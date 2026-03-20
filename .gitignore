@@ -1,0 +1,21 @@
+node_modules/
+.DS_Store
+*.zip
+*.log
+backup-temp/
+WEBDL BACKUP/
+.env
+# Ignore typical media folders if they are directly in WEBDL (user might download here)
+# But maybe we just ignore everything large
+*.mp4
+*.mkv
+*.avi
+*.webm
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.webp
+*.sqlite
+*.sqlite3
+*.db
