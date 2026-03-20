@@ -1991,6 +1991,17 @@ function getViewerHTML() {
       }
     });
 
+    
+    window.addEventListener('popstate', (e) => {
+      if (elModal.classList.contains('open') && (!e.state || e.state.page !== 'viewer')) {
+        closeModal(true);
+      } else if (!elModal.classList.contains('open') && e.state && e.state.page === 'viewer') {
+        if (typeof e.state.index === 'number') {
+          openModalIndex(e.state.index);
+        }
+      }
+    });
+    
     window.addEventListener('keydown', async (e) => {
       if (e.key === 'ArrowRight') { await nextItem(1); e.preventDefault(); }
       else if (e.key === 'ArrowLeft') { await nextItem(-1); e.preventDefault(); }
