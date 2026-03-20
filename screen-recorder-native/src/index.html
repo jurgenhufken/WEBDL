@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="script-src 'self';">
+  <title>Screen Recorder</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="container">
+    <h1>Screen Recorder</h1>
+    
+    <div class="status-container">
+      <div id="status-indicator" class="status-indicator"></div>
+      <span id="status-text">Gereed</span>
+    </div>
+    
+    <div class="button-container">
+      <button id="start-btn" class="action-button">Start Opname</button>
+      <button id="stop-btn" class="action-button" disabled>Stop Opname</button>
+      <button id="screenshot-btn" class="action-button">Screenshot</button>
+    </div>
+    
+    <div class="source-selection">
+      <h3>Opnamebron selecteren</h3>
+      <div id="sources-list" class="sources-list"></div>
+    </div>
+    
+    <h3>Recente opnames</h3>
+    <ul id="recordings-list" class="recordings-list"></ul>
+  </div>
+
+  <div class="preview-container">
+    <video id="preview" autoplay muted></video>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
