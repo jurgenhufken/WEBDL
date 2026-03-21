@@ -7575,6 +7575,8 @@ async function applyAbortStatus(id, kind) {
       removeFromQueue(queuedLight, id);
       jobLane.delete(id);
       await updateDownloadStatus.run('cancelled', 0, null, id);
+      try {runDownloadSchedulerSoon();} catch (e) {}
+      try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
       return true;
     }
     if (kind === 'on_hold') {
@@ -7584,6 +7586,8 @@ async function applyAbortStatus(id, kind) {
       removeFromQueue(queuedLight, id);
       jobLane.delete(id);
       await updateDownloadStatus.run('on_hold', 0, null, id);
+      try {runDownloadSchedulerSoon();} catch (e) {}
+      try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
       return true;
     }
   } catch (e) {}
@@ -9512,8 +9516,8 @@ function deriveChannelFromUrl(platform, url) {
   }
 
   if (platform === 'footfetishforum') {
-    const m = u.match(/footfetishforum\.com\/threads\/[^\/\?#]*\.(\d+)(?:\/|\?|#|$)/i);
-    if (m && m[1]) return `thread_${m[1]}`;
+    const info = parseFootFetishForumThreadInfo(u);
+    if (info && info.name) return info.name;
   }
 
   if (platform === 'reddit') {
@@ -9610,7 +9614,9 @@ function getDownloadDir(platform, channel, title) {
   const safePlatform = sanitizeName(platform || 'other');
   const safeChannel = sanitizeName(channel || 'unknown');
   const safeTitle = sanitizeName(title || 'untitled');
-  const dir = path.join(BASE_DIR, safePlatform, safeChannel, safeTitle);
+  const dir = String(platform || '').toLowerCase() === 'footfetishforum' && safeChannel && safeTitle && safeChannel === safeTitle ?
+    path.join(BASE_DIR, safePlatform, safeChannel) :
+    path.join(BASE_DIR, safePlatform, safeChannel, safeTitle);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -9795,6 +9801,8 @@ function extractYoutubeChannel(url) {
 function deriveTitleFromUrl(url) {
   const ytId = extractYoutubeId(url);
   if (ytId) return `video_${ytId}`;
+  const fffInfo = parseFootFetishForumThreadInfo(url);
+  if (fffInfo && fffInfo.name) return fffInfo.name;
   if (!url) return 'untitled';
   return sanitizeName(url).slice(0, 60) || 'untitled';
 }
@@ -11005,12 +11013,12 @@ expressApp.post('/stop-recording', (req, res) => {
 
 // Download starten via yt-dlp
 expressApp.post('/download', async (req, res) => {
-  const { url, metadata, force, forceCopy } = req.body || {};
+  const { url, metadata, force } = req.body || {};
   try {
-    console.log(`[INGRESS] POST /download url=${String(url || '').slice(0, 200)} page=${String(metadata && metadata.url || '').slice(0, 200)} force=${force === true ? '1' : '0'} forceCopy=${forceCopy === true ? '1' : '0'}`);
+    console.log(`[INGRESS] POST /download url=${String(url || '').slice(0, 200)} page=${String(metadata && metadata.url || '').slice(0, 200)} force=${force === true ? '1' : '0'}`);
   } catch (e) {}
   if (!url) return res.status(400).json({ success: false, error: 'URL is vereist' });
-  const forceDuplicates = force === true || forceCopy === true;
+  const forceDuplicates = force === true;
 
   const metaPlatform = metadata && typeof metadata.platform === 'string' ? metadata.platform : null;
   const effectiveUrl = String(url || '');
@@ -11032,21 +11040,22 @@ expressApp.post('/download', async (req, res) => {
   const pinFffOrigin = !!(originPlatform === 'footfetishforum' && pageUrl && pageUrl !== effectiveUrl && isFootfetishforumThreadUrl(pageUrl));
   const pinAznOrigin = !!(originPlatform === 'aznudefeet' && pageUrl && pageUrl !== effectiveUrl && isAznudefeetViewUrl(pageUrl));
   const pinToOrigin = !!(pinFffOrigin || pinAznOrigin);
+  const fffThreadInfo = pinFffOrigin ? parseFootFetishForumThreadInfo(pageUrl || effectiveUrl) : null;
   const detectedPlatform = detectPlatform(effectiveUrl);
-  const originChannel = metadata && metadata.channel ? metadata.channel : deriveChannelFromUrl(originPlatform, pageUrl || effectiveUrl) || 'unknown';
-  const originTitle = metadata && metadata.title ? metadata.title : deriveTitleFromUrl(pageUrl || effectiveUrl);
+  const originChannel = pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : metadata && metadata.channel ? metadata.channel : deriveChannelFromUrl(originPlatform, pageUrl || effectiveUrl) || 'unknown';
+  const originTitle = pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : metadata && metadata.title ? metadata.title : deriveTitleFromUrl(pageUrl || effectiveUrl);
 
   const preferDetectedPlatform = !!(pinFffOrigin && detectedPlatform && detectedPlatform !== 'other' && detectedPlatform !== originPlatform);
-  const platform = preferDetectedPlatform ? detectedPlatform : (pinToOrigin ? originPlatform : normalizePlatform(metaPlatform, effectiveUrl));
-  const channel = preferDetectedPlatform ?
-  deriveChannelFromUrl(platform, effectiveUrl) || originChannel :
-  pinToOrigin ?
+  const platform = pinToOrigin ? originPlatform : (preferDetectedPlatform ? detectedPlatform : normalizePlatform(metaPlatform, effectiveUrl));
+  const channel = pinToOrigin ?
   originChannel :
+  preferDetectedPlatform ?
+  deriveChannelFromUrl(platform, effectiveUrl) || originChannel :
   metadata && metadata.channel ? metadata.channel : deriveChannelFromUrl(platform, effectiveUrl) || 'unknown';
-  const title = preferDetectedPlatform ?
-  deriveTitleFromUrl(effectiveUrl) :
-  pinToOrigin ?
+  const title = pinToOrigin ?
   originTitle :
+  preferDetectedPlatform ?
+  deriveTitleFromUrl(effectiveUrl) :
   metadata && metadata.title ? metadata.title : deriveTitleFromUrl(effectiveUrl);
 
   const allowRedditRerun = platform === 'reddit' && isRedditRollingTargetUrl(effectiveUrl);
@@ -11128,7 +11137,10 @@ expressApp.post('/download', async (req, res) => {
 
   const jobMetadata = metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? { ...metadata } : {};
   if (force === true) jobMetadata.webdl_force = true;
-  if (forceCopy === true) jobMetadata.webdl_force_copy = true;
+  if (!jobMetadata.webdl_direct_hint && jobMetadata.webdl_direct_hints && typeof jobMetadata.webdl_direct_hints === 'object') {
+    const directHint = pickDirectHintForUrl(effectiveUrl, jobMetadata.webdl_direct_hints);
+    if (typeof directHint === 'string' && directHint.trim()) jobMetadata.webdl_direct_hint = directHint.trim();
+  }
   if (pinToOrigin) {
     jobMetadata.webdl_pin_context = true;
     jobMetadata.origin_thread = { url: pageUrl, platform: originPlatform, channel: originChannel, title: originTitle };
@@ -11174,23 +11186,24 @@ expressApp.post('/reddit/index', async (req, res) => {
 });
 
 expressApp.post('/download/batch', async (req, res) => {
-  const { urls, metadata, force, forceCopy } = req.body || {};
+  const { urls, metadata, force } = req.body || {};
   try {
     const n = Array.isArray(urls) ? urls.length : 0;
-    console.log(`[INGRESS] POST /download/batch count=${n} page=${String(metadata && metadata.url || '').slice(0, 200)} force=${force === true ? '1' : '0'} forceCopy=${forceCopy === true ? '1' : '0'}`);
+    console.log(`[INGRESS] POST /download/batch count=${n} page=${String(metadata && metadata.url || '').slice(0, 200)} force=${force === true ? '1' : '0'}`);
   } catch (e) {}
   if (!Array.isArray(urls) || urls.length === 0) {
     return res.status(400).json({ success: false, error: 'urls is vereist' });
   }
-  const forceDuplicates = force === true || forceCopy === true;
+  const forceDuplicates = force === true;
 
   const metaPlatform = metadata && typeof metadata.platform === 'string' ? metadata.platform : null;
   const pageUrl = metadata && typeof metadata.url === 'string' ? metadata.url.trim() : '';
   const originPlatform = normalizePlatform(metaPlatform, pageUrl || '');
   const pinFffOrigin = !!(originPlatform === 'footfetishforum' && pageUrl && isFootfetishforumThreadUrl(pageUrl));
   const pinAznOrigin = !!(originPlatform === 'aznudefeet' && pageUrl && isAznudefeetViewUrl(pageUrl));
-  const originChannel = metadata && metadata.channel ? metadata.channel : deriveChannelFromUrl(originPlatform, pageUrl) || 'unknown';
-  const originTitle = metadata && metadata.title ? metadata.title : deriveTitleFromUrl(pageUrl);
+  const fffThreadInfo = pinFffOrigin ? parseFootFetishForumThreadInfo(pageUrl) : null;
+  const originChannel = pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : metadata && metadata.channel ? metadata.channel : deriveChannelFromUrl(originPlatform, pageUrl) || 'unknown';
+  const originTitle = pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : metadata && metadata.title ? metadata.title : deriveTitleFromUrl(pageUrl);
 
   const unique = [];
   const seen = new Set();
@@ -11208,9 +11221,9 @@ expressApp.post('/download/batch', async (req, res) => {
     const pinToOrigin = !!((pinFffOrigin || pinAznOrigin) && pageUrl && pageUrl !== u);
     const detectedPlatform = detectPlatform(u);
     const preferDetectedPlatform = !!(pinFffOrigin && pinToOrigin && detectedPlatform && detectedPlatform !== 'other' && detectedPlatform !== originPlatform);
-    const platform = preferDetectedPlatform ? detectedPlatform : (pinToOrigin ? originPlatform : normalizePlatform(metaPlatform, u));
-    const channel = preferDetectedPlatform ? deriveChannelFromUrl(platform, u) || originChannel : pinToOrigin ? originChannel : metadata && metadata.channel ? metadata.channel : deriveChannelFromUrl(platform, u) || 'unknown';
-    const title = preferDetectedPlatform ? deriveTitleFromUrl(u) : pinToOrigin ? originTitle : metadata && metadata.title ? metadata.title : deriveTitleFromUrl(u);
+    const platform = pinToOrigin ? originPlatform : (preferDetectedPlatform ? detectedPlatform : normalizePlatform(metaPlatform, u));
+    const channel = pinToOrigin ? originChannel : preferDetectedPlatform ? deriveChannelFromUrl(platform, u) || originChannel : metadata && metadata.channel ? metadata.channel : deriveChannelFromUrl(platform, u) || 'unknown';
+    const title = pinToOrigin ? originTitle : preferDetectedPlatform ? deriveTitleFromUrl(u) : metadata && metadata.title ? metadata.title : deriveTitleFromUrl(u);
     const allowRedditRerun = platform === 'reddit' && isRedditRollingTargetUrl(u);
     const allowPatreonRerun = platform === 'patreon' && (u.includes('/posts') || u.includes('patreon.com/c/'));
     const allowRerun = allowRedditRerun || allowPatreonRerun;
@@ -11245,18 +11258,21 @@ expressApp.post('/download/batch', async (req, res) => {
       }
     } catch (e) {}
 
-    created.push({ downloadId, url: u, platform, channel, title });
-    const jobMetadata = metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? { ...metadata } : {};
-    if (force === true) jobMetadata.webdl_force = true;
-    if (forceCopy === true) jobMetadata.webdl_force_copy = true;
-    if (pinToOrigin) {
-      jobMetadata.webdl_pin_context = true;
-      jobMetadata.origin_thread = { url: pageUrl, platform: originPlatform, channel: originChannel, title: originTitle };
-      jobMetadata.webdl_media_url = u;
-      jobMetadata.webdl_detected_platform = detectedPlatform;
-    }
-    enqueueDownloadJob(downloadId, u, platform, channel, title, jobMetadata);
+  created.push({ downloadId, url: u, platform, channel, title });
+  const jobMetadata = metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? { ...metadata } : {};
+  if (force === true) jobMetadata.webdl_force = true;
+  if (!jobMetadata.webdl_direct_hint && jobMetadata.webdl_direct_hints && typeof jobMetadata.webdl_direct_hints === 'object') {
+    const directHint = pickDirectHintForUrl(u, jobMetadata.webdl_direct_hints);
+    if (typeof directHint === 'string' && directHint.trim()) jobMetadata.webdl_direct_hint = directHint.trim();
   }
+  if (pinToOrigin) {
+    jobMetadata.webdl_pin_context = true;
+    jobMetadata.origin_thread = { url: pageUrl, platform: originPlatform, channel: originChannel, title: originTitle };
+    jobMetadata.webdl_media_url = u;
+    jobMetadata.webdl_detected_platform = detectedPlatform;
+  }
+  enqueueDownloadJob(downloadId, u, platform, channel, title, jobMetadata);
+}
 
   res.json({ success: true, downloads: created });
 });
@@ -11343,7 +11359,12 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
 
   if (isKnownHtmlWrapperUrl(url)) {
     try {
-      const resolved = await resolveHtmlWrapperToDirectMediaUrl(url, 15000);
+      const wrapperReferer = String(
+        metadata && typeof metadata === 'object' && metadata.origin_thread && metadata.origin_thread.url ? metadata.origin_thread.url :
+        metadata && typeof metadata === 'object' && metadata.url && metadata.url !== url ? metadata.url :
+        ''
+      ).trim();
+      const resolved = await resolveHtmlWrapperToDirectMediaUrl(url, 15000, wrapperReferer);
       if (resolved && resolved !== url) {
         try {await updateDownloadUrl.run(resolved, downloadId);} catch (e) {}
         const nextMeta = metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? { ...metadata } : {};
@@ -11352,6 +11373,7 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
         return startDirectFileDownload(downloadId, resolved, platform, channel, title, nextMeta);
       }
     } catch (e) {}
+    return startDirectFileDownload(downloadId, url, platform, channel, title, metadata);
   }
 
   if (looksLikeDirectFileUrl(url)) {
@@ -11526,7 +11548,7 @@ function isKnownHtmlWrapperUrl(url) {
   }
 }
 
-async function fetchTextWithTimeout(url, timeoutMs = 15000) {
+async function fetchTextWithTimeout(url, timeoutMs = 15000, referer = '') {
   const ctrl = new AbortController();
   const timer = setTimeout(() => {
     try {ctrl.abort();} catch (e) {}
@@ -11536,21 +11558,80 @@ async function fetchTextWithTimeout(url, timeoutMs = 15000) {
       method: 'GET',
       headers: {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        ...(referer ? { 'Referer': referer } : {})
       },
       signal: ctrl.signal
     });
     const text = await res.text();
-    return { ok: res.ok, status: res.status, text, contentType: String(res.headers.get('content-type') || '') };
+    return { ok: res.ok, status: res.status, text, contentType: String(res.headers.get('content-type') || ''), finalUrl: String(res.url || url || '') };
   } finally {
     clearTimeout(timer);
   }
 }
 
+function buildUrlLookupVariants(rawUrl) {
+  try {
+    const input = String(rawUrl || '').trim();
+    if (!input) return [];
+    const out = new Set([input]);
+    try {
+      const u = new URL(input);
+      u.hash = '';
+      out.add(u.toString());
+      const noQuery = new URL(u.toString());
+      noQuery.search = '';
+      out.add(noQuery.toString());
+      if (u.pathname && !u.pathname.endsWith('/')) {
+        const withSlash = new URL(u.toString());
+        withSlash.pathname = `${withSlash.pathname}/`;
+        out.add(withSlash.toString());
+      }
+      if (u.pathname && u.pathname !== '/') {
+        const withoutSlash = new URL(u.toString());
+        withoutSlash.pathname = withoutSlash.pathname.replace(/\/+$/, '') || '/';
+        out.add(withoutSlash.toString());
+      }
+    } catch (e) {}
+    return Array.from(out).filter(Boolean);
+  } catch (e) {
+    return [];
+  }
+}
+
+function pickDirectHintForUrl(rawUrl, directHints) {
+  try {
+    if (!directHints || typeof directHints !== 'object') return '';
+    for (const key of buildUrlLookupVariants(rawUrl)) {
+      const hint = directHints[key];
+      if (typeof hint === 'string' && hint.trim()) return hint.trim();
+    }
+    return '';
+  } catch (e) {
+    return '';
+  }
+}
+
+function decodeHtmlEscapedUrlText(raw) {
+  try {
+    return String(raw || '')
+      .replace(/&amp;/gi, '&')
+      .replace(/&#x2f;/gi, '/')
+      .replace(/&#47;/gi, '/')
+      .replace(/\\u002f/gi, '/')
+      .replace(/\\u0026/gi, '&')
+      .replace(/\\x2f/gi, '/')
+      .replace(/\\x26/gi, '&')
+      .replace(/\\\//g, '/');
+  } catch (e) {
+    return String(raw || '');
+  }
+}
+
 function normalizeHtmlExtractedUrl(raw, baseUrl) {
-  const s = String(raw || '').trim();
+  const s = decodeHtmlEscapedUrlText(raw).trim();
   if (!s) return '';
-  const decoded = s.replace(/&amp;/g, '&');
+  const decoded = ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) ? s.slice(1, -1).trim() : s;
   try {
     return new URL(decoded, baseUrl).toString();
   } catch (e) {
@@ -11561,23 +11642,29 @@ function normalizeHtmlExtractedUrl(raw, baseUrl) {
 function extractOpenGraphMediaUrl(html, baseUrl) {
   try {
     const h = String(html || '');
+    const decodedHtml = decodeHtmlEscapedUrlText(h);
+    const variants = decodedHtml && decodedHtml !== h ? [h, decodedHtml] : [h];
     const patterns = [
     /<meta\s+[^>]*(?:property|name)=["']og:video:url["'][^>]*content=["']([^"']+)["'][^>]*>/i,
     /<meta\s+[^>]*(?:property|name)=["']og:video["'][^>]*content=["']([^"']+)["'][^>]*>/i,
     /<meta\s+[^>]*(?:property|name)=["']og:image["'][^>]*content=["']([^"']+)["'][^>]*>/i,
     /<meta\s+[^>]*(?:property|name)=["']twitter:image["'][^>]*content=["']([^"']+)["'][^>]*>/i];
 
-    for (const re of patterns) {
-      const m = h.match(re);
-      if (m && m[1]) {
-        const u = normalizeHtmlExtractedUrl(m[1], baseUrl);
-        if (u) return u;
+    for (const variant of variants) {
+      for (const re of patterns) {
+        const m = variant.match(re);
+        if (m && m[1]) {
+          const u = normalizeHtmlExtractedUrl(m[1], baseUrl);
+          if (u) return u;
+        }
       }
     }
 
     const urls = [];
-    for (const m of h.matchAll(/https?:\/\/[^"'\s<>]+/gi)) {
-      if (m && m[0]) urls.push(m[0]);
+    for (const variant of variants) {
+      for (const m of variant.matchAll(/https?:\/\/[^"'\s<>]+/gi)) {
+        if (m && m[0]) urls.push(m[0]);
+      }
     }
     for (const raw of urls) {
       const u = normalizeHtmlExtractedUrl(raw, baseUrl);
@@ -11638,6 +11725,8 @@ function scoreDirectMediaCandidate(url) {
 function extractDirectMediaCandidates(html, baseUrl) {
   try {
     const h = String(html || '');
+    const decodedHtml = decodeHtmlEscapedUrlText(h);
+    const variants = decodedHtml && decodedHtml !== h ? [h, decodedHtml] : [h];
     const out = [];
     const seen = new Set();
     const pushUrl = (raw) => {
@@ -11653,18 +11742,27 @@ function extractDirectMediaCandidates(html, baseUrl) {
       /<meta\s+[^>]*(?:property|name)=["']og:image["'][^>]*content=["']([^"']+)["'][^>]*>/ig,
       /<meta\s+[^>]*(?:property|name)=["']twitter:image(?::src)?["'][^>]*content=["']([^"']+)["'][^>]*>/ig
     ];
-    for (const re of metaPatterns) {
-      for (const m of h.matchAll(re)) {
+    for (const variant of variants) {
+      for (const re of metaPatterns) {
+        for (const m of variant.matchAll(re)) {
+          if (m && m[1]) pushUrl(m[1]);
+        }
+      }
+    }
+
+    for (const variant of variants) {
+      for (const m of variant.matchAll(/<(?:a|img|source|video|meta|link)\b[^>]+(?:href|src|data-src|data-url|data-image|data-full-url|content)=["']([^"']+)["'][^>]*>/ig)) {
         if (m && m[1]) pushUrl(m[1]);
       }
     }
 
-    for (const m of h.matchAll(/<(?:a|img|source|video)\b[^>]+(?:href|src|data-src|data-url)=["']([^"']+)["'][^>]*>/ig)) {
-      if (m && m[1]) pushUrl(m[1]);
-    }
-
-    for (const m of h.matchAll(/https?:\/\/[^"'\s<>]+/gi)) {
-      if (m && m[0]) pushUrl(m[0]);
+    for (const variant of variants) {
+      for (const m of variant.matchAll(/https?:\/\/[^"'\s<>]+/gi)) {
+        if (m && m[0]) pushUrl(m[0]);
+      }
+      for (const m of variant.matchAll(/url\((["']?)(https?:\/\/[^)'"\s]+)\1\)/ig)) {
+        if (m && m[2]) pushUrl(m[2]);
+      }
     }
 
     return out
@@ -11675,14 +11773,15 @@ function extractDirectMediaCandidates(html, baseUrl) {
   }
 }
 
-async function resolveHtmlWrapperToDirectMediaUrl(url, timeoutMs = 15000) {
+async function resolveHtmlWrapperToDirectMediaUrl(url, timeoutMs = 15000, referer = '') {
   try {
     const u0 = String(url || '').trim();
     if (!u0) return '';
-    const r = await fetchTextWithTimeout(u0, timeoutMs);
-    if (!r || !r.text) return '';
-    if (r.contentType && r.contentType.toLowerCase().startsWith('image/')) return u0;
-    if (r.contentType && r.contentType.toLowerCase().startsWith('video/')) return u0;
+    const r = await fetchTextWithTimeout(u0, timeoutMs, referer);
+    if (!r) return '';
+    if (r.contentType && r.contentType.toLowerCase().startsWith('image/')) return upgradeKnownLowQualityMediaUrl(String(r.finalUrl || u0));
+    if (r.contentType && r.contentType.toLowerCase().startsWith('video/')) return upgradeKnownLowQualityMediaUrl(String(r.finalUrl || u0));
+    if (!r.text) return '';
     const candidates = extractDirectMediaCandidates(r.text, u0);
     if (candidates && candidates.length) return candidates[0];
     const og = upgradeKnownLowQualityMediaUrl(extractOpenGraphMediaUrl(r.text, u0));
@@ -11733,11 +11832,36 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
     // Probeer lage resolutie links van footfetishforum te upgraden
     url = upgradeKnownLowQualityMediaUrl(url);
 
-    await updateDownloadStatus.run('downloading', 0, null, downloadId);
-
     const pinContext = !!(metadata && typeof metadata === 'object' && !Array.isArray(metadata) && metadata.webdl_pin_context === true);
     const originThread = metadata && typeof metadata === 'object' && metadata.origin_thread && typeof metadata.origin_thread === 'object' ? metadata.origin_thread : null;
     const pinnedPlatform = String(originThread && originThread.platform ? originThread.platform : platform || '').toLowerCase();
+    if (isKnownHtmlWrapperUrl(url)) {
+      const directHint = upgradeKnownLowQualityMediaUrl(String(metadata && typeof metadata === 'object' && metadata.webdl_direct_hint ? metadata.webdl_direct_hint : '').trim());
+      if (directHint && looksLikeDirectFileUrl(directHint) && directHint !== url) {
+        try {await updateDownloadUrl.run(directHint, downloadId);} catch (e) {}
+        url = directHint;
+      }
+    }
+    if (isKnownHtmlWrapperUrl(url)) {
+      const wrapperReferer = String(
+        originThread && originThread.url ? originThread.url :
+        metadata && typeof metadata === 'object' && metadata.url && metadata.url !== url ? metadata.url :
+        ''
+      ).trim();
+      try {
+        const resolved = await resolveHtmlWrapperToDirectMediaUrl(url, 15000, wrapperReferer);
+        if (resolved && resolved !== url) {
+          try {await updateDownloadUrl.run(resolved, downloadId);} catch (e) {}
+          url = upgradeKnownLowQualityMediaUrl(resolved);
+        }
+      } catch (e) {}
+      if (isKnownHtmlWrapperUrl(url)) {
+        await updateDownloadStatus.run('error', 0, 'Kon wrapper media URL niet resolven naar een direct bestand', downloadId);
+        return;
+      }
+    }
+
+    await updateDownloadStatus.run('downloading', 0, null, downloadId);
 
     let dir = pinContext && pinnedPlatform === 'aznudefeet' ? getDownloadDirChannelOnly(platform, channel) : getDownloadDir(platform, channel, title);
     let meta = {};
@@ -11843,6 +11967,14 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
               await updateDownloadThumbnail.run(`/download/${downloadId}/thumb`, downloadId);
             } catch (e) {}
           }
+
+          try {
+            const relPath = path.relative(BASE_DIR, filepath);
+            if (relPath && !relPath.startsWith('..')) {
+              const indexedAt = new Date().toISOString();
+              await upsertDownloadFile.run(downloadId, relPath, size, Math.floor(fs.statSync(filepath).mtimeMs), indexedAt, indexedAt);
+            }
+          } catch (e) {}
 
           await updateDownload.run('completed', 100, filepath, filename, size, ext || '', JSON.stringify(metaObj), null, downloadId);
         } else {
@@ -12274,6 +12406,8 @@ async function startOfscraperDownload(downloadId, url, platform, channel, title,
         try {
           if (fs.existsSync(cfgDir)) fs.rmSync(cfgDir, { recursive: true, force: true });
         } catch (e) {}
+        try {runDownloadSchedulerSoon();} catch (e) {}
+        try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
         return;
       }
 
@@ -12349,6 +12483,8 @@ async function startOfscraperDownload(downloadId, url, platform, channel, title,
       try {
         if (fs.existsSync(cfgDir)) fs.rmSync(cfgDir, { recursive: true, force: true });
       } catch (e) {}
+      try {runDownloadSchedulerSoon();} catch (e) {}
+      try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
     });
 
     proc.on('error', async (err) => {
@@ -12357,6 +12493,8 @@ async function startOfscraperDownload(downloadId, url, platform, channel, title,
         if (fs.existsSync(cfgDir)) fs.rmSync(cfgDir, { recursive: true, force: true });
       } catch (e) {}
       await updateDownloadStatus.run('error', 0, err.message, downloadId);
+      try {runDownloadSchedulerSoon();} catch (e) {}
+      try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
     });
   } catch (err) {
     await updateDownloadStatus.run('error', 0, err.message, downloadId);
@@ -12585,11 +12723,8 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
     }
     await updateDownloadStatus.run('downloading', 0, null, downloadId);
 
-    const forceCopy = !!(metadata && typeof metadata === 'object' && !Array.isArray(metadata) && metadata.webdl_force_copy === true);
     const forceOverwrite = !!(metadata && typeof metadata === 'object' && !Array.isArray(metadata) && metadata.webdl_force === true);
-    const outputTemplate = forceCopy ?
-    path.join(dir, `%(title).120B [%(id)s] [#${downloadId}].%(ext)s`) :
-    path.join(dir, '%(title).120B [%(id)s].%(ext)s');
+    const outputTemplate = path.join(dir, '%(title).120B [%(id)s].%(ext)s');
     const baseArgs = [
     '--concurrent-fragments', YTDLP_CONCURRENT_FRAGMENTS,
     '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
@@ -12819,6 +12954,17 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
             console.log(`   ⚠️ Final Cut transcode mislukt: ${e.message}`);
           }
         }
+
+        try {
+          if (finalPath && fs.existsSync(finalPath)) {
+            const st = fs.statSync(finalPath);
+            const relPath = path.relative(BASE_DIR, finalPath);
+            if (relPath && !relPath.startsWith('..')) {
+              const indexedAt = new Date().toISOString();
+              await upsertDownloadFile.run(downloadId, relPath, st.size, Math.floor(st.mtimeMs), indexedAt, indexedAt);
+            }
+          }
+        } catch (e) {}
 
         await updateDownload.run('completed', 100, finalPath, finalFile, finalSize, finalFormat, JSON.stringify(metaObj), null, downloadId);
         try {
@@ -13683,11 +13829,12 @@ expressApp.get('/dashboard', async (req, res) => {
   const runtimeActiveIds = new Set((runtimeActiveRows || []).map((row) => Number(row && row.id)).filter((id) => Number.isFinite(id)));
   const queuedRows = (await db.prepare(`
     SELECT * FROM downloads
-    WHERE status IN ('queued', 'pending')
+    WHERE status IN ('queued', 'pending', 'postprocessing')
     ORDER BY
       CASE status
-        WHEN 'queued' THEN 0
-        WHEN 'pending' THEN 1
+        WHEN 'postprocessing' THEN 0
+        WHEN 'queued' THEN 1
+        WHEN 'pending' THEN 2
         ELSE 9
       END,
       COALESCE(updated_at, created_at) DESC,

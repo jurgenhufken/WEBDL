@@ -737,18 +737,20 @@
           }
         }
 
-        push(
-          img.currentSrc || img.src || img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-lazy-src') || img.getAttribute('data-url'),
-          img,
-          hadParentLink ? 'img_under_link' : 'img'
-        );
-        const srcset = String(img.getAttribute('srcset') || '').trim();
-        if (srcset) {
-          const parts = srcset.split(',').map(s => String(s || '').trim()).filter(Boolean);
-          for (const part of parts) {
-            const first = part.split(/\s+/)[0];
-            if (first) push(first, img, hadParentLink ? 'img_srcset_under_link' : 'img_srcset');
-            if (out.length >= maxItems) return out;
+        if (!hadParentLink) {
+          push(
+            img.currentSrc || img.src || img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-lazy-src') || img.getAttribute('data-url'),
+            img,
+            'img'
+          );
+          const srcset = String(img.getAttribute('srcset') || '').trim();
+          if (srcset) {
+            const parts = srcset.split(',').map(s => String(s || '').trim()).filter(Boolean);
+            for (const part of parts) {
+              const first = part.split(/\s+/)[0];
+              if (first) push(first, img, 'img_srcset');
+              if (out.length >= maxItems) return out;
+            }
           }
         }
       } catch (e) {}
@@ -1207,6 +1209,7 @@
               ''
             ).trim();
             const isLikelyExternalPage = looksLikeExternalMediaPageUrl(url, candidateText);
+            if (/_under_link/i.test(kind)) return false;
             if (looksLikeMediaFileUrl(url)) return true;
             if (/^text$/i.test(kind)) return isLikelyExternalPage;
 
@@ -1221,7 +1224,10 @@
               pathname = '';
             }
 
-            if (host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) {
+            const isFffUploadHost = host === 'upload.footfetishforum.com' || host.endsWith('.upload.footfetishforum.com');
+            const isFffForumHost = host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com');
+
+            if (isFffForumHost && !isFffUploadHost) {
               if (looksLikeFffAttachmentPage(url)) {
                 if (/thumb_link/i.test(kind)) {
                   try {
@@ -1243,7 +1249,7 @@
             const isKnownHostWrapper = (() => {
               try {
                 if (!host) return false;
-                if (host === 'upload.footfetishforum.com' || host.endsWith('.upload.footfetishforum.com')) return /^\/image\//i.test(pathname);
+                if (isFffUploadHost) return /^\/image\//i.test(pathname);
                 if (host === 'jpg.pet') return /^\/img\//i.test(pathname);
                 if (host === 'pixeldrain.com') return /^\/u\//i.test(pathname);
                 if (host === 'cyberfile.me') return true;
@@ -1274,6 +1280,26 @@
             return false;
           } catch (e) {
             return false;
+          }
+        };
+
+        const getDirectHintForCandidate = (c) => {
+          try {
+            const url = c && c.url ? normalizeUrl(c.url) : '';
+            if (!url || looksLikeMediaFileUrl(url)) return '';
+            try {
+              const mappedSet = thumbLinkToDirectSet.get(url);
+              if (mappedSet && mappedSet.size) {
+                for (const d of mappedSet) {
+                  if (d && looksLikeMediaFileUrl(d)) return normalizeUrl(d);
+                }
+              }
+            } catch (e) {}
+            const direct = inferDirectMediaUrlFromLink(c && c.el ? c.el : null);
+            if (direct && looksLikeMediaFileUrl(direct)) return normalizeUrl(direct);
+            return '';
+          } catch (e) {
+            return '';
           }
         };
 
@@ -1445,8 +1471,17 @@
       });
 
       btnStart.addEventListener('click', () => {
-        const selected = rows.filter((r) => r.cb && r.cb.checked).map((r) => r.c.url);
-        finish(selected);
+        const selectedRows = rows.filter((r) => r.cb && r.cb.checked);
+        const selected = selectedRows.map((r) => r.c.url);
+        const directHints = {};
+        for (const r of selectedRows) {
+          try {
+            const key = normalizeUrl(r && r.c && r.c.url ? r.c.url : '');
+            const hint = getDirectHintForCandidate(r && r.c ? r.c : null);
+            if (key && hint && hint !== key) directHints[key] = hint;
+          } catch (e) {}
+        }
+        finish({ urls: selected, directHints });
       });
 
         try {
@@ -1564,7 +1599,6 @@
   const dashboardBtn = makeBtn('📊 Dashboard', '#0f3460');
   const mediaDownloadBtn = makeBtnIn(extraBtnContainer, '🖼 Media', '#6d28d9');
   const forceBatchDownloadBtn = makeBtnIn(extraBtnContainer, '🔥 Force', '#b91c1c');
-  const forceCopyBtn = makeBtnIn(extraBtnContainer, '📋 Kopie', '#d97706');
   const threadBatchDownloadBtn = makeBtnIn(extraBtnContainer, '🧵 Hele thread', '#0ea5e9');
   const vdhHintBtn = makeBtnIn(extraBtnContainer, '🧩 VDH hint', '#2e7d32');
   const redditAllBtn = makeBtnIn(extraBtnContainer, '🧵 Reddit all', '#ff4500');
@@ -1907,9 +1941,12 @@
 
   async function queueBatchDownloadRequest(urls, meta, options) {
     const opt = options && typeof options === 'object' ? options : {};
-    const payload = { urls, metadata: meta };
+    const payloadMeta = meta && typeof meta === 'object' ? { ...meta } : {};
+    if (opt.directHints && typeof opt.directHints === 'object' && Object.keys(opt.directHints).length) {
+      payloadMeta.webdl_direct_hints = { ...opt.directHints };
+    }
+    const payload = { urls, metadata: payloadMeta };
     if (opt.force === true) payload.force = true;
-    if (opt.forceCopy === true) payload.forceCopy = true;
     const viaBg = await sendBackgroundAction('queueBatchDownload', payload, 20000);
     if (viaBg && viaBg.success) return viaBg;
     const viaHttp = await postServerJson('download/batch', payload, 20000);
@@ -2690,7 +2727,6 @@
   async function runBatchFromCurrentPage(triggerBtn, opts, clickEvent) {
     const options = opts && typeof opts === 'object' ? opts : {};
     const force = options.force === true;
-    const forceCopy = options.forceCopy === true;
 
     if (!(await ensureServerReachable(true))) return;
 
@@ -2735,6 +2771,7 @@
     const redditHint = (redditIndexInfo && meta.platform === 'reddit')
       ? `\nMode: ${redditIndexInfo.mode}, pagina's: ${redditIndexInfo.scannedPages}, posts gescand: ${redditIndexInfo.scannedPosts}`
       : '';
+    let selectedDirectHints = null;
     if (isFootFetishForumThreadPage()) {
       let selected = null;
       try {
@@ -2749,7 +2786,10 @@
         selected = null;
       }
 
-      if (selected && selected.length) {
+      if (selected && Array.isArray(selected.urls) && selected.urls.length) {
+        urls = selected.urls;
+        selectedDirectHints = selected.directHints && typeof selected.directHints === 'object' ? selected.directHints : null;
+      } else if (Array.isArray(selected) && selected.length) {
         urls = selected;
       } else {
         try { addLog('Preview niet getoond; fallback confirm', 'error'); } catch (e) {}
@@ -2764,7 +2804,7 @@
       if (!ok) return;
     }
 
-    const modeLabel = forceCopy ? 'Kopie' : (force ? 'Force' : 'Batch');
+    const modeLabel = force ? 'Force' : 'Batch';
     addLog(`${modeLabel} batch download: ${urls.length} items`);
     const oldLabel = String((triggerBtn && triggerBtn.textContent) || '').trim();
     if (triggerBtn) {
@@ -2773,7 +2813,7 @@
     }
 
     try {
-      const result = await queueBatchDownloadRequest(urls, meta, { force, forceCopy });
+      const result = await queueBatchDownloadRequest(urls, meta, { force, directHints: selectedDirectHints });
       if (result.success) {
         const stats = summarizeBatchResult(result);
         showNotification(`${modeLabel}: ${stats.queued} nieuw, ${stats.duplicates} bestaand (${stats.total} totaal)`);
@@ -2799,10 +2839,6 @@
 
   forceBatchDownloadBtn.addEventListener('click', async function(e) {
     await runBatchFromCurrentPage(forceBatchDownloadBtn, { force: true }, e);
-  });
-
-  forceCopyBtn.addEventListener('click', async function(e) {
-    await runBatchFromCurrentPage(forceCopyBtn, { forceCopy: true }, e);
   });
 
   async function runBatchFromWholeThread(triggerBtn, opts, clickEvent) {
@@ -2877,6 +2913,7 @@
       try { showNotification(`Thread: ${candidates.length} items (${res && Number.isFinite(Number(res.pages)) ? res.pages : '?'} pagina\'s)`, false); } catch (e) {}
 
       let selected = null;
+      let selectedDirectHints = null;
       try {
         selected = await showBatchPreviewModal(candidates, meta, force);
       } catch (e) {
@@ -2884,7 +2921,10 @@
       }
 
       let urls = candidates.map((c) => c.url);
-      if (selected && selected.length) urls = selected;
+      if (selected && Array.isArray(selected.urls) && selected.urls.length) {
+        urls = selected.urls;
+        selectedDirectHints = selected.directHints && typeof selected.directHints === 'object' ? selected.directHints : null;
+      } else if (Array.isArray(selected) && selected.length) urls = selected;
       else {
         const forceHint = force ? '\nFORCE: duplicates opnieuw downloaden' : '';
         const ok = window.confirm(`Hele thread download starten voor ${urls.length} items?${forceHint}`);
@@ -2892,7 +2932,7 @@
       }
 
       addLog(force ? `Force thread batch: ${urls.length} items` : `Thread batch: ${urls.length} items`);
-      const result = await queueBatchDownloadRequest(urls, meta, { force });
+      const result = await queueBatchDownloadRequest(urls, meta, { force, directHints: selectedDirectHints });
       if (result && result.success) {
         const stats = summarizeBatchResult(result);
         const label = force ? 'Force thread' : 'Thread';

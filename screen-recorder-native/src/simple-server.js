@@ -3106,6 +3106,7 @@ function applyAbortStatus(id, kind) {
       removeFromQueue(queuedLight, id);
       jobLane.delete(id);
       updateDownloadStatus.run('cancelled', 0, null, id);
+      try { runDownloadSchedulerSoon(); } catch (e) {}
       return true;
     }
     if (kind === 'on_hold') {
@@ -3115,6 +3116,7 @@ function applyAbortStatus(id, kind) {
       removeFromQueue(queuedLight, id);
       jobLane.delete(id);
       updateDownloadStatus.run('on_hold', 0, null, id);
+      try { runDownloadSchedulerSoon(); } catch (e) {}
       return true;
     }
   } catch (e) {}
@@ -4721,6 +4723,27 @@ function getDownloadDirChannelOnly(platform, channel) {
   return dir;
 }
 
+function parseFootFetishForumThreadInfo(input) {
+  try {
+    const raw = String(input || '');
+    if (!raw) return null;
+    const match = raw.match(/footfetishforum\.com\/threads\/([^\/\?#]+)\.(\d+)(?:\/|\?|#|$)/i);
+    if (!match) return null;
+    const slug = String(match[1] || '').trim();
+    const id = String(match[2] || '').trim();
+    const name = slug
+      .split('-')
+      .map((part) => String(part || '').trim())
+      .filter(Boolean)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(' ')
+      .trim();
+    return { slug, id, name: name || `thread_${id}` };
+  } catch (e) {
+    return null;
+  }
+}
+
 function deriveChannelFromUrl(platform, url) {
   if (!url) return null;
   const u = String(url);
@@ -4730,8 +4753,8 @@ function deriveChannelFromUrl(platform, url) {
   }
 
   if (platform === 'footfetishforum') {
-    const m = u.match(/footfetishforum\.com\/threads\/[^\/\?#]*\.(\d+)(?:\/|\?|#|$)/i);
-    if (m && m[1]) return `thread_${m[1]}`;
+    const info = parseFootFetishForumThreadInfo(u);
+    if (info && info.name) return info.name;
   }
 
   if (platform === 'reddit') {
@@ -4804,7 +4827,9 @@ function getDownloadDir(platform, channel, title) {
   const safePlatform = sanitizeName(platform || 'other');
   const safeChannel = sanitizeName(channel || 'unknown');
   const safeTitle = sanitizeName(title || 'untitled');
-  const dir = path.join(BASE_DIR, safePlatform, safeChannel, safeTitle);
+  const dir = String(platform || '').toLowerCase() === 'footfetishforum' && safeChannel && safeTitle && safeChannel === safeTitle
+    ? path.join(BASE_DIR, safePlatform, safeChannel)
+    : path.join(BASE_DIR, safePlatform, safeChannel, safeTitle);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -4989,6 +5014,8 @@ function extractYoutubeChannel(url) {
 function deriveTitleFromUrl(url) {
   const ytId = extractYoutubeId(url);
   if (ytId) return `video_${ytId}`;
+  const fffInfo = parseFootFetishForumThreadInfo(url);
+  if (fffInfo && fffInfo.name) return fffInfo.name;
   if (!url) return 'untitled';
   return sanitizeName(url).slice(0, 60) || 'untitled';
 }
@@ -6081,6 +6108,10 @@ expressApp.post('/download', async (req, res) => {
 
   const jobMetadata = (metadata && typeof metadata === 'object' && !Array.isArray(metadata)) ? { ...metadata } : {};
   if (forceDuplicates) jobMetadata.webdl_force = true;
+  if (!jobMetadata.webdl_direct_hint && jobMetadata.webdl_direct_hints && typeof jobMetadata.webdl_direct_hints === 'object') {
+    const directHint = jobMetadata.webdl_direct_hints[effectiveUrl];
+    if (typeof directHint === 'string' && directHint.trim()) jobMetadata.webdl_direct_hint = directHint.trim();
+  }
   if (pinToOrigin) {
     jobMetadata.webdl_pin_context = true;
     jobMetadata.origin_thread = { url: pageUrl, platform: originPlatform, channel, title };
@@ -6183,6 +6214,10 @@ expressApp.post('/download/batch', async (req, res) => {
     created.push({ downloadId, url: u, platform, channel, title });
     const jobMetadata = (metadata && typeof metadata === 'object' && !Array.isArray(metadata)) ? { ...metadata } : {};
     if (forceDuplicates) jobMetadata.webdl_force = true;
+    if (!jobMetadata.webdl_direct_hint && jobMetadata.webdl_direct_hints && typeof jobMetadata.webdl_direct_hints === 'object') {
+      const directHint = jobMetadata.webdl_direct_hints[u];
+      if (typeof directHint === 'string' && directHint.trim()) jobMetadata.webdl_direct_hint = directHint.trim();
+    }
     if (pinToOrigin) {
       jobMetadata.webdl_pin_context = true;
       jobMetadata.origin_thread = { url: pageUrl, platform: originPlatform, channel: originChannel, title: originTitle };
@@ -6249,7 +6284,12 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
 
   if (isKnownHtmlWrapperUrl(url)) {
     try {
-      const resolved = await resolveHtmlWrapperToDirectMediaUrl(url, 15000);
+      const wrapperReferer = String(
+        metadata && typeof metadata === 'object' && metadata.origin_thread && metadata.origin_thread.url ? metadata.origin_thread.url :
+        metadata && typeof metadata === 'object' && metadata.url && metadata.url !== url ? metadata.url :
+        ''
+      ).trim();
+      const resolved = await resolveHtmlWrapperToDirectMediaUrl(url, 15000, wrapperReferer);
       if (resolved && resolved !== url) {
         try { updateDownloadUrl.run(resolved, downloadId); } catch (e) {}
         const nextMeta = (metadata && typeof metadata === 'object' && !Array.isArray(metadata)) ? { ...metadata } : {};
@@ -6258,6 +6298,7 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
         return startDirectFileDownload(downloadId, resolved, platform, channel, title, nextMeta);
       }
     } catch (e) {}
+    return startDirectFileDownload(downloadId, url, platform, channel, title, metadata);
   }
 
   if (looksLikeDirectFileUrl(url)) {
@@ -6432,7 +6473,7 @@ function isKnownHtmlWrapperUrl(url) {
   }
 }
 
-async function fetchTextWithTimeout(url, timeoutMs = 15000) {
+async function fetchTextWithTimeout(url, timeoutMs = 15000, referer = '') {
   const ctrl = new AbortController();
   const timer = setTimeout(() => {
     try { ctrl.abort(); } catch (e) {}
@@ -6442,12 +6483,13 @@ async function fetchTextWithTimeout(url, timeoutMs = 15000) {
       method: 'GET',
       headers: {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        ...(referer ? { 'Referer': referer } : {})
       },
       signal: ctrl.signal
     });
     const text = await res.text();
-    return { ok: res.ok, status: res.status, text, contentType: String(res.headers.get('content-type') || '') };
+    return { ok: res.ok, status: res.status, text, contentType: String(res.headers.get('content-type') || ''), finalUrl: String(res.url || url || '') };
   } finally {
     clearTimeout(timer);
   }
@@ -6495,15 +6537,104 @@ function extractOpenGraphMediaUrl(html, baseUrl) {
   }
 }
 
-async function resolveHtmlWrapperToDirectMediaUrl(url, timeoutMs = 15000) {
+function upgradeKnownLowQualityMediaUrl(rawUrl) {
+  try {
+    const input = String(rawUrl || '').trim();
+    if (!input) return '';
+    let out = input
+      .replace(/\.md\.(jpg|jpeg|png|gif|webp)$/i, '.$1')
+      .replace(/\.th\.(jpg|jpeg|png|gif|webp)$/i, '.$1');
+    try {
+      const u = new URL(out);
+      const host = String(u.hostname || '').toLowerCase();
+      const p = String(u.pathname || '');
+      if ((host === 'upload.footfetishforum.com' || host.endsWith('.footfetishforum.com')) && /\/images\//i.test(p)) {
+        u.pathname = p
+          .replace(/\.md\.(jpg|jpeg|png|gif|webp)$/i, '.$1')
+          .replace(/\.th\.(jpg|jpeg|png|gif|webp)$/i, '.$1');
+        out = u.toString();
+      }
+      if (host.endsWith('pixhost.to')) {
+        u.pathname = p.replace(/\/thumbs\//i, '/images/');
+        out = u.toString();
+      }
+    } catch (e) {}
+    return out;
+  } catch (e) {
+    return String(rawUrl || '').trim();
+  }
+}
+
+function scoreDirectMediaCandidate(url) {
+  try {
+    const s = upgradeKnownLowQualityMediaUrl(url);
+    if (!s || !looksLikeDirectFileUrl(s)) return -1000;
+    let score = 0;
+    if (/\.(mp4|mov|m4v|webm|mkv)(?:$|[?#])/i.test(s)) score += 120;
+    else if (/\.(jpg|jpeg|png|gif|webp|bmp|tiff|tif|svg|avif|heic|heif)(?:$|[?#])/i.test(s)) score += 80;
+    if (/upload\.footfetishforum\.com\/images\//i.test(s)) score += 40;
+    if (/pixhost\.to\/images\//i.test(s)) score += 35;
+    if (/\.(?:th|md)\.(jpg|jpeg|png|gif|webp)(?:$|[?#])/i.test(s)) score -= 160;
+    if (/\/thumbs\//i.test(s)) score -= 180;
+    if (/(?:^|[^a-z])(thumb|thumbnail|preview|poster|cover|small)(?:[^a-z]|$)/i.test(s)) score -= 120;
+    return score;
+  } catch (e) {
+    return -1000;
+  }
+}
+
+function extractDirectMediaCandidates(html, baseUrl) {
+  try {
+    const h = String(html || '');
+    const out = [];
+    const seen = new Set();
+    const pushUrl = (raw) => {
+      const normalized = upgradeKnownLowQualityMediaUrl(normalizeHtmlExtractedUrl(raw, baseUrl));
+      if (!normalized || seen.has(normalized)) return;
+      seen.add(normalized);
+      out.push(normalized);
+    };
+
+    const metaPatterns = [
+      /<meta\s+[^>]*(?:property|name)=["']og:video:url["'][^>]*content=["']([^"']+)["'][^>]*>/ig,
+      /<meta\s+[^>]*(?:property|name)=["']og:video["'][^>]*content=["']([^"']+)["'][^>]*>/ig,
+      /<meta\s+[^>]*(?:property|name)=["']og:image["'][^>]*content=["']([^"']+)["'][^>]*>/ig,
+      /<meta\s+[^>]*(?:property|name)=["']twitter:image(?::src)?["'][^>]*content=["']([^"']+)["'][^>]*>/ig
+    ];
+    for (const re of metaPatterns) {
+      for (const m of h.matchAll(re)) {
+        if (m && m[1]) pushUrl(m[1]);
+      }
+    }
+
+    for (const m of h.matchAll(/<(?:a|img|source|video)\b[^>]+(?:href|src|data-src|data-url)=["']([^"']+)["'][^>]*>/ig)) {
+      if (m && m[1]) pushUrl(m[1]);
+    }
+
+    for (const m of h.matchAll(/https?:\/\/[^"'\s<>]+/gi)) {
+      if (m && m[0]) pushUrl(m[0]);
+    }
+
+    return out
+      .filter((u) => looksLikeDirectFileUrl(u))
+      .sort((a, b) => scoreDirectMediaCandidate(b) - scoreDirectMediaCandidate(a));
+  } catch (e) {
+    return [];
+  }
+}
+
+async function resolveHtmlWrapperToDirectMediaUrl(url, timeoutMs = 15000, referer = '') {
   try {
     const u0 = String(url || '').trim();
     if (!u0) return '';
-    const r = await fetchTextWithTimeout(u0, timeoutMs);
-    if (!r || !r.text) return '';
-    if (r.contentType && r.contentType.toLowerCase().startsWith('image/')) return u0;
-    if (r.contentType && r.contentType.toLowerCase().startsWith('video/')) return u0;
-    const og = extractOpenGraphMediaUrl(r.text, u0);
+    const r = await fetchTextWithTimeout(u0, timeoutMs, referer);
+    if (!r) return '';
+    if (r.contentType && r.contentType.toLowerCase().startsWith('image/')) return upgradeKnownLowQualityMediaUrl(String(r.finalUrl || u0));
+    if (r.contentType && r.contentType.toLowerCase().startsWith('video/')) return upgradeKnownLowQualityMediaUrl(String(r.finalUrl || u0));
+    if (!r.text) return '';
+    const candidates = extractDirectMediaCandidates(r.text, u0);
+    if (candidates && candidates.length) return candidates[0];
+    const og = upgradeKnownLowQualityMediaUrl(extractOpenGraphMediaUrl(r.text, u0));
     if (!og) return '';
     if (!looksLikeDirectFileUrl(og)) return '';
     return og;
@@ -6549,8 +6680,35 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
     }
     updateDownloadStatus.run('downloading', 0, null, downloadId);
 
+    url = upgradeKnownLowQualityMediaUrl(url);
+
     const pinContext = !!(metadata && typeof metadata === 'object' && !Array.isArray(metadata) && metadata.webdl_pin_context === true);
     const originThread = (metadata && typeof metadata === 'object' && metadata.origin_thread && typeof metadata.origin_thread === 'object') ? metadata.origin_thread : null;
+    if (isKnownHtmlWrapperUrl(url)) {
+      const directHint = upgradeKnownLowQualityMediaUrl(String(metadata && typeof metadata === 'object' && metadata.webdl_direct_hint ? metadata.webdl_direct_hint : '').trim());
+      if (directHint && looksLikeDirectFileUrl(directHint) && directHint !== url) {
+        try { updateDownloadUrl.run(directHint, downloadId); } catch (e) {}
+        url = directHint;
+      }
+    }
+    if (isKnownHtmlWrapperUrl(url)) {
+      const wrapperReferer = String(
+        originThread && originThread.url ? originThread.url :
+        metadata && typeof metadata === 'object' && metadata.url && metadata.url !== url ? metadata.url :
+        ''
+      ).trim();
+      try {
+        const resolved = await resolveHtmlWrapperToDirectMediaUrl(url, 15000, wrapperReferer);
+        if (resolved && resolved !== url) {
+          try { updateDownloadUrl.run(resolved, downloadId); } catch (e) {}
+          url = upgradeKnownLowQualityMediaUrl(resolved);
+        }
+      } catch (e) {}
+      if (isKnownHtmlWrapperUrl(url)) {
+        updateDownloadStatus.run('error', 0, 'Kon wrapper media URL niet resolven naar een direct bestand', downloadId);
+        return;
+      }
+    }
 
     let dir = getDownloadDir(platform, channel, title);
     let meta = {};
@@ -6649,6 +6807,14 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
             updateDownloadThumbnail.run(`/download/${downloadId}/thumb`, downloadId);
           } catch (e) {}
         }
+
+        try {
+          const relPath = path.relative(BASE_DIR, filepath);
+          if (relPath && !relPath.startsWith('..')) {
+            const indexedAt = new Date().toISOString();
+            upsertDownloadFile.run(downloadId, relPath, size, Math.floor(fs.statSync(filepath).mtimeMs), indexedAt);
+          }
+        } catch (e) {}
 
         updateDownload.run('completed', 100, filepath, filename, size, ext || '', JSON.stringify(metaObj), null, downloadId);
       } else {
@@ -6949,6 +7115,7 @@ async function startOfscraperDownload(downloadId, url, platform, channel, title,
         try {
           if (fs.existsSync(cfgDir)) fs.rmSync(cfgDir, { recursive: true, force: true });
         } catch (e) {}
+        try { runDownloadSchedulerSoon(); } catch (e) {}
         return;
       }
 
@@ -7022,6 +7189,7 @@ async function startOfscraperDownload(downloadId, url, platform, channel, title,
       try {
         if (fs.existsSync(cfgDir)) fs.rmSync(cfgDir, { recursive: true, force: true });
       } catch (e) {}
+      try { runDownloadSchedulerSoon(); } catch (e) {}
     });
 
     proc.on('error', (err) => {
@@ -7030,6 +7198,7 @@ async function startOfscraperDownload(downloadId, url, platform, channel, title,
         if (fs.existsSync(cfgDir)) fs.rmSync(cfgDir, { recursive: true, force: true });
       } catch (e) {}
       updateDownloadStatus.run('error', 0, err.message, downloadId);
+      try { runDownloadSchedulerSoon(); } catch (e) {}
     });
   } catch (err) {
     updateDownloadStatus.run('error', 0, err.message, downloadId);
@@ -7407,6 +7576,17 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
             console.log(`   ⚠️ Final Cut transcode mislukt: ${e.message}`);
           }
         }
+
+        try {
+          if (finalPath && fs.existsSync(finalPath)) {
+            const st = fs.statSync(finalPath);
+            const relPath = path.relative(BASE_DIR, finalPath);
+            if (relPath && !relPath.startsWith('..')) {
+              const indexedAt = new Date().toISOString();
+              upsertDownloadFile.run(downloadId, relPath, st.size, Math.floor(st.mtimeMs), indexedAt);
+            }
+          }
+        } catch (e) {}
 
         updateDownload.run('completed', 100, finalPath, finalFile, finalSize, finalFormat, JSON.stringify(metaObj), null, downloadId);
         try {
