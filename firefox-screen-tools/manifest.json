@@ -1,0 +1,56 @@
+{
+  "manifest_version": 2,
+  "name": "Screen Tools",
+  "version": "1.0.1",
+  "description": "Take screenshots and record your screen with audio from Firefox",
+  "icons": {
+    "48": "icons/icon-48.svg",
+    "96": "icons/icon-96.svg"
+  },
+  "permissions": [
+    "activeTab",
+    "tabs",
+    "storage",
+    "downloads",
+    "<all_urls>"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "exclude_matches": [
+        "http://localhost/*",
+        "http://127.0.0.1/*"
+      ],
+      "js": ["content/toolbar.js"],
+      "css": ["content/toolbar.css"],
+      "run_at": "document_end"
+    },
+    {
+      "matches": ["<all_urls>"],
+      "exclude_matches": [
+        "http://localhost/*",
+        "http://127.0.0.1/*"
+      ],
+      "js": ["content/video-detector.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "browser_action": {
+    "default_icon": {
+      "48": "icons/icon-48.svg",
+      "96": "icons/icon-96.svg"
+    },
+    "default_title": "Screen Tools",
+    "default_popup": "popup/popup.html"
+  },
+  "background": {
+    "scripts": ["background/background.js"]
+  },
+  "web_accessible_resources": [
+    "icons/*.svg",
+    "recorder/*.html",
+    "recorder/*.js",
+    "content/*.css",
+    "content/*.js"
+  ]
+}

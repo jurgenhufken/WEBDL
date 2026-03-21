@@ -1,0 +1,14 @@
+{
+  "name": "firefox-screen-tools",
+  "version": "1.0.0",
+  "description": "Firefox extensie voor screenshots en schermopname",
+  "main": "index.js",
+  "scripts": {
+    "generate-icons": "node lib/generateIcons.js"
+  },
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "canvas": "^2.11.0"
+  }
+}

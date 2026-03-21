@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Screen Tools</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <h1>Screen Tools</h1>
+    <div class="button-container">
+      <button id="screenshot-btn" class="action-btn" title="Screenshot maken">
+        <img src="../icons/screenshot.svg" alt="Screenshot">
+        <span>Screenshot</span>
+      </button>
+      <button id="record-btn" class="action-btn" title="Scherm opnemen">
+        <img src="../icons/record.svg" alt="Opnemen">
+        <span>Opnemen</span>
+      </button>
+    </div>
+    <div id="recording-status" class="hidden">
+      <div class="pulse"></div>
+      <span>Opname bezig...</span>
+      <button id="stop-recording-btn">Stoppen</button>
+    </div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Check CAM-GIRLS Database</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #0a0f1a; color: #d7e6ff; }
+    button { padding: 10px 20px; margin: 10px; background: #2a4a82; color: #fff; border: none; cursor: pointer; }
+    button:hover { background: #3a5a92; }
+    pre { background: #1a1f2a; padding: 10px; overflow: auto; max-height: 600px; }
+    .count { font-size: 20px; color: #00d4ff; margin: 10px 0; }
+  </style>
+</head>
+<body>
+  <h1>🔍 CAM-GIRLS Database Check</h1>
+  
+  <button onclick="checkOldPaths()">Check Old Paths (zonder CAM-GIRLS)</button>
+  <button onclick="checkNewPaths()">Check New Paths (met CAM-GIRLS)</button>
+  <button onclick="checkAllCamGirls()">Check All CAM-GIRLS paths</button>
+  
+  <div id="result"></div>
+
+  <script>
+    async function checkOldPaths() {
+      const dirs = ['Chatroulette', 'motherless', 'omegleporn', 'rutube', 'test-examples', 'videodownloadhelper', 'xvideos', '_Downloads te importeren'];
+      let html = '<h2>Items met OUDE paths (zonder CAM-GIRLS prefix):</h2>';
+      
+      for (const dir of dirs) {
+        const resp = await fetch('/api/gallery/items', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            mode: 'recent',
+            filter: 'all',
+            sort: 'recent',
+            cursor: '',
+            limit: 1000
+          })
+        });
+        
+        const data = await resp.json();
+        const items = data.items || [];
+        
+        // Filter items that start with this dir but NOT with CAM-GIRLS
+        const oldItems = items.filter(it => {
+          const fp = it.filepath || '';
+          return fp.startsWith(dir + '/') && !fp.startsWith('CAM-GIRLS/');
+        });
+        
+        html += `<div class="count">${dir}: ${oldItems.length} items</div>`;
+        if (oldItems.length > 0) {
+          html += '<pre>' + oldItems.slice(0, 5).map(it => it.filepath).join('\n') + '</pre>';
+        }
+      }
+      
+      document.getElementById('result').innerHTML = html;
+    }
+    
+    async function checkNewPaths() {
+      const resp = await fetch('/api/gallery/items', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          mode: 'recent',
+          filter: 'all',
+          sort: 'recent',
+          cursor: '',
+          limit: 1000
+        })
+      });
+      
+      const data = await resp.json();
+      const items = data.items || [];
+      
+      const camGirlsItems = items.filter(it => {
+        const fp = it.filepath || '';
+        return fp.startsWith('CAM-GIRLS/');
+      });
+      
+      let html = '<h2>Items met NIEUWE CAM-GIRLS paths:</h2>';
+      html += `<div class="count">Total: ${camGirlsItems.length} items</div>`;
+      
+      if (camGirlsItems.length > 0) {
+        html += '<pre>' + camGirlsItems.slice(0, 20).map(it => it.filepath).join('\n') + '</pre>';
+      }
+      
+      document.getElementById('result').innerHTML = html;
+    }
+    
+    async function checkAllCamGirls() {
+      const resp = await fetch('/api/gallery/items', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          mode: 'recent',
+          filter: 'all',
+          sort: 'recent',
+          cursor: '',
+          limit: 5000
+        })
+      });
+      
+      const data = await resp.json();
+      const items = data.items || [];
+      
+      let html = '<h2>📊 Alle CAM-GIRLS analyse:</h2>';
+      html += `<div class="count">Totaal items in DB: ${items.length}</div>`;
+      
+      const camGirlsNew = items.filter(it => (it.filepath || '').startsWith('CAM-GIRLS/'));
+      const camGirlsOld = items.filter(it => {
+        const fp = it.filepath || '';
+        return !fp.startsWith('CAM-GIRLS/') && 
+               (fp.startsWith('Chatroulette/') || fp.startsWith('motherless/') || 
+                fp.startsWith('omegleporn/') || fp.startsWith('rutube/') ||
+                fp.startsWith('test-examples/') || fp.startsWith('videodownloadhelper/') ||
+                fp.startsWith('xvideos/') || fp.startsWith('_Downloads te importeren/'));
+      });
+      
+      html += `<div class="count">Met CAM-GIRLS prefix: ${camGirlsNew.length}</div>`;
+      html += `<div class="count">Zonder CAM-GIRLS prefix (oud): ${camGirlsOld.length}</div>`;
+      
+      if (camGirlsOld.length > 0) {
+        html += '<h3>⚠️ Deze items moeten nog gemigreerd:</h3>';
+        html += '<pre>' + camGirlsOld.slice(0, 10).map(it => it.filepath).join('\n') + '</pre>';
+      }
+      
+      if (camGirlsNew.length > 0) {
+        html += '<h3>✅ Al gemigreerd:</h3>';
+        html += '<pre>' + camGirlsNew.slice(0, 10).map(it => it.filepath).join('\n') + '</pre>';
+      }
+      
+      document.getElementById('result').innerHTML = html;
+    }
+  </script>
+</body>
+</html>

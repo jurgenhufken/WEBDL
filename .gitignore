@@ -4,9 +4,20 @@ node_modules/
 *.log
 backup-temp/
 WEBDL BACKUP/
+Backup/
 .env
-# Ignore typical media folders if they are directly in WEBDL (user might download here)
-# But maybe we just ignore everything large
+venv/
+*.pyc
+__pycache__/
+.tools/
+UV/
+OF-Scraper/
+OF-Scraper-main.zip
+CascadeProjects/
+WEBDL/
+pg-migrate-tmp/
+untitled folder/
+# Media files
 *.mp4
 *.mkv
 *.avi
@@ -16,6 +27,7 @@ WEBDL BACKUP/
 *.png
 *.gif
 *.webp
+# Databases
 *.sqlite
 *.sqlite3
 *.db
