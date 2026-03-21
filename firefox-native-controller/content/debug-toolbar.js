@@ -1522,7 +1522,8 @@
   const batchDownloadBtn = makeBtn('⏬ Batch', '#1565C0');
   const dashboardBtn = makeBtn('📊 Dashboard', '#0f3460');
   const mediaDownloadBtn = makeBtnIn(extraBtnContainer, '🖼 Media', '#6d28d9');
-  const forceBatchDownloadBtn = makeBtnIn(extraBtnContainer, '🔥 Force Batch', '#b91c1c');
+  const forceBatchDownloadBtn = makeBtnIn(extraBtnContainer, '🔥 Force', '#b91c1c');
+  const forceCopyBtn = makeBtnIn(extraBtnContainer, '📋 Kopie', '#d97706');
   const threadBatchDownloadBtn = makeBtnIn(extraBtnContainer, '🧵 Hele thread', '#0ea5e9');
   const vdhHintBtn = makeBtnIn(extraBtnContainer, '🧩 VDH hint', '#2e7d32');
   const redditAllBtn = makeBtnIn(extraBtnContainer, '🧵 Reddit all', '#ff4500');
@@ -1867,6 +1868,7 @@
     const opt = options && typeof options === 'object' ? options : {};
     const payload = { urls, metadata: meta };
     if (opt.force === true) payload.force = true;
+    if (opt.forceCopy === true) payload.forceCopy = true;
     const viaBg = await sendBackgroundAction('queueBatchDownload', payload, 20000);
     if (viaBg && viaBg.success) return viaBg;
     const viaHttp = await postServerJson('download/batch', payload, 20000);
@@ -2647,6 +2649,7 @@
   async function runBatchFromCurrentPage(triggerBtn, opts, clickEvent) {
     const options = opts && typeof opts === 'object' ? opts : {};
     const force = options.force === true;
+    const forceCopy = options.forceCopy === true;
 
     if (!(await ensureServerReachable(true))) return;
 
@@ -2720,20 +2723,20 @@
       if (!ok) return;
     }
 
-    addLog(force ? `Force batch download: ${urls.length} items` : `Batch download: ${urls.length} items`);
+    const modeLabel = forceCopy ? 'Kopie' : (force ? 'Force' : 'Batch');
+    addLog(`${modeLabel} batch download: ${urls.length} items`);
     const oldLabel = String((triggerBtn && triggerBtn.textContent) || '').trim();
     if (triggerBtn) {
-      triggerBtn.textContent = force ? '⏳ Force...' : '\u23f3 Batch...';
+      triggerBtn.textContent = `⏳ ${modeLabel}...`;
       triggerBtn.style.opacity = '0.6';
     }
 
     try {
-      const result = await queueBatchDownloadRequest(urls, meta, { force });
+      const result = await queueBatchDownloadRequest(urls, meta, { force, forceCopy });
       if (result.success) {
         const stats = summarizeBatchResult(result);
-        const label = force ? 'Force batch' : 'Batch';
-        showNotification(`${label}: ${stats.queued} nieuw, ${stats.duplicates} bestaand (${stats.total} totaal)`);
-        addLog(`${label} gestart: nieuw=${stats.queued}, bestaand=${stats.duplicates}, totaal=${stats.total}`);
+        showNotification(`${modeLabel}: ${stats.queued} nieuw, ${stats.duplicates} bestaand (${stats.total} totaal)`);
+        addLog(`${modeLabel} gestart: nieuw=${stats.queued}, bestaand=${stats.duplicates}, totaal=${stats.total}`);
       } else {
         showNotification(`Batch fout: ${result.error}`, true);
         addLog(`Batch fout: ${result.error}`, 'error');
@@ -2743,7 +2746,7 @@
       addLog(`Batch fout: ${e.message}`, 'error');
     } finally {
       if (triggerBtn) {
-        triggerBtn.textContent = oldLabel || (force ? '🔥 Force Batch' : '\u23ec Batch');
+        triggerBtn.textContent = oldLabel;
         triggerBtn.style.opacity = '1';
       }
     }
@@ -2755,6 +2758,10 @@
 
   forceBatchDownloadBtn.addEventListener('click', async function(e) {
     await runBatchFromCurrentPage(forceBatchDownloadBtn, { force: true }, e);
+  });
+
+  forceCopyBtn.addEventListener('click', async function(e) {
+    await runBatchFromCurrentPage(forceCopyBtn, { forceCopy: true }, e);
   });
 
   async function runBatchFromWholeThread(triggerBtn, opts, clickEvent) {

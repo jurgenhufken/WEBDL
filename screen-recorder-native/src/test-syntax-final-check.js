@@ -1991,6 +1991,17 @@ function getViewerHTML() {
       }
     });
 
+    
+    window.addEventListener('popstate', (e) => {
+      if (elModal.classList.contains('open') && (!e.state || e.state.page !== 'viewer')) {
+        closeModal(true);
+      } else if (!elModal.classList.contains('open') && e.state && e.state.page === 'viewer') {
+        if (typeof e.state.index === 'number') {
+          openModalIndex(e.state.index);
+        }
+      }
+    });
+    
     window.addEventListener('keydown', async (e) => {
       if (e.key === 'ArrowRight') { await nextItem(1); e.preventDefault(); }
       else if (e.key === 'ArrowLeft') { await nextItem(-1); e.preventDefault(); }
@@ -3298,7 +3309,13 @@ function getGalleryHTML() {
       elMBody.addEventListener('click', showHeader);
     }
 
-    function closeModal(skipHistory) {
+    function closeModal(fromHistory = false) {
+      if (fromHistory !== true && window.history.state && window.history.state.page === 'viewer') {
+        window.history.back();
+        return;
+      }
+      try { history.replaceState({ page: 'gallery' }, '', '/gallery'); } catch(e) {}
+    
       stopSlideshow();
       if (state.reverseInterval) {
         clearInterval(state.reverseInterval);
@@ -3546,11 +3563,11 @@ function getGalleryHTML() {
         let path = '';
         const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
         if (state.mode === 'recent') {
-          path = '/api/media/recent-files?limit=60&cursor=&type=' + encodeURIComponent(state.filter) + '&include_active=1' + dirsParam + '&_t=' + Date.now();
+          path = '/api/media/recent-files?limit=60&cursor=&type=' + encodeURIComponent(state.filter) + '&include_active=1' + dirsParam ;
         } else {
           const ch = state.channel;
           if (!ch) return;
-          path = '/api/media/channel-files?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=60&cursor=&type=' + encodeURIComponent(state.filter) + '&include_active=1' + dirsParam + '&_t=' + Date.now();
+          path = '/api/media/channel-files?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=60&cursor=&type=' + encodeURIComponent(state.filter) + '&include_active=1' + dirsParam ;
         }
         const data = await api(path);
         if (!data || !data.success) return;
@@ -3996,6 +4013,13 @@ function getGalleryHTML() {
       if (state.currentMediaEl) state.currentMediaEl.classList.remove('dragging');
     });
 
+    
+    window.addEventListener('popstate', (e) => {
+      if (elModal && elModal.classList.contains('open')) {
+        closeModal(true);
+      }
+    });
+    
     window.addEventListener('keydown', async (e) => {
       const tag = e.target && e.target.tagName ? String(e.target.tagName).toUpperCase() : '';
       const isFormTarget = tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA';
@@ -4483,6 +4507,7 @@ async function hydrateDownloadActivityContext(downloadId) {
     if (!row) return prev;
     return setDownloadActivityContext(id, {
       url: row.url || '',
+    sourceUrl: row.source_url || '',
       source_url: row.source_url || '',
       platform: row.platform || '',
       channel: row.channel || '',
@@ -13521,6 +13546,7 @@ function normalizeThumbValue(v) {
 }
 
 function makeMediaItem(row) {
+  const sourceUrl = row.source_url || '';
   const fp = String(row.filepath || '').trim();
 
     if (row.platform === 'patreon') {
@@ -13860,6 +13886,7 @@ function makePathMediaItem({ relPath, platform, channel, title, created_at, thum
 }
 
 function makeIndexedMediaItem(row) {
+  const sourceUrl = row.source_url || '';
   if (!row || typeof row !== 'object') return null;
   const kind = String(row.kind || '').toLowerCase();
   if (kind === 'p') {
@@ -14071,7 +14098,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
     const items = [];
     const seenKeys = new Set();
 
-    const isTopRequest = false; // cache disabled to guarantee live updates
+    const isTopRequest = !cursorRaw || (cur && cur.activeOffset === 0 && cur.rowOffset === 0 && !cur.dir && cur.fileIndex === 0); to guarantee live updates
     if (includeActive && isTopRequest) {
       try {
         const cap = Math.min(28, Math.max(8, Math.floor(limit / 2)));
@@ -14204,7 +14231,7 @@ expressApp.get('/api/media/channel-files', async (req, res) => {
     const items = [];
     const seenKeys = new Set();
 
-    const isTopRequest = false; // cache disabled to guarantee live updates
+    const isTopRequest = !cursorRaw || (cur && cur.activeOffset === 0 && cur.rowOffset === 0 && !cur.dir && cur.fileIndex === 0); to guarantee live updates
     if (includeActive && isTopRequest) {
       try {
         const cap = Math.min(28, Math.max(8, Math.floor(limit / 2)));

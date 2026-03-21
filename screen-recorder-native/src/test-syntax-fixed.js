@@ -2134,8 +2134,6 @@ function getGalleryHTML() {
     .line2 { font-size: 12px; color: #eee; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .badge { position: absolute; top: 8px; left: 8px; font-size: 10px; background: rgba(15,52,96,0.9); border: 1px solid rgba(31,42,82,0.9); padding: 3px 8px; border-radius: 999px; color: #d7e6ff; }
     .badge.r { left: auto; right: 8px; }
-    .src-btn { position: absolute; bottom: 8px; right: 8px; font-size: 10px; font-weight: 600; background: rgba(0,212,255,0.15); border: 1px solid rgba(0,212,255,0.4); padding: 4px 8px; border-radius: 4px; color: #00d4ff; cursor: pointer; transition: all 0.2s; z-index: 5; text-transform: uppercase; letter-spacing: 0.5px; }
-    .src-btn:hover { background: rgba(0,212,255,0.25); border-color: #00d4ff; transform: translateY(-1px); }
     .webdl-rating { margin-top: 8px; display: inline-flex !important; gap: 2px !important; align-items: center !important; user-select: none !important; }
     .webdl-rating .webdl-star { position: relative !important; display: inline-block !important; width: 1em !important; font-size: 14px !important; line-height: 1 !important; color: rgba(215,230,255,0.55) !important; cursor: pointer !important; }
     .webdl-rating .webdl-star.full { color: #ffd166 !important; }
@@ -2253,7 +2251,6 @@ function getGalleryHTML() {
         <button id="btnRotate" class="btn">↻ 90°</button>
         <button id="btnOpen" class="btn">Open</button>
         <button id="btnFinder" class="btn">Finder</button>
-        <button id="btnSource" class="btn">Bron</button>
       </header>
       <div class="body" id="mBody"></div>
     </div>
@@ -2303,7 +2300,6 @@ function getGalleryHTML() {
     const elBtnClose = document.getElementById('btnClose');
     const elBtnOpen = document.getElementById('btnOpen');
     const elBtnFinder = document.getElementById('btnFinder');
-    const elBtnSource = document.getElementById('btnSource');
     const elBtnRotate = document.getElementById('btnRotate');
     const elZoomRange = document.getElementById('zoomRange');
     const elBtnZoomReset = document.getElementById('btnZoomReset');
@@ -2888,8 +2884,7 @@ function getGalleryHTML() {
       if (!it) return '';
       const src = it.src ? ' - ' + it.src.split('/').pop() : '';
       const origin = it.origin_url ? ' (' + new URL(it.origin_url).hostname + ')' : '';
-      const channelText = it.channel_display || it.channel || '-';
-      return (it.platform || '-') + ' | ' + channelText + ' | ' + (it.type || '-') + ' | ' + (it.created_at || '-') + origin + src;
+      return (it.platform || '-') + ' | ' + (it.channel || '-') + ' | ' + (it.type || '-') + ' | ' + (it.created_at || '-') + origin + src;
     }
 
     function syncZoomUi() {
@@ -3065,19 +3060,6 @@ function getGalleryHTML() {
         card.appendChild(b1);
         card.appendChild(b2);
         card.appendChild(meta);
-        
-        if (it.source_url) {
-          const srcBtn = document.createElement('button');
-          srcBtn.className = 'src-btn';
-          srcBtn.textContent = 'Source';
-          srcBtn.title = 'Open bron';
-          srcBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            window.open(it.source_url, '_blank');
-          });
-          card.appendChild(srcBtn);
-        }
-        
         card.addEventListener('click', () => openModalByKey(key));
         frag.appendChild(card);
       }
@@ -3176,19 +3158,6 @@ function getGalleryHTML() {
         card.appendChild(b1);
         card.appendChild(b2);
         card.appendChild(meta);
-        
-        if (it.source_url) {
-          const srcBtn = document.createElement('button');
-          srcBtn.className = 'src-btn';
-          srcBtn.textContent = 'Source';
-          srcBtn.title = 'Open bron';
-          srcBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            window.open(it.source_url, '_blank');
-          });
-          card.appendChild(srcBtn);
-        }
-        
         card.addEventListener('click', () => openModalByKey(key));
         frag.appendChild(card);
       }
@@ -3230,7 +3199,6 @@ function getGalleryHTML() {
       const isReady = !(it && it.ready === false);
       elBtnOpen.disabled = !isReady;
       elBtnFinder.disabled = !isReady;
-      if (elBtnSource) { elBtnSource.style.display = it.source_url ? '' : 'none'; elBtnSource.onclick = () => window.open(it.source_url, '_blank'); }
 
       elMTitle.textContent = it.title_display || it.title || '(zonder titel)';
       elMSub.textContent = fmtItemSub(it);
@@ -3354,18 +3322,6 @@ function getGalleryHTML() {
         state.reverseInterval = null;
       }
       state.reversePlayback = false;
-      
-      // Stop video playback
-      if (state.currentMediaEl) {
-        try {
-          if (state.currentMediaEl.tagName === 'VIDEO') {
-            state.currentMediaEl.pause();
-            state.currentMediaEl.src = '';
-            state.currentMediaEl.load();
-          }
-        } catch (e) {}
-      }
-      
       elModal.classList.remove('open');
       elMBody.innerHTML = '';
       state.current = null;
@@ -3607,11 +3563,11 @@ function getGalleryHTML() {
         let path = '';
         const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
         if (state.mode === 'recent') {
-          path = '/api/media/recent-files?limit=60&cursor=&type=' + encodeURIComponent(state.filter) + '&include_active=0' + dirsParam ;
+          path = '/api/media/recent-files?limit=60&cursor=&type=' + encodeURIComponent(state.filter) + '&include_active=1' + dirsParam ;
         } else {
           const ch = state.channel;
           if (!ch) return;
-          path = '/api/media/channel-files?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=60&cursor=&type=' + encodeURIComponent(state.filter) + '&include_active=0' + dirsParam ;
+          path = '/api/media/channel-files?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=60&cursor=&type=' + encodeURIComponent(state.filter) + '&include_active=1' + dirsParam ;
         }
         const data = await api(path);
         if (!data || !data.success) return;
@@ -3808,7 +3764,7 @@ function getGalleryHTML() {
     try {
       let last = null;
       let lastReloadAt = 0;
-      let lastPeriodicAt = Date.now();
+      let lastPeriodicAt = 0;
       const tick = async () => {
         try {
           const data = await api('/api/stats');
@@ -5192,7 +5148,7 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(f.created_at, d.created_at) AS created_at,
-      COALESCE(NULLIF(CAST(f.mtime_ms AS INTEGER), 0), COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.updated_at, d.created_at)) AS INTEGER) * 1000, 0)) AS ts,
+      COALESCE(NULLIF(CAST(f.mtime_ms AS INTEGER), 0), COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0)) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -5213,7 +5169,7 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
       d.title AS title,
       d.filepath AS filepath,
       d.created_at AS created_at,
-      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.updated_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
+      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       d.thumbnail AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -5330,7 +5286,7 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(f.created_at, d.created_at) AS created_at,
-      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.updated_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
+      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -5351,7 +5307,7 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
       d.title AS title,
       d.filepath AS filepath,
       d.created_at AS created_at,
-      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.updated_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
+      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       d.thumbnail AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -6604,7 +6560,7 @@ const getRecentHybridMediaByRatingDesc = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(f.created_at, d.created_at) AS created_at,
-      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.updated_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
+      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -6625,7 +6581,7 @@ const getRecentHybridMediaByRatingDesc = db.prepare(db.isPostgres ? `
       d.title AS title,
       d.filepath AS filepath,
       d.created_at AS created_at,
-      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.updated_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
+      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       d.thumbnail AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -6742,7 +6698,7 @@ const getRecentHybridMediaByRatingAsc = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(f.created_at, d.created_at) AS created_at,
-      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.updated_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
+      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -6763,7 +6719,7 @@ const getRecentHybridMediaByRatingAsc = db.prepare(db.isPostgres ? `
       d.title AS title,
       d.filepath AS filepath,
       d.created_at AS created_at,
-      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.updated_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
+      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       d.thumbnail AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -7595,8 +7551,8 @@ function runDownloadSchedulerSoon() {
 async function runDownloadScheduler() {
   const heavyLimit = Math.max(0, HEAVY_DOWNLOAD_CONCURRENCY);
   const lightLimit = Math.max(0, LIGHT_DOWNLOAD_CONCURRENCY);
-  
-  // YouTube settings
+  // console.log(`[SCHEDULER] Running... active=${activeProcesses.size} starting=${startingJobs.size}`);
+
   const youtubeSettings = getYoutubeRuntimeConfig();
   const youtubeLimit = Math.max(0, youtubeSettings.concurrency);
   const youtubeSpacingMs = Math.max(0, youtubeSettings.spacingMs);
@@ -7606,13 +7562,18 @@ async function runDownloadScheduler() {
     try {
       const p = String(platform || '').toLowerCase();
       if (!p) return 0;
+      const ids = new Set();
+      for (const id of activeProcesses.keys()) ids.add(id);
+      for (const id of startingJobs) ids.add(id);
       let n = 0;
-      for (const id of activeProcesses.keys()) {
+      for (const id of ids) {
         const plat = String(jobPlatform.get(id) || '').toLowerCase();
         if (plat === p) n++;
       }
       return n;
-    } catch (e) { return 0; }
+    } catch (e) {
+      return 0;
+    }
   };
 
   const canStartYoutubeNow = () => {
@@ -7636,7 +7597,7 @@ async function runDownloadScheduler() {
       const job = queuedJobs.get(id);
       if (!job) continue;
       const plat = String(job.platform || '').toLowerCase();
-      if ((plat === 'youtube' || plat === 'youtube-shorts') && !canStartYoutubeNow()) {
+      if (plat === 'youtube' && !canStartYoutubeNow()) {
         queue.push(id);
         continue;
       }
@@ -7655,11 +7616,14 @@ async function runDownloadScheduler() {
     queuedJobs.delete(id);
     heavyActive++;
     startingJobs.add(id);
-    try { jobPlatform.set(id, job.platform); } catch (e) {}
+    try {
+      jobPlatform.set(id, job.platform);
+    } catch (e) {}
     if (String(job.platform || '').toLowerCase() === 'youtube') markYoutubeStarted();
     try {
-      startDownload(job.downloadId, job.url, job.platform, job.channel, job.title, job.metadata)
-      .catch(() => {}).finally(() => {
+      startDownload(job.downloadId, job.url, job.platform, job.channel, job.title, job.metadata).
+      catch(() => {}).
+      finally(() => {
         startingJobs.delete(id);
         runDownloadSchedulerSoon();
       });
@@ -7677,11 +7641,14 @@ async function runDownloadScheduler() {
     queuedJobs.delete(id);
     lightActive++;
     startingJobs.add(id);
-    try { jobPlatform.set(id, job.platform); } catch (e) {}
+    try {
+      jobPlatform.set(id, job.platform);
+    } catch (e) {}
     if (String(job.platform || '').toLowerCase() === 'youtube') markYoutubeStarted();
     try {
-      startDownload(job.downloadId, job.url, job.platform, job.channel, job.title, job.metadata)
-      .catch(() => {}).finally(() => {
+      startDownload(job.downloadId, job.url, job.platform, job.channel, job.title, job.metadata).
+      catch(() => {}).
+      finally(() => {
         startingJobs.delete(id);
         runDownloadSchedulerSoon();
       });
@@ -10939,12 +10906,12 @@ expressApp.post('/stop-recording', (req, res) => {
 
 // Download starten via yt-dlp
 expressApp.post('/download', async (req, res) => {
-  const { url, metadata, force, forceCopy } = req.body || {};
+  const { url, metadata, force } = req.body || {};
   try {
-    console.log(`[INGRESS] POST /download url=${String(url || '').slice(0, 200)} page=${String(metadata && metadata.url || '').slice(0, 200)} force=${force === true ? '1' : '0'} forceCopy=${forceCopy === true ? '1' : '0'}`);
+    console.log(`[INGRESS] POST /download url=${String(url || '').slice(0, 200)} page=${String(metadata && metadata.url || '').slice(0, 200)} force=${force === true ? '1' : '0'}`);
   } catch (e) {}
   if (!url) return res.status(400).json({ success: false, error: 'URL is vereist' });
-  const forceDuplicates = force === true || forceCopy === true;
+  const forceDuplicates = force === true;
 
   const metaPlatform = metadata && typeof metadata.platform === 'string' ? metadata.platform : null;
   const effectiveUrl = String(url || '');
@@ -11061,8 +11028,7 @@ expressApp.post('/download', async (req, res) => {
   res.json({ success: true, downloadId, platform, channel, title });
 
   const jobMetadata = metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? { ...metadata } : {};
-  if (force === true) jobMetadata.webdl_force = true;
-  if (forceCopy === true) jobMetadata.webdl_force_copy = true;
+  if (forceDuplicates) jobMetadata.webdl_force = true;
   if (pinToOrigin) {
     jobMetadata.webdl_pin_context = true;
     jobMetadata.origin_thread = { url: pageUrl, platform: originPlatform, channel: originChannel, title: originTitle };
@@ -11108,15 +11074,15 @@ expressApp.post('/reddit/index', async (req, res) => {
 });
 
 expressApp.post('/download/batch', async (req, res) => {
-  const { urls, metadata, force, forceCopy } = req.body || {};
+  const { urls, metadata, force } = req.body || {};
   try {
     const n = Array.isArray(urls) ? urls.length : 0;
-    console.log(`[INGRESS] POST /download/batch count=${n} page=${String(metadata && metadata.url || '').slice(0, 200)} force=${force === true ? '1' : '0'} forceCopy=${forceCopy === true ? '1' : '0'}`);
+    console.log(`[INGRESS] POST /download/batch count=${n} page=${String(metadata && metadata.url || '').slice(0, 200)} force=${force === true ? '1' : '0'}`);
   } catch (e) {}
   if (!Array.isArray(urls) || urls.length === 0) {
     return res.status(400).json({ success: false, error: 'urls is vereist' });
   }
-  const forceDuplicates = force === true || forceCopy === true;
+  const forceDuplicates = force === true;
 
   const metaPlatform = metadata && typeof metadata.platform === 'string' ? metadata.platform : null;
   const pageUrl = metadata && typeof metadata.url === 'string' ? metadata.url.trim() : '';
@@ -11181,8 +11147,7 @@ expressApp.post('/download/batch', async (req, res) => {
 
     created.push({ downloadId, url: u, platform, channel, title });
     const jobMetadata = metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? { ...metadata } : {};
-    if (force === true) jobMetadata.webdl_force = true;
-    if (forceCopy === true) jobMetadata.webdl_force_copy = true;
+    if (forceDuplicates) jobMetadata.webdl_force = true;
     if (pinToOrigin) {
       jobMetadata.webdl_pin_context = true;
       jobMetadata.origin_thread = { url: pageUrl, platform: originPlatform, channel: originChannel, title: originTitle };
@@ -12400,8 +12365,7 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
     }
     await updateDownloadStatus.run('downloading', 0, null, downloadId);
 
-    const forceCopy = !!(metadata && typeof metadata === 'object' && !Array.isArray(metadata) && metadata.webdl_force_copy === true);
-    const outputTemplate = forceCopy ?
+    const outputTemplate = forceDuplicates ?
     path.join(dir, `%(title).120B [%(id)s] [#${downloadId}].%(ext)s`) :
     path.join(dir, '%(title).120B [%(id)s].%(ext)s');
     const baseArgs = [
@@ -13504,8 +13468,7 @@ expressApp.get('/media/file', async (req, res) => {
           }
         }
 
-        const imgData = pickPrimaryMediaFile(fp);
-        const img = imgData ? imgData.path : null;
+        const img = pickThumbnailFile(fp);
         if (img && safeIsAllowedExistingPath(img)) {
           return res.sendFile(img, (err) => {
             if (!err) return;

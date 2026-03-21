@@ -10939,12 +10939,12 @@ expressApp.post('/stop-recording', (req, res) => {
 
 // Download starten via yt-dlp
 expressApp.post('/download', async (req, res) => {
-  const { url, metadata, force } = req.body || {};
+  const { url, metadata, force, forceCopy } = req.body || {};
   try {
-    console.log(`[INGRESS] POST /download url=${String(url || '').slice(0, 200)} page=${String(metadata && metadata.url || '').slice(0, 200)} force=${force === true ? '1' : '0'}`);
+    console.log(`[INGRESS] POST /download url=${String(url || '').slice(0, 200)} page=${String(metadata && metadata.url || '').slice(0, 200)} force=${force === true ? '1' : '0'} forceCopy=${forceCopy === true ? '1' : '0'}`);
   } catch (e) {}
   if (!url) return res.status(400).json({ success: false, error: 'URL is vereist' });
-  const forceDuplicates = force === true;
+  const forceDuplicates = force === true || forceCopy === true;
 
   const metaPlatform = metadata && typeof metadata.platform === 'string' ? metadata.platform : null;
   const effectiveUrl = String(url || '');
@@ -11061,7 +11061,8 @@ expressApp.post('/download', async (req, res) => {
   res.json({ success: true, downloadId, platform, channel, title });
 
   const jobMetadata = metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? { ...metadata } : {};
-  if (forceDuplicates) jobMetadata.webdl_force = true;
+  if (force === true) jobMetadata.webdl_force = true;
+  if (forceCopy === true) jobMetadata.webdl_force_copy = true;
   if (pinToOrigin) {
     jobMetadata.webdl_pin_context = true;
     jobMetadata.origin_thread = { url: pageUrl, platform: originPlatform, channel: originChannel, title: originTitle };
@@ -11107,15 +11108,15 @@ expressApp.post('/reddit/index', async (req, res) => {
 });
 
 expressApp.post('/download/batch', async (req, res) => {
-  const { urls, metadata, force } = req.body || {};
+  const { urls, metadata, force, forceCopy } = req.body || {};
   try {
     const n = Array.isArray(urls) ? urls.length : 0;
-    console.log(`[INGRESS] POST /download/batch count=${n} page=${String(metadata && metadata.url || '').slice(0, 200)} force=${force === true ? '1' : '0'}`);
+    console.log(`[INGRESS] POST /download/batch count=${n} page=${String(metadata && metadata.url || '').slice(0, 200)} force=${force === true ? '1' : '0'} forceCopy=${forceCopy === true ? '1' : '0'}`);
   } catch (e) {}
   if (!Array.isArray(urls) || urls.length === 0) {
     return res.status(400).json({ success: false, error: 'urls is vereist' });
   }
-  const forceDuplicates = force === true;
+  const forceDuplicates = force === true || forceCopy === true;
 
   const metaPlatform = metadata && typeof metadata.platform === 'string' ? metadata.platform : null;
   const pageUrl = metadata && typeof metadata.url === 'string' ? metadata.url.trim() : '';
@@ -11180,7 +11181,8 @@ expressApp.post('/download/batch', async (req, res) => {
 
     created.push({ downloadId, url: u, platform, channel, title });
     const jobMetadata = metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? { ...metadata } : {};
-    if (forceDuplicates) jobMetadata.webdl_force = true;
+    if (force === true) jobMetadata.webdl_force = true;
+    if (forceCopy === true) jobMetadata.webdl_force_copy = true;
     if (pinToOrigin) {
       jobMetadata.webdl_pin_context = true;
       jobMetadata.origin_thread = { url: pageUrl, platform: originPlatform, channel: originChannel, title: originTitle };
@@ -12398,7 +12400,8 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
     }
     await updateDownloadStatus.run('downloading', 0, null, downloadId);
 
-    const outputTemplate = forceDuplicates ?
+    const forceCopy = !!(metadata && typeof metadata === 'object' && !Array.isArray(metadata) && metadata.webdl_force_copy === true);
+    const outputTemplate = forceCopy ?
     path.join(dir, `%(title).120B [%(id)s] [#${downloadId}].%(ext)s`) :
     path.join(dir, '%(title).120B [%(id)s].%(ext)s');
     const baseArgs = [
