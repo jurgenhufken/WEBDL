@@ -167,7 +167,19 @@
             const parentLink = img.closest ? img.closest('a[href], a[data-href], a[data-url]') : null;
             if (parentLink && parentLink.getAttribute) {
               const href = parentLink.getAttribute('href') || parentLink.getAttribute('data-href') || parentLink.getAttribute('data-url');
-              if (href) push(href, 'thumb_link');
+              if (href) {
+                try {
+                  const linkUrl = new URL(href, baseHref);
+                  const linkHost = String(linkUrl.hostname || '').toLowerCase();
+                  const linkPath = String(linkUrl.pathname || '').toLowerCase();
+                  const isFffAttachment = (linkHost === 'footfetishforum.com' || linkHost.endsWith('.footfetishforum.com')) && /\/(attachments?|attach)\//i.test(linkPath);
+                  if (!isFffAttachment) {
+                    push(href, 'thumb_link');
+                  }
+                } catch (e) {
+                  push(href, 'thumb_link');
+                }
+              }
             }
           } catch (e) {}
 
@@ -208,6 +220,11 @@
             const s = abs.toString();
             const host = String(abs.hostname || '').toLowerCase();
             const path = String(abs.pathname || '').toLowerCase();
+            
+            // Skip FFF attachment pages
+            const isFffAttachment = (host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) && /\/(attachments?|attach)\//i.test(path);
+            if (isFffAttachment) continue;
+            
             const text = String(a.textContent || '').trim().toLowerCase();
             const cls = String(a.className || '').toLowerCase();
             const looksLikeFile = /\.(jpe?g|png|gif|webp|bmp|svg|avif|heic|heif|mp4|mov|m4v|webm|mkv|mp3|m4a|zip|rar|7z)(\?|$)/i.test(s);
@@ -688,16 +705,36 @@
           if (parentLink) {
             const href = parentLink.getAttribute('href') || parentLink.getAttribute('data-href') || parentLink.getAttribute('data-url');
             if (href) {
-              push(href, parentLink, 'thumb_link');
-              hadParentLink = true;
+              try {
+                const linkUrl = new URL(href, window.location.href);
+                const linkHost = String(linkUrl.hostname || '').toLowerCase();
+                const linkPath = String(linkUrl.pathname || '').toLowerCase();
+                
+                // Skip FFF attachment pages - use direct image src instead
+                const isFffAttachment = (linkHost === 'footfetishforum.com' || linkHost.endsWith('.footfetishforum.com')) && /\/(attachments?|attach)\//i.test(linkPath);
+                
+                if (!isFffAttachment) {
+                  const isFile = /\.(jpe?g|png|gif|webp|bmp|svg|avif|heic|heif|mp4|mov|m4v|webm|mkv)(\?|$)/i.test(href);
+                  const isExternalMedia = !(linkHost === 'footfetishforum.com' || linkHost.endsWith('.footfetishforum.com'));
+                  const isUploadSite = linkHost === 'upload.footfetishforum.com' || /pixhost|postimg|imgur|redgifs|gfycat/i.test(linkHost);
+                  
+                  if (isFile || isExternalMedia || isUploadSite) {
+                    push(href, parentLink, 'thumb_link');
+                    hadParentLink = true;
+                  }
+                }
+              } catch (e) {}
             }
           }
         } catch (e) {}
 
-        const nw = Number(img.naturalWidth || 0);
-        const nh = Number(img.naturalHeight || 0);
-        if (Number.isFinite(nw) && Number.isFinite(nh) && nw > 0 && nh > 0) {
-          if ((nw * nh) < 6400) continue;
+        // Skip tiny images UNLESS they have a parent link (which we already captured above)
+        if (!hadParentLink) {
+          const nw = Number(img.naturalWidth || 0);
+          const nh = Number(img.naturalHeight || 0);
+          if (Number.isFinite(nw) && Number.isFinite(nh) && nw > 0 && nh > 0) {
+            if ((nw * nh) < 6400) continue;
+          }
         }
 
         push(
@@ -800,6 +837,10 @@
         const host = String(abs.hostname || '').toLowerCase();
         const path = String(abs.pathname || '').toLowerCase();
         if (path === '/attachments/upload') continue;
+        
+        // Skip FFF attachment pages
+        const isFffAttachment = (host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) && /\/(attachments?|attach)\//i.test(path);
+        if (isFffAttachment) continue;
 
         // likely attachment/media or embed-ish
         const text = String(a.textContent || '').trim().toLowerCase();

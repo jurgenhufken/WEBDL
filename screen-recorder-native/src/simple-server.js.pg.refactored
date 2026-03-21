@@ -1581,7 +1581,7 @@ function getViewerHTML() {
       state.loadingMore = true;
       try {
         if (state.mode === 'recent') {
-          const data = await api('/api/media/recent-files?include_active=0&include_active_files=0&include_downloads=0&limit=200&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&sort=' + encodeURIComponent(state.sort || 'recent'));
+          const data = await api('/api/media/recent-files?include_active=0&include_active_files=1&include_downloads=0&limit=200&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&sort=' + encodeURIComponent(state.sort || 'recent'));
           if (!data.success) throw new Error(data.error || 'recent failed');
           const newItems = data.items || [];
           state.items = state.items.concat(newItems);
@@ -1642,7 +1642,7 @@ function getViewerHTML() {
         state.cursor = '';
         state.done = false;
         const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
-        const data = await api('/api/media/recent-files?include_active=0&include_active_files=0&limit=200&cursor=&type=' + encodeURIComponent(state.filter) + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam);
+        const data = await api('/api/media/recent-files?include_active=0&include_active_files=1&limit=200&cursor=&type=' + encodeURIComponent(state.filter) + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam);
         if (!data.success) throw new Error(data.error || 'recent failed');
         state.items = data.items || [];
         state.cursor = data.next_cursor || '';
@@ -1701,7 +1701,7 @@ function getViewerHTML() {
       state.cursor = '';
       state.done = false;
       const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
-      const data = await api('/api/media/channel-files?include_active=0&include_active_files=0&platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=300&cursor=&type=' + encodeURIComponent(state.filter) + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam);
+      const data = await api('/api/media/channel-files?include_active=0&include_active_files=1&platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=300&cursor=&type=' + encodeURIComponent(state.filter) + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam);
       if (!data.success) throw new Error(data.error || 'channel failed');
       state.items = data.items || [];
       state.cursor = data.next_cursor || '';
@@ -3682,11 +3682,11 @@ function getGalleryHTML() {
         const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
         elSentinel.textContent = '📡 Aanvraag verzenden (limit=' + state.limit + ', filters=' + (state.enabledDirs ? state.enabledDirs.length : 'none') + ')...';
         if (state.mode === 'recent') {
-          path = '/api/media/recent-files?limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0' + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam;
+          path = '/api/media/recent-files?limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=1' + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam;
         } else {
           const ch = state.channel;
           if (!ch) { state.done = true; return; }
-          path = '/api/media/channel-files?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0' + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam;
+          path = '/api/media/channel-files?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=1' + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam;
         }
         const data = await api(path);
         const fetchTime = Date.now() - startTime;
@@ -4843,13 +4843,15 @@ const insertScreenshot = db.prepare(`INSERT INTO screenshots (url, platform, cha
 const getAllScreenshots = db.prepare(`SELECT * FROM screenshots ORDER BY created_at DESC`);
 
 const upsertDownloadFile = db.prepare(`
-  INSERT INTO download_files (download_id, relpath, filesize, mtime_ms, updated_at)
-  VALUES (?, ?, ?, ?, ?)
+  INSERT INTO download_files (download_id, relpath, filesize, mtime_ms, created_at, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?)
   ON CONFLICT(download_id, relpath) DO UPDATE SET
     filesize=excluded.filesize,
     mtime_ms=excluded.mtime_ms,
+    created_at=COALESCE(download_files.created_at, excluded.created_at),
     updated_at=excluded.updated_at
 `);
+
 const deleteDownloadFile = db.prepare(`
   DELETE FROM download_files
   WHERE download_id = ?
@@ -4959,7 +4961,7 @@ async function indexDownloadFilesForDownload(row) {
             return;
           }
         }
-        await upsertDownloadFile.run(downloadId, rel, size, mtime, createdAt);
+        await upsertDownloadFile.run(downloadId, rel, size, mtime, createdAt, createdAt);
       } catch (e) {}
     };
 
@@ -5113,6 +5115,50 @@ const getRecentIndexedMedia = db.prepare(db.isPostgres ? `
   LIMIT ? OFFSET ?
 `);
 
+const getRecentDashboardBatchFiles = db.prepare(db.isPostgres ? `
+  SELECT
+    'p' AS kind,
+    f.relpath AS id,
+    d.platform AS platform,
+    d.channel AS channel,
+    d.title AS title,
+    NULL AS filepath,
+    COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
+    COALESCE(NULLIF(CAST(f.mtime_ms AS BIGINT), 0), CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT)) AS ts,
+    NULL AS thumbnail,
+    d.url AS url,
+    d.source_url AS source_url,
+    d.rating AS rating,
+    'd' AS rating_kind,
+    d.id AS rating_id
+  FROM download_files f
+  JOIN downloads d ON d.id = f.download_id
+  WHERE d.status NOT IN ('pending', 'queued')
+  ORDER BY ts DESC
+  LIMIT ?
+` : `
+  SELECT
+    'p' AS kind,
+    f.relpath AS id,
+    d.platform AS platform,
+    d.channel AS channel,
+    d.title AS title,
+    NULL AS filepath,
+    COALESCE(f.created_at, d.created_at) AS created_at,
+    COALESCE(NULLIF(CAST(f.mtime_ms AS INTEGER), 0), COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0)) AS ts,
+    NULL AS thumbnail,
+    d.url AS url,
+    d.source_url AS source_url,
+    d.rating AS rating,
+    'd' AS rating_kind,
+    d.id AS rating_id
+  FROM download_files f
+  JOIN downloads d ON d.id = f.download_id
+  WHERE d.status NOT IN ('pending', 'queued')
+  ORDER BY ts DESC
+  LIMIT ?
+`);
+
 const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
@@ -5153,7 +5199,7 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
       'd' AS rating_kind,
       d.id AS rating_id
     FROM downloads d
-    WHERE d.status NOT IN ('pending', 'queued')
+    WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
       AND d.filepath IS NOT NULL
       AND TRIM(d.filepath) != ''
       AND NOT EXISTS (SELECT 1 FROM download_files f2 WHERE f2.download_id = d.id)
@@ -5192,7 +5238,7 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(f.created_at, d.created_at) AS created_at,
-      COALESCE(NULLIF(CAST(f.mtime_ms AS INTEGER), 0), COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.updated_at, d.created_at)) AS INTEGER) * 1000, 0)) AS ts,
+      COALESCE(NULLIF(CAST(f.mtime_ms AS INTEGER), 0), COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0)) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -5213,7 +5259,7 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
       d.title AS title,
       d.filepath AS filepath,
       d.created_at AS created_at,
-      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.updated_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
+      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       d.thumbnail AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -5221,7 +5267,7 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
       'd' AS rating_kind,
       d.id AS rating_id
     FROM downloads d
-    WHERE d.status NOT IN ('pending', 'queued')
+    WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
       AND d.filepath IS NOT NULL
       AND TRIM(d.filepath) != ''
       AND NOT EXISTS (SELECT 1 FROM download_files f2 WHERE f2.download_id = d.id)
@@ -5262,7 +5308,7 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
+      COALESCE(NULLIF(CAST(f.mtime_ms AS BIGINT), 0), CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT)) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -5271,7 +5317,7 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
       d.id AS rating_id
     FROM download_files f
     JOIN downloads d ON d.id = f.download_id
-    WHERE d.status NOT IN ('pending', 'queued')
+    WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
 
     UNION ALL
 
@@ -5330,7 +5376,7 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(f.created_at, d.created_at) AS created_at,
-      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.updated_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
+      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -5351,7 +5397,7 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
       d.title AS title,
       d.filepath AS filepath,
       d.created_at AS created_at,
-      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.updated_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
+      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       d.thumbnail AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -5400,7 +5446,7 @@ const getHybridMediaByChannel = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
+      COALESCE(NULLIF(CAST(f.mtime_ms AS BIGINT), 0), CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT)) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -6379,8 +6425,6 @@ const getHybridMediaByChannelByNameDesc = db.prepare(db.isPostgres ? `
   LIMIT ? OFFSET ?
 `);
 
-
-
 const getHybridMediaByChannelWithActiveFiles = db.prepare(db.isPostgres ? `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
@@ -6604,7 +6648,7 @@ const getRecentHybridMediaByRatingDesc = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(f.created_at, d.created_at) AS created_at,
-      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.updated_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
+      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -6625,7 +6669,7 @@ const getRecentHybridMediaByRatingDesc = db.prepare(db.isPostgres ? `
       d.title AS title,
       d.filepath AS filepath,
       d.created_at AS created_at,
-      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.updated_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
+      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       d.thumbnail AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -6742,7 +6786,7 @@ const getRecentHybridMediaByRatingAsc = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(f.created_at, d.created_at) AS created_at,
-      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.updated_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
+      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -6763,7 +6807,7 @@ const getRecentHybridMediaByRatingAsc = db.prepare(db.isPostgres ? `
       d.title AS title,
       d.filepath AS filepath,
       d.created_at AS created_at,
-      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.updated_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
+      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       d.thumbnail AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -7470,11 +7514,25 @@ let runtimeActiveSyncedAt = 0;
 
 async function syncRuntimeActiveState() {
   try {
-    const rows = await getRuntimeActiveDownloadRows();
     const ids = new Set();
-    for (const r of rows || []) {
-      if (r && r.id != null) ids.add(Number(r.id));
+    for (const id of activeProcesses.keys()) ids.add(id);
+    for (const id of startingJobs) ids.add(id);
+    const rows = [];
+    for (const id of ids) {
+      const row = await getDownload.get(id);
+      if (!row) continue;
+      const status = String(row.status || '').toLowerCase();
+      if (status === 'queued' || status === 'pending') continue;
+      rows.push(row);
     }
+    const rank = (s) => {
+      if (s === 'downloading') return 0;
+      if (s === 'postprocessing') return 1;
+      if (s === 'queued') return 2;
+      if (s === 'pending') return 3;
+      return 9;
+    };
+    rows.sort((a, b) => rank(a.status) - rank(b.status));
     runtimeActiveRows = rows;
     runtimeActiveIdSet = ids;
     runtimeActiveSyncedAt = Date.now();
@@ -8107,23 +8165,31 @@ io.on('connection', (socket) => {
 expressApp.post('/media/open', async (req, res) => {
   const kind = String(req.body && req.body.kind ? req.body.kind : '').toLowerCase();
   const id = parseInt(req.body && req.body.id != null ? req.body.id : '', 10);
+  const relPath = String(req.body && req.body.path ? req.body.path : '').trim();
   const action = String(req.body && req.body.action ? req.body.action : 'open').toLowerCase();
-  if (!Number.isFinite(id)) return res.status(400).json({ success: false, error: 'id is vereist' });
 
   try {
-    let row = null;
-    if (kind === 'd') row = await getDownload.get(id);else
-    if (kind === 's') row = await db.prepare(`SELECT * FROM screenshots WHERE id=?`).get(id);else
-    return res.status(400).json({ success: false, error: 'kind moet d of s zijn' });
-    if (!row) return res.status(404).json({ success: false, error: 'niet gevonden' });
+    let fp = '';
+    if (relPath) {
+      const abs = safeResolveMediaRelPath(relPath);
+      if (!abs || !fs.existsSync(abs)) return res.status(404).json({ success: false, error: 'bestand niet gevonden' });
+      fp = abs;
+    } else {
+      if (!Number.isFinite(id)) return res.status(400).json({ success: false, error: 'id is vereist' });
+      let row = null;
+      if (kind === 'd') row = await getDownload.get(id);else
+      if (kind === 's') row = await db.prepare(`SELECT * FROM screenshots WHERE id=?`).get(id);else
+      return res.status(400).json({ success: false, error: 'kind moet d of s zijn' });
+      if (!row) return res.status(404).json({ success: false, error: 'niet gevonden' });
 
-    const fp = String(row.filepath || '').trim();
+      fp = String(row.filepath || '').trim();
 
-    if (row.platform === 'patreon') {
-      console.log(`[DEBUG-PATREON-EXPAND] Processing id=${row.id}, fp=${fp}, isAllowed=${safeIsAllowedExistingPath(path.resolve(fp))}`);
+      if (row.platform === 'patreon') {
+        console.log(`[DEBUG-PATREON-EXPAND] Processing id=${row.id}, fp=${fp}, isAllowed=${safeIsAllowedExistingPath(path.resolve(fp))}`);
+      }
+
+      if (!fp || !safeIsAllowedExistingPath(fp)) return res.status(404).json({ success: false, error: 'bestand niet gevonden' });
     }
-
-    if (!fp || !safeIsAllowedExistingPath(fp)) return res.status(404).json({ success: false, error: 'bestand niet gevonden' });
 
     const stat = fs.statSync(fp);
     if (action === 'finder') {
@@ -11523,6 +11589,92 @@ function extractOpenGraphMediaUrl(html, baseUrl) {
   }
 }
 
+function upgradeKnownLowQualityMediaUrl(rawUrl) {
+  try {
+    const input = String(rawUrl || '').trim();
+    if (!input) return '';
+    let out = input
+      .replace(/\.md\.(jpg|jpeg|png|gif|webp)$/i, '.$1')
+      .replace(/\.th\.(jpg|jpeg|png|gif|webp)$/i, '.$1');
+    try {
+      const u = new URL(out);
+      const host = String(u.hostname || '').toLowerCase();
+      const p = String(u.pathname || '');
+      if ((host === 'upload.footfetishforum.com' || host.endsWith('.footfetishforum.com')) && /\/images\//i.test(p)) {
+        u.pathname = p
+          .replace(/\.md\.(jpg|jpeg|png|gif|webp)$/i, '.$1')
+          .replace(/\.th\.(jpg|jpeg|png|gif|webp)$/i, '.$1');
+        out = u.toString();
+      }
+      if (host.endsWith('pixhost.to')) {
+        u.pathname = p.replace(/\/thumbs\//i, '/images/');
+        out = u.toString();
+      }
+    } catch (e) {}
+    return out;
+  } catch (e) {
+    return String(rawUrl || '').trim();
+  }
+}
+
+function scoreDirectMediaCandidate(url) {
+  try {
+    const s = upgradeKnownLowQualityMediaUrl(url);
+    if (!s || !looksLikeDirectFileUrl(s)) return -1000;
+    let score = 0;
+    if (/\.(mp4|mov|m4v|webm|mkv)(?:$|[?#])/i.test(s)) score += 120;
+    else if (/\.(jpg|jpeg|png|gif|webp|bmp|tiff|tif|svg|avif|heic|heif)(?:$|[?#])/i.test(s)) score += 80;
+    if (/upload\.footfetishforum\.com\/images\//i.test(s)) score += 40;
+    if (/pixhost\.to\/images\//i.test(s)) score += 35;
+    if (/\.(?:th|md)\.(jpg|jpeg|png|gif|webp)(?:$|[?#])/i.test(s)) score -= 160;
+    if (/\/thumbs\//i.test(s)) score -= 180;
+    if (/(?:^|[^a-z])(thumb|thumbnail|preview|poster|cover|small)(?:[^a-z]|$)/i.test(s)) score -= 120;
+    return score;
+  } catch (e) {
+    return -1000;
+  }
+}
+
+function extractDirectMediaCandidates(html, baseUrl) {
+  try {
+    const h = String(html || '');
+    const out = [];
+    const seen = new Set();
+    const pushUrl = (raw) => {
+      const normalized = upgradeKnownLowQualityMediaUrl(normalizeHtmlExtractedUrl(raw, baseUrl));
+      if (!normalized || seen.has(normalized)) return;
+      seen.add(normalized);
+      out.push(normalized);
+    };
+
+    const metaPatterns = [
+      /<meta\s+[^>]*(?:property|name)=["']og:video:url["'][^>]*content=["']([^"']+)["'][^>]*>/ig,
+      /<meta\s+[^>]*(?:property|name)=["']og:video["'][^>]*content=["']([^"']+)["'][^>]*>/ig,
+      /<meta\s+[^>]*(?:property|name)=["']og:image["'][^>]*content=["']([^"']+)["'][^>]*>/ig,
+      /<meta\s+[^>]*(?:property|name)=["']twitter:image(?::src)?["'][^>]*content=["']([^"']+)["'][^>]*>/ig
+    ];
+    for (const re of metaPatterns) {
+      for (const m of h.matchAll(re)) {
+        if (m && m[1]) pushUrl(m[1]);
+      }
+    }
+
+    for (const m of h.matchAll(/<(?:a|img|source|video)\b[^>]+(?:href|src|data-src|data-url)=["']([^"']+)["'][^>]*>/ig)) {
+      if (m && m[1]) pushUrl(m[1]);
+    }
+
+    for (const m of h.matchAll(/https?:\/\/[^"'\s<>]+/gi)) {
+      if (m && m[0]) pushUrl(m[0]);
+    }
+
+    return out
+      .filter((u) => looksLikeDirectFileUrl(u))
+      .sort((a, b) => scoreDirectMediaCandidate(b) - scoreDirectMediaCandidate(a));
+  } catch (e) {
+    return [];
+  }
+}
+
 async function resolveHtmlWrapperToDirectMediaUrl(url, timeoutMs = 15000) {
   try {
     const u0 = String(url || '').trim();
@@ -11531,7 +11683,9 @@ async function resolveHtmlWrapperToDirectMediaUrl(url, timeoutMs = 15000) {
     if (!r || !r.text) return '';
     if (r.contentType && r.contentType.toLowerCase().startsWith('image/')) return u0;
     if (r.contentType && r.contentType.toLowerCase().startsWith('video/')) return u0;
-    const og = extractOpenGraphMediaUrl(r.text, u0);
+    const candidates = extractDirectMediaCandidates(r.text, u0);
+    if (candidates && candidates.length) return candidates[0];
+    const og = upgradeKnownLowQualityMediaUrl(extractOpenGraphMediaUrl(r.text, u0));
     if (!og) return '';
     if (!looksLikeDirectFileUrl(og)) return '';
     return og;
@@ -11575,6 +11729,10 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
       await updateDownloadStatus.run('cancelled', 0, null, downloadId);
       return;
     }
+
+    // Probeer lage resolutie links van footfetishforum te upgraden
+    url = upgradeKnownLowQualityMediaUrl(url);
+
     await updateDownloadStatus.run('downloading', 0, null, downloadId);
 
     const pinContext = !!(metadata && typeof metadata === 'object' && !Array.isArray(metadata) && metadata.webdl_pin_context === true);
@@ -11657,43 +11815,54 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
 
     proc.on('close', async (code) => {
       activeProcesses.delete(downloadId);
-      if (code === 0 && fs.existsSync(tmpFilepath)) {
-        try {
-          if (fs.existsSync(filepath)) {
-            try {fs.rmSync(filepath, { force: true });} catch (e) {}
-          }
-          fs.renameSync(tmpFilepath, filepath);
-        } catch (e) {
-          await updateDownloadStatus.run('error', 0, e.message, downloadId);
-          return;
-        }
-        const size = fs.existsSync(filepath) ? fs.statSync(filepath).size : 0;
-        const ext = (path.extname(filename).replace('.', '') || '').toLowerCase();
-        const metaObj = { tool: 'curl', platform, channel, title, url, outputDir: dir };
-        if (pinContext) {
-          metaObj.webdl_pin_context = true;
-          metaObj.origin_thread = originThread && originThread.url ? originThread : null;
-          metaObj.webdl_media_url = metadata && metadata.webdl_media_url ? metadata.webdl_media_url : url;
-          metaObj.webdl_detected_platform = metadata && metadata.webdl_detected_platform ? metadata.webdl_detected_platform : detectPlatform(url);
-          if (originThread && originThread.url) metaObj.source_url = originThread.url;
-        }
-
-        const isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'].includes(ext);
-        if (isImage) {
+      try {
+        if (code === 0 && fs.existsSync(tmpFilepath)) {
           try {
-            await updateDownloadThumbnail.run(`/download/${downloadId}/thumb`, downloadId);
-          } catch (e) {}
-        }
+            if (fs.existsSync(filepath)) {
+              try {fs.rmSync(filepath, { force: true });} catch (e) {}
+            }
+            fs.renameSync(tmpFilepath, filepath);
+          } catch (e) {
+            await updateDownloadStatus.run('error', 0, e.message, downloadId);
+            return;
+          }
+          const size = fs.existsSync(filepath) ? fs.statSync(filepath).size : 0;
+          const ext = (path.extname(filename).replace('.', '') || '').toLowerCase();
+          const metaObj = { tool: 'curl', platform, channel, title, url, outputDir: dir };
+          if (pinContext) {
+            metaObj.webdl_pin_context = true;
+            metaObj.origin_thread = originThread && originThread.url ? originThread : null;
+            metaObj.webdl_media_url = metadata && metadata.webdl_media_url ? metadata.webdl_media_url : url;
+            metaObj.webdl_detected_platform = metadata && metadata.webdl_detected_platform ? metadata.webdl_detected_platform : detectPlatform(url);
+            if (originThread && originThread.url) metaObj.source_url = originThread.url;
+          }
 
-        await updateDownload.run('completed', 100, filepath, filename, size, ext || '', JSON.stringify(metaObj), null, downloadId);
-      } else {
-        await updateDownloadStatus.run('error', 0, stderr || `curl exit code: ${code}`, downloadId);
+          const isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'].includes(ext);
+          if (isImage) {
+            try {
+              await updateDownloadThumbnail.run(`/download/${downloadId}/thumb`, downloadId);
+            } catch (e) {}
+          }
+
+          await updateDownload.run('completed', 100, filepath, filename, size, ext || '', JSON.stringify(metaObj), null, downloadId);
+        } else {
+          await updateDownloadStatus.run('error', 0, stderr || `curl exit code: ${code}`, downloadId);
+        }
+      } finally {
+        try {recentFilesTopCache.clear();} catch (e) {}
+        try {runDownloadSchedulerSoon();} catch (e) {}
+        try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
       }
     });
 
     proc.on('error', async (err) => {
       activeProcesses.delete(downloadId);
-      await updateDownloadStatus.run('error', 0, err.message, downloadId);
+      try {
+        await updateDownloadStatus.run('error', 0, err.message, downloadId);
+      } finally {
+        try {runDownloadSchedulerSoon();} catch (e) {}
+        try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
+      }
     });
   } catch (err) {
     await updateDownloadStatus.run('error', 0, err.message, downloadId);
@@ -11777,7 +11946,8 @@ async function startTdlDownload(downloadId, url, platform, channel, title, metad
               if (st.isFile() && /\.(mp4|webm|mkv|avi|mov|jpg|jpeg|png|gif|webp)$/i.test(file)) {
                 const relPath = path.relative(BASE_DIR, fullPath);
                 if (relPath && !relPath.startsWith('..')) {
-                  await upsertDownloadFile.run(downloadId, relPath, st.size, Math.floor(st.mtimeMs), new Date().toISOString());
+                  const indexedAt = new Date().toISOString();
+                  await upsertDownloadFile.run(downloadId, relPath, st.size, Math.floor(st.mtimeMs), indexedAt, indexedAt);
                 }
               }
             } catch (e) {}
@@ -11799,15 +11969,21 @@ async function startTdlDownload(downloadId, url, platform, channel, title, metad
         };
         await updateDownload.run('completed', 100, dir, safeCount > 1 ? `(multiple: ${safeCount} files)` : '(multiple)', safeBytes, '', JSON.stringify(metaObj), null, downloadId);
         recentFilesTopCache.clear();
+        try {runDownloadSchedulerSoon();} catch (e) {}
+        try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
         return;
       }
       const msg = String(stderr || stdout || `telegram-channel-download exit code: ${code}`).trim();
       await updateDownloadStatus.run('error', 0, msg.slice(0, 4000), downloadId);
+      try {runDownloadSchedulerSoon();} catch (e) {}
+      try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
     });
 
     proc.on('error', async (err) => {
       activeProcesses.delete(downloadId);
       await updateDownloadStatus.run('error', 0, err.message, downloadId);
+      try {runDownloadSchedulerSoon();} catch (e) {}
+      try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
     });
   } catch (err) {
     await updateDownloadStatus.run('error', 0, err.message, downloadId);
@@ -12138,6 +12314,8 @@ async function startOfscraperDownload(downloadId, url, platform, channel, title,
           try {
             if (fs.existsSync(cfgDir)) fs.rmSync(cfgDir, { recursive: true, force: true });
           } catch (e) {}
+          try {runDownloadSchedulerSoon();} catch (e) {}
+          try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
           return;
         }
         const metaObj = { tool: 'ofscraper', platform: 'onlyfans', channel: outChannel, title, url, outputDir: dir };
@@ -12224,18 +12402,19 @@ async function startGalleryDlDownload(downloadId, url, platform, channel, title,
       if (code === 0) {
         // Index all downloaded files
         try {
-          const files = fs.readdirSync(dir);
+          const files = listMediaFilesInDir(dir);
           let indexed = 0;
-          for (const file of files) {
+          for (const fullPath of files) {
             try {
-              const fullPath = path.join(dir, file);
+              const file = path.basename(fullPath);
               const st = fs.statSync(fullPath);
               // Skip gallery-dl downloaded thumbnails/logos (not server-generated ones)
               if (file.endsWith('_thumb.jpg') || file.endsWith('_thumb.png') || file.endsWith('_logo.jpg') || file.endsWith('_logo.png')) continue;
-              if (st.isFile() && /\.(mp4|webm|mkv|avi|mov|jpg|jpeg|png|gif|webp)$/i.test(file)) {
+              if (st.isFile()) {
                 const relPath = path.relative(BASE_DIR, fullPath);
                 if (relPath && !relPath.startsWith('..')) {
-                  await upsertDownloadFile.run(downloadId, relPath, st.size, Math.floor(st.mtimeMs), new Date().toISOString());
+                  const indexedAt = new Date().toISOString();
+                  await upsertDownloadFile.run(downloadId, relPath, st.size, Math.floor(st.mtimeMs), indexedAt, indexedAt);
                   indexed++;
                 }
               }
@@ -12249,14 +12428,20 @@ async function startGalleryDlDownload(downloadId, url, platform, channel, title,
         
         const metaObj = { tool: 'gallery-dl', platform, channel: outChannel, title, url, outputDir: dir };
         await updateDownload.run('completed', 100, dir, '(multiple)', 0, '', JSON.stringify(metaObj), null, downloadId);
+        try {runDownloadSchedulerSoon();} catch (e) {}
+        try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
       } else {
         await updateDownloadStatus.run('error', 0, stderr || `gallery-dl exit code: ${code}`, downloadId);
+        try {runDownloadSchedulerSoon();} catch (e) {}
+        try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
       }
     });
 
     proc.on('error', async (err) => {
       activeProcesses.delete(downloadId);
       await updateDownloadStatus.run('error', 0, err.message, downloadId);
+      try {runDownloadSchedulerSoon();} catch (e) {}
+      try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
     });
   } catch (err) {
     await updateDownloadStatus.run('error', 0, err.message, downloadId);
@@ -12401,6 +12586,7 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
     await updateDownloadStatus.run('downloading', 0, null, downloadId);
 
     const forceCopy = !!(metadata && typeof metadata === 'object' && !Array.isArray(metadata) && metadata.webdl_force_copy === true);
+    const forceOverwrite = !!(metadata && typeof metadata === 'object' && !Array.isArray(metadata) && metadata.webdl_force === true);
     const outputTemplate = forceCopy ?
     path.join(dir, `%(title).120B [%(id)s] [#${downloadId}].%(ext)s`) :
     path.join(dir, '%(title).120B [%(id)s].%(ext)s');
@@ -12409,12 +12595,13 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
     '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
     '--merge-output-format', 'mp4',
     '--write-thumbnail',
-    '--write-info-json',
-    '--no-overwrites',
-    '--progress',
-    '--newline',
-    '-o', outputTemplate,
-    url];
+    '--write-info-json'];
+    if (!forceOverwrite) {
+      baseArgs.push('--no-overwrites');
+    } else {
+      baseArgs.push('--force-overwrites');
+    }
+    baseArgs.push('--progress', '--newline', '-o', outputTemplate, url);
 
 
     if (platform === 'youtube') {
@@ -12464,7 +12651,10 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
             }
           }
           if (line.includes('Destination:')) {
-            lastFile = line.split('Destination:')[1]?.trim() || '';
+            const rawDest = line.split('Destination:')[1]?.trim() || '';
+            // Remove any ANSI color codes yt-dlp might have added
+            lastFile = rawDest.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '');
+            console.log(`   [#${downloadId}] lastFile set: ${lastFile}`);
           }
           if (line.includes('[Merger]') || line.includes('has already been downloaded')) {
             if (!markedPostprocessing && (line.includes('[Merger]') || line.includes('Merging formats into'))) {
@@ -12472,7 +12662,16 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
               await updateDownloadStatus.run('postprocessing', 100, null, downloadId);
             }
             const mergeMatch = line.match(/Merging formats into "(.+)"/);
-            if (mergeMatch) lastFile = mergeMatch[1];
+            if (mergeMatch) lastFile = mergeMatch[1].replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '');
+            
+            if (line.includes('has already been downloaded')) {
+              // Extract filename from: [download] /path/to/file has already been downloaded
+              const alreadyMatch = line.match(/\[download\]\s+(.+?)\s+has already been downloaded/);
+              if (alreadyMatch) {
+                lastFile = alreadyMatch[1].replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '');
+                console.log(`   [#${downloadId}] skipped existing: ${lastFile}`);
+              }
+            }
           }
         });
 
@@ -12530,6 +12729,9 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
 
     if (result && result.success) {
       (async () => {
+        // Give yt-dlp a moment to flush file renames (e.g. from .part) to disk
+        await new Promise(r => setTimeout(r, 400));
+
         let lastFile = result.lastFile || '';
         let mainPath = '';
         if (lastFile) {
@@ -12538,9 +12740,44 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
         }
 
         if (!mainPath) {
-          const files = fs.readdirSync(dir).filter((f) => f.endsWith('.mp4') || f.endsWith('.mkv') || f.endsWith('.webm'));
+          const files = fs.readdirSync(dir).filter((f) => 
+            f.endsWith('.mp4') || f.endsWith('.mkv') || f.endsWith('.webm') ||
+            f.endsWith('.jpg') || f.endsWith('.jpeg') || f.endsWith('.png') ||
+            f.endsWith('.gif') || f.endsWith('.webp') || f.endsWith('.unknown_video')
+          );
+          files.sort((a, b) => {
+            try {
+              const statA = fs.statSync(path.join(dir, a));
+              const statB = fs.statSync(path.join(dir, b));
+              return statB.mtimeMs - statA.mtimeMs;
+            } catch (e) {
+              return 0;
+            }
+          });
           const mainFileGuess = files[0] || '';
           mainPath = mainFileGuess ? path.join(dir, mainFileGuess) : '';
+        }
+
+        if (mainPath && mainPath.endsWith('.unknown_video')) {
+          try {
+            const { execSync } = require('child_process');
+            const output = execSync(`file -b "${mainPath}"`).toString().toLowerCase();
+            let newExt = '';
+            if (output.includes('jpeg image')) newExt = '.jpg';
+            else if (output.includes('png image')) newExt = '.png';
+            else if (output.includes('gif image')) newExt = '.gif';
+            else if (output.includes('webm')) newExt = '.webm';
+            else if (output.includes('mp4') || output.includes('isom')) newExt = '.mp4';
+            
+            if (newExt) {
+              const newPath = mainPath.replace('.unknown_video', newExt);
+              fs.renameSync(mainPath, newPath);
+              mainPath = newPath;
+              console.log(`   [#${downloadId}] Hernoemd unknown_video naar ${path.basename(mainPath)}`);
+            }
+          } catch(e) {
+            console.log(`   [#${downloadId}] Fout bij scannen unknown_video: ${e.message}`);
+          }
         }
 
         const mainFile = mainPath ? path.basename(mainPath) : '';
@@ -12996,7 +13233,8 @@ expressApp.post('/downloads/reindex-gallery', async (req, res) => {
           if (st.isFile() && /\.(mp4|webm|mkv|avi|mov|jpg|jpeg|png|gif|webp)$/i.test(file)) {
             const relPath = path.relative(BASE_DIR, fullPath);
             if (relPath && !relPath.startsWith('..')) {
-              await upsertDownloadFile.run(id, relPath, st.size, Math.floor(st.mtimeMs), new Date().toISOString());
+              const indexedAt = new Date().toISOString();
+              await upsertDownloadFile.run(id, relPath, st.size, Math.floor(st.mtimeMs), indexedAt, indexedAt);
               indexed++;
             }
           }
@@ -13441,7 +13679,21 @@ expressApp.get('/dashboard', async (req, res) => {
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
   
-  const runtimeActiveIds = new Set(Array.from(runtimeActiveIdSet));
+  const runtimeActiveRows = await getRuntimeActiveDownloadRows();
+  const runtimeActiveIds = new Set((runtimeActiveRows || []).map((row) => Number(row && row.id)).filter((id) => Number.isFinite(id)));
+  const queuedRows = (await db.prepare(`
+    SELECT * FROM downloads
+    WHERE status IN ('queued', 'pending')
+    ORDER BY
+      CASE status
+        WHEN 'queued' THEN 0
+        WHEN 'pending' THEN 1
+        ELSE 9
+      END,
+      COALESCE(updated_at, created_at) DESC,
+      created_at DESC
+    LIMIT 200
+  `).all()).filter((row) => !runtimeActiveIds.has(Number(row && row.id)));
   const completedRows = await db.prepare(`
     SELECT * FROM downloads 
     WHERE status NOT IN ('queued', 'pending', 'downloading', 'postprocessing')
@@ -13449,7 +13701,7 @@ expressApp.get('/dashboard', async (req, res) => {
     LIMIT 350
   `).all();
   
-  const allDownloads = [...runtimeActiveRows, ...completedRows];
+  const allDownloads = [...runtimeActiveRows, ...queuedRows, ...completedRows];
   const seen = new Set();
   const uniqueDownloads = [];
   for (const d of allDownloads) {
@@ -13460,7 +13712,8 @@ expressApp.get('/dashboard', async (req, res) => {
   }
   
   const screenshots = await db.prepare(`SELECT * FROM screenshots ORDER BY created_at DESC LIMIT 200`).all();
-  res.send(getDashboardHTML(uniqueDownloads, screenshots));
+  const recentBatchFiles = await getRecentDashboardBatchFiles.all(240);
+  res.send(getDashboardHTML(uniqueDownloads, screenshots, recentBatchFiles));
 });
 
 expressApp.get('/media/file', async (req, res) => {
@@ -14734,7 +14987,7 @@ expressApp.post('/api/rating', async (req, res) => {
   }
 });
 
-function getDashboardHTML(downloads, screenshots) {
+function getDashboardHTML(downloads, screenshots, batchFiles) {
   function dashCaptureKind(d) {
     try {
       const u = String(d && d.url ? d.url : '');
@@ -14912,6 +15165,28 @@ function getDashboardHTML(downloads, screenshots) {
       </td>
     </tr>`).join('');
 
+  const batchFileRows = (Array.isArray(batchFiles) ? batchFiles : []).map((row) => {
+    const item = makeIndexedMediaItem(row);
+    if (!item || !item.file_rel) return '';
+    const platform = String(item.platform || 'other');
+    const thumb = item.thumb ? `<img src="${item.thumb}" style="width:64px;height:36px;object-fit:cover;border-radius:4px;" onerror="this.style.display='none'" />` : '';
+    const when = row && row.created_at ? new Date(row.created_at).toLocaleString('nl-NL') : '-';
+    return `
+    <tr>
+      <td class="title-cell">${item.file_rel}</td>
+      <td>${thumb}</td>
+      <td><span class="badge">batch / ${item.type || 'file'}</span></td>
+      <td><span class="badge badge-${platform}">${platform}</span></td>
+      <td>${item.channel_display || item.channel || ''}</td>
+      <td class="title-cell">${item.title_display || item.title || ''}</td>
+      <td>${when}</td>
+      <td>
+        <button onclick="openMediaPath(${JSON.stringify(String(item.file_rel || ''))})" class="btn btn-sm">Open</button>
+        <button onclick="showPathInFinder(${JSON.stringify(String(item.file_rel || ''))})" class="btn btn-sm">Finder</button>
+      </td>
+    </tr>`;
+  }).filter(Boolean).join('');
+
   return `<!DOCTYPE html>
 <html lang="nl">
 <head>
@@ -14971,8 +15246,12 @@ function getDashboardHTML(downloads, screenshots) {
       <div class="stat-label">Voltooid</div>
     </div>
     <div class="stat">
-      <div class="stat-num">${downloads.filter((d) => d.status === 'downloading').length}</div>
+      <div class="stat-num">${downloads.filter((d) => d.status === 'downloading' || d.status === 'postprocessing').length}</div>
       <div class="stat-label">Actief</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num">${downloads.filter((d) => d.status === 'queued' || d.status === 'pending').length}</div>
+      <div class="stat-label">Wachtrij</div>
     </div>
     <div class="stat">
       <div class="stat-num">${screenshots.length}</div>
@@ -14984,6 +15263,12 @@ function getDashboardHTML(downloads, screenshots) {
   <table>
     <thead><tr><th>#</th><th>Thumb</th><th>Type</th><th>Platform</th><th>Kanaal</th><th>Titel</th><th>Status</th><th>Grootte</th><th>Datum</th><th>Acties</th></tr></thead>
     <tbody>${downloadRows || '<tr><td colspan="10" style="text-align:center;color:#666;">Nog geen downloads</td></tr>'}</tbody>
+  </table>
+
+  <h2>Batch-bestanden</h2>
+  <table>
+    <thead><tr><th>Bestand</th><th>Thumb</th><th>Type</th><th>Platform</th><th>Kanaal</th><th>Titel</th><th>Datum</th><th>Acties</th></tr></thead>
+    <tbody>${batchFileRows || '<tr><td colspan="8" style="text-align:center;color:#666;">Nog geen batch-bestanden</td></tr>'}</tbody>
   </table>
 
   <h2>Screenshots</h2>
@@ -15022,11 +15307,29 @@ function getDashboardHTML(downloads, screenshots) {
       const data = await resp.json().catch(() => null);
       if (!data || !data.success) alert((data && data.error) ? data.error : 'Open mislukt');
     }
+    async function openMediaPath(path) {
+      const resp = await fetch('/media/open', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path, action: 'open' })
+      });
+      const data = await resp.json().catch(() => null);
+      if (!data || !data.success) alert((data && data.error) ? data.error : 'Open mislukt');
+    }
     async function showInFinder(kind, id) {
       const resp = await fetch('/media/open', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ kind, id, action: 'finder' })
+      });
+      const data = await resp.json().catch(() => null);
+      if (!data || !data.success) alert((data && data.error) ? data.error : 'Finder mislukt');
+    }
+    async function showPathInFinder(path) {
+      const resp = await fetch('/media/open', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path, action: 'finder' })
       });
       const data = await resp.json().catch(() => null);
       if (!data || !data.success) alert((data && data.error) ? data.error : 'Finder mislukt');
