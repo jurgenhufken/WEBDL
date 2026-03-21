@@ -34,6 +34,9 @@
       if (isFootFetishForumThreadPage()) return true;
     } catch (e) {}
     try {
+      if (isAmateurVoyeurForumThreadPage()) return true;
+    } catch (e) {}
+    try {
       const flag = String(localStorage.getItem('WEBDL_DEBUG_BATCH_URLS') || '').trim();
       return flag === '1' || flag.toLowerCase() === 'true';
     } catch (e) {}
@@ -360,6 +363,49 @@
     return { candidates: out, pages };
   }
 
+  function getAmateurVoyeurForumPageInfo(inputUrl) {
+    try {
+      const u = new URL(String(inputUrl || window.location.href), window.location.href);
+      const host = String(u.hostname || '').toLowerCase();
+      if (!(host === 'amateurvoyeurforum.com' || host === 'www.amateurvoyeurforum.com' || host.endsWith('.amateurvoyeurforum.com'))) return null;
+      const path = String(u.pathname || '').toLowerCase();
+      const clean = (value) => String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+      if (path === '/showthread.php') {
+        const id = String(u.searchParams.get('t') || u.searchParams.get('p') || '').trim();
+        if (!id) return null;
+        return { kind: 'thread', id, channel: `thread_${id}` };
+      }
+      if (path === '/forumdisplay.php') {
+        const id = String(u.searchParams.get('f') || '').trim();
+        if (!id) return null;
+        return { kind: 'forum', id, channel: `forum_${id}` };
+      }
+      if (path === '/video.php') {
+        const userId = String(u.searchParams.get('u') || '').trim();
+        if (userId) return { kind: 'member_video_list', id: userId, channel: `member_${userId}` };
+        const tag = String(u.searchParams.get('tag') || '').trim();
+        if (tag) {
+          const safeTag = clean(tag);
+          return { kind: 'tag_video_list', id: tag, channel: safeTag ? `tag_${safeTag}` : 'videos' };
+        }
+        return { kind: 'video_list', id: 'videos', channel: 'videos' };
+      }
+      if (path === '/member.php') {
+        const userId = String(u.searchParams.get('u') || '').trim();
+        if (!userId) return null;
+        return { kind: 'member', id: userId, channel: `member_${userId}` };
+      }
+      if (path === '/attachment.php') {
+        const attachmentId = String(u.searchParams.get('attachmentid') || '').trim();
+        if (!attachmentId) return null;
+        return { kind: 'attachment', id: attachmentId, channel: `attachment_${attachmentId}` };
+      }
+      return null;
+    } catch (e) {
+      return null;
+    }
+  }
+
   const BATCH_DOMAIN_SUFFIXES = [
     'motherless.com',
     'pornzog.com',
@@ -590,6 +636,15 @@
       if (tm && tm[1]) meta.channel = `thread_${tm[1]}`;
     }
 
+    else if (/amateurvoyeurforum\.com/i.test(url)) {
+      meta.platform = 'amateurvoyeurforum';
+      const info = getAmateurVoyeurForumPageInfo(url);
+      if (info && info.channel) meta.channel = info.channel;
+      const heading = pickFirstMatchingText('h1, .page-title, .headline, td.navbar strong, .navbar strong, .tcat + table td.navbar strong');
+      const cleanedTitle = String((heading && heading.text) || document.title || '').replace(/\s*-\s*Amateur Voyeur Forum\s*$/i, '').trim();
+      if (cleanedTitle) meta.title = cleanedTitle;
+    }
+
     if (!meta.platform || meta.platform === 'unknown') {
       try {
         const host = String(window.location.hostname || '').toLowerCase();
@@ -612,6 +667,15 @@
     } catch (e) {
       return false;
     }
+  }
+
+  function isAmateurVoyeurForumPage() {
+    return !!getAmateurVoyeurForumPageInfo(window.location.href);
+  }
+
+  function isAmateurVoyeurForumThreadPage() {
+    const info = getAmateurVoyeurForumPageInfo(window.location.href);
+    return !!(info && info.kind === 'thread');
   }
 
   function collectFootFetishForumCandidates(maxItems = 2000) {
@@ -889,6 +953,119 @@
 
   function collectFootFetishForumUrls(maxItems = 2000) {
     return collectFootFetishForumCandidates(maxItems).map((c) => c.url);
+  }
+
+  function collectAmateurVoyeurForumCandidatesFromDocument(doc, baseHref, maxItems = 2000) {
+    const out = [];
+    const seen = new Set();
+    const pageInfo = getAmateurVoyeurForumPageInfo(baseHref) || {};
+    const isThreadPage = pageInfo.kind === 'thread';
+    const isForumPage = pageInfo.kind === 'forum';
+    const isVideoPage = pageInfo.kind === 'video_list' || pageInfo.kind === 'member_video_list' || pageInfo.kind === 'tag_video_list';
+
+    const push = (raw, kind) => {
+      try {
+        const s = String(raw || '').trim();
+        if (!s || /^(data:|blob:|javascript:|mailto:)/i.test(s)) return;
+        const u = new URL(s, baseHref);
+        u.hash = '';
+        const host = String(u.hostname || '').toLowerCase();
+        const path = String(u.pathname || '').toLowerCase();
+        if (!/^https?:$/i.test(String(u.protocol || ''))) return;
+        const isAvfHost = host === 'amateurvoyeurforum.com' || host === 'www.amateurvoyeurforum.com' || host.endsWith('.amateurvoyeurforum.com');
+        if (isAvfHost) {
+          if (/\/(image|avatar)\.php$/i.test(path) && (u.searchParams.get('u') || u.searchParams.get('userid'))) return;
+          if (/\b(clear|spacer|logo|banner|icon|avatar|smil|emoji)\b/i.test(path)) return;
+        }
+        const final = u.toString();
+        if (seen.has(final)) return;
+        seen.add(final);
+        out.push({ url: final, el: null, kind: kind || '' });
+      } catch (e) {}
+    };
+
+    const roots = Array.from(doc.querySelectorAll(
+      'article, .message, .message-main, .message-body, .message-content, .message-userContent, .message-attachments, .bbWrapper, .postbody, .post_message, .content'
+    )).filter(Boolean);
+    const scanRoots = roots.length ? roots : [doc.body || doc.documentElement];
+
+    if (!isForumPage) {
+      for (const root of scanRoots) {
+        if (!root) continue;
+        try {
+          for (const img of Array.from(root.querySelectorAll('img'))) {
+            if (out.length >= maxItems) return out;
+            const cls = String(img.className || '').toLowerCase();
+            if (/\b(avatar|emoji|emote|smilie|reaction|logo|icon)\b/i.test(cls)) continue;
+            push(img.currentSrc || img.src || img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-url'), 'img');
+          }
+        } catch (e) {}
+        try {
+          for (const video of Array.from(root.querySelectorAll('video, source'))) {
+            if (out.length >= maxItems) return out;
+            push(video.currentSrc || video.src || video.getAttribute('src'), 'video');
+          }
+        } catch (e) {}
+      }
+    }
+
+    for (const root of scanRoots.length ? scanRoots : [doc]) {
+      if (!root) continue;
+      let anchors = [];
+      try { anchors = Array.from(root.querySelectorAll('a[href], a[data-href], a[data-url]')); } catch (e) { anchors = []; }
+      for (const a of anchors) {
+        if (out.length >= maxItems) return out;
+        try {
+          const href = a.getAttribute('href') || a.getAttribute('data-href') || a.getAttribute('data-url');
+          if (!href) continue;
+          const abs = new URL(href, baseHref);
+          abs.hash = '';
+          const s = abs.toString();
+          const host = String(abs.hostname || '').toLowerCase();
+          const path = String(abs.pathname || '').toLowerCase();
+          const text = String(a.textContent || '').trim().toLowerCase();
+          const cls = String(a.className || '').toLowerCase();
+          const isAvfHost = host === 'amateurvoyeurforum.com' || host === 'www.amateurvoyeurforum.com' || host.endsWith('.amateurvoyeurforum.com');
+          const isAttachment = isAvfHost && path === '/attachment.php' && !!String(abs.searchParams.get('attachmentid') || '').trim();
+          const isThreadLink = isAvfHost && path === '/showthread.php' && !!String(abs.searchParams.get('t') || abs.searchParams.get('p') || '').trim();
+          const looksLikeFile = /\.(jpe?g|png|gif|webp|bmp|svg|avif|heic|heif|mp4|mov|m4v|webm|mkv|mp3|m4a|zip|rar|7z)(\?|$)/i.test(s);
+          let looksLikeExternalMedia = !isAvfHost && looksLikeExternalMediaPageUrl(s, text);
+          if (looksLikeExternalMedia && (host === 'twitter.com' || host === 'x.com') && !/\/status\//i.test(path)) looksLikeExternalMedia = false;
+
+          if (isAttachment || looksLikeFile || looksLikeExternalMedia) {
+            push(s, isAttachment ? 'attachment' : 'a');
+            continue;
+          }
+          if ((isForumPage || isVideoPage) && isThreadLink) push(s, 'thread_link');
+          if (isThreadPage && /attachment|download|full\s*size/i.test(text) && /attachment|download/i.test(cls)) push(s, 'download_link');
+        } catch (e) {}
+      }
+    }
+
+    if (isThreadPage) {
+      try {
+        for (const root of scanRoots.slice(0, 120)) {
+          if (out.length >= maxItems) return out;
+          const raw = String(root && root.textContent ? root.textContent : '');
+          if (!raw) continue;
+          const re = /(https?:\/\/[^\s)\]"']+)/g;
+          let m;
+          while ((m = re.exec(raw)) && out.length < maxItems) {
+            const found = String(m[1] || '').replace(/[),\]."']+$/g, '').trim();
+            if (!found) continue;
+            try {
+              const parsed = new URL(found);
+              const foundHost = String(parsed.hostname || '').toLowerCase();
+              const looksLikeFile = /\.(jpe?g|png|gif|webp|bmp|svg|avif|heic|heif|mp4|mov|m4v|webm|mkv|mp3|m4a)(\?|$)/i.test(found);
+              const looksLikeExternalMedia = looksLikeExternalMediaPageUrl(found, '');
+              if (looksLikeFile || looksLikeExternalMedia || foundHost.includes('amateurvoyeurforum.com')) push(found, 'text');
+            } catch (e) {}
+          }
+        }
+      } catch (e) {}
+    }
+
+    return out;
   }
 
   function uniqueCandidates(candidates) {
