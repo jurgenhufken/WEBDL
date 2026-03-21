@@ -1,0 +1,104 @@
+.debug-panel {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  background-color: rgba(0, 0, 0, 0.8);
+  color: #fff;
+  border-radius: 8px;
+  padding: 15px;
+  font-family: monospace;
+  z-index: 2147483646;
+  max-width: 400px;
+  max-height: 300px;
+  overflow-y: auto;
+  box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.debug-panel h3 {
+  margin-top: 0;
+  margin-bottom: 10px;
+  font-size: 14px;
+  color: #0dd;
+}
+
+.debug-panel p {
+  margin: 0 0 8px 0;
+}
+
+.debug-panel .status {
+  display: flex;
+  justify-content: space-between;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+}
+
+.debug-panel .status-item {
+  margin-right: 10px;
+}
+
+.debug-panel .status-label {
+  color: #aaa;
+}
+
+.debug-panel .status-value {
+  color: #fff;
+  font-weight: bold;
+}
+
+.debug-panel .status-value.connected {
+  color: #4caf50;
+}
+
+.debug-panel .status-value.disconnected {
+  color: #f44336;
+}
+
+.debug-panel .status-value.recording {
+  color: #f44336;
+  animation: pulse 2s infinite;
+}
+
+.debug-panel .log-entry {
+  margin-bottom: 5px;
+  word-break: break-word;
+}
+
+.debug-panel .timestamp {
+  color: #aaa;
+  margin-right: 5px;
+}
+
+.debug-panel .debug-buttons {
+  margin-top: 10px;
+  display: flex;
+  gap: 10px;
+}
+
+.debug-panel button {
+  background: #333;
+  color: white;
+  border: 1px solid #555;
+  padding: 5px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.debug-panel button:hover {
+  background: #444;
+}
+
+.debug-panel .close-btn {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  background: none;
+  border: none;
+  color: #aaa;
+  cursor: pointer;
+  font-size: 16px;
+  padding: 0;
+}

@@ -1,0 +1,92 @@
+# WEBDL - Video DownloadHelper Smart Naming
+# Place this file in Video DownloadHelper's smartnaming configuration location.
+# This config aims to keep filenames consistent and WEBDL-import friendly.
+
+max_length = 160
+template = '%title - %hostname'
+
+[[rule]]
+url = 'youtube.com'
+max_length = 180
+selector = 'ytd-video-owner-renderer ytd-channel-name a, ytd-video-owner-renderer #channel-name a, #owner ytd-channel-name a, #owner #channel-name a, #owner a[href^="/@"], #owner a[href^="/channel/"], #owner-name a, #upload-info a[href^="/@"], #upload-info a[href^="/channel/"], ytd-reel-player-header-renderer a[href^="/@"], ytd-reel-player-header-renderer a[href^="/channel/"], .ytd-reel-player-header-renderer a[href^="/@"], .ytd-reel-player-header-renderer a[href^="/channel/"], a[href^="/@"], a[href^="/channel/"], a[href^="https://www.youtube.com/@"], a[href^="https://www.youtube.com/channel/"]'
+template = 'youtube.com - %selector - %title'
+replace = [
+  { from = '\s*[-|–—•]+\s*YouTube\s*$', to = '' },
+  { from = '\s*\|\s*YouTube\s*$', to = '' },
+  { from = '^(youtube\\.com\s*-\s*)@', to = '$1' },
+  { from = '\s*-+\s*-+\s*', to = ' - ' },
+  { from = '^(youtube\\.com)\s*[-|–—•]+\s*[-|–—•]+\s*', to = '$1 - ' },
+  { from = '\s*[-|–—•]+\s*[-|–—•]+\s*', to = ' - ' },
+  { from = '\s+', to = ' ' }
+]
+
+[[rule]]
+url = 'youtu.be'
+max_length = 180
+selector = 'ytd-video-owner-renderer ytd-channel-name a, ytd-video-owner-renderer #channel-name a, #owner ytd-channel-name a, #owner #channel-name a, #owner a[href^="/@"], #owner a[href^="/channel/"], #owner-name a, #upload-info a[href^="/@"], #upload-info a[href^="/channel/"], ytd-reel-player-header-renderer a[href^="/@"], ytd-reel-player-header-renderer a[href^="/channel/"], .ytd-reel-player-header-renderer a[href^="/@"], .ytd-reel-player-header-renderer a[href^="/channel/"], a[href^="/@"], a[href^="/channel/"], a[href^="https://www.youtube.com/@"], a[href^="https://www.youtube.com/channel/"]'
+template = 'youtube.com - %selector - %title'
+replace = [
+  { from = '\s*[-|–—•]+\s*YouTube\s*$', to = '' },
+  { from = '\s*\|\s*YouTube\s*$', to = '' },
+  { from = '^(youtube\\.com\s*-\s*)@', to = '$1' },
+  { from = '\s*-+\s*-+\s*', to = ' - ' },
+  { from = '^(youtube\\.com)\s*[-|–—•]+\s*[-|–—•]+\s*', to = '$1 - ' },
+  { from = '\s*[-|–—•]+\s*[-|–—•]+\s*', to = ' - ' },
+  { from = '\s+', to = ' ' }
+]
+
+[[rule]]
+url = 'reddit.com'
+max_length = 180
+template = '%title - reddit.com'
+replace = [
+  { from = '\s*[-|–—•]+\s*Reddit\s*$', to = '' },
+  { from = '\s+', to = ' ' }
+]
+
+[[rule]]
+url = 'redd.it'
+max_length = 180
+template = '%title - reddit.com'
+replace = [
+  { from = '\s*[-|–—•]+\s*Reddit\s*$', to = '' },
+  { from = '\s+', to = ' ' }
+]
+
+[[rule]]
+url = 'instagram.com'
+max_length = 180
+template = '%title - instagram.com'
+replace = [
+  { from = '\s*[-|–—•]+\s*Instagram\s*$', to = '' },
+  { from = '\s+', to = ' ' }
+]
+
+[[rule]]
+url = 'tiktok.com'
+max_length = 180
+template = '%title - tiktok.com'
+replace = [
+  { from = '\s*[-|–—•]+\s*TikTok\s*$', to = '' },
+  { from = '\s+', to = ' ' }
+]
+
+[[rule]]
+url = 'motherless.com'
+max_length = 180
+template = '%title - motherless.com'
+replace = [
+  { from = '\s*[-|–—•]+\s*(?:www\\.)?[Mm][Oo][Tt][Hh][Ee][Rr][Ll][Ee][Ss][Ss]\\.com(?:\/[\\w._-]+){0,6}(?:\s*[™®©]+)?\s*$', to = '' },
+  { from = '\s*\|\s*(?:www\\.)?[Mm][Oo][Tt][Hh][Ee][Rr][Ll][Ee][Ss][Ss]\\.com(?:\s*[™®©]+)?\s*$', to = '' },
+  { from = '\s+', to = ' ' }
+]
+
+[[rule]]
+url = 'hotmovs.com'
+max_length = 180
+template = '%title - hotmovs.com'
+replace = [
+  { from = '\s*[-|–—•]+\s*(?:www\\.)?[Hh][Oo][Tt][Mm][Oo][Vv][Ss]\\.com(?:\/[\\w._-]+){0,6}(?:\s*[™®©]+)?\s*$', to = '' },
+  { from = '\s*\|\s*(?:www\\.)?[Hh][Oo][Tt][Mm][Oo][Vv][Ss]\\.com(?:\s*[™®©]+)?\s*$', to = '' },
+  { from = '\s+', to = ' ' }
+]
