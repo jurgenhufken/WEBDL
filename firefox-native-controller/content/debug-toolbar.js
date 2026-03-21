@@ -5,7 +5,7 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-03-07-08-26';
+  const WEBDL_BUILD = 'debug-toolbar-2026-03-21-20-03';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
@@ -79,6 +79,118 @@
       }
     } catch (e) {}
     return { text: '', selector: '', href: '' };
+  }
+
+  const ONLYFANS_RESERVED_SEGMENTS = new Set(['posts', 'my', 'home', 'notifications', 'messages', 'bookmarks', 'lists', 'subscriptions', 'settings', 'chats', 'chat', 'discover', 'vault', 'stories']);
+
+  function normalizeOnlyFansUsername(value) {
+    try {
+      const raw = String(value || '').trim().replace(/^@+/, '').replace(/^\/+|\/+$/g, '');
+      if (!raw) return '';
+      const first = raw.split(/[\/?#]/)[0];
+      if (!first) return '';
+      if (/^\d+$/.test(first)) return '';
+      if (!/^[a-z0-9._-]{2,80}$/i.test(first)) return '';
+      if (ONLYFANS_RESERVED_SEGMENTS.has(first.toLowerCase())) return '';
+      return first;
+    } catch (e) {}
+    return '';
+  }
+
+  function extractOnlyFansUsernameFromUrl(rawUrl) {
+    try {
+      const parsed = new URL(String(rawUrl || ''), window.location.href);
+      const host = String(parsed.hostname || '').toLowerCase();
+      if (!(host === 'onlyfans.com' || host.endsWith('.onlyfans.com'))) return '';
+      const parts = String(parsed.pathname || '').split('/').filter(Boolean);
+      for (const part of parts) {
+        const user = normalizeOnlyFansUsername(part);
+        if (user) return user;
+      }
+    } catch (e) {}
+    return '';
+  }
+
+  function findOnlyFansPageUsername() {
+    try {
+      const direct = extractOnlyFansUsernameFromUrl(window.location.href);
+      if (direct) return direct;
+    } catch (e) {}
+
+    const scores = new Map();
+    const bump = (candidate, weight = 1) => {
+      const user = normalizeOnlyFansUsername(candidate);
+      if (!user) return;
+      scores.set(user, (scores.get(user) || 0) + weight);
+    };
+    const bumpUrl = (candidateUrl, weight = 1) => {
+      const user = extractOnlyFansUsernameFromUrl(candidateUrl);
+      if (user) bump(user, weight);
+    };
+
+    try {
+      const canonical = document.querySelector('link[rel="canonical"]');
+      if (canonical) bumpUrl(canonical.href || canonical.getAttribute('href') || '', 8);
+    } catch (e) {}
+    try {
+      const ogUrl = document.querySelector('meta[property="og:url"], meta[name="twitter:url"]');
+      if (ogUrl) bumpUrl(ogUrl.content || ogUrl.getAttribute('content') || '', 7);
+    } catch (e) {}
+
+    try {
+      const anchors = Array.from(document.querySelectorAll('a[href]')).slice(0, 600);
+      for (const a of anchors) {
+        try {
+          const href = String(a.getAttribute('href') || '').trim();
+          if (!href) continue;
+          const fromHref = extractOnlyFansUsernameFromUrl(href);
+          if (!fromHref) continue;
+          let weight = 1;
+          if (a.closest && a.closest('header')) weight += 4;
+          const textUser = normalizeOnlyFansUsername(String(a.textContent || '').trim());
+          if (textUser && textUser.toLowerCase() === fromHref.toLowerCase()) weight += 4;
+          bump(fromHref, weight);
+        } catch (e) {}
+      }
+    } catch (e) {}
+
+    let best = '';
+    let bestScore = 0;
+    for (const [user, score] of scores.entries()) {
+      if (score > bestScore) {
+        best = user;
+        bestScore = score;
+      }
+    }
+    if (best) return best;
+
+    try {
+      const title = String(document.title || '').trim();
+      const atMatch = title.match(/@([a-z0-9._-]{2,80})/i);
+      if (atMatch && atMatch[1]) return normalizeOnlyFansUsername(atMatch[1]);
+    } catch (e) {}
+
+    return '';
+  }
+
+  function isFootFetishForumAttachmentUrl(rawUrl, baseHref) {
+    try {
+      const u = new URL(String(rawUrl || ''), baseHref || window.location.href);
+      const host = String(u.hostname || '').toLowerCase();
+      if (!(host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com'))) return false;
+      return /\/(attachments?|attach)\//i.test(String(u.pathname || ''));
+    } catch (e) {}
+    return false;
+  }
+
+  function isKnownExternalMediaWrapperHost(hostname) {
+    try {
+      const host = String(hostname || '').toLowerCase();
+      if (!host) return false;
+      if (/^(?:www\.)?(?:pixhost\.to|postimages\.org|postimg\.cc|imagebam\.com|imgvb\.com|ibb\.co|imgbox\.com|imagevenue\.com|imgchest\.com|turboimagehost\.com|imx\.to|vipr\.im|pixeldrain\.com|cyberfile\.me|jpg\.pet|gofile\.io|erome\.com|img\.kiwi)$/.test(host)) return true;
+      if (/^(?:www\.)?bunkr\.(?:si|ru|is|ph)$/.test(host)) return true;
+    } catch (e) {}
+    return false;
   }
 
   function getServerCandidates() {
@@ -166,6 +278,7 @@
             if (/\b(avatar|emoji|emote|smilie|reaction|logo|icon)\b/i.test(cls)) continue;
           } catch (e) {}
 
+          let hadParentLink = false;
           try {
             const parentLink = img.closest ? img.closest('a[href], a[data-href], a[data-url]') : null;
             if (parentLink && parentLink.getAttribute) {
@@ -174,17 +287,23 @@
                 try {
                   const linkUrl = new URL(href, baseHref);
                   const linkHost = String(linkUrl.hostname || '').toLowerCase();
-                  const linkPath = String(linkUrl.pathname || '').toLowerCase();
-                  const isFffAttachment = (linkHost === 'footfetishforum.com' || linkHost.endsWith('.footfetishforum.com')) && /\/(attachments?|attach)\//i.test(linkPath);
-                  if (!isFffAttachment) {
+                  const isFffAttachment = isFootFetishForumAttachmentUrl(href, baseHref);
+                  const isFile = /\.(jpe?g|png|gif|webp|bmp|svg|avif|heic|heif|mp4|mov|m4v|webm|mkv)(\?|$)/i.test(href);
+                  const isExternalMedia = !(linkHost === 'footfetishforum.com' || linkHost.endsWith('.footfetishforum.com')) && looksLikeExternalMediaPageUrl(linkUrl.toString(), parentLink.textContent || '');
+                  const isUploadSite = linkHost === 'upload.footfetishforum.com' || linkHost.endsWith('.upload.footfetishforum.com') || isKnownExternalMediaWrapperHost(linkHost) || /pixhost|postimg|imgur|redgifs|gfycat/i.test(linkHost);
+                  if (isFffAttachment || isFile || isExternalMedia || isUploadSite) {
                     push(href, 'thumb_link');
+                    hadParentLink = true;
                   }
                 } catch (e) {
                   push(href, 'thumb_link');
+                  hadParentLink = true;
                 }
               }
             }
           } catch (e) {}
+
+          if (hadParentLink) continue;
 
           push(img.currentSrc || img.src || img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-lazy-src') || img.getAttribute('data-url'), 'img');
           const srcset = String(img.getAttribute('srcset') || '').trim();
@@ -223,11 +342,7 @@
             const s = abs.toString();
             const host = String(abs.hostname || '').toLowerCase();
             const path = String(abs.pathname || '').toLowerCase();
-            
-            // Skip FFF attachment pages
-            const isFffAttachment = (host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) && /\/(attachments?|attach)\//i.test(path);
-            if (isFffAttachment) continue;
-            
+
             const text = String(a.textContent || '').trim().toLowerCase();
             const cls = String(a.className || '').toLowerCase();
             const looksLikeFile = /\.(jpe?g|png|gif|webp|bmp|svg|avif|heic|heif|mp4|mov|m4v|webm|mkv|mp3|m4a|zip|rar|7z)(\?|$)/i.test(s);
@@ -478,7 +593,8 @@
       if (host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) return false;
       if (host === 'upload.footfetishforum.com' || host.endsWith('.upload.footfetishforum.com')) return false;
       if (/\.(jpe?g|png|gif|webp|bmp|svg|avif|heic|heif|mp4|mov|m4v|webm|mkv|mp3|m4a|zip|rar|7z)(\?|$)/i.test(p)) return true;
-      if (/(youtube\.com|youtu\.be|vimeo\.com|redgifs\.com|gfycat\.com|imgur\.com|instagram\.com|tiktok\.com|reddit\.com|redd\.it|pixhost\.to|postimages\.org|postimg\.cc|pixeldrain\.com|cyberfile\.me|jpg\.pet|t\.me|telegram\.me)/i.test(host)) return true;
+      if (isKnownExternalMediaWrapperHost(host)) return true;
+      if (/(youtube\.com|youtu\.be|vimeo\.com|redgifs\.com|gfycat\.com|imgur\.com|instagram\.com|tiktok\.com|reddit\.com|redd\.it|t\.me|telegram\.me)/i.test(host)) return true;
       if (/\/(video|videos|gallery|galleries|album|albums|watch|view|clip|movie|media|embed|post|posts|photo|photos|set|sets|show|download|file)\b/i.test(p)) return true;
       if (/\b(video|videos|gallery|galleries|album|albums|clip|movie|download|teaser|trailer|watch|part\s*\d+)\b/i.test(text)) return true;
       if (text && text.length >= 6 && /[a-z]/i.test(text) && !/^(like|quote|reply|report|bookmark|share|profile|member|click to expand|last edited)/i.test(text)) return true;
@@ -587,13 +703,8 @@
 
     else if (/onlyfans\.com/i.test(url)) {
       meta.platform = 'onlyfans';
-      const m = url.match(/onlyfans\.com\/([^\/\?#]+)/i);
-      if (m) {
-        const user = m[1];
-        if (user && !['posts', 'my', 'home', 'notifications', 'messages', 'bookmarks', 'lists', 'subscriptions', 'settings'].includes(user.toLowerCase())) {
-          meta.channel = user;
-        }
-      }
+      const user = findOnlyFansPageUsername();
+      if (user) meta.channel = user;
     }
 
     else if (/rutube\.ru/i.test(url)) {
@@ -772,20 +883,14 @@
               try {
                 const linkUrl = new URL(href, window.location.href);
                 const linkHost = String(linkUrl.hostname || '').toLowerCase();
-                const linkPath = String(linkUrl.pathname || '').toLowerCase();
-                
-                // Skip FFF attachment pages - use direct image src instead
-                const isFffAttachment = (linkHost === 'footfetishforum.com' || linkHost.endsWith('.footfetishforum.com')) && /\/(attachments?|attach)\//i.test(linkPath);
-                
-                if (!isFffAttachment) {
-                  const isFile = /\.(jpe?g|png|gif|webp|bmp|svg|avif|heic|heif|mp4|mov|m4v|webm|mkv)(\?|$)/i.test(href);
-                  const isExternalMedia = !(linkHost === 'footfetishforum.com' || linkHost.endsWith('.footfetishforum.com'));
-                  const isUploadSite = linkHost === 'upload.footfetishforum.com' || /pixhost|postimg|imgur|redgifs|gfycat/i.test(linkHost);
-                  
-                  if (isFile || isExternalMedia || isUploadSite) {
-                    push(href, parentLink, 'thumb_link');
-                    hadParentLink = true;
-                  }
+                const isFffAttachment = isFootFetishForumAttachmentUrl(href, window.location.href);
+                const isFile = /\.(jpe?g|png|gif|webp|bmp|svg|avif|heic|heif|mp4|mov|m4v|webm|mkv)(\?|$)/i.test(href);
+                const isExternalMedia = !(linkHost === 'footfetishforum.com' || linkHost.endsWith('.footfetishforum.com')) && looksLikeExternalMediaPageUrl(linkUrl.toString(), parentLink.textContent || '');
+                const isUploadSite = linkHost === 'upload.footfetishforum.com' || linkHost.endsWith('.upload.footfetishforum.com') || isKnownExternalMediaWrapperHost(linkHost) || /pixhost|postimg|imgur|redgifs|gfycat/i.test(linkHost);
+
+                if (isFffAttachment || isFile || isExternalMedia || isUploadSite) {
+                  push(href, parentLink, 'thumb_link');
+                  hadParentLink = true;
                 }
               } catch (e) {}
             }
@@ -903,12 +1008,7 @@
         const host = String(abs.hostname || '').toLowerCase();
         const path = String(abs.pathname || '').toLowerCase();
         if (path === '/attachments/upload') continue;
-        
-        // Skip FFF attachment pages
-        const isFffAttachment = (host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) && /\/(attachments?|attach)\//i.test(path);
-        if (isFffAttachment) continue;
 
-        // likely attachment/media or embed-ish
         const text = String(a.textContent || '').trim().toLowerCase();
         const cls = String(a.className || '').toLowerCase();
 
@@ -1265,6 +1365,8 @@
             const p = String(u.pathname || '');
 
             if ((host === 'upload.footfetishforum.com' || host.endsWith('.upload.footfetishforum.com')) && /^\/image\//i.test(p)) return true;
+            if (isFootFetishForumAttachmentUrl(rawUrl, window.location.href)) return true;
+            if (isKnownExternalMediaWrapperHost(host)) return true;
             return false;
           } catch (e) {
             return false;
@@ -1427,10 +1529,12 @@
               try {
                 if (!host) return false;
                 if (isFffUploadHost) return /^\/image\//i.test(pathname);
+                if (isFootFetishForumAttachmentUrl(url, window.location.href)) return true;
                 if (host === 'jpg.pet') return /^\/img\//i.test(pathname);
                 if (host === 'pixeldrain.com') return /^\/u\//i.test(pathname);
                 if (host === 'cyberfile.me') return true;
                 if (host === 'pixhost.to') return true;
+                if (isKnownExternalMediaWrapperHost(host)) return true;
                 return false;
               } catch (e) {
                 return false;
@@ -2096,6 +2200,12 @@
           console.log(`[WEBDL] Telegram Web URL geconverteerd: ${meta.url} -> ${url}`);
         }
       }
+      if (meta && meta.platform === 'onlyfans') {
+        const user = normalizeOnlyFansUsername(meta.channel);
+        if (user) {
+          url = `https://onlyfans.com/${user}`;
+        }
+      }
     } catch (e) {}
     const payload = { url, metadata: meta };
     const viaBg = await sendBackgroundAction('queueDownload', payload, 12000);
@@ -2622,7 +2732,8 @@
     }
 
     if (meta.platform === 'onlyfans') {
-      push(window.location.href);
+      const user = normalizeOnlyFansUsername(meta.channel);
+      push(user ? `https://onlyfans.com/${user}` : window.location.href);
     }
 
     if (out.length === 0) {

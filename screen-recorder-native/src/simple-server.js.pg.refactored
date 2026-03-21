@@ -172,6 +172,36 @@ function parseFootFetishForumThreadInfo(inputUrl) {
   }
 }
 
+function parseFootFetishForumAttachmentInfo(inputUrl) {
+  try {
+    const u = new URL(String(inputUrl || ''));
+    const host = String(u.hostname || '').toLowerCase();
+    const pathname = String(u.pathname || '');
+    if ((host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) && /\/attachments\//i.test(pathname)) {
+      const m = pathname.match(/\/attachments\/([^\/]+)\.(\d+)(?:\/|\?|#|$)/i);
+      if (!m) return null;
+      return {
+        kind: 'page',
+        slug: String(m[1] || '').trim().toLowerCase(),
+        id: String(m[2] || '').trim()
+      };
+    }
+    if (host.includes('digitaloceanspaces.com') && /\/data\/attachments\//i.test(pathname)) {
+      const base = path.basename(pathname || '');
+      const m = base.match(/^(\d+)-([^./?#]+)/i);
+      if (!m) return null;
+      return {
+        kind: 'asset',
+        slug: '',
+        id: String(m[1] || '').trim()
+      };
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
 function parseAmateurVoyeurForumUrlInfo(inputUrl) {
   try {
     const u = new URL(String(inputUrl || ''));
@@ -11181,6 +11211,7 @@ expressApp.post('/download', async (req, res) => {
 
   const metaPlatform = metadata && typeof metadata.platform === 'string' ? metadata.platform : null;
   const effectiveUrl = String(url || '');
+  const isOnlyFansProfileUrl = /onlyfans\.com\//i.test(effectiveUrl) && !/onlyfans\.com\/[^\/\?#]+\/posts\//i.test(effectiveUrl);
 
     const isProfileUrl = (u) => {
       if (u.includes('patreon.com/c/') || u.match(/patreon\.com\/.*\/posts/)) return true;
@@ -11189,7 +11220,7 @@ expressApp.post('/download', async (req, res) => {
       if (u.includes('onlyfans.com/') && !u.includes('/posts/')) return true;
       return false;
     };
-    if (isProfileUrl(effectiveUrl)) {
+    if (isProfileUrl(effectiveUrl) && !isOnlyFansProfileUrl) {
       return res.status(400).json({ success: false, error: 'Dit is een profiel/kanaal link. Gebruik de BATCH knop in de extensie om het hele kanaal te downloaden.' });
     }
 
@@ -11695,6 +11726,18 @@ function looksLikeDirectFileUrl(url) {
   }
 }
 
+function isKnownExternalMediaWrapperHost(hostname) {
+  try {
+    const host = String(hostname || '').toLowerCase();
+    if (!host) return false;
+    if (/^(?:www\.)?(?:pixhost\.to|postimages\.org|postimg\.cc|imagebam\.com|imgvb\.com|ibb\.co|imgbox\.com|imagevenue\.com|imgchest\.com|turboimagehost\.com|imx\.to|vipr\.im|pixeldrain\.com|cyberfile\.me|jpg\.pet|gofile\.io|erome\.com|img\.kiwi)$/.test(host)) return true;
+    if (/^(?:www\.)?bunkr\.(?:si|ru|is|ph)$/.test(host)) return true;
+    return false;
+  } catch (e) {
+    return false;
+  }
+}
+
 function isKnownHtmlWrapperUrl(url) {
   try {
     const u = new URL(String(url || ''));
@@ -11702,6 +11745,10 @@ function isKnownHtmlWrapperUrl(url) {
     const p = String(u.pathname || '');
     if (host === 'upload.footfetishforum.com' && p.startsWith('/image/')) return true;
     if (host.endsWith('pixhost.to') && p.startsWith('/show/')) return true;
+    if ((host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) && /\/(attachments?|attach)\//i.test(p)) return true;
+    if (host === 'jpg.pet' && /^\/img\//i.test(p)) return true;
+    if (host === 'pixeldrain.com' && /^\/u\//i.test(p)) return true;
+    if (isKnownExternalMediaWrapperHost(host)) return true;
     return false;
   } catch (e) {
     return false;
@@ -11864,15 +11911,24 @@ function upgradeKnownLowQualityMediaUrl(rawUrl) {
   }
 }
 
-function scoreDirectMediaCandidate(url) {
+function scoreDirectMediaCandidate(url, baseUrl = '') {
   try {
     const s = upgradeKnownLowQualityMediaUrl(url);
     if (!s || !looksLikeDirectFileUrl(s)) return -1000;
     let score = 0;
+    const baseAttachment = parseFootFetishForumAttachmentInfo(baseUrl);
+    const candidateAttachment = parseFootFetishForumAttachmentInfo(s);
     if (/\.(mp4|mov|m4v|webm|mkv)(?:$|[?#])/i.test(s)) score += 120;
     else if (/\.(jpg|jpeg|png|gif|webp|bmp|tiff|tif|svg|avif|heic|heif)(?:$|[?#])/i.test(s)) score += 80;
     if (/upload\.footfetishforum\.com\/images\//i.test(s)) score += 40;
     if (/pixhost\.to\/images\//i.test(s)) score += 35;
+    if (baseAttachment && baseAttachment.kind === 'page' && baseAttachment.id) {
+      if (candidateAttachment && candidateAttachment.id) {
+        if (candidateAttachment.id === baseAttachment.id) score += 1200;
+        else score -= 1600;
+      }
+      if (baseAttachment.slug && s.toLowerCase().includes(baseAttachment.slug)) score += 180;
+    }
     if (/\.(?:th|md)\.(jpg|jpeg|png|gif|webp)(?:$|[?#])/i.test(s)) score -= 160;
     if (/\/thumbs\//i.test(s)) score -= 180;
     if (/(?:^|[^a-z])(thumb|thumbnail|preview|poster|cover|small)(?:[^a-z]|$)/i.test(s)) score -= 120;
@@ -11927,7 +11983,7 @@ function extractDirectMediaCandidates(html, baseUrl) {
 
     return out
       .filter((u) => looksLikeDirectFileUrl(u))
-      .sort((a, b) => scoreDirectMediaCandidate(b) - scoreDirectMediaCandidate(a));
+      .sort((a, b) => scoreDirectMediaCandidate(b, baseUrl) - scoreDirectMediaCandidate(a, baseUrl));
   } catch (e) {
     return [];
   }
