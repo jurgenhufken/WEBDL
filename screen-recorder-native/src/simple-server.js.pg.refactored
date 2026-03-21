@@ -2251,6 +2251,7 @@ function getGalleryHTML() {
         <button id="btnRotate" class="btn">↻ 90°</button>
         <button id="btnOpen" class="btn">Open</button>
         <button id="btnFinder" class="btn">Finder</button>
+        <button id="btnSource" class="btn">Bron</button>
       </header>
       <div class="body" id="mBody"></div>
     </div>
@@ -2300,6 +2301,7 @@ function getGalleryHTML() {
     const elBtnClose = document.getElementById('btnClose');
     const elBtnOpen = document.getElementById('btnOpen');
     const elBtnFinder = document.getElementById('btnFinder');
+    const elBtnSource = document.getElementById('btnSource');
     const elBtnRotate = document.getElementById('btnRotate');
     const elZoomRange = document.getElementById('zoomRange');
     const elBtnZoomReset = document.getElementById('btnZoomReset');
@@ -3199,6 +3201,7 @@ function getGalleryHTML() {
       const isReady = !(it && it.ready === false);
       elBtnOpen.disabled = !isReady;
       elBtnFinder.disabled = !isReady;
+      if (elBtnSource) { elBtnSource.style.display = it.source_url ? '' : 'none'; elBtnSource.onclick = () => window.open(it.source_url, '_blank'); }
 
       elMTitle.textContent = it.title_display || it.title || '(zonder titel)';
       elMSub.textContent = fmtItemSub(it);
@@ -3309,7 +3312,13 @@ function getGalleryHTML() {
       elMBody.addEventListener('click', showHeader);
     }
 
-    function closeModal(skipHistory) {
+    function closeModal(fromHistory = false) {
+      if (fromHistory !== true && window.history.state && window.history.state.page === 'viewer') {
+        window.history.back();
+        return;
+      }
+      try { history.replaceState({ page: 'gallery' }, '', '/gallery'); } catch(e) {}
+    
       stopSlideshow();
       if (state.reverseInterval) {
         clearInterval(state.reverseInterval);
@@ -3557,11 +3566,11 @@ function getGalleryHTML() {
         let path = '';
         const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
         if (state.mode === 'recent') {
-          path = '/api/media/recent-files?limit=60&cursor=&type=' + encodeURIComponent(state.filter) + '&include_active=1' + dirsParam + '&_t=' + Date.now();
+          path = '/api/media/recent-files?limit=60&cursor=&type=' + encodeURIComponent(state.filter) + '&include_active=0' + dirsParam ;
         } else {
           const ch = state.channel;
           if (!ch) return;
-          path = '/api/media/channel-files?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=60&cursor=&type=' + encodeURIComponent(state.filter) + '&include_active=1' + dirsParam + '&_t=' + Date.now();
+          path = '/api/media/channel-files?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=60&cursor=&type=' + encodeURIComponent(state.filter) + '&include_active=0' + dirsParam ;
         }
         const data = await api(path);
         if (!data || !data.success) return;
@@ -3758,7 +3767,7 @@ function getGalleryHTML() {
     try {
       let last = null;
       let lastReloadAt = 0;
-      let lastPeriodicAt = 0;
+      let lastPeriodicAt = Date.now();
       const tick = async () => {
         try {
           const data = await api('/api/stats');
@@ -4007,6 +4016,13 @@ function getGalleryHTML() {
       if (state.currentMediaEl) state.currentMediaEl.classList.remove('dragging');
     });
 
+    
+    window.addEventListener('popstate', (e) => {
+      if (elModal && elModal.classList.contains('open')) {
+        closeModal(true);
+      }
+    });
+    
     window.addEventListener('keydown', async (e) => {
       const tag = e.target && e.target.tagName ? String(e.target.tagName).toUpperCase() : '';
       const isFormTarget = tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA';
@@ -4494,6 +4510,7 @@ async function hydrateDownloadActivityContext(downloadId) {
     if (!row) return prev;
     return setDownloadActivityContext(id, {
       url: row.url || '',
+    sourceUrl: row.source_url || '',
       source_url: row.source_url || '',
       platform: row.platform || '',
       channel: row.channel || '',
@@ -5134,7 +5151,7 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(f.created_at, d.created_at) AS created_at,
-      COALESCE(NULLIF(CAST(f.mtime_ms AS INTEGER), 0), COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0)) AS ts,
+      COALESCE(NULLIF(CAST(f.mtime_ms AS INTEGER), 0), COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.updated_at, d.created_at)) AS INTEGER) * 1000, 0)) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -5155,7 +5172,7 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
       d.title AS title,
       d.filepath AS filepath,
       d.created_at AS created_at,
-      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
+      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.updated_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       d.thumbnail AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -5272,7 +5289,7 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(f.created_at, d.created_at) AS created_at,
-      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
+      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.updated_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -5293,7 +5310,7 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
       d.title AS title,
       d.filepath AS filepath,
       d.created_at AS created_at,
-      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
+      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.updated_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       d.thumbnail AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -6546,7 +6563,7 @@ const getRecentHybridMediaByRatingDesc = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(f.created_at, d.created_at) AS created_at,
-      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
+      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.updated_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -6567,7 +6584,7 @@ const getRecentHybridMediaByRatingDesc = db.prepare(db.isPostgres ? `
       d.title AS title,
       d.filepath AS filepath,
       d.created_at AS created_at,
-      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
+      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.updated_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       d.thumbnail AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -6684,7 +6701,7 @@ const getRecentHybridMediaByRatingAsc = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(f.created_at, d.created_at) AS created_at,
-      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
+      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.updated_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -6705,7 +6722,7 @@ const getRecentHybridMediaByRatingAsc = db.prepare(db.isPostgres ? `
       d.title AS title,
       d.filepath AS filepath,
       d.created_at AS created_at,
-      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
+      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.updated_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       d.thumbnail AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -7537,8 +7554,8 @@ function runDownloadSchedulerSoon() {
 async function runDownloadScheduler() {
   const heavyLimit = Math.max(0, HEAVY_DOWNLOAD_CONCURRENCY);
   const lightLimit = Math.max(0, LIGHT_DOWNLOAD_CONCURRENCY);
-  // console.log(`[SCHEDULER] Running... active=${activeProcesses.size} starting=${startingJobs.size}`);
-
+  
+  // YouTube settings
   const youtubeSettings = getYoutubeRuntimeConfig();
   const youtubeLimit = Math.max(0, youtubeSettings.concurrency);
   const youtubeSpacingMs = Math.max(0, youtubeSettings.spacingMs);
@@ -7548,18 +7565,13 @@ async function runDownloadScheduler() {
     try {
       const p = String(platform || '').toLowerCase();
       if (!p) return 0;
-      const ids = new Set();
-      for (const id of activeProcesses.keys()) ids.add(id);
-      for (const id of startingJobs) ids.add(id);
       let n = 0;
-      for (const id of ids) {
+      for (const id of activeProcesses.keys()) {
         const plat = String(jobPlatform.get(id) || '').toLowerCase();
         if (plat === p) n++;
       }
       return n;
-    } catch (e) {
-      return 0;
-    }
+    } catch (e) { return 0; }
   };
 
   const canStartYoutubeNow = () => {
@@ -7583,7 +7595,7 @@ async function runDownloadScheduler() {
       const job = queuedJobs.get(id);
       if (!job) continue;
       const plat = String(job.platform || '').toLowerCase();
-      if (plat === 'youtube' && !canStartYoutubeNow()) {
+      if ((plat === 'youtube' || plat === 'youtube-shorts') && !canStartYoutubeNow()) {
         queue.push(id);
         continue;
       }
@@ -7602,14 +7614,11 @@ async function runDownloadScheduler() {
     queuedJobs.delete(id);
     heavyActive++;
     startingJobs.add(id);
-    try {
-      jobPlatform.set(id, job.platform);
-    } catch (e) {}
+    try { jobPlatform.set(id, job.platform); } catch (e) {}
     if (String(job.platform || '').toLowerCase() === 'youtube') markYoutubeStarted();
     try {
-      startDownload(job.downloadId, job.url, job.platform, job.channel, job.title, job.metadata).
-      catch(() => {}).
-      finally(() => {
+      startDownload(job.downloadId, job.url, job.platform, job.channel, job.title, job.metadata)
+      .catch(() => {}).finally(() => {
         startingJobs.delete(id);
         runDownloadSchedulerSoon();
       });
@@ -7627,14 +7636,11 @@ async function runDownloadScheduler() {
     queuedJobs.delete(id);
     lightActive++;
     startingJobs.add(id);
-    try {
-      jobPlatform.set(id, job.platform);
-    } catch (e) {}
+    try { jobPlatform.set(id, job.platform); } catch (e) {}
     if (String(job.platform || '').toLowerCase() === 'youtube') markYoutubeStarted();
     try {
-      startDownload(job.downloadId, job.url, job.platform, job.channel, job.title, job.metadata).
-      catch(() => {}).
-      finally(() => {
+      startDownload(job.downloadId, job.url, job.platform, job.channel, job.title, job.metadata)
+      .catch(() => {}).finally(() => {
         startingJobs.delete(id);
         runDownloadSchedulerSoon();
       });
@@ -13454,7 +13460,8 @@ expressApp.get('/media/file', async (req, res) => {
           }
         }
 
-        const img = pickThumbnailFile(fp);
+        const imgData = pickPrimaryMediaFile(fp);
+        const img = imgData ? imgData.path : null;
         if (img && safeIsAllowedExistingPath(img)) {
           return res.sendFile(img, (err) => {
             if (!err) return;
@@ -13532,6 +13539,7 @@ function normalizeThumbValue(v) {
 }
 
 function makeMediaItem(row) {
+  const sourceUrl = row.source_url || '';
   const fp = String(row.filepath || '').trim();
 
     if (row.platform === 'patreon') {
@@ -13871,6 +13879,7 @@ function makePathMediaItem({ relPath, platform, channel, title, created_at, thum
 }
 
 function makeIndexedMediaItem(row) {
+  const sourceUrl = row.source_url || '';
   if (!row || typeof row !== 'object') return null;
   const kind = String(row.kind || '').toLowerCase();
   if (kind === 'p') {
@@ -14082,7 +14091,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
     const items = [];
     const seenKeys = new Set();
 
-    const isTopRequest = false; // cache disabled to guarantee live updates
+    const isTopRequest = !cursorRaw || (cur && cur.activeOffset === 0 && cur.rowOffset === 0 && !cur.dir && cur.fileIndex === 0);
     if (includeActive && isTopRequest) {
       try {
         const cap = Math.min(28, Math.max(8, Math.floor(limit / 2)));
@@ -14215,7 +14224,7 @@ expressApp.get('/api/media/channel-files', async (req, res) => {
     const items = [];
     const seenKeys = new Set();
 
-    const isTopRequest = false; // cache disabled to guarantee live updates
+    const isTopRequest = !cursorRaw || (cur && cur.activeOffset === 0 && cur.rowOffset === 0 && !cur.dir && cur.fileIndex === 0);
     if (includeActive && isTopRequest) {
       try {
         const cap = Math.min(28, Math.max(8, Math.floor(limit / 2)));
