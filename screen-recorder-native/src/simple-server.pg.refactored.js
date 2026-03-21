@@ -172,6 +172,49 @@ function parseFootFetishForumThreadInfo(inputUrl) {
   }
 }
 
+function parseAmateurVoyeurForumUrlInfo(inputUrl) {
+  try {
+    const u = new URL(String(inputUrl || ''));
+    const host = String(u.hostname || '').toLowerCase();
+    if (!(host === 'amateurvoyeurforum.com' || host === 'www.amateurvoyeurforum.com' || host.endsWith('.amateurvoyeurforum.com'))) return null;
+    const pathname = String(u.pathname || '').toLowerCase();
+    const clean = (value) => String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    if (pathname === '/showthread.php') {
+      const id = String(u.searchParams.get('t') || u.searchParams.get('p') || '').trim();
+      if (!id) return null;
+      return { kind: 'thread', id, name: `thread_${id}` };
+    }
+    if (pathname === '/forumdisplay.php') {
+      const id = String(u.searchParams.get('f') || '').trim();
+      if (!id) return null;
+      return { kind: 'forum', id, name: `forum_${id}` };
+    }
+    if (pathname === '/attachment.php') {
+      const id = String(u.searchParams.get('attachmentid') || '').trim();
+      if (!id) return null;
+      return { kind: 'attachment', id, name: `attachment_${id}` };
+    }
+    if (pathname === '/video.php') {
+      const userId = String(u.searchParams.get('u') || '').trim();
+      if (userId) return { kind: 'member', id: userId, name: `member_${userId}` };
+      const tag = String(u.searchParams.get('tag') || '').trim();
+      if (tag) {
+        const safeTag = clean(tag);
+        return { kind: 'tag', id: tag, name: safeTag ? `tag_${safeTag}` : 'videos' };
+      }
+      return { kind: 'videos', id: 'videos', name: 'videos' };
+    }
+    if (pathname === '/member.php') {
+      const userId = String(u.searchParams.get('u') || '').trim();
+      if (!userId) return null;
+      return { kind: 'member', id: userId, name: `member_${userId}` };
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
 function moveFileSyncWithFallback(sourcePath, targetPath) {
   const src = path.resolve(String(sourcePath || ''));
   const dst = path.resolve(String(targetPath || ''));
@@ -1581,7 +1624,7 @@ function getViewerHTML() {
       state.loadingMore = true;
       try {
         if (state.mode === 'recent') {
-          const data = await api('/api/media/recent-files?include_active=0&include_active_files=1&include_downloads=0&limit=200&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&sort=' + encodeURIComponent(state.sort || 'recent'));
+          const data = await api('/api/media/recent-files?include_active=0&include_active_files=0&include_downloads=0&limit=200&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&sort=' + encodeURIComponent(state.sort || 'recent'));
           if (!data.success) throw new Error(data.error || 'recent failed');
           const newItems = data.items || [];
           state.items = state.items.concat(newItems);
@@ -1591,7 +1634,7 @@ function getViewerHTML() {
           const ch = state.channels[state.chIndex];
           if (!ch) { state.done = true; return; }
           const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
-          const data = await api(/api/media/channel?platform=${encodeURIComponent(ch.platform)}&channel=${encodeURIComponent(ch.channel)}&limit=300&type= + encodeURIComponent(state.filter) + dirsParam + '&sort=' + encodeURIComponent(state.sort || 'recent'));
+          const data = await api('/api/media/channel?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=300&type=' + encodeURIComponent(state.filter) + dirsParam + '&sort=' + encodeURIComponent(state.sort || 'recent'));
           if (!data.success) throw new Error(data.error || 'channel failed');
           const newItems = data.items || [];
           state.items = state.items.concat(newItems);
@@ -1642,7 +1685,7 @@ function getViewerHTML() {
         state.cursor = '';
         state.done = false;
         const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
-        const data = await api('/api/media/recent-files?include_active=0&include_active_files=1&limit=200&cursor=&type=' + encodeURIComponent(state.filter) + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam);
+        const data = await api('/api/media/recent-files?include_active=0&include_active_files=0&limit=200&cursor=&type=' + encodeURIComponent(state.filter) + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam);
         if (!data.success) throw new Error(data.error || 'recent failed');
         state.items = data.items || [];
         state.cursor = data.next_cursor || '';
@@ -1701,7 +1744,7 @@ function getViewerHTML() {
       state.cursor = '';
       state.done = false;
       const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
-      const data = await api('/api/media/channel-files?include_active=0&include_active_files=1&platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=300&cursor=&type=' + encodeURIComponent(state.filter) + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam);
+      const data = await api('/api/media/channel-files?include_active=0&include_active_files=0&platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=300&cursor=&type=' + encodeURIComponent(state.filter) + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam);
       if (!data.success) throw new Error(data.error || 'channel failed');
       state.items = data.items || [];
       state.cursor = data.next_cursor || '';
@@ -3682,11 +3725,11 @@ function getGalleryHTML() {
         const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
         elSentinel.textContent = '📡 Aanvraag verzenden (limit=' + state.limit + ', filters=' + (state.enabledDirs ? state.enabledDirs.length : 'none') + ')...';
         if (state.mode === 'recent') {
-          path = '/api/media/recent-files?limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=1' + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam;
+          path = '/api/media/recent-files?limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0' + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam;
         } else {
           const ch = state.channel;
           if (!ch) { state.done = true; return; }
-          path = '/api/media/channel-files?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=1' + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam;
+          path = '/api/media/channel-files?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0' + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam;
         }
         const data = await api(path);
         const fetchTime = Date.now() - startTime;
@@ -5202,7 +5245,6 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
     WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
       AND d.filepath IS NOT NULL
       AND TRIM(d.filepath) != ''
-      AND NOT EXISTS (SELECT 1 FROM download_files f2 WHERE f2.download_id = d.id)
 
     UNION ALL
 
@@ -5270,7 +5312,6 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
     WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
       AND d.filepath IS NOT NULL
       AND TRIM(d.filepath) != ''
-      AND NOT EXISTS (SELECT 1 FROM download_files f2 WHERE f2.download_id = d.id)
 
     UNION ALL
 
@@ -5340,7 +5381,6 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
     WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
       AND d.filepath IS NOT NULL
       AND TRIM(d.filepath) != ''
-      AND NOT EXISTS (SELECT 1 FROM download_files f2 WHERE f2.download_id = d.id)
 
     UNION ALL
 
@@ -5480,7 +5520,6 @@ const getHybridMediaByChannel = db.prepare(db.isPostgres ? `
       AND d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
       AND d.filepath IS NOT NULL
       AND TRIM(d.filepath) != ''
-      AND NOT EXISTS (SELECT 1 FROM download_files f2 WHERE f2.download_id = d.id)
 
     UNION ALL
 
@@ -5551,7 +5590,6 @@ const getHybridMediaByChannel = db.prepare(db.isPostgres ? `
       AND d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
       AND d.filepath IS NOT NULL
       AND TRIM(d.filepath) != ''
-      AND NOT EXISTS (SELECT 1 FROM download_files f2 WHERE f2.download_id = d.id)
 
     UNION ALL
 
@@ -5622,7 +5660,6 @@ const getRecentHybridMediaByOldest = db.prepare(db.isPostgres ? `
     WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
       AND d.filepath IS NOT NULL
       AND TRIM(d.filepath) != ''
-      AND NOT EXISTS (SELECT 1 FROM download_files f2 WHERE f2.download_id = d.id)
 
     UNION ALL
 
@@ -6038,7 +6075,6 @@ const getHybridMediaByChannelByOldest = db.prepare(db.isPostgres ? `
       AND d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
       AND d.filepath IS NOT NULL
       AND TRIM(d.filepath) != ''
-      AND NOT EXISTS (SELECT 1 FROM download_files f2 WHERE f2.download_id = d.id)
 
     UNION ALL
 
@@ -6109,7 +6145,6 @@ const getHybridMediaByChannelByOldest = db.prepare(db.isPostgres ? `
       AND d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
       AND d.filepath IS NOT NULL
       AND TRIM(d.filepath) != ''
-      AND NOT EXISTS (SELECT 1 FROM download_files f2 WHERE f2.download_id = d.id)
 
     UNION ALL
 
@@ -6470,7 +6505,6 @@ const getHybridMediaByChannelWithActiveFiles = db.prepare(db.isPostgres ? `
       AND d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
       AND d.filepath IS NOT NULL
       AND TRIM(d.filepath) != ''
-      AND NOT EXISTS (SELECT 1 FROM download_files f2 WHERE f2.download_id = d.id)
 
     UNION ALL
 
@@ -7498,6 +7532,10 @@ let lastYoutubeStartMs = 0;
 
 const queuedHeavy = [];
 const queuedLight = [];
+const POSTPROCESS_CONCURRENCY = Math.max(1, parseInt(process.env.WEBDL_POSTPROCESS_CONCURRENCY || '1', 10) || 1);
+const queuedPostprocess = [];
+const postprocessJobs = new Map();
+const activePostprocessJobs = new Set();
 const queuedJobs = new Map();
 const jobLane = new Map();
 const jobPlatform = new Map();
@@ -7561,6 +7599,9 @@ function abortKind(id) {
 
 async function applyAbortStatus(id, kind) {
   try {
+    const postprocessJob = postprocessJobs.get(id);
+    const isActivePostprocess = activePostprocessJobs.has(id);
+    if (postprocessJob) postprocessJob.aborted = kind;
     const proc = activeProcesses.get(id);
     if (proc) {
       try {proc.kill('SIGTERM');} catch (e) {}
@@ -7573,9 +7614,15 @@ async function applyAbortStatus(id, kind) {
       queuedJobs.delete(id);
       removeFromQueue(queuedHeavy, id);
       removeFromQueue(queuedLight, id);
+      removeFromQueue(queuedPostprocess, id);
+      if (!isActivePostprocess) {
+        postprocessJobs.delete(id);
+        try {if (postprocessJob && typeof postprocessJob.resolve === 'function') postprocessJob.resolve(false);} catch (e) {}
+      }
       jobLane.delete(id);
       await updateDownloadStatus.run('cancelled', 0, null, id);
       try {runDownloadSchedulerSoon();} catch (e) {}
+      try {runPostprocessSchedulerSoon();} catch (e) {}
       try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
       return true;
     }
@@ -7584,9 +7631,15 @@ async function applyAbortStatus(id, kind) {
       queuedJobs.delete(id);
       removeFromQueue(queuedHeavy, id);
       removeFromQueue(queuedLight, id);
+      removeFromQueue(queuedPostprocess, id);
+      if (!isActivePostprocess) {
+        postprocessJobs.delete(id);
+        try {if (postprocessJob && typeof postprocessJob.resolve === 'function') postprocessJob.resolve(false);} catch (e) {}
+      }
       jobLane.delete(id);
       await updateDownloadStatus.run('on_hold', 0, null, id);
       try {runDownloadSchedulerSoon();} catch (e) {}
+      try {runPostprocessSchedulerSoon();} catch (e) {}
       try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
       return true;
     }
@@ -7619,7 +7672,7 @@ function activeLaneCount(lane) {
 }
 
 function detectLane(platform) {
-  if (platform === 'instagram' || platform === 'wikifeet' || platform === 'kinky' || platform === 'reddit' || platform === 'aznudefeet' || platform === 'telegram') return 'light';
+  if (platform === 'instagram' || platform === 'wikifeet' || platform === 'kinky' || platform === 'reddit' || platform === 'aznudefeet' || platform === 'telegram' || platform === 'amateurvoyeurforum') return 'light';
   if (platform === 'tiktok') return 'light';
   if (platform === 'onlyfans') return 'heavy';
   return 'heavy';
@@ -7636,7 +7689,7 @@ async function enqueueDownloadJob(downloadId, url, platform, channel, title, met
   if (lane === 'light') queuedLight.unshift(downloadId);else
   queuedHeavy.unshift(downloadId);
 
-  if (METADATA_PROBE_ENABLED && METADATA_PROBE_CONCURRENCY > 0 && platform !== 'onlyfans' && platform !== 'instagram' && platform !== 'wikifeet' && platform !== 'kinky' && platform !== 'tiktok' && platform !== 'reddit' && platform !== 'aznudefeet') {
+  if (METADATA_PROBE_ENABLED && METADATA_PROBE_CONCURRENCY > 0 && platform !== 'onlyfans' && platform !== 'instagram' && platform !== 'wikifeet' && platform !== 'kinky' && platform !== 'tiktok' && platform !== 'reddit' && platform !== 'aznudefeet' && platform !== 'amateurvoyeurforum') {
     metadataProbeQueue.push({ downloadId, url });
   }
 
@@ -7755,6 +7808,79 @@ async function runDownloadScheduler() {
   }
 }
 
+let postprocessSchedulerTimer = null;
+function runPostprocessSchedulerSoon() {
+  if (postprocessSchedulerTimer) return;
+  postprocessSchedulerTimer = setTimeout(() => {
+    postprocessSchedulerTimer = null;
+    runPostprocessScheduler();
+    syncRuntimeActiveState().catch(() => {});
+  }, 120);
+}
+
+function enqueuePostprocessJob(downloadId, job) {
+  if (!Number.isFinite(Number(downloadId)) || !job || typeof job.run !== 'function') return Promise.resolve(false);
+  return new Promise((resolve, reject) => {
+    postprocessJobs.set(downloadId, { ...job, resolve, reject });
+    if (!queuedPostprocess.includes(downloadId)) queuedPostprocess.push(downloadId);
+    const queuedStatus = String(job.queuedStatus || '').trim().toLowerCase();
+    Promise.resolve().then(async () => {
+      if (queuedStatus) {
+        try {
+          await updateDownloadStatus.run(queuedStatus, Number.isFinite(job.queuedProgress) ? job.queuedProgress : 0, null, downloadId);
+        } catch (e) {}
+      }
+      runPostprocessSchedulerSoon();
+    }).catch((e) => {
+      postprocessJobs.delete(downloadId);
+      removeFromQueue(queuedPostprocess, downloadId);
+      reject(e);
+    });
+  });
+}
+
+async function runPostprocessScheduler() {
+  while (activePostprocessJobs.size < POSTPROCESS_CONCURRENCY && queuedPostprocess.length > 0) {
+    const downloadId = queuedPostprocess.shift();
+    if (!downloadId) continue;
+    const job = postprocessJobs.get(downloadId);
+    if (!job || typeof job.run !== 'function') continue;
+    const queuedAbort = abortKind(downloadId);
+    if (queuedAbort) {
+      await applyAbortStatus(downloadId, queuedAbort);
+      postprocessJobs.delete(downloadId);
+      try {if (typeof job.resolve === 'function') job.resolve(false);} catch (e) {}
+      continue;
+    }
+
+    activePostprocessJobs.add(downloadId);
+    Promise.resolve().then(async () => {
+      try {
+        const startStatus = String(job.startStatus || '').trim().toLowerCase();
+        if (startStatus) {
+          await updateDownloadStatus.run(startStatus, Number.isFinite(job.startProgress) ? job.startProgress : 0, null, downloadId);
+        }
+        await job.run();
+        try {if (typeof job.resolve === 'function') job.resolve(true);} catch (e) {}
+      } catch (e) {
+        const aborted = job.aborted || abortKind(downloadId);
+        if (aborted) {
+          if (!job.aborted) await applyAbortStatus(downloadId, aborted);
+          try {if (typeof job.resolve === 'function') job.resolve(false);} catch (err) {}
+        } else {
+          await updateDownloadStatus.run('error', 0, e && e.message ? e.message : String(e), downloadId);
+          try {if (typeof job.reject === 'function') job.reject(e);} catch (err) {}
+        }
+      } finally {
+        activePostprocessJobs.delete(downloadId);
+        postprocessJobs.delete(downloadId);
+        runPostprocessSchedulerSoon();
+        try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
+      }
+    }).catch(() => {});
+  }
+}
+
 let metadataProbeTimer = null;
 function runMetadataProbeSchedulerSoon() {
   if (metadataProbeTimer) return;
@@ -7797,6 +7923,7 @@ async function getRuntimeActiveDownloadRows() {
     const ids = new Set();
     for (const id of activeProcesses.keys()) ids.add(id);
     for (const id of startingJobs) ids.add(id);
+    for (const id of activePostprocessJobs) ids.add(id);
     const rows = [];
     for (const id of ids) {
       const row = await getDownload.get(id);
@@ -7843,7 +7970,6 @@ async function rehydrateDownloadQueueWithMode(modeRaw, maxRowsRaw) {
     mode === 'post' || mode === 'postprocessing' || mode === 'postproc' ?
     "('postprocessing')" :
     "('downloading', 'postprocessing')";
-
     const rows = await db.prepare(
       `SELECT id, url, platform, channel, title, metadata, status
        FROM downloads
@@ -7890,6 +8016,7 @@ async function rehydrateDownloadQueueWithMode(modeRaw, maxRowsRaw) {
       }
 
       const metadata = parsedMeta;
+
       const lane = detectLane(platform);
       queuedJobs.set(id, { downloadId: id, url, platform, channel, title, metadata });
       jobLane.set(id, lane);
@@ -7981,7 +8108,7 @@ async function rehydrateDownloadQueue() {
 
       // Vermijd zware DB writes tijdens startup; scheduler pakt queue direct op.
 
-      if (STARTUP_METADATA_PROBE_ENABLED && METADATA_PROBE_ENABLED && METADATA_PROBE_CONCURRENCY > 0 && platform !== 'onlyfans' && platform !== 'instagram' && platform !== 'wikifeet' && platform !== 'kinky' && platform !== 'tiktok' && platform !== 'reddit' && platform !== 'aznudefeet') {
+      if (STARTUP_METADATA_PROBE_ENABLED && METADATA_PROBE_ENABLED && METADATA_PROBE_CONCURRENCY > 0 && platform !== 'onlyfans' && platform !== 'instagram' && platform !== 'wikifeet' && platform !== 'kinky' && platform !== 'tiktok' && platform !== 'reddit' && platform !== 'aznudefeet' && platform !== 'amateurvoyeurforum') {
         metadataProbeQueue.push({ downloadId: id, url });
       }
     }
@@ -8542,14 +8669,13 @@ function pickThumbnailFile(dir) {
   try {
     if (!dir || !fs.existsSync(dir)) return null;
     const abs = path.resolve(String(dir));
-    const stat = fs.statSync(abs);
     if (!safeIsInsideBaseDir(abs)) return null;
 
-    if (stat.isFile() && isImagePath(abs)) {
+    if (fs.statSync(abs).isFile() && isImagePath(abs)) {
       return abs;
     }
 
-    const rootDir = stat.isDirectory() ? abs : path.dirname(abs);
+    const rootDir = fs.statSync(abs).isDirectory() ? abs : path.dirname(abs);
     if (!safeIsInsideBaseDir(rootDir)) return null;
 
     const candidates = [];
@@ -9198,7 +9324,7 @@ function makeRecordingLockCmdFile(updates, cropWidth, cropHeight) {
   return lines.join('\n') + '\n';
 }
 
-function applyRecordingLockCrop({ rawFilePath, finalFilePath, cmdText, cropWidth, cropHeight }) {
+function applyRecordingLockCrop({ rawFilePath, finalFilePath, cmdText, cropWidth, cropHeight, downloadId = null }) {
   return new Promise((resolve, reject) => {
     const cmdFile = path.join(os.tmpdir(), `webdl-lock-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.cmd`);
     fs.writeFileSync(cmdFile, cmdText);
@@ -9231,17 +9357,26 @@ function applyRecordingLockCrop({ rawFilePath, finalFilePath, cmdText, cropWidth
     }
 
     const proc = spawnNice(FFMPEG, args);
+    if (Number.isFinite(Number(downloadId)) && Number(downloadId) > 0) {
+      try {activeProcesses.set(downloadId, proc);} catch (e) {}
+    }
 
     let stderr = '';
     proc.stderr.on('data', (d) => {stderr += d.toString();});
 
     proc.on('close', (code) => {
+      if (Number.isFinite(Number(downloadId)) && Number(downloadId) > 0) {
+        try {activeProcesses.delete(downloadId);} catch (e) {}
+      }
       try {fs.unlinkSync(cmdFile);} catch (e) {}
       if (code === 0) return resolve();
       reject(new Error(stderr || `ffmpeg exit code ${code}`));
     });
 
     proc.on('error', (err) => {
+      if (Number.isFinite(Number(downloadId)) && Number(downloadId) > 0) {
+        try {activeProcesses.delete(downloadId);} catch (e) {}
+      }
       try {fs.unlinkSync(cmdFile);} catch (e) {}
       reject(err);
     });
@@ -9383,7 +9518,7 @@ async function runRecordingDiagnosticsToLog(filePath, logFile) {
   return diag;
 }
 
-function transcodeToFinalCutMov(inputPath, outputPath) {
+function transcodeToFinalCutMov(inputPath, outputPath, downloadId = null) {
   return new Promise((resolve, reject) => {
     const args = [
     '-y',
@@ -9392,7 +9527,6 @@ function transcodeToFinalCutMov(inputPath, outputPath) {
     '-map', '0:a?',
     '-c:v', FINALCUT_VIDEO_CODEC,
     '-pix_fmt', 'yuv420p'];
-
 
     if (POSTPROCESS_THREADS) {
       args.splice(args.indexOf('-i') + 2, 0, '-threads', POSTPROCESS_THREADS);
@@ -9412,13 +9546,24 @@ function transcodeToFinalCutMov(inputPath, outputPath) {
     );
 
     const proc = spawnNice(FFMPEG, args);
+    if (Number.isFinite(Number(downloadId)) && Number(downloadId) > 0) {
+      try {activeProcesses.set(downloadId, proc);} catch (e) {}
+    }
     let stderr = '';
     proc.stderr.on('data', (d) => {stderr += d.toString();});
     proc.on('close', (code) => {
+      if (Number.isFinite(Number(downloadId)) && Number(downloadId) > 0) {
+        try {activeProcesses.delete(downloadId);} catch (e) {}
+      }
       if (code === 0) return resolve();
       reject(new Error(stderr || `ffmpeg exit code ${code}`));
     });
-    proc.on('error', reject);
+    proc.on('error', (err) => {
+      if (Number.isFinite(Number(downloadId)) && Number(downloadId) > 0) {
+        try {activeProcesses.delete(downloadId);} catch (e) {}
+      }
+      reject(err);
+    });
   });
 }
 
@@ -9439,6 +9584,7 @@ function detectPlatform(url) {
   if (/wikifeetx\.com/i.test(u)) return 'wikifeetx';
   if (/kinky\.nl/i.test(u)) return 'kinky';
   if (/aznudefeet\.com/i.test(u)) return 'aznudefeet';
+  if (/amateurvoyeurforum\.com/i.test(u)) return 'amateurvoyeurforum';
   if (((/t\.me|telegram\.me/i.test(u)) || (/web\.telegram\.org/i.test(u) && /#-?\d+/.test(u))) && !/web\.telegram\.org.*#@/i.test(u)) return 'telegram';
     if (/patreon\.com/i.test(u)) return 'patreon';
   if (/tiktok\.com|tiktokv\.com/i.test(u)) return 'tiktok';
@@ -9485,6 +9631,7 @@ const KNOWN_PLATFORMS = new Set([
 'wikifeetx',
 'kinky',
 'aznudefeet',
+'amateurvoyeurforum',
 'telegram',
 'tiktok',
 'other']
@@ -9517,6 +9664,11 @@ function deriveChannelFromUrl(platform, url) {
 
   if (platform === 'footfetishforum') {
     const info = parseFootFetishForumThreadInfo(u);
+    if (info && info.name) return info.name;
+  }
+
+  if (platform === 'amateurvoyeurforum') {
+    const info = parseAmateurVoyeurForumUrlInfo(u);
     if (info && info.name) return info.name;
   }
 
@@ -9803,6 +9955,8 @@ function deriveTitleFromUrl(url) {
   if (ytId) return `video_${ytId}`;
   const fffInfo = parseFootFetishForumThreadInfo(url);
   if (fffInfo && fffInfo.name) return fffInfo.name;
+  const avfInfo = parseAmateurVoyeurForumUrlInfo(url);
+  if (avfInfo && avfInfo.name) return avfInfo.name;
   if (!url) return 'untitled';
   return sanitizeName(url).slice(0, 60) || 'untitled';
 }
@@ -10178,6 +10332,9 @@ function cleanupSchedulerForId(id) {
     queuedJobs.delete(id);
     removeFromQueue(queuedHeavy, id);
     removeFromQueue(queuedLight, id);
+    removeFromQueue(queuedPostprocess, id);
+    postprocessJobs.delete(id);
+    activePostprocessJobs.delete(id);
     jobLane.delete(id);
   } catch (e) {}
 }
@@ -10889,7 +11046,7 @@ expressApp.post('/stop-recording', (req, res) => {
           fp,
           size,
           'mp4',
-          'postprocessing',
+          'queued',
           50,
           JSON.stringify(recordMeta)
         );
@@ -10897,67 +11054,69 @@ expressApp.post('/stop-recording', (req, res) => {
       } catch (e) {}
 
       finish(true, null, { processing: true, rawFile: lockJob.rawFilePath, finalFile: lockJob.finalFilePath, logFile: lockJob.logFile });
-      (async () => {
-        const size = await probeVideoSize(lockJob.rawFilePath);
-        let safeW = Math.max(2, Math.floor(lockJob.cropWidth / 2) * 2);
-        let safeH = Math.max(2, Math.floor(lockJob.cropHeight / 2) * 2);
+      enqueuePostprocessJob(dbId, {
+        queuedStatus: 'queued',
+        queuedProgress: 50,
+        startStatus: 'postprocessing',
+        startProgress: 50,
+        run: async () => {
+          const size = await probeVideoSize(lockJob.rawFilePath);
+          let safeW = Math.max(2, Math.floor(lockJob.cropWidth / 2) * 2);
+          let safeH = Math.max(2, Math.floor(lockJob.cropHeight / 2) * 2);
 
-        if (size && Number.isFinite(size.width) && Number.isFinite(size.height)) {
-          const maxW = Math.max(2, Math.floor(size.width / 2) * 2);
-          const maxH = Math.max(2, Math.floor(size.height / 2) * 2);
-          safeW = Math.min(safeW, maxW);
-          safeH = Math.min(safeH, maxH);
-        }
+          if (size && Number.isFinite(size.width) && Number.isFinite(size.height)) {
+            const maxW = Math.max(2, Math.floor(size.width / 2) * 2);
+            const maxH = Math.max(2, Math.floor(size.height / 2) * 2);
+            safeW = Math.min(safeW, maxW);
+            safeH = Math.min(safeH, maxH);
+          }
 
-        let updates = lockJob.updates;
-        if (size && Number.isFinite(size.width) && Number.isFinite(size.height)) {
-          const maxX = Math.floor(Math.max(0, size.width - safeW) / 2) * 2;
-          const maxY = Math.floor(Math.max(0, size.height - safeH) / 2) * 2;
-          updates = updates.map((u) => {
-            const t = Number.isFinite(u.t) ? Math.max(0, u.t) : 0;
-            const x = Number.isFinite(u.x) ? Math.max(0, Math.min(maxX, Math.floor(u.x / 2) * 2)) : 0;
-            const y = Number.isFinite(u.y) ? Math.max(0, Math.min(maxY, Math.floor(u.y / 2) * 2)) : 0;
-            return { t, x, y };
-          });
-        }
+          let updates = lockJob.updates;
+          if (size && Number.isFinite(size.width) && Number.isFinite(size.height)) {
+            const maxX = Math.floor(Math.max(0, size.width - safeW) / 2) * 2;
+            const maxY = Math.floor(Math.max(0, size.height - safeH) / 2) * 2;
+            updates = updates.map((u) => {
+              const t = Number.isFinite(u.t) ? Math.max(0, u.t) : 0;
+              const x = Number.isFinite(u.x) ? Math.max(0, Math.min(maxX, Math.floor(u.x / 2) * 2)) : 0;
+              const y = Number.isFinite(u.y) ? Math.max(0, Math.min(maxY, Math.floor(u.y / 2) * 2)) : 0;
+              return { t, x, y };
+            });
+          }
 
-        const cmdText = makeRecordingLockCmdFile(updates, safeW, safeH);
-        try {
-          fs.appendFileSync(lockJob.logFile, `\n[WEBDL] LOCK CROP updates: ${updates.length}\n`);
-        } catch (e) {}
-
-        await applyRecordingLockCrop({
-          rawFilePath: lockJob.rawFilePath,
-          finalFilePath: lockJob.finalFilePath,
-          cmdText,
-          cropWidth: safeW,
-          cropHeight: safeH
-        });
-
-        if (dbId) {
+          const cmdText = makeRecordingLockCmdFile(updates, safeW, safeH);
           try {
-            const fp = String(lockJob.finalFilePath || '');
-            const exists = fp && fs.existsSync(fp);
-            const finalSize = exists ? fs.statSync(fp).size : 0;
-            const recordMeta = {
-              webdl_kind: 'recording',
-              webdl_recording: { lock: true, raw: lockJob.rawFilePath, final: lockJob.finalFilePath, log: lockJob.logFile, page_url: meta && meta.pageUrl ? meta.pageUrl : null }
-            };
-            await updateDownload.run('completed', 100, fp, path.basename(fp), finalSize, 'mp4', JSON.stringify(recordMeta), null, dbId);
+            fs.appendFileSync(lockJob.logFile, `\n[WEBDL] LOCK CROP updates: ${updates.length}\n`);
+          } catch (e) {}
+
+          await applyRecordingLockCrop({
+            rawFilePath: lockJob.rawFilePath,
+            finalFilePath: lockJob.finalFilePath,
+            cmdText,
+            cropWidth: safeW,
+            cropHeight: safeH,
+            downloadId: dbId
+          });
+
+          if (dbId) {
+            try {
+              const fp = String(lockJob.finalFilePath || '');
+              const exists = fp && fs.existsSync(fp);
+              const finalSize = exists ? fs.statSync(fp).size : 0;
+              const recordMeta = {
+                webdl_kind: 'recording',
+                webdl_recording: { lock: true, raw: lockJob.rawFilePath, final: lockJob.finalFilePath, log: lockJob.logFile, page_url: meta && meta.pageUrl ? meta.pageUrl : null }
+              };
+              await updateDownload.run('completed', 100, fp, path.basename(fp), finalSize, 'mp4', JSON.stringify(recordMeta), null, dbId);
+            } catch (e) {}
+          }
+
+          try {
+            fs.appendFileSync(lockJob.logFile, `\n[WEBDL] LOCK CROP done: ${lockJob.finalFilePath}\n`);
           } catch (e) {}
         }
-
+      }).catch(async (e) => {
         try {
-          fs.appendFileSync(lockJob.logFile, `\n[WEBDL] LOCK CROP done: ${lockJob.finalFilePath}\n`);
-        } catch (e) {}
-      })().catch(async (e) => {
-        if (dbId) {
-          try {
-            await updateDownloadStatus.run('error', 0, e.message, dbId);
-          } catch (err) {}
-        }
-        try {
-          fs.appendFileSync(lockJob.logFile, `\n[WEBDL] LOCK CROP error: ${e.message}\n`);
+          fs.appendFileSync(lockJob.logFile, `\n[WEBDL] LOCK CROP queue error: ${e.message}\n`);
         } catch (err) {}
       });
       return;
@@ -11514,6 +11673,7 @@ function looksLikeDirectFileUrl(url) {
 
     if (host.includes('tiktokcdn.com') || host.includes('ttwstatic.com')) return true;
     if (host.includes('cdninstagram.com') || host.includes('fbcdn.net')) return true;
+    if ((host === 'amateurvoyeurforum.com' || host === 'www.amateurvoyeurforum.com' || host.endsWith('.amateurvoyeurforum.com')) && String(u.pathname || '').toLowerCase() === '/attachment.php' && !!String(u.searchParams.get('attachmentid') || '').trim()) return true;
 
     const p = (u.pathname || '').toLowerCase();
     const m = p.match(/\.([a-z0-9]{1,8})$/i);
@@ -11810,6 +11970,13 @@ function uniqueFilePath(filepath, suffix) {
 function filenameFromUrl(url, fallback = 'download.bin') {
   try {
     const u = new URL(String(url || ''));
+    if (String(u.pathname || '').toLowerCase() === '/attachment.php') {
+      const attachmentId = String(u.searchParams.get('attachmentid') || '').trim();
+      if (attachmentId) {
+        const safeAttachment = sanitizeName(`attachment_${attachmentId}`);
+        return safeAttachment || fallback;
+      }
+    }
     const base = path.basename(u.pathname || '');
     const name = base && base !== '/' && base !== '.' && base !== '..' ? base : '';
     const safe = sanitizeName(name);
@@ -11818,6 +11985,89 @@ function filenameFromUrl(url, fallback = 'download.bin') {
     const safe = sanitizeName(String(url || ''));
     return safe ? safe.slice(0, 60) : fallback;
   }
+}
+
+function parseLastHttpHeaders(rawHeaders) {
+  try {
+    const text = String(rawHeaders || '');
+    if (!text) return {};
+    const blocks = text.split(/\r?\n\r?\n/g).map((block) => String(block || '').trim()).filter(Boolean);
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      const lines = blocks[i].split(/\r?\n/g).filter(Boolean);
+      if (!lines.length || !/^HTTP\//i.test(lines[0])) continue;
+      const headers = {};
+      for (const line of lines.slice(1)) {
+        const idx = line.indexOf(':');
+        if (idx <= 0) continue;
+        const key = String(line.slice(0, idx) || '').trim().toLowerCase();
+        const value = String(line.slice(idx + 1) || '').trim();
+        if (key) headers[key] = value;
+      }
+      if (Object.keys(headers).length) return headers;
+    }
+    return {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function extensionFromContentType(contentType) {
+  const type = String(contentType || '').split(';')[0].trim().toLowerCase();
+  if (!type) return '';
+  const map = new Map([
+    ['image/jpeg', 'jpg'],
+    ['image/png', 'png'],
+    ['image/gif', 'gif'],
+    ['image/webp', 'webp'],
+    ['image/bmp', 'bmp'],
+    ['image/svg+xml', 'svg'],
+    ['image/avif', 'avif'],
+    ['image/heic', 'heic'],
+    ['image/heif', 'heif'],
+    ['video/mp4', 'mp4'],
+    ['video/quicktime', 'mov'],
+    ['video/webm', 'webm'],
+    ['video/x-matroska', 'mkv'],
+    ['audio/mpeg', 'mp3'],
+    ['audio/mp4', 'm4a'],
+    ['audio/x-m4a', 'm4a'],
+    ['audio/wav', 'wav'],
+    ['audio/flac', 'flac'],
+    ['application/zip', 'zip'],
+    ['application/x-rar-compressed', 'rar'],
+    ['application/pdf', 'pdf']
+  ]);
+  return map.get(type) || '';
+}
+
+function filenameFromContentDisposition(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  let match = raw.match(/filename\*=UTF-8''([^;]+)/i);
+  if (match && match[1]) {
+    try {
+      return sanitizeName(path.basename(decodeURIComponent(String(match[1] || '').trim())));
+    } catch (e) {}
+  }
+  match = raw.match(/filename="([^"]+)"/i);
+  if (match && match[1]) return sanitizeName(path.basename(String(match[1] || '').trim()));
+  match = raw.match(/filename=([^;]+)/i);
+  if (match && match[1]) return sanitizeName(path.basename(String(match[1] || '').trim().replace(/^"|"$/g, '')));
+  return '';
+}
+
+function resolveDirectDownloadFilename(url, fallback, rawHeaders) {
+  const headers = parseLastHttpHeaders(rawHeaders);
+  const hinted = filenameFromContentDisposition(headers['content-disposition']);
+  let filename = hinted || filenameFromUrl(url, fallback);
+  const ext = String(path.extname(filename || '') || '').replace('.', '').toLowerCase();
+  const contentExt = extensionFromContentType(headers['content-type']);
+  if ((!ext || ext === 'php' || ext === 'bin') && contentExt) {
+    const stem = sanitizeName(path.basename(filename || fallback, path.extname(filename || fallback)) || `download_${Date.now()}`);
+    filename = `${stem}.${contentExt}`;
+  }
+  const safe = sanitizeName(filename || '');
+  return safe || fallback;
 }
 
 async function startDirectFileDownload(downloadId, url, platform, channel, title, metadata) {
@@ -11912,9 +12162,9 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
     }
     await updateDownloadStatus.run('downloading', 0, null, downloadId);
 
-    const filename = filenameFromUrl(url, `download_${downloadId}.bin`);
-    const filepath = uniqueFilePath(path.join(dir, filename), downloadId);
-    const tmpFilepath = uniqueFilePath(filepath + '.part', downloadId);
+    const provisionalFilename = filenameFromUrl(url, `download_${downloadId}.bin`);
+    const tmpFilepath = uniqueFilePath(path.join(dir, `${provisionalFilename}.part`), downloadId);
+    const headerFilepath = uniqueFilePath(path.join(dir, `${provisionalFilename}.headers.txt`), downloadId);
     const referer = String(
       originThread && originThread.url ? originThread.url :
       metadata && typeof metadata === 'object' && metadata.url && metadata.url !== url ? metadata.url :
@@ -11928,6 +12178,7 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
       '-A', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
     ];
     if (referer) curlArgs.push('-e', referer);
+    curlArgs.push('-D', headerFilepath);
     curlArgs.push('-o', tmpFilepath, url);
     const proc = spawnNice('/usr/bin/curl', curlArgs);
 
@@ -11941,6 +12192,9 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
       activeProcesses.delete(downloadId);
       try {
         if (code === 0 && fs.existsSync(tmpFilepath)) {
+          const rawHeaders = fs.existsSync(headerFilepath) ? fs.readFileSync(headerFilepath, 'utf8') : '';
+          const filename = resolveDirectDownloadFilename(url, provisionalFilename, rawHeaders);
+          const filepath = uniqueFilePath(path.join(dir, filename), downloadId);
           try {
             if (fs.existsSync(filepath)) {
               try {fs.rmSync(filepath, { force: true });} catch (e) {}
@@ -11981,6 +12235,7 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
           await updateDownloadStatus.run('error', 0, stderr || `curl exit code: ${code}`, downloadId);
         }
       } finally {
+        try {if (fs.existsSync(headerFilepath)) fs.rmSync(headerFilepath, { force: true });} catch (e) {}
         try {recentFilesTopCache.clear();} catch (e) {}
         try {runDownloadSchedulerSoon();} catch (e) {}
         try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
@@ -12934,25 +13189,34 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
         }
 
         if (doFinalCut && mainPath && fs.existsSync(mainPath)) {
-          await updateDownloadStatus.run('postprocessing', 100, null, downloadId);
+          await updateDownloadStatus.run('queued', 100, null, downloadId);
           const base = path.basename(mainPath, path.extname(mainPath));
           const movFile = `${base}.mov`;
           const movPath = path.join(dir, movFile);
-          try {
-            console.log(`   🎞️ Transcode Final Cut: ${movFile}`);
-            await transcodeToFinalCutMov(mainPath, movPath);
-            if (fs.existsSync(movPath)) {
-              finalPath = movPath;
-              finalFile = movFile;
-              finalSize = fs.statSync(movPath).size;
-              finalFormat = 'mov';
-              metaObj.webdl_finalcut = { source: mainPath, output: movPath };
-              console.log(`   ✅ Final Cut MOV klaar: ${movPath}`);
+          const finalCutCompleted = await enqueuePostprocessJob(downloadId, {
+            queuedStatus: 'queued',
+            queuedProgress: 100,
+            startStatus: 'postprocessing',
+            startProgress: 100,
+            run: async () => {
+              try {
+                console.log(`   🎞️ Transcode Final Cut: ${movFile}`);
+                await transcodeToFinalCutMov(mainPath, movPath, downloadId);
+                if (fs.existsSync(movPath)) {
+                  finalPath = movPath;
+                  finalFile = movFile;
+                  finalSize = fs.statSync(movPath).size;
+                  finalFormat = 'mov';
+                  metaObj.webdl_finalcut = { source: mainPath, output: movPath };
+                  console.log(`   ✅ Final Cut MOV klaar: ${movPath}`);
+                }
+              } catch (e) {
+                metaObj.webdl_finalcut_error = e.message;
+                console.log(`   ⚠️ Final Cut transcode mislukt: ${e.message}`);
+              }
             }
-          } catch (e) {
-            metaObj.webdl_finalcut_error = e.message;
-            console.log(`   ⚠️ Final Cut transcode mislukt: ${e.message}`);
-          }
+          });
+          if (!finalCutCompleted) return;
         }
 
         try {
@@ -14005,6 +14269,17 @@ function makeMediaItem(row) {
     fileRel = '';
   }
 
+  let dedupeKey = '';
+  try {
+    if (fp) {
+      const abs = path.resolve(fp);
+      dedupeKey = abs;
+      if (fs.existsSync(abs)) dedupeKey = fs.realpathSync(abs);
+    }
+  } catch (e) {
+    dedupeKey = fp || '';
+  }
+
   const safeDecode = (v) => {
     try {
       const s = String(v == null ? '' : v);
@@ -14052,6 +14327,7 @@ function makeMediaItem(row) {
     rating_id: row.id,
     url: row.url || null,
     source_url: row.source_url || null,
+    dedupe_key: dedupeKey || null,
     file_rel: fileRel || null,
     ready: true,
     src,
@@ -14354,55 +14630,71 @@ function makeIndexedMediaItem(row) {
   return makeMediaItem(row);
 }
 
-function mediaItemKey(item) {
-  if (!item || typeof item !== 'object') return null;
-  try {
-    const dk = item.dedupe_key ? String(item.dedupe_key) : '';
-    if (dk) {
-      const abs = path.resolve(dk);
-      return `dedupe:${abs}`;
+  function mediaItemKey(item) {
+    if (!item || typeof item !== 'object') return null;
+    try {
+      const dk = item.dedupe_key ? String(item.dedupe_key) : '';
+      if (dk) {
+        const abs = path.resolve(dk);
+        return `dedupe:${abs}`;
+      }
+    } catch (e) {}
+    try {
+      const rel = item.file_rel ? String(item.file_rel) : '';
+      if (rel) {
+        const abs = path.resolve(BASE_DIR, rel);
+        return `dedupe:${abs}`;
+      }
+    } catch (e) {}
+    if (item.kind && item.id != null) {
+      return `${item.kind}:${item.id}`;
     }
-  } catch (e) {}
-  try {
-    const rel = item.file_rel ? String(item.file_rel) : '';
-    if (rel) {
-      const abs = path.resolve(BASE_DIR, rel);
-      return `dedupe:${abs}`;
+    if (item.open && item.open.path) {
+      return `path:${item.open.path}`;
     }
-  } catch (e) {}
-  if (item.kind && item.id != null) {
-    return `${item.kind}:${item.id}`;
+    if (item.src) {
+      return `src:${item.src}`;
+    }
+    return null;
   }
-  if (item.open && item.open.path) {
-    return `path:${item.open.path}`;
-  }
-  if (item.src) {
-    return `src:${item.src}`;
-  }
-  return null;
-}
 
-function pushUniqueMediaItem({
-  bucket,
-  item,
-  seen,
-  typeFilter
-}) {
-  if (!item || !bucket || !seen) return false;
-  const type = String(typeFilter || 'all');
-  const isMedia = item.type === 'video' || item.type === 'image';
-  if (type === 'media' && !isMedia) return false;
-  if (type !== 'all' && type !== 'media' && item.type !== type) return false;
-  const key = mediaItemKey(item);
-  if (key && seen.has(key)) return false;
-  if (key) seen.add(key);
-  bucket.push(item);
-  return true;
-}
+  function mediaItemPriority(item) {
+    if (!item || typeof item !== 'object') return 0;
+    const kind = String(item.kind || '').toLowerCase();
+    if (kind === 'd') return 3;
+    if (kind === 's') return 2;
+    if (kind === 'p') return 1;
+    return 0;
+  }
 
-function expandRowToMediaItems(row, cursorFileIndex = 0, maxItems = 500) {
-  const items = [];
-  const fp = String(row.filepath || '').trim();
+  function pushUniqueMediaItem({
+    bucket,
+    item,
+    seen,
+    typeFilter
+  }) {
+    if (!item || !bucket || !seen) return false;
+    const type = String(typeFilter || 'all');
+    const isMedia = item.type === 'video' || item.type === 'image';
+    if (type === 'media' && !isMedia) return false;
+    if (type !== 'all' && type !== 'media' && item.type !== type) return false;
+    const key = mediaItemKey(item);
+    if (key && seen.has(key)) {
+      const prevIndex = Number(seen.get(key));
+      if (!Number.isFinite(prevIndex) || prevIndex < 0 || prevIndex >= bucket.length) return false;
+      const prevItem = bucket[prevIndex];
+      if (mediaItemPriority(item) <= mediaItemPriority(prevItem)) return false;
+      bucket[prevIndex] = item;
+      return true;
+    }
+    bucket.push(item);
+    if (key) seen.set(key, bucket.length - 1);
+    return true;
+  }
+
+  function expandRowToMediaItems(row, cursorFileIndex = 0, maxItems = 500) {
+    const items = [];
+    const fp = String(row.filepath || '').trim();
 
     if (row.platform === 'patreon') {
       console.log(`[DEBUG-PATREON-EXPAND] Processing id=${row.id}, fp=${fp}, isAllowed=${safeIsAllowedExistingPath(path.resolve(fp))}`);
@@ -14533,7 +14825,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
     }
 
     const items = [];
-    const seenKeys = new Set();
+    const seenKeys = new Map();
 
     const isTopRequest = !cursorRaw || (cur && cur.activeOffset === 0 && cur.rowOffset === 0 && !cur.dir && cur.fileIndex === 0);
     if (includeActive && isTopRequest) {
@@ -14543,17 +14835,8 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
         for (const r of rows || []) {
           if (!r) continue;
           const it = makeActiveDownloadItem(r);
-          if (tagFilter) {
-        try {
-          const tags = db.prepare(db.isPostgres ? 'SELECT t.name FROM tags t JOIN media_tags mt ON t.id = mt.tag_id WHERE mt.kind = $1 AND mt.media_id = $2' : 'SELECT t.name FROM tags t JOIN media_tags mt ON t.id = mt.tag_id WHERE mt.kind = ? AND mt.media_id = ?').all(row.kind, row.id);
-          if (!tags.some(t => t.name === tagFilter)) {
-            rowOffset += 1;
-            continue;
-          }
-        } catch(e) {}
-      }
-      pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
-          if (items.length >= limit) break;
+          pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
+          if (items.length >= limit || items.length >= cap) break;
         }
       } catch (e) {}
     }
@@ -14666,7 +14949,7 @@ expressApp.get('/api/media/channel-files', async (req, res) => {
     }
 
     const items = [];
-    const seenKeys = new Set();
+    const seenKeys = new Map();
 
     const isTopRequest = !cursorRaw || (cur && cur.activeOffset === 0 && cur.rowOffset === 0 && !cur.dir && cur.fileIndex === 0);
     if (includeActive && isTopRequest) {
@@ -14678,17 +14961,8 @@ expressApp.get('/api/media/channel-files', async (req, res) => {
           if (String(r.platform || '') !== String(platform || '')) continue;
           if (String(r.channel || '') !== String(channel || '')) continue;
           const it = makeActiveDownloadItem(r);
-      if (tagFilter) {
-        try {
-          const tags = db.prepare(db.isPostgres ? 'SELECT t.name FROM tags t JOIN media_tags mt ON t.id = mt.tag_id WHERE mt.kind = $1 AND mt.media_id = $2' : 'SELECT t.name FROM tags t JOIN media_tags mt ON t.id = mt.tag_id WHERE mt.kind = ? AND mt.media_id = ?').all(row.kind, row.id);
-          if (!tags.some(t => t.name === tagFilter)) {
-            rowOffset += 1;
-            continue;
-          }
-        } catch(e) {}
-      }
           pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
-          if (items.length >= limit) break;
+          if (items.length >= limit || items.length >= cap) break;
         }
       } catch (e) {}
     }
@@ -14758,7 +15032,7 @@ expressApp.get('/api/media/recent', async (req, res) => {
   try {
     const rows = await getRecentMedia.all(limit, offset);
     const items = [];
-    const seenKeys = new Set();
+    const seenKeys = new Map();
     for (const row of rows || []) {
       const it = makeMediaItem(row);
       pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
@@ -14828,7 +15102,7 @@ expressApp.get('/api/media/channel', async (req, res) => {
   try {
     const rows = await getMediaByChannel.all(platform, channel, limit, offset);
     const items = [];
-    const seenKeys = new Set();
+    const seenKeys = new Map();
     for (const row of rows || []) {
       const it = makeMediaItem(row);
       pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });

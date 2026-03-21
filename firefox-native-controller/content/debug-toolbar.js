@@ -2131,6 +2131,14 @@
     return viaBg && viaBg.error ? viaBg : viaHttp;
   }
 
+  function confirmBatchStart({ count, force, label, redditHint }) {
+    const total = Math.max(0, parseInt(count || 0, 10) || 0);
+    const title = String(label || 'Batch download');
+    const extraRedditHint = redditHint ? String(redditHint) : '';
+    const forceHint = force ? '\nFORCE: duplicates opnieuw downloaden' : '';
+    return window.confirm(`${title} starten voor ${total} items?${extraRedditHint}${forceHint}`);
+  }
+
   async function requestRedditIndex(seedUrl) {
     const payload = { url: seedUrl, maxItems: 5000, maxPages: 120 };
     const viaBg = await sendBackgroundAction('redditIndex', payload, 15000);
@@ -2971,15 +2979,11 @@
       } else {
         try { addLog('Preview niet getoond; fallback confirm', 'error'); } catch (e) {}
         try { showNotification('Preview niet getoond; fallback confirm', true); } catch (e) {}
-        const forceHint = force ? '\nFORCE: duplicates opnieuw downloaden' : '';
-        const ok = window.confirm(`Batch download starten voor ${urls.length} items?${redditHint}${forceHint}`);
-        if (!ok) return;
       }
-    } else {
-      const forceHint = force ? '\nFORCE: duplicates opnieuw downloaden' : '';
-      const ok = window.confirm(`Batch download starten voor ${urls.length} items?${redditHint}${forceHint}`);
-      if (!ok) return;
     }
+
+    const ok = confirmBatchStart({ count: urls.length, force, label: 'Batch download', redditHint });
+    if (!ok) return;
 
     const modeLabel = force ? 'Force' : 'Batch';
     addLog(`${modeLabel} batch download: ${urls.length} items`);
@@ -3103,10 +3107,10 @@
         selectedDirectHints = selected.directHints && typeof selected.directHints === 'object' ? selected.directHints : null;
       } else if (Array.isArray(selected) && selected.length) urls = selected;
       else {
-        const forceHint = force ? '\nFORCE: duplicates opnieuw downloaden' : '';
-        const ok = window.confirm(`Hele thread download starten voor ${urls.length} items?${forceHint}`);
-        if (!ok) return;
       }
+
+      const ok = confirmBatchStart({ count: urls.length, force, label: 'Hele thread download' });
+      if (!ok) return;
 
       addLog(force ? `Force thread batch: ${urls.length} items` : `Thread batch: ${urls.length} items`);
       const result = await queueBatchDownloadRequest(urls, meta, { force, directHints: selectedDirectHints });

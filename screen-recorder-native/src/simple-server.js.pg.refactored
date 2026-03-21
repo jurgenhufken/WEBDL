@@ -1624,7 +1624,7 @@ function getViewerHTML() {
       state.loadingMore = true;
       try {
         if (state.mode === 'recent') {
-          const data = await api('/api/media/recent-files?include_active=0&include_active_files=1&include_downloads=0&limit=200&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&sort=' + encodeURIComponent(state.sort || 'recent'));
+          const data = await api('/api/media/recent-files?include_active=0&include_active_files=0&include_downloads=0&limit=200&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&sort=' + encodeURIComponent(state.sort || 'recent'));
           if (!data.success) throw new Error(data.error || 'recent failed');
           const newItems = data.items || [];
           state.items = state.items.concat(newItems);
@@ -1634,7 +1634,7 @@ function getViewerHTML() {
           const ch = state.channels[state.chIndex];
           if (!ch) { state.done = true; return; }
           const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
-          const data = await api(/api/media/channel?platform=${encodeURIComponent(ch.platform)}&channel=${encodeURIComponent(ch.channel)}&limit=300&type= + encodeURIComponent(state.filter) + dirsParam + '&sort=' + encodeURIComponent(state.sort || 'recent'));
+          const data = await api('/api/media/channel?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=300&type=' + encodeURIComponent(state.filter) + dirsParam + '&sort=' + encodeURIComponent(state.sort || 'recent'));
           if (!data.success) throw new Error(data.error || 'channel failed');
           const newItems = data.items || [];
           state.items = state.items.concat(newItems);
@@ -1685,7 +1685,7 @@ function getViewerHTML() {
         state.cursor = '';
         state.done = false;
         const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
-        const data = await api('/api/media/recent-files?include_active=0&include_active_files=1&limit=200&cursor=&type=' + encodeURIComponent(state.filter) + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam);
+        const data = await api('/api/media/recent-files?include_active=0&include_active_files=0&limit=200&cursor=&type=' + encodeURIComponent(state.filter) + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam);
         if (!data.success) throw new Error(data.error || 'recent failed');
         state.items = data.items || [];
         state.cursor = data.next_cursor || '';
@@ -1744,7 +1744,7 @@ function getViewerHTML() {
       state.cursor = '';
       state.done = false;
       const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
-      const data = await api('/api/media/channel-files?include_active=0&include_active_files=1&platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=300&cursor=&type=' + encodeURIComponent(state.filter) + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam);
+      const data = await api('/api/media/channel-files?include_active=0&include_active_files=0&platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=300&cursor=&type=' + encodeURIComponent(state.filter) + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam);
       if (!data.success) throw new Error(data.error || 'channel failed');
       state.items = data.items || [];
       state.cursor = data.next_cursor || '';
@@ -3725,11 +3725,11 @@ function getGalleryHTML() {
         const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
         elSentinel.textContent = '📡 Aanvraag verzenden (limit=' + state.limit + ', filters=' + (state.enabledDirs ? state.enabledDirs.length : 'none') + ')...';
         if (state.mode === 'recent') {
-          path = '/api/media/recent-files?limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=1' + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam;
+          path = '/api/media/recent-files?limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0' + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam;
         } else {
           const ch = state.channel;
           if (!ch) { state.done = true; return; }
-          path = '/api/media/channel-files?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=1' + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam;
+          path = '/api/media/channel-files?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0' + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam;
         }
         const data = await api(path);
         const fetchTime = Date.now() - startTime;
@@ -5245,7 +5245,6 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
     WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
       AND d.filepath IS NOT NULL
       AND TRIM(d.filepath) != ''
-      AND NOT EXISTS (SELECT 1 FROM download_files f2 WHERE f2.download_id = d.id)
 
     UNION ALL
 
@@ -5313,7 +5312,6 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
     WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
       AND d.filepath IS NOT NULL
       AND TRIM(d.filepath) != ''
-      AND NOT EXISTS (SELECT 1 FROM download_files f2 WHERE f2.download_id = d.id)
 
     UNION ALL
 
@@ -5383,7 +5381,6 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
     WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
       AND d.filepath IS NOT NULL
       AND TRIM(d.filepath) != ''
-      AND NOT EXISTS (SELECT 1 FROM download_files f2 WHERE f2.download_id = d.id)
 
     UNION ALL
 
@@ -5523,7 +5520,6 @@ const getHybridMediaByChannel = db.prepare(db.isPostgres ? `
       AND d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
       AND d.filepath IS NOT NULL
       AND TRIM(d.filepath) != ''
-      AND NOT EXISTS (SELECT 1 FROM download_files f2 WHERE f2.download_id = d.id)
 
     UNION ALL
 
@@ -5594,7 +5590,6 @@ const getHybridMediaByChannel = db.prepare(db.isPostgres ? `
       AND d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
       AND d.filepath IS NOT NULL
       AND TRIM(d.filepath) != ''
-      AND NOT EXISTS (SELECT 1 FROM download_files f2 WHERE f2.download_id = d.id)
 
     UNION ALL
 
@@ -5665,7 +5660,6 @@ const getRecentHybridMediaByOldest = db.prepare(db.isPostgres ? `
     WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
       AND d.filepath IS NOT NULL
       AND TRIM(d.filepath) != ''
-      AND NOT EXISTS (SELECT 1 FROM download_files f2 WHERE f2.download_id = d.id)
 
     UNION ALL
 
@@ -6081,7 +6075,6 @@ const getHybridMediaByChannelByOldest = db.prepare(db.isPostgres ? `
       AND d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
       AND d.filepath IS NOT NULL
       AND TRIM(d.filepath) != ''
-      AND NOT EXISTS (SELECT 1 FROM download_files f2 WHERE f2.download_id = d.id)
 
     UNION ALL
 
@@ -6152,7 +6145,6 @@ const getHybridMediaByChannelByOldest = db.prepare(db.isPostgres ? `
       AND d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
       AND d.filepath IS NOT NULL
       AND TRIM(d.filepath) != ''
-      AND NOT EXISTS (SELECT 1 FROM download_files f2 WHERE f2.download_id = d.id)
 
     UNION ALL
 
@@ -6513,7 +6505,6 @@ const getHybridMediaByChannelWithActiveFiles = db.prepare(db.isPostgres ? `
       AND d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
       AND d.filepath IS NOT NULL
       AND TRIM(d.filepath) != ''
-      AND NOT EXISTS (SELECT 1 FROM download_files f2 WHERE f2.download_id = d.id)
 
     UNION ALL
 
@@ -14278,6 +14269,17 @@ function makeMediaItem(row) {
     fileRel = '';
   }
 
+  let dedupeKey = '';
+  try {
+    if (fp) {
+      const abs = path.resolve(fp);
+      dedupeKey = abs;
+      if (fs.existsSync(abs)) dedupeKey = fs.realpathSync(abs);
+    }
+  } catch (e) {
+    dedupeKey = fp || '';
+  }
+
   const safeDecode = (v) => {
     try {
       const s = String(v == null ? '' : v);
@@ -14325,6 +14327,7 @@ function makeMediaItem(row) {
     rating_id: row.id,
     url: row.url || null,
     source_url: row.source_url || null,
+    dedupe_key: dedupeKey || null,
     file_rel: fileRel || null,
     ready: true,
     src,
@@ -14627,55 +14630,71 @@ function makeIndexedMediaItem(row) {
   return makeMediaItem(row);
 }
 
-function mediaItemKey(item) {
-  if (!item || typeof item !== 'object') return null;
-  try {
-    const dk = item.dedupe_key ? String(item.dedupe_key) : '';
-    if (dk) {
-      const abs = path.resolve(dk);
-      return `dedupe:${abs}`;
+  function mediaItemKey(item) {
+    if (!item || typeof item !== 'object') return null;
+    try {
+      const dk = item.dedupe_key ? String(item.dedupe_key) : '';
+      if (dk) {
+        const abs = path.resolve(dk);
+        return `dedupe:${abs}`;
+      }
+    } catch (e) {}
+    try {
+      const rel = item.file_rel ? String(item.file_rel) : '';
+      if (rel) {
+        const abs = path.resolve(BASE_DIR, rel);
+        return `dedupe:${abs}`;
+      }
+    } catch (e) {}
+    if (item.kind && item.id != null) {
+      return `${item.kind}:${item.id}`;
     }
-  } catch (e) {}
-  try {
-    const rel = item.file_rel ? String(item.file_rel) : '';
-    if (rel) {
-      const abs = path.resolve(BASE_DIR, rel);
-      return `dedupe:${abs}`;
+    if (item.open && item.open.path) {
+      return `path:${item.open.path}`;
     }
-  } catch (e) {}
-  if (item.kind && item.id != null) {
-    return `${item.kind}:${item.id}`;
+    if (item.src) {
+      return `src:${item.src}`;
+    }
+    return null;
   }
-  if (item.open && item.open.path) {
-    return `path:${item.open.path}`;
-  }
-  if (item.src) {
-    return `src:${item.src}`;
-  }
-  return null;
-}
 
-function pushUniqueMediaItem({
-  bucket,
-  item,
-  seen,
-  typeFilter
-}) {
-  if (!item || !bucket || !seen) return false;
-  const type = String(typeFilter || 'all');
-  const isMedia = item.type === 'video' || item.type === 'image';
-  if (type === 'media' && !isMedia) return false;
-  if (type !== 'all' && type !== 'media' && item.type !== type) return false;
-  const key = mediaItemKey(item);
-  if (key && seen.has(key)) return false;
-  if (key) seen.add(key);
-  bucket.push(item);
-  return true;
-}
+  function mediaItemPriority(item) {
+    if (!item || typeof item !== 'object') return 0;
+    const kind = String(item.kind || '').toLowerCase();
+    if (kind === 'd') return 3;
+    if (kind === 's') return 2;
+    if (kind === 'p') return 1;
+    return 0;
+  }
 
-function expandRowToMediaItems(row, cursorFileIndex = 0, maxItems = 500) {
-  const items = [];
-  const fp = String(row.filepath || '').trim();
+  function pushUniqueMediaItem({
+    bucket,
+    item,
+    seen,
+    typeFilter
+  }) {
+    if (!item || !bucket || !seen) return false;
+    const type = String(typeFilter || 'all');
+    const isMedia = item.type === 'video' || item.type === 'image';
+    if (type === 'media' && !isMedia) return false;
+    if (type !== 'all' && type !== 'media' && item.type !== type) return false;
+    const key = mediaItemKey(item);
+    if (key && seen.has(key)) {
+      const prevIndex = Number(seen.get(key));
+      if (!Number.isFinite(prevIndex) || prevIndex < 0 || prevIndex >= bucket.length) return false;
+      const prevItem = bucket[prevIndex];
+      if (mediaItemPriority(item) <= mediaItemPriority(prevItem)) return false;
+      bucket[prevIndex] = item;
+      return true;
+    }
+    bucket.push(item);
+    if (key) seen.set(key, bucket.length - 1);
+    return true;
+  }
+
+  function expandRowToMediaItems(row, cursorFileIndex = 0, maxItems = 500) {
+    const items = [];
+    const fp = String(row.filepath || '').trim();
 
     if (row.platform === 'patreon') {
       console.log(`[DEBUG-PATREON-EXPAND] Processing id=${row.id}, fp=${fp}, isAllowed=${safeIsAllowedExistingPath(path.resolve(fp))}`);
@@ -14806,7 +14825,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
     }
 
     const items = [];
-    const seenKeys = new Set();
+    const seenKeys = new Map();
 
     const isTopRequest = !cursorRaw || (cur && cur.activeOffset === 0 && cur.rowOffset === 0 && !cur.dir && cur.fileIndex === 0);
     if (includeActive && isTopRequest) {
@@ -14816,17 +14835,8 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
         for (const r of rows || []) {
           if (!r) continue;
           const it = makeActiveDownloadItem(r);
-          if (tagFilter) {
-        try {
-          const tags = db.prepare(db.isPostgres ? 'SELECT t.name FROM tags t JOIN media_tags mt ON t.id = mt.tag_id WHERE mt.kind = $1 AND mt.media_id = $2' : 'SELECT t.name FROM tags t JOIN media_tags mt ON t.id = mt.tag_id WHERE mt.kind = ? AND mt.media_id = ?').all(row.kind, row.id);
-          if (!tags.some(t => t.name === tagFilter)) {
-            rowOffset += 1;
-            continue;
-          }
-        } catch(e) {}
-      }
-      pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
-          if (items.length >= limit) break;
+          pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
+          if (items.length >= limit || items.length >= cap) break;
         }
       } catch (e) {}
     }
@@ -14939,7 +14949,7 @@ expressApp.get('/api/media/channel-files', async (req, res) => {
     }
 
     const items = [];
-    const seenKeys = new Set();
+    const seenKeys = new Map();
 
     const isTopRequest = !cursorRaw || (cur && cur.activeOffset === 0 && cur.rowOffset === 0 && !cur.dir && cur.fileIndex === 0);
     if (includeActive && isTopRequest) {
@@ -14951,17 +14961,8 @@ expressApp.get('/api/media/channel-files', async (req, res) => {
           if (String(r.platform || '') !== String(platform || '')) continue;
           if (String(r.channel || '') !== String(channel || '')) continue;
           const it = makeActiveDownloadItem(r);
-      if (tagFilter) {
-        try {
-          const tags = db.prepare(db.isPostgres ? 'SELECT t.name FROM tags t JOIN media_tags mt ON t.id = mt.tag_id WHERE mt.kind = $1 AND mt.media_id = $2' : 'SELECT t.name FROM tags t JOIN media_tags mt ON t.id = mt.tag_id WHERE mt.kind = ? AND mt.media_id = ?').all(row.kind, row.id);
-          if (!tags.some(t => t.name === tagFilter)) {
-            rowOffset += 1;
-            continue;
-          }
-        } catch(e) {}
-      }
           pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
-          if (items.length >= limit) break;
+          if (items.length >= limit || items.length >= cap) break;
         }
       } catch (e) {}
     }
@@ -15031,7 +15032,7 @@ expressApp.get('/api/media/recent', async (req, res) => {
   try {
     const rows = await getRecentMedia.all(limit, offset);
     const items = [];
-    const seenKeys = new Set();
+    const seenKeys = new Map();
     for (const row of rows || []) {
       const it = makeMediaItem(row);
       pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
@@ -15101,7 +15102,7 @@ expressApp.get('/api/media/channel', async (req, res) => {
   try {
     const rows = await getMediaByChannel.all(platform, channel, limit, offset);
     const items = [];
-    const seenKeys = new Set();
+    const seenKeys = new Map();
     for (const row of rows || []) {
       const it = makeMediaItem(row);
       pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
