@@ -1,7 +1,18 @@
-# WEBDL (Firefox Add-on + lokale server)
+# WEBDL — Media Downloader & Recorder
 
-WEBDL is een **lokale** downloader/recorder die je bedient vanuit Firefox.
-De Firefox add-on toont een toolbar met knoppen (download/screenshot/opnemen) en praat met een lokale Node.js server op `http://localhost:35729`.
+**Firefox Add-on + Lokale Node.js Server**
+
+WEBDL is een lokale media downloader en screen recorder die je bedient vanuit Firefox. De Firefox add-on toont een toolbar met knoppen (download / screenshot / opnemen / batch) en communiceert met een lokale Node.js server op `localhost:35729`.
+
+## 🎯 Concept & Doel
+
+WEBDL verzamelt media van diverse platforms in één centrale plek:
+
+- **Downloads**: YouTube, OnlyFans, Reddit, Instagram, TikTok, forums, en meer
+- **Screen Recording**: Direct opnemen van je scherm (macOS avfoundation)
+- **Screenshots**: Snelle captures van webpagina's
+- **Gallery/Viewer**: Doorzoekbare interface voor al je verzamelde media
+- **Batch Processing**: Meerdere URLs in één keer downloaden
 
 De server regelt:
 
@@ -9,9 +20,11 @@ De server regelt:
   - `yt-dlp` (YouTube e.d.)
   - `gallery-dl` (diverse sites)
   - `ofscraper` (OnlyFans)
+  - `reddit-dl` (Reddit)
+  - `instaloader` (Instagram)
 - **Screen recording** via `ffmpeg` (`avfoundation` op macOS)
 - **Screenshots** (upload vanuit de add-on of via macOS `screencapture` fallback)
-- **Opslag + historie** in SQLite (`webdl.db`)
+- **Opslag + historie** in PostgreSQL/SQLite (`webdl.db`)
 
 ## Snelstart
 
@@ -26,37 +39,42 @@ De server regelt:
    - **Install Add-on From File…**
    - kies de gedownloade `.xpi`
 
-## Ontwerp / Architectuur (schema)
+## 🏗️ Architectuur
 
 ```text
 Firefox tab
   content script (firefox-native-controller/content/debug-toolbar.js)
     |  HTTP fetch (localhost)
     v
-WEBDL server (screen-recorder-native/src/simple-server.js)
-  |-- SQLite: ~/Downloads/WEBDL/webdl.db
-  |-- Files:  ~/Downloads/WEBDL/<platform>/<channel>/<title>/...
-  |-- Tools:
-      - yt-dlp
-      - gallery-dl
-      - ofscraper
-      - ffmpeg/ffprobe
-      - screencapture (macOS)
+WEBDL Server (Node.js) — localhost:35729
+  ├─ Express HTTP API
+  │   ├─ /download — Enqueue downloads
+  │   ├─ /download/batch — Batch downloads
+  │   ├─ /start-recording — Screen recording
+  │   ├─ /screenshot — Save screenshots
+  │   ├─ /dashboard — Web UI
+  │   └─ /viewer — Media viewer
+  ├─ Download Queue Manager (Heavy/Light lanes)
+  ├─ Media Resolution Engine
+  │   ├─ HTML wrapper → direct URL resolving
+  │   ├─ Thumbnail → full-size upgrading
+  │   └─ Attachment ID matching (FootFetishForum)
+  └─ Storage
+      ├─ PostgreSQL/SQLite: webdl.db
+      └─ Files: ~/Downloads/WEBDL/<platform>/<channel>/...
 ```
 
 ## Repository indeling
 
-- **`StartServer.command`**
-  - Start de server en opent automatisch `/addon`.
-  - Zet standaard environment variables zoals `WEBDL_VIDEO_DEVICE`, `WEBDL_AUDIO_DEVICE`, `WEBDL_ADDON_SOURCE_DIR`.
-- **`screen-recorder-native/`**
-  - Lokale server (Node.js) + database + ffmpeg orchestration.
-  - Belangrijkste entrypoint: `screen-recorder-native/src/simple-server.js`.
-- **`firefox-native-controller/`**
-  - Firefox add-on (toolbar UI) die requests naar de server stuurt.
-- **Output data (runtime)**
-  - Standaard: `~/Downloads/WEBDL/`
-  - Database: `~/Downloads/WEBDL/webdl.db`
+| Pad | Doel |
+|------|------|
+| `StartServer.command` | Start server + open `/addon` pagina |
+| `firefox-native-controller/` | Firefox add-on (toolbar UI) |
+| `screen-recorder-native/` | Node.js server + database + ffmpeg |
+| `screen-recorder-native/src/simple-server.pg.refactored.js` | Main server (runtime) |
+| `screen-recorder-native/src/simple-server.js.pg.refactored` | Source server (master) |
+| `screen-recorder-native/src/sync-onlyfans-auth-from-firefox.py` | **OnlyFans auth helper** |
+| `STATUS.md` | Huidige ontwikkelingsstatus & TODO |
 
 ## Opslag & mappenstructuur
 
@@ -72,20 +90,19 @@ Let op:
 
 - `BASE_DIR` staat momenteel vast in de servercode. Als je opslag op een externe schijf wilt, gebruik een **symlink** van `~/Downloads/WEBDL` naar je externe locatie.
 
-## Database (SQLite)
+## Database
 
-Database file:
+**Engine**: PostgreSQL (productie) / SQLite (legacy)
 
-- `~/Downloads/WEBDL/webdl.db`
+Database file: `~/Downloads/WEBDL/webdl.db` (SQLite) of PostgreSQL via `DATABASE_URL`
 
 Tabellen:
+- **`downloads`** — queue/status/progress/metadata van downloads
+- **`screenshots`** — opgeslagen screenshots
+- **`download_files`** — individuele bestanden per download
+- **`tags`** + **`media_tags`** — tagging systeem
 
-- **`downloads`**
-  - queue/status/progress/metadata van downloads
-- **`screenshots`**
-  - opgeslagen screenshots
-
-De DB draait in `WAL` mode.
+De DB draait in `WAL` mode (SQLite) of transactions (PostgreSQL).
 
 ## HTTP API (server endpoints)
 
@@ -166,6 +183,33 @@ WEBDL zet downloads in een queue met lanes:
 
 De server bepaalt lane en concurrency.
 
+## Media Resolution Engine (Belangrijk!)
+
+De server heeft een **wrapper resolution engine** voor sites die thumbnails/low-res previews tonen:
+
+**Voorbeeld: FootFetishForum attachment pagina**
+```
+Input:  https://footfetishforum.com/attachments/img_1234.jpg.56789/
+Output: https://.../data/attachments/56789/.../full_image.jpg
+```
+
+**Hoe het werkt:**
+1. HTML pagina wordt opgehaald
+2. Directe media URLs worden geëxtraheerd
+3. **Attachment ID matching** — URLs met matching ID krijgen hogere score
+4. Thumbnails worden geupgrade naar full-size
+5. Hoogste score wint → download
+
+**Ondersteunde sites:**
+- FootFetishForum attachments
+- AmateurVoyeurForum attachments  
+- Pixhost.to thumbnails → full images
+- Imgur/RedGifs via gallery-dl
+- Externe hosts (jpg.pet, pixeldrain, etc.)
+
+**Batch Preview:**
+De add-on detecteert automatisch attachment links en toont ze bovenaan in de preview modal.
+
 ## OnlyFans (ofscraper)
 
 OnlyFans downloads lopen via `ofscraper` en gebruiken een config map:
@@ -173,10 +217,25 @@ OnlyFans downloads lopen via `ofscraper` en gebruiken een config map:
 - Config dir: `~/.config/ofscraper` (default)
 - Auth: `~/.config/ofscraper/auth.json` (moet valide JSON zijn)
 
-Belangrijk:
+### Auth Sync Helper (NIEUW)
 
+Probleem: `auth.json` kan verouderde cookies bevatten → "Wrong user" error.
+
+Oplossing: Python helper syncs live Firefox cookies:
+
+```bash
+python3 screen-recorder-native/src/sync-onlyfans-auth-from-firefox.py
+```
+
+Wat het doet:
+1. Leest `cookies.sqlite` uit Firefox profiel
+2. Haalt `sess`, `auth_id`, `csrf`, `st`, `c`, `fp` op
+3. Update `~/.config/ofscraper/auth.json`
+4. Maakt backup (`.pre_firefox_sync.bak`)
+
+Belangrijk:
 - Als `auth.json` per ongeluk als RTF/TextEdit bestand is opgeslagen, faalt login.
-- WEBDL maakt per download een tijdelijke kopie van de ofscraper config en schrijft een `_ofscraper_<id>.log` in de output map met stdout/stderr + ofscraper internal log tail.
+- Controleer: `cat ~/.config/ofscraper/auth.json | head -c 100` moet starten met `{"auth":{...`
 
 ## Relevante instellingen (Environment variables)
 
@@ -280,9 +339,23 @@ Zet terug naar:
 
 - `WEBDL_RECORDING_INPUT_PIXEL_FORMAT=nv12`
 
-### OnlyFans download: leeg resultaat
+### FootFetishForum: lage resolutie afbeeldingen
 
-- Controleer `~/.config/ofscraper/auth.json` (valide JSON, niet RTF)
+De server **zou** nu automatisch attachment URLs moeten prefereren. Check:
+
+1. **Batch preview** toont attachment links (`.519294/`, `.519728/`, etc.) bovenaan
+2. **Server log** toont "upgraded" URLs met attachment ID matching
+3. **Download bestand** is groot (MB, niet KB)
+
+Als je nog steeds lage resolutie krijgt:
+- Controleer of je de juiste attachment links selecteert (niet `upload.footfetishforum.com/image/...` thumbnails)
+- Restart server: `Ctrl+C` → `./StartServer.command`
+- Herlaad extension: `about:debugging` → Herladen
+
+### OnlyFans download: "Wrong user" error
+
+- Sync cookies: `python3 screen-recorder-native/src/sync-onlyfans-auth-from-firefox.py`
+- Controleer `~/.config/ofscraper/auth.json` (moet starten met `{"auth":{...`)
 - Bekijk `_ofscraper_<id>.log` in de output map voor de echte foutmelding
 
 ### YouTube download problemen met cookies
