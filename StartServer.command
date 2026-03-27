@@ -188,6 +188,7 @@
  export WEBDL_TDL
  export WEBDL_FINALCUT_OUTPUT
  export WEBDL_VERBOSE_LOG
+ export WEBDL_SCAN_EXISTING_TAGS=0
  
  (sleep 1; open "$HOME/Downloads/WEBDL") >/dev/null 2>&1 &
  (sleep 4; open "http://localhost:35729/addon/firefox-debug-controller.xpi?t=$(date +%s)") >/dev/null 2>&1 &
