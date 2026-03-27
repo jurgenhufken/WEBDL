@@ -2214,6 +2214,26 @@ function getGalleryHTML() {
     .card { border: 1px solid #1f2a52; background: #050816; border-radius: 12px; overflow: hidden; cursor: pointer; position: relative; transition: transform 0.2s; }
     .card:hover { border-color: #00d4ff; transform: translateY(-2px); }
     .card.is-processing { opacity: 0.88; }
+    .queue-panel { margin: 0 0 12px 0; border: 1px solid #1f2a52; border-radius: 10px; background: #050d1a; overflow: hidden; }
+    .queue-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; cursor: pointer; user-select: none; background: #07122a; font-size: 13px; font-weight: 600; color: #a8c0ff; gap: 8px; }
+    .queue-header:hover { background: #0b1a3a; }
+    .queue-chevron { font-size: 10px; transition: transform 0.2s; color: #4a6aff; }
+    .queue-panel.collapsed .queue-chevron { transform: rotate(-90deg); }
+    .queue-body { padding: 10px 14px 12px; display: flex; flex-direction: column; gap: 8px; }
+    .queue-panel.collapsed .queue-body { display: none; }
+    .queue-section-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: #5a7aaa; margin-bottom: 4px; }
+    .queue-item { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-radius: 7px; background: #080f20; border: 1px solid #1a2544; font-size: 12px; }
+    .queue-item.active-dl { border-color: #00d4ff44; background: #001822; }
+    .queue-item-badge { font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 700; white-space: nowrap; }
+    .queue-item-badge.downloading { background: #00d4ff22; color: #00d4ff; border: 1px solid #00d4ff55; }
+    .queue-item-badge.postprocessing { background: #ff990022; color: #ff9900; border: 1px solid #ff990055; }
+    .queue-item-badge.queued { background: #ffffff11; color: #7a9acc; border: 1px solid #ffffff22; }
+    .queue-item-badge.pending { background: #ffffff11; color: #9a7acc; border: 1px solid #ffffff22; }
+    .queue-item-title { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #c8d8ff; }
+    .queue-item-platform { font-size: 10px; color: #5a7aaa; white-space: nowrap; }
+    .queue-progress-bar { height: 3px; background: #1a2544; border-radius: 2px; overflow: hidden; margin-top: 4px; }
+    .queue-progress-fill { height: 100%; background: linear-gradient(90deg, #00d4ff, #4a6aff); border-radius: 2px; transition: width 0.5s; }
+    .queue-more { font-size: 11px; color: #5a7aaa; text-align: center; padding: 4px 0 0; }
     .thumb { width: 100%; height: 140px; background: #000; object-fit: cover; display: block; border-bottom: 1px solid #1f2a52; }
     .meta { padding: 8px 10px 10px; }
     .line1 { font-size: 11px; color: #9aa7d1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -2295,6 +2315,16 @@ function getGalleryHTML() {
   </div>
 
   <div class="content">
+    <div id="queue-panel" class="queue-panel">
+      <div class="queue-header" id="queue-toggle">
+        <span id="queue-summary">⏳ Wachtrij laden…</span>
+        <span class="queue-chevron" id="queue-chevron">▼</span>
+      </div>
+      <div class="queue-body" id="queue-body">
+        <div id="queue-active-section"></div>
+        <div id="queue-upcoming-section"></div>
+      </div>
+    </div>
     <div class="grid" id="grid"></div>
     <div class="sentinel" id="sentinel">Laden…</div>
   </div>
@@ -4016,6 +4046,119 @@ function getGalleryHTML() {
       };
       setInterval(tick, 2500);
       tick();
+    } catch (e) {}
+
+    // ── Queue Panel ────────────────────────────────────────────────
+    try {
+      const qPanel = document.getElementById('queue-panel');
+      const qToggle = document.getElementById('queue-toggle');
+      const qSummary = document.getElementById('queue-summary');
+      const qActiveSection = document.getElementById('queue-active-section');
+      const qUpcomingSection = document.getElementById('queue-upcoming-section');
+
+      let qCollapsed = false;
+      try { qCollapsed = localStorage.getItem('queuePanelCollapsed') === '1'; } catch(e) {}
+      if (qCollapsed) qPanel.classList.add('collapsed');
+
+      qToggle.addEventListener('click', () => {
+        qCollapsed = !qCollapsed;
+        qPanel.classList.toggle('collapsed', qCollapsed);
+        try { localStorage.setItem('queuePanelCollapsed', qCollapsed ? '1' : '0'); } catch(e) {}
+      });
+
+      function makeQueueItem(item, isActive) {
+        const div = document.createElement('div');
+        div.className = 'queue-item' + (isActive ? ' active-dl' : '');
+        const badge = document.createElement('span');
+        badge.className = 'queue-item-badge ' + (item.status || 'queued');
+        badge.textContent = item.status || 'queued';
+        const title = document.createElement('span');
+        title.className = 'queue-item-title';
+        title.title = item.url || item.title || '';
+        title.textContent = item.title || item.url || '(onbekend)';
+        const platform = document.createElement('span');
+        platform.className = 'queue-item-platform';
+        platform.textContent = [item.platform, item.channel].filter(Boolean).join('/') || '';
+        div.appendChild(badge);
+        div.appendChild(title);
+        div.appendChild(platform);
+        if (isActive && item.progress > 0) {
+          const progressWrap = document.createElement('div');
+          progressWrap.className = 'queue-progress-bar';
+          progressWrap.style.width = '60px';
+          const fill = document.createElement('div');
+          fill.className = 'queue-progress-fill';
+          fill.style.width = item.progress + '%';
+          const pctLabel = document.createElement('span');
+          pctLabel.style.cssText = 'font-size:10px;color:#00d4ff;white-space:nowrap;';
+          pctLabel.textContent = item.progress + '%';
+          progressWrap.appendChild(fill);
+          div.appendChild(progressWrap);
+          div.appendChild(pctLabel);
+        }
+        return div;
+      }
+
+      async function pollQueueOverview() {
+        try {
+          const resp = await fetch('/api/queue-overview', { cache: 'no-store' });
+          if (!resp.ok) return;
+          const data = await resp.json();
+          if (!data || !data.success) return;
+
+          const totalActive = data.total_active || 0;
+          const totalQueued = data.total_queued || 0;
+
+          // Update summary text
+          if (totalActive === 0 && totalQueued === 0) {
+            qSummary.textContent = '✅ Wachtrij leeg';
+          } else {
+            const parts = [];
+            if (totalActive > 0) parts.push('⬇️ ' + totalActive + ' bezig');
+            if (totalQueued > 0) parts.push('⏳ ' + totalQueued + ' in wachtrij');
+            qSummary.textContent = parts.join('  •  ');
+          }
+
+          // Render active downloads
+          qActiveSection.innerHTML = '';
+          if (data.active && data.active.length > 0) {
+            const title = document.createElement('div');
+            title.className = 'queue-section-title';
+            title.textContent = 'Nu aan het downloaden';
+            qActiveSection.appendChild(title);
+            for (const item of data.active) {
+              qActiveSection.appendChild(makeQueueItem(item, true));
+            }
+          }
+
+          // Render upcoming queued items
+          qUpcomingSection.innerHTML = '';
+          if (data.upcoming && data.upcoming.length > 0) {
+            const title = document.createElement('div');
+            title.className = 'queue-section-title';
+            title.textContent = 'Volgende in wachtrij';
+            qUpcomingSection.appendChild(title);
+            const show = data.upcoming.slice(0, 10);
+            for (const item of show) {
+              qUpcomingSection.appendChild(makeQueueItem(item, false));
+            }
+            if (totalQueued > show.length) {
+              const more = document.createElement('div');
+              more.className = 'queue-more';
+              more.textContent = '… en nog ' + (totalQueued - show.length) + ' meer';
+              qUpcomingSection.appendChild(more);
+            }
+          } else if (totalActive === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'queue-more';
+            empty.textContent = 'Geen items in de wachtrij';
+            qUpcomingSection.appendChild(empty);
+          }
+        } catch (e) {}
+      }
+
+      pollQueueOverview();
+      setInterval(pollQueueOverview, 3000);
     } catch (e) {}
 
     document.getElementById('btnReload').addEventListener('click', () => reloadAll());
@@ -8318,6 +8461,51 @@ expressApp.post('/api/queue/resume', async (req, res) => {
   try {
     const result = await rehydrateDownloadQueueWithMode(mode, max);
     res.json(result);
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e && e.message ? e.message : e) });
+  }
+});
+
+expressApp.get('/api/queue-overview', async (req, res) => {
+  try {
+    const active = (runtimeActiveRows || []).map(r => ({
+      id: r.id,
+      title: r.title || r.url || '(onbekend)',
+      platform: r.platform || '',
+      channel: r.channel || '',
+      status: r.status || 'unknown',
+      progress: Number.isFinite(Number(r.progress)) ? Math.round(Number(r.progress)) : 0,
+      url: r.url || '',
+    }));
+
+    const upcoming = await db.prepare(db.isPostgres
+      ? `SELECT id, title, url, platform, channel, status FROM downloads WHERE status IN ('queued','pending') ORDER BY COALESCE(created_at, NOW()) ASC LIMIT 30`
+      : `SELECT id, title, url, platform, channel, status FROM downloads WHERE status IN ('queued','pending') ORDER BY COALESCE(created_at, datetime('now')) ASC LIMIT 30`
+    ).all();
+
+    const counts = await db.prepare(db.isPostgres
+      ? `SELECT status, COUNT(*) AS n FROM downloads WHERE status IN ('queued','pending','downloading','postprocessing') GROUP BY status`
+      : `SELECT status, COUNT(*) AS n FROM downloads WHERE status IN ('queued','pending','downloading','postprocessing') GROUP BY status`
+    ).all();
+
+    const byStatus = {};
+    for (const r of counts || []) byStatus[r.status] = Number(r.n) || 0;
+
+    res.json({
+      success: true,
+      active,
+      upcoming: (upcoming || []).map(r => ({
+        id: r.id,
+        title: r.title || r.url || '(onbekend)',
+        platform: r.platform || '',
+        channel: r.channel || '',
+        status: r.status,
+        url: r.url || '',
+      })),
+      counts: byStatus,
+      total_queued: (byStatus.queued || 0) + (byStatus.pending || 0),
+      total_active: (byStatus.downloading || 0) + (byStatus.postprocessing || 0),
+    });
   } catch (e) {
     res.status(500).json({ success: false, error: String(e && e.message ? e.message : e) });
   }
