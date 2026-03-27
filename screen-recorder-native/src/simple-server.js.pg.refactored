@@ -15951,6 +15951,11 @@ async function startServer() {
 
     setInterval(() => {
       syncRuntimeActiveState().catch(() => {});
+      
+      const count = queuedHeavy.length + queuedLight.length;
+      if (count < 6) {
+        rehydrateDownloadQueueWithMode('queued', 20).catch(() => {});
+      }
     }, 2500);
 
   if (ADDON_AUTO_BUILD_ON_START || ADDON_FORCE_REBUILD_ON_START) {
