@@ -1,5 +1,6 @@
 const path = require('path');
 const fs = require('fs');
+const { Worker } = require('worker_threads');
 const express = require('express');
 const http = require('http');
 const socketIO = require('socket.io');
@@ -27,7 +28,7 @@ const REDDIT_DL = process.env.WEBDL_REDDIT_DL || path.join(os.homedir(), '.local
 const TDL = String(process.env.WEBDL_TDL || '').trim() || path.join(os.homedir(), 'go', 'bin', 'tdl');
 const TDL_NAMESPACE = String(process.env.WEBDL_TDL_NAMESPACE || 'webdl').trim();
 const TDL_THREADS = Math.max(1, parseInt(process.env.WEBDL_TDL_THREADS || '4', 10) || 4);
-const TDL_CONCURRENCY = Math.max(1, parseInt(process.env.WEBDL_TDL_CONCURRENCY || '2', 10) || 2);
+const TDL_CONCURRENCY = Math.max(1, parseInt(process.env.WEBDL_TDL_CONCURRENCY || '1', 10) || 1);
 const REDDIT_DL_CLIENT_ID = String(process.env.WEBDL_REDDIT_CLIENT_ID || '').trim();
 const REDDIT_DL_CLIENT_SECRET = String(process.env.WEBDL_REDDIT_CLIENT_SECRET || '').trim();
 const REDDIT_DL_USERNAME = String(process.env.WEBDL_REDDIT_USERNAME || '').trim();
@@ -176,17 +177,18 @@ function parseFootFetishForumAttachmentInfo(inputUrl) {
   try {
     const u = new URL(String(inputUrl || ''));
     const host = String(u.hostname || '').toLowerCase();
-    const pathname = String(u.pathname || '');
     if ((host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) && /\/attachments\//i.test(pathname)) {
       const m = pathname.match(/\/attachments\/([^\/]+)\.(\d+)(?:\/|\?|#|$)/i);
-      if (!m) return null;
-      return {
-        kind: 'page',
-        slug: String(m[1] || '').trim().toLowerCase(),
-        id: String(m[2] || '').trim()
-      };
+      if (m) {
+        return {
+          kind: 'page',
+          slug: String(m[1] || '').trim().toLowerCase(),
+          id: String(m[2] || '').trim()
+        };
+      }
     }
-    if (host.includes('digitaloceanspaces.com') && /\/data\/attachments\//i.test(pathname)) {
+    // Remove the digitaloceanspaces.com domain check completely, as assets can be served from footfetishforum.com directly
+    if (/\/data\/attachments\//i.test(pathname) || /\/attachments\//i.test(pathname)) {
       const base = path.basename(pathname || '');
       const m = base.match(/^(\d+)-([^./?#]+)/i);
       if (!m) return null;
@@ -1271,8 +1273,13 @@ function getViewerHTML() {
       img.addEventListener('load', () => {
         try {
           const cur = String(img.currentSrc || img.src || '');
-          if (cur.startsWith('data:')) return;
+          const card = img.closest('.card');
+          if (cur.startsWith('data:')) {
+            if (card) card.style.display = '';
+            return;
+          }
           if (cur.includes('/media/pending-thumb.svg')) {
+            if (card) card.style.display = 'none';
             const base = img.dataset ? String(img.dataset.src || '') : '';
             if (!base) return;
             const tries = img.dataset ? (parseInt(String(img.dataset.retries || '0'), 10) || 0) : 0;
@@ -1289,6 +1296,7 @@ function getViewerHTML() {
             }, delay);
             return;
           }
+          if (card) card.style.display = '';
         } catch (e) {}
         try { if (img.dataset) img.dataset._thumbLoaded = '1'; } catch (e) {}
       });
@@ -1296,10 +1304,14 @@ function getViewerHTML() {
       img.addEventListener('error', () => {
         try {
           if (img.dataset && img.dataset._thumbLoaded === '1') return;
+          const card = img.closest('.card');
           const base = img.dataset ? String(img.dataset.src || '') : '';
-          if (!base) return;
-          const tries = img.dataset ? (parseInt(String(img.dataset.retries || '0'), 10) || 0) : 0;
-          if (tries >= 25) return;
+          const tries = img.dataset ? parseInt(String(img.dataset.retries || '0'), 10) || 0 : 0;
+          if (!base || tries >= 25) {
+            img.src = FALLBACK_THUMB;
+            if (card) card.style.display = '';
+            return;
+          }
           if (img.dataset) img.dataset.retries = String(tries + 1);
           const delay = Math.min(45000, Math.floor(2000 * Math.pow(1.45, tries) + (Math.random() * 500)));
           setTimeout(() => {
@@ -2199,9 +2211,10 @@ function getGalleryHTML() {
 
     .content { padding: 14px; }
     .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
-    .card { border: 1px solid #1f2a52; background: #050816; border-radius: 12px; overflow: hidden; cursor: pointer; position: relative; }
-    .card:hover { border-color: #00d4ff; }
-    .thumb { width: 100%; height: 140px; background: #000; object-fit: contain; display: block; }
+    .card { border: 1px solid #1f2a52; background: #050816; border-radius: 12px; overflow: hidden; cursor: pointer; position: relative; transition: transform 0.2s; }
+    .card:hover { border-color: #00d4ff; transform: translateY(-2px); }
+    .card.is-processing { opacity: 0.88; }
+    .thumb { width: 100%; height: 140px; background: #000; object-fit: cover; display: block; border-bottom: 1px solid #1f2a52; }
     .meta { padding: 8px 10px 10px; }
     .line1 { font-size: 11px; color: #9aa7d1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .line2 { font-size: 12px; color: #eee; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -2593,8 +2606,15 @@ function getGalleryHTML() {
         const idx = i + 1;
         star.classList.remove('full');
         star.classList.remove('half');
-        if (r >= idx) star.classList.add('full');
-        else if (r >= (idx - 0.5)) star.classList.add('half');
+        if (r >= idx) {
+          star.classList.add('full');
+          star.textContent = '★';
+        } else if (r >= (idx - 0.5)) {
+          star.classList.add('half');
+          star.textContent = '★';
+        } else {
+          star.textContent = '☆';
+        }
       }
     }
 
@@ -2608,7 +2628,7 @@ function getGalleryHTML() {
       for (let i = 1; i <= 5; i++) {
         const s = document.createElement('span');
         s.className = 'webdl-star';
-        s.textContent = '★';
+        s.textContent = '☆';
         s.dataset.i = String(i);
         box.appendChild(s);
       }
@@ -2718,7 +2738,7 @@ function getGalleryHTML() {
       elGrid.innerHTML = '';
     }
 
-    const THUMB_MAX_INFLIGHT = Math.max(1, Math.min(32, parseInt((new URLSearchParams(location.search)).get('thumb_inflight') || '20', 10) || 20));
+    const THUMB_MAX_INFLIGHT = 6;
     const thumbQueue = [];
     const thumbInflight = new Set();
     let thumbDrainTimer = null;
@@ -2736,10 +2756,78 @@ function getGalleryHTML() {
       drainThumbQueueSoon();
     }
 
+    function attachThumbRetry(img) {
+      if (!img) return;
+      try {
+        if (img.dataset && img.dataset._webdlThumbRetry) return;
+        if (img.dataset) img.dataset._webdlThumbRetry = '1';
+      } catch (e) {}
+
+      img.addEventListener('load', () => {
+        try { markThumbDone(img); } catch (e) {}
+        try {
+          const cur = String(img.currentSrc || img.src || '');
+          const card = img.closest('.card');
+          if (cur.startsWith('data:') || cur.includes('/media/pending-thumb.svg')) {
+            if (card) card.style.display = 'none';
+            if (!cur.includes('/media/pending-thumb.svg')) return;
+            const base = img.dataset ? String(img.dataset.src || '') : '';
+            if (!base) return;
+            const tries = img.dataset ? (parseInt(String(img.dataset.retries || '0'), 10) || 0) : 0;
+            if (tries >= 25) return;
+            if (img.dataset) img.dataset.retries = String(tries + 1);
+            const delay = Math.min(45000, Math.floor(1500 * Math.pow(1.35, tries) + (Math.random() * 500)));
+            setTimeout(() => {
+              try {
+                if (!img.isConnected) return;
+                if (img.dataset && img.dataset._thumbLoaded === '1') return;
+                const u = base + (base.includes('?') ? '&' : '?') + 'r=' + Date.now();
+                img.src = u;
+              } catch (e2) {}
+            }, delay);
+            return;
+          }
+          if (card) card.style.display = '';
+        } catch (e) {}
+        try { if (img.dataset) img.dataset._thumbLoaded = '1'; } catch (e) {}
+      }, { once: false });
+
+      img.addEventListener('error', () => {
+        try { markThumbDone(img); } catch (e) {}
+        try {
+          if (img.dataset && img.dataset._thumbLoaded === '1') return;
+          const card = img.closest('.card');
+          const base = img.dataset ? String(img.dataset.src || '') : '';
+          const tries = img.dataset ? parseInt(String(img.dataset.retries || '0'), 10) || 0 : 0;
+          if (!base || tries >= 25) {
+            img.src = FALLBACK_THUMB;
+            if (card) card.style.display = 'none';
+            return;
+          }
+
+          if (card) card.style.display = 'none';
+          if (img.dataset) img.dataset.retries = String(tries + 1);
+          const delay = Math.min(45000, Math.floor(2000 * Math.pow(1.45, tries) + (Math.random() * 500)));
+          setTimeout(() => {
+            try {
+              if (!img.isConnected) return;
+              if (img.dataset && img.dataset._thumbLoaded === '1') return;
+              const u = base + (base.includes('?') ? '&' : '?') + 'r=' + Date.now();
+              img.src = u;
+            } catch (e2) {}
+          }, delay);
+        } catch (e) {}
+      }, { once: false });
+    }
+
     function setThumbSource(img, real) {
       try {
         if (!img) return;
         const base = String(real || '');
+        if (base) {
+          try { attachThumbRetry(img); } catch (e) {}
+        }
+        
         const prevBase = (img.dataset && typeof img.dataset.src === 'string') ? String(img.dataset.src || '') : '';
         const prevReal = (img.dataset && typeof img.dataset.real === 'string') ? String(img.dataset.real || '') : '';
         try {
@@ -2762,33 +2850,15 @@ function getGalleryHTML() {
           try { thumbIo.unobserve(img); } catch (e) {}
           return;
         }
-        if (base && (base.startsWith('/') || base.startsWith('https://') || base.startsWith('http://'))) {
-          const preloader = new Image();
-          preloader.onload = () => {
-            try {
-              img.src = base;
-              try { if (img.dataset) img.dataset.src = ''; } catch (e) {}
-              try { if (img.dataset) img.dataset.real = base; } catch (e) {}
-              try { if (img.dataset) img.dataset._thumbLoaded = '1'; } catch (e) {}
-              try { if (img.dataset) img.dataset._thumbQueued = ''; } catch (e) {}
-              try { if (img.dataset) img.dataset._thumbFallback = ''; } catch (e) {}
-            } catch (e) {}
-          };
-          preloader.onerror = () => {
-            try {
-              img.src = FALLBACK_THUMB;
-              try { if (img.dataset) img.dataset._thumbFallback = '1'; } catch (e) {}
-            } catch (e) {}
-          };
-          preloader.src = base;
-          return;
-        }
         img.src = FALLBACK_THUMB;
+        const card = img.closest('.card');
+        if (card) card.style.display = 'none';
         try { if (img.dataset) img.dataset.src = base; } catch (e) {}
         try { if (img.dataset) img.dataset.real = base; } catch (e) {}
         try { if (img.dataset) img.dataset._thumbLoaded = ''; } catch (e) {}
         try { if (img.dataset) img.dataset._thumbQueued = ''; } catch (e) {}
         try { if (img.dataset) img.dataset._thumbFallback = base ? '1' : ''; } catch (e) {}
+        
         try {
           if (img.dataset) {
             const baseUnchanged = prevBase && base && prevBase === base;
@@ -2799,8 +2869,8 @@ function getGalleryHTML() {
             }
           }
         } catch (e) {}
+
         if (base) {
-          try { attachThumbRetry(img); } catch (e) {}
           try { thumbIo.observe(img); } catch (e) {}
         } else {
           try { if (img.dataset) img.dataset.real = ''; } catch (e) {}
@@ -3071,10 +3141,10 @@ function getGalleryHTML() {
         const it = items[i];
         const key = itemKey(it);
         const card = document.createElement('div');
-        card.className = 'card';
+        card.className = 'card' + (it.is_thumb_ready === false ? ' is-processing' : '');
         card.dataset.key = key;
-        if (it && it.ready === false) {
-          card.style.opacity = '0.82';
+        if (it && (it.ready === false || it.is_thumb_ready === false)) {
+          card.style.opacity = '0.92';
         }
 
         const img = document.createElement('img');
@@ -3085,10 +3155,16 @@ function getGalleryHTML() {
           setThumbSource(img, thumbUrl);
         } else {
           const real = thumbUrl || '';
+          if (img.dataset) {
+            img.dataset.src = real;
+            img.dataset.real = '';
+            img.dataset._thumbLoaded = '';
+            img.dataset._thumbQueued = '';
+          }
+          img.src = FALLBACK_THUMB;
+          try { attachThumbRetry(img); } catch (e) {}
           if (real) {
-            setThumbSource(img, real);
-          } else {
-            setThumbSource(img, '');
+            try { thumbIo.observe(img); } catch (e) {}
           }
         }
         img.alt = it.title || '';
@@ -3182,10 +3258,10 @@ function getGalleryHTML() {
         const it = items[i];
         const key = itemKey(it);
         const card = document.createElement('div');
-        card.className = 'card';
+        card.className = 'card' + (it.is_thumb_ready === false ? ' is-processing' : '');
         card.dataset.key = key;
-        if (it && it.ready === false) {
-          card.style.opacity = '0.82';
+        if (it && (it.ready === false || it.is_thumb_ready === false)) {
+          card.style.opacity = '0.92';
         }
 
         const img = document.createElement('img');
@@ -3196,10 +3272,16 @@ function getGalleryHTML() {
           setThumbSource(img, thumbUrl);
         } else {
           const real = thumbUrl || '';
+          if (img.dataset) {
+            img.dataset.src = real;
+            img.dataset.real = '';
+            img.dataset._thumbLoaded = '';
+            img.dataset._thumbQueued = '';
+          }
+          img.src = FALLBACK_THUMB;
+          try { attachThumbRetry(img); } catch (e) {}
           if (real) {
-            setThumbSource(img, real);
-          } else {
-            setThumbSource(img, '');
+            try { thumbIo.observe(img); } catch (e) {}
           }
         }
         img.alt = it.title || '';
@@ -3747,6 +3829,9 @@ function getGalleryHTML() {
 
     async function loadNext() {
       if (state.loading || state.done) return;
+      try {
+      } catch (e) {}
+
       state.loading = true;
       const startTime = Date.now();
       elSentinel.textContent = '⏳ Verbinden met server...';
@@ -4326,9 +4411,9 @@ if (!fs.existsSync(BASE_DIR)) {
 // ========================
 // DATABASE
 // ========================
-const DATABASE_URL = String(process.env.DATABASE_URL || '').trim();
-const DEFAULT_DB_ENGINE = DATABASE_URL ? 'postgres' : 'sqlite';
-const WEBDL_DB_ENGINE = String(process.env.WEBDL_DB_ENGINE || DEFAULT_DB_ENGINE).trim();
+const DATABASE_URL = String(process.env.DATABASE_URL || 'postgres://localhost/webdl').trim();
+const DEFAULT_DB_ENGINE = 'postgres';
+const WEBDL_DB_ENGINE = 'postgres';
 if ((WEBDL_DB_ENGINE === 'postgres' || WEBDL_DB_ENGINE === 'pg') && !DATABASE_URL) {
   throw new Error('DATABASE_URL is required when WEBDL_DB_ENGINE=postgres');
 }
@@ -5117,7 +5202,7 @@ const getRecentIndexedMedia = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
+      COALESCE(NULLIF(CAST(f.mtime_ms AS BIGINT), 0), CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT)) AS ts,
       d.url AS url,
       d.source_url AS source_url,
       d.rating AS rating,
@@ -5369,7 +5454,46 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
 `);
 
 const getRecentHybridMedia = db.prepare(db.isPostgres ? `
-  SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
+  SELECT kind, id, platform, channel, title, filepath, created_at, ts_ms, is_thumb_ready, thumbnail, url, source_url, rating, rating_kind, rating_id
+  FROM (
+    SELECT 'p' AS kind, f.relpath AS id, d.platform, d.channel, d.title, NULL AS filepath, COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at, f.ts_ms, f.is_thumb_ready, NULL AS thumbnail, d.url, d.source_url, d.rating, 'd' AS rating_kind, d.id AS rating_id
+    FROM download_files f JOIN downloads d ON d.id = f.download_id
+    WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
+    UNION ALL
+    SELECT 'd' AS kind, CAST(id AS TEXT) AS id, platform, channel, title, filepath, created_at::text, ts_ms, is_thumb_ready, thumbnail, url, source_url, rating, 'd' AS rating_kind, id AS rating_id
+    FROM downloads
+    WHERE status NOT IN ('pending', 'queued', 'downloading', 'postprocessing') AND filepath IS NOT NULL AND TRIM(filepath) != ''
+    UNION ALL
+    SELECT 's' AS kind, CAST(id AS TEXT) AS id, platform, channel, title, filepath, created_at::text, ts_ms, is_thumb_ready, NULL AS thumbnail, url, NULL AS source_url, rating, 's' AS rating_kind, id AS rating_id
+    FROM screenshots
+    WHERE filepath IS NOT NULL AND TRIM(filepath) != ''
+  ) sub
+  WHERE ($1::BIGINT IS NULL OR ts_ms < $1 OR (ts_ms = $1 AND id < $2))
+  ORDER BY ts_ms DESC, id DESC
+  LIMIT $3
+` : `
+  SELECT kind, id, platform, channel, title, filepath, created_at, ts_ms, is_thumb_ready, thumbnail, url, source_url, rating, rating_kind, rating_id
+  FROM (
+    SELECT 'p' AS kind, f.relpath AS id, d.platform, d.channel, d.title, NULL AS filepath, COALESCE(f.created_at, d.created_at) AS created_at, f.ts_ms, f.is_thumb_ready, NULL AS thumbnail, d.url, d.source_url, d.rating, 'd' AS rating_kind, d.id AS rating_id
+    FROM download_files f JOIN downloads d ON d.id = f.download_id
+    WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
+    UNION ALL
+    SELECT 'd' AS kind, CAST(id AS TEXT) AS id, platform, channel, title, filepath, created_at, ts_ms, is_thumb_ready, thumbnail, url, source_url, rating, 'd' AS rating_kind, id AS rating_id
+    FROM downloads
+    WHERE status NOT IN ('pending', 'queued', 'downloading', 'postprocessing') AND filepath IS NOT NULL AND TRIM(filepath) != '' AND NOT EXISTS (SELECT 1 FROM download_files f2 WHERE f2.download_id = downloads.id)
+    UNION ALL
+    SELECT 's' AS kind, CAST(id AS TEXT) AS id, platform, channel, title, filepath, created_at, ts_ms, is_thumb_ready, NULL AS thumbnail, url, NULL AS source_url, rating, 's' AS rating_kind, id AS rating_id
+    FROM screenshots
+    WHERE filepath IS NOT NULL AND TRIM(filepath) != ''
+  ) sub
+  WHERE (? IS NULL OR ts_ms < ? OR (ts_ms = ? AND id < ?))
+  ORDER BY ts_ms DESC, id DESC
+  LIMIT ?
+`);
+
+
+const getHybridMediaRecent = db.prepare(db.isPostgres ? `
+  SELECT kind, id, platform, channel, title, filepath, created_at, ts_ms, is_thumb_ready, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
     SELECT
       'p' AS kind,
@@ -5379,7 +5503,8 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-      COALESCE(NULLIF(CAST(f.mtime_ms AS BIGINT), 0), CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT)) AS ts,
+      f.ts_ms AS ts_ms,
+      f.is_thumb_ready AS is_thumb_ready,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -5388,7 +5513,7 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
       d.id AS rating_id
     FROM download_files f
     JOIN downloads d ON d.id = f.download_id
-    WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
+    WHERE d.status NOT IN ('pending', 'queued')
 
     UNION ALL
 
@@ -5400,74 +5525,8 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
       d.title AS title,
       d.filepath AS filepath,
       d.created_at::text AS created_at,
-      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
-      d.thumbnail AS thumbnail,
-      d.url AS url,
-      d.source_url AS source_url,
-      d.rating AS rating,
-      'd' AS rating_kind,
-      d.id AS rating_id
-    FROM downloads d
-    WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
-      AND d.filepath IS NOT NULL
-      AND TRIM(d.filepath) != ''
-
-    UNION ALL
-
-    SELECT
-      's' AS kind,
-      CAST(s.id AS TEXT) AS id,
-      s.platform AS platform,
-      s.channel AS channel,
-      s.title AS title,
-      s.filepath AS filepath,
-      s.created_at::text AS created_at,
-      CAST(EXTRACT(EPOCH FROM s.created_at) * 1000 AS BIGINT) AS ts,
-      NULL AS thumbnail,
-      s.url AS url,
-      NULL AS source_url,
-      s.rating AS rating,
-      's' AS rating_kind,
-      s.id AS rating_id
-    FROM screenshots s
-    WHERE s.filepath IS NOT NULL
-      AND TRIM(s.filepath) != ''
-  )
-  ORDER BY ts DESC
-  LIMIT ? OFFSET ?
-` : `
-  SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
-  FROM (
-    SELECT
-      'p' AS kind,
-      f.relpath AS id,
-      d.platform AS platform,
-      d.channel AS channel,
-      d.title AS title,
-      NULL AS filepath,
-      COALESCE(f.created_at, d.created_at) AS created_at,
-      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
-      NULL AS thumbnail,
-      d.url AS url,
-      d.source_url AS source_url,
-      d.rating AS rating,
-      'd' AS rating_kind,
-      d.id AS rating_id
-    FROM download_files f
-    JOIN downloads d ON d.id = f.download_id
-    WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
-
-    UNION ALL
-
-    SELECT
-      'd' AS kind,
-      CAST(d.id AS TEXT) AS id,
-      d.platform AS platform,
-      d.channel AS channel,
-      d.title AS title,
-      d.filepath AS filepath,
-      d.created_at AS created_at,
-      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
+      d.ts_ms AS ts_ms,
+      d.is_thumb_ready AS is_thumb_ready,
       d.thumbnail AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -5489,8 +5548,9 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
       s.channel AS channel,
       s.title AS title,
       s.filepath AS filepath,
-      s.created_at AS created_at,
-      CAST(strftime('%s', s.created_at) AS INTEGER) * 1000 AS ts,
+      s.created_at::text AS created_at,
+      s.ts_ms AS ts_ms,
+      s.is_thumb_ready AS is_thumb_ready,
       NULL AS thumbnail,
       s.url AS url,
       NULL AS source_url,
@@ -5500,13 +5560,25 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
     FROM screenshots s
     WHERE s.filepath IS NOT NULL
       AND TRIM(s.filepath) != ''
+  ) sub
+  WHERE (?::BIGINT IS NULL OR ts_ms < ?::BIGINT OR (ts_ms = ?::BIGINT AND id < ?))
+  ORDER BY ts_ms DESC, id DESC
+  LIMIT ?
+` : `
+  SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
+  FROM (
+    SELECT 'p' AS kind, f.relpath AS id, d.platform, d.channel, d.title, NULL AS filepath, NULL AS created_at, 0 AS ts, NULL AS thumbnail, d.url, d.source_url, d.rating, 'd' AS rating_kind, d.id AS rating_id FROM download_files f JOIN downloads d ON d.id = f.download_id
+    UNION ALL
+    SELECT 'd' AS kind, CAST(id AS TEXT) AS id, platform, channel, title, filepath, created_at, 0 AS ts, thumbnail, url, source_url, rating, 'd' AS rating_kind, id AS rating_id FROM downloads d
+    UNION ALL
+    SELECT 's' AS kind, CAST(id AS TEXT) AS id, platform, channel, title, filepath, created_at, 0 AS ts, NULL AS thumbnail, url, NULL AS source_url, rating, 's' AS rating_kind, id AS rating_id FROM screenshots s
   )
   ORDER BY ts DESC
   LIMIT ? OFFSET ?
 `);
 
 const getHybridMediaByChannel = db.prepare(db.isPostgres ? `
-  SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
+  SELECT kind, id, platform, channel, title, filepath, created_at, ts_ms, is_thumb_ready, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
     SELECT
       'p' AS kind,
@@ -5516,7 +5588,8 @@ const getHybridMediaByChannel = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-      COALESCE(NULLIF(CAST(f.mtime_ms AS BIGINT), 0), CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT)) AS ts,
+      f.ts_ms AS ts_ms,
+      f.is_thumb_ready AS is_thumb_ready,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -5538,7 +5611,8 @@ const getHybridMediaByChannel = db.prepare(db.isPostgres ? `
       d.title AS title,
       d.filepath AS filepath,
       d.created_at::text AS created_at,
-      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
+      d.ts_ms AS ts_ms,
+      d.is_thumb_ready AS is_thumb_ready,
       d.thumbnail AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -5561,7 +5635,8 @@ const getHybridMediaByChannel = db.prepare(db.isPostgres ? `
       s.title AS title,
       s.filepath AS filepath,
       s.created_at::text AS created_at,
-      CAST(EXTRACT(EPOCH FROM s.created_at) * 1000 AS BIGINT) AS ts,
+      s.ts_ms AS ts_ms,
+      s.is_thumb_ready AS is_thumb_ready,
       NULL AS thumbnail,
       s.url AS url,
       NULL AS source_url,
@@ -5572,9 +5647,10 @@ const getHybridMediaByChannel = db.prepare(db.isPostgres ? `
     WHERE s.platform = ? AND s.channel = ?
       AND s.filepath IS NOT NULL
       AND TRIM(s.filepath) != ''
-  )
-  ORDER BY ts DESC
-  LIMIT ? OFFSET ?
+  ) sub
+  WHERE (?::BIGINT IS NULL OR ts_ms < ?::BIGINT OR (ts_ms = ?::BIGINT AND id < ?))
+  ORDER BY ts_ms DESC, id DESC
+  LIMIT ?
 ` : `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
@@ -5658,7 +5734,7 @@ const getRecentHybridMediaByOldest = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
+      COALESCE(NULLIF(CAST(f.mtime_ms AS BIGINT), 0), CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT)) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -5795,7 +5871,7 @@ const getRecentHybridMediaByNameAsc = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
+      COALESCE(NULLIF(CAST(f.mtime_ms AS BIGINT), 0), CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT)) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -5933,7 +6009,7 @@ const getRecentHybridMediaByNameDesc = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
+      COALESCE(NULLIF(CAST(f.mtime_ms AS BIGINT), 0), CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT)) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -6061,7 +6137,7 @@ const getRecentHybridMediaByNameDesc = db.prepare(db.isPostgres ? `
 `);
 
 const getHybridMediaByChannelByOldest = db.prepare(db.isPostgres ? `
-  SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
+  SELECT kind, id, platform, channel, title, filepath, created_at, ts_ms, is_thumb_ready, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
     SELECT
       'p' AS kind,
@@ -6071,7 +6147,8 @@ const getHybridMediaByChannelByOldest = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
+      f.ts_ms AS ts_ms,
+      f.is_thumb_ready AS is_thumb_ready,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -6093,7 +6170,8 @@ const getHybridMediaByChannelByOldest = db.prepare(db.isPostgres ? `
       d.title AS title,
       d.filepath AS filepath,
       d.created_at::text AS created_at,
-      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
+      d.ts_ms AS ts_ms,
+      d.is_thumb_ready AS is_thumb_ready,
       d.thumbnail AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -6116,7 +6194,8 @@ const getHybridMediaByChannelByOldest = db.prepare(db.isPostgres ? `
       s.title AS title,
       s.filepath AS filepath,
       s.created_at::text AS created_at,
-      CAST(EXTRACT(EPOCH FROM s.created_at) * 1000 AS BIGINT) AS ts,
+      s.ts_ms AS ts_ms,
+      s.is_thumb_ready AS is_thumb_ready,
       NULL AS thumbnail,
       s.url AS url,
       NULL AS source_url,
@@ -6127,9 +6206,10 @@ const getHybridMediaByChannelByOldest = db.prepare(db.isPostgres ? `
     WHERE s.platform = ? AND s.channel = ?
       AND s.filepath IS NOT NULL
       AND TRIM(s.filepath) != ''
-  )
-  ORDER BY ts ASC
-  LIMIT ? OFFSET ?
+  ) sub
+  WHERE (?::BIGINT IS NULL OR ts_ms > ?::BIGINT OR (ts_ms = ?::BIGINT AND id > ?))
+  ORDER BY ts_ms ASC, id ASC
+  LIMIT ?
 ` : `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
@@ -6213,7 +6293,7 @@ const getHybridMediaByChannelByNameAsc = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
+      COALESCE(NULLIF(CAST(f.mtime_ms AS BIGINT), 0), CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT)) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -6270,9 +6350,10 @@ const getHybridMediaByChannelByNameAsc = db.prepare(db.isPostgres ? `
     WHERE s.platform = ? AND s.channel = ?
       AND s.filepath IS NOT NULL
       AND TRIM(s.filepath) != ''
-  )
-  ORDER BY LOWER(COALESCE(NULLIF(title, ''), id)) ASC, ts DESC
-  LIMIT ? OFFSET ?
+  ) sub
+  WHERE (?::BIGINT IS NULL OR ts_ms < ?::BIGINT OR (ts_ms = ?::BIGINT AND id < ?))
+  ORDER BY ts_ms DESC, id DESC
+  LIMIT ?
 ` : `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
@@ -6341,9 +6422,10 @@ const getHybridMediaByChannelByNameAsc = db.prepare(db.isPostgres ? `
     WHERE s.platform = ? AND s.channel = ?
       AND s.filepath IS NOT NULL
       AND TRIM(s.filepath) != ''
-  )
-  ORDER BY LOWER(COALESCE(NULLIF(title, ''), id)) ASC, ts DESC
-  LIMIT ? OFFSET ?
+  ) sub
+  WHERE (?::BIGINT IS NULL OR ts_ms < ?::BIGINT OR (ts_ms = ?::BIGINT AND id < ?))
+  ORDER BY ts_ms DESC, id DESC
+  LIMIT ?
 `);
 
 const getHybridMediaByChannelByNameDesc = db.prepare(db.isPostgres ? `
@@ -6357,7 +6439,7 @@ const getHybridMediaByChannelByNameDesc = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
+      COALESCE(NULLIF(CAST(f.mtime_ms AS BIGINT), 0), CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT)) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -6491,7 +6573,7 @@ const getHybridMediaByChannelByNameDesc = db.prepare(db.isPostgres ? `
 `);
 
 const getHybridMediaByChannelWithActiveFiles = db.prepare(db.isPostgres ? `
-  SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
+  SELECT kind, id, platform, channel, title, filepath, created_at, ts_ms, is_thumb_ready, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
     SELECT
       'p' AS kind,
@@ -6501,7 +6583,8 @@ const getHybridMediaByChannelWithActiveFiles = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-      COALESCE(NULLIF(CAST(f.mtime_ms AS BIGINT), 0), CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT)) AS ts,
+      f.ts_ms AS ts_ms,
+      f.is_thumb_ready AS is_thumb_ready,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -6523,7 +6606,8 @@ const getHybridMediaByChannelWithActiveFiles = db.prepare(db.isPostgres ? `
       d.title AS title,
       d.filepath AS filepath,
       d.created_at::text AS created_at,
-      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
+      d.ts_ms AS ts_ms,
+      d.is_thumb_ready AS is_thumb_ready,
       d.thumbnail AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -6546,7 +6630,8 @@ const getHybridMediaByChannelWithActiveFiles = db.prepare(db.isPostgres ? `
       s.title AS title,
       s.filepath AS filepath,
       s.created_at::text AS created_at,
-      CAST(EXTRACT(EPOCH FROM s.created_at) * 1000 AS BIGINT) AS ts,
+      s.ts_ms AS ts_ms,
+      s.is_thumb_ready AS is_thumb_ready,
       NULL AS thumbnail,
       s.url AS url,
       NULL AS source_url,
@@ -6557,9 +6642,10 @@ const getHybridMediaByChannelWithActiveFiles = db.prepare(db.isPostgres ? `
     WHERE s.platform = ? AND s.channel = ?
       AND s.filepath IS NOT NULL
       AND TRIM(s.filepath) != ''
-  )
-  ORDER BY ts DESC
-  LIMIT ? OFFSET ?
+  ) sub
+  WHERE (?::BIGINT IS NULL OR ts_ms < ?::BIGINT OR (ts_ms = ?::BIGINT AND id < ?))
+  ORDER BY ts_ms DESC, id DESC
+  LIMIT ?
 ` : `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
@@ -6644,7 +6730,7 @@ const getRecentHybridMediaByRatingDesc = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
+      COALESCE(NULLIF(CAST(f.mtime_ms AS BIGINT), 0), CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT)) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -6782,7 +6868,7 @@ const getRecentHybridMediaByRatingAsc = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
+      COALESCE(NULLIF(CAST(f.mtime_ms AS BIGINT), 0), CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT)) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -6910,7 +6996,7 @@ const getRecentHybridMediaByRatingAsc = db.prepare(db.isPostgres ? `
 `);
 
 const getHybridMediaByChannelByRatingDesc = db.prepare(db.isPostgres ? `
-  SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
+  SELECT kind, id, platform, channel, title, filepath, created_at, ts_ms, is_thumb_ready, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
     SELECT
       'p' AS kind,
@@ -6920,7 +7006,8 @@ const getHybridMediaByChannelByRatingDesc = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
+      f.ts_ms AS ts_ms,
+      f.is_thumb_ready AS is_thumb_ready,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -6942,7 +7029,8 @@ const getHybridMediaByChannelByRatingDesc = db.prepare(db.isPostgres ? `
       d.title AS title,
       d.filepath AS filepath,
       d.created_at::text AS created_at,
-      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
+      d.ts_ms AS ts_ms,
+      d.is_thumb_ready AS is_thumb_ready,
       d.thumbnail AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -6966,7 +7054,8 @@ const getHybridMediaByChannelByRatingDesc = db.prepare(db.isPostgres ? `
       s.title AS title,
       s.filepath AS filepath,
       s.created_at::text AS created_at,
-      CAST(EXTRACT(EPOCH FROM s.created_at) * 1000 AS BIGINT) AS ts,
+      s.ts_ms AS ts_ms,
+      s.is_thumb_ready AS is_thumb_ready,
       NULL AS thumbnail,
       s.url AS url,
       NULL AS source_url,
@@ -6977,9 +7066,10 @@ const getHybridMediaByChannelByRatingDesc = db.prepare(db.isPostgres ? `
     WHERE s.platform = ? AND s.channel = ?
       AND s.filepath IS NOT NULL
       AND TRIM(s.filepath) != ''
-  )
-  ORDER BY (rating IS NULL) ASC, rating DESC, ts DESC
-  LIMIT ? OFFSET ?
+  ) sub
+  WHERE (?::FLOAT IS NULL OR rating < ?::FLOAT OR (rating = ?::FLOAT AND (ts_ms < ?::BIGINT OR (ts_ms = ?::BIGINT AND id < ?))))
+  ORDER BY (rating IS NULL) ASC, rating DESC, ts_ms DESC, id DESC
+  LIMIT ?
 ` : `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
@@ -7064,7 +7154,7 @@ const getHybridMediaByChannelByRatingAsc = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
+      COALESCE(NULLIF(CAST(f.mtime_ms AS BIGINT), 0), CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT)) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -7121,9 +7211,10 @@ const getHybridMediaByChannelByRatingAsc = db.prepare(db.isPostgres ? `
     WHERE s.platform = ? AND s.channel = ?
       AND s.filepath IS NOT NULL
       AND TRIM(s.filepath) != ''
-  )
-  ORDER BY (rating IS NULL) ASC, rating ASC, ts DESC
-  LIMIT ? OFFSET ?
+  ) sub
+  WHERE (?::FLOAT IS NULL OR rating > ?::FLOAT OR (rating = ?::FLOAT AND (ts_ms < ?::BIGINT OR (ts_ms = ?::BIGINT AND id < ?))))
+  ORDER BY (rating IS NULL) ASC, rating ASC, ts_ms DESC, id DESC
+  LIMIT ?
 ` : `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
@@ -7208,7 +7299,7 @@ const getIndexedMediaByChannel = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
+      COALESCE(NULLIF(CAST(f.mtime_ms AS BIGINT), 0), CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT)) AS ts,
       d.url AS url,
       d.source_url AS source_url,
       d.rating AS rating,
@@ -7343,6 +7434,7 @@ const STATS_CACHE_MS = Math.max(250, parseInt(process.env.WEBDL_STATS_CACHE_MS |
 
 let recentFilesTopCache = new Map();
 let recentFilesTopCacheAt = 0;
+const recentFilesPromiseCache = new Map();
 const RECENT_FILES_TOP_CACHE_MS = Math.max(250, parseInt(process.env.WEBDL_RECENT_FILES_TOP_CACHE_MS || '2000', 10) || 2000);
 
 function buildRecentFilesCacheMarker(stats) {
@@ -7513,8 +7605,8 @@ const getMediaByChannelByRatingAsc = db.prepare(`
 // ========================
 const activeProcesses = new Map();
 
-const HEAVY_DOWNLOAD_CONCURRENCY = parseInt(process.env.WEBDL_HEAVY_DOWNLOAD_CONCURRENCY || '4', 10);
-const LIGHT_DOWNLOAD_CONCURRENCY = parseInt(process.env.WEBDL_LIGHT_DOWNLOAD_CONCURRENCY || '3', 10);
+const HEAVY_DOWNLOAD_CONCURRENCY = parseInt(process.env.WEBDL_HEAVY_DOWNLOAD_CONCURRENCY || '2', 10);
+const LIGHT_DOWNLOAD_CONCURRENCY = parseInt(process.env.WEBDL_LIGHT_DOWNLOAD_CONCURRENCY || '2', 10);
 
 const initialYoutubeConcurrency = parseInt(process.env.WEBDL_YOUTUBE_DOWNLOAD_CONCURRENCY || '1', 10);
 const initialYoutubeSpacing = parseInt(process.env.WEBDL_YOUTUBE_START_SPACING_MS || '0', 10);
@@ -8435,7 +8527,7 @@ expressApp.get('/media/path-thumb', (req, res) => {
         let sched = 'error';
         try {sched = scheduleThumbGeneration(abs) || 'error';} catch (e) {}
         logMissingThumbOnce('path-thumb', rel, sched);
-        return res.redirect(302, `/media/pending-thumb.svg?kind=path&id=${encodeURIComponent(rel.slice(0, 120))}`);
+        return res.status(404).end();
       }
       res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
       try {
@@ -9063,134 +9155,80 @@ async function extractVideoThumbnail(videoPath, outJpgPath) {
   throw new Error(lastErr || 'ffmpeg thumbnail failed');
 }
 
-const THUMB_GEN_CONCURRENCY = Math.max(0, parseInt(process.env.WEBDL_THUMB_GEN_CONCURRENCY || '2', 10) || 2);
-const THUMB_GEN_MAX_QUEUE = Math.max(50, Math.min(5000, parseInt(process.env.WEBDL_THUMB_GEN_MAX_QUEUE || '1200', 10) || 1200));
+const THUMB_GEN_CONCURRENCY = Math.max(0, parseInt(process.env.WEBDL_THUMB_GEN_CONCURRENCY || '1', 10) || 1);
+const THUMB_GEN_MAX_QUEUE = 512;
+
+let thumbGenQueue = [];
+let thumbGenQueued = new Set();
 let thumbGenActive = 0;
-let thumbGenTimer = null;
-const thumbGenQueue = [];
-const thumbGenQueued = new Set();
-const thumbGenInflight = new Set();
-
-const THUMB_GEN_COOLDOWN_MS = Math.max(2500, parseInt(process.env.WEBDL_THUMB_GEN_COOLDOWN_MS || '30000', 10) || 30000);
-const thumbGenCooldownUntil = new Map();
-
+let thumbGenInflight = new Set();
+let thumbGenFailOnce = new Set();
 let thumbGenScheduleTotal = 0;
 let thumbGenScheduleEnqueued = 0;
-const thumbGenScheduleDenied = {
-  no_concurrency: 0,
-  empty_path: 0,
-  not_allowed: 0,
-  dup: 0,
-  queue_full: 0,
-  cooldown: 0
-};
+let thumbGenScheduleDenied = 0;
+let thumbWorker = null;
+let thumbWorkerBusy = false;
 
-const thumbGenFailOnce = new Set();
-function logThumbGenFailureOnce(abs, err) {
-  try {
-    const msg = (err && err.message) ? String(err.message) : String(err || '');
-    const key = String(abs || '') + '::' + msg.slice(0, 220);
-    if (!key.trim()) return;
-    if (thumbGenFailOnce.has(key)) return;
-    thumbGenFailOnce.add(key);
-    if (thumbGenFailOnce.size > 400) {
-      try { thumbGenFailOnce.clear(); } catch (e) {}
+function initThumbWorker() {
+  if (thumbWorker || THUMB_GEN_CONCURRENCY < 1) return;
+  console.log('Initializing thumbnail worker thread...');
+  thumbWorker = new Worker(path.join(__dirname, 'thumb-worker.js'), {
+    workerData: { ffmpegPath: FFMPEG }
+  });
+  
+  thumbWorker.on('message', async (res) => {
+    thumbWorkerBusy = false;
+    if (res.status === 'success') {
+      const table = res.kind === 'd' ? 'downloads' : 'screenshots';
+      await db.prepare(`UPDATE ${table} SET is_thumb_ready = TRUE WHERE id = ?`).run(res.id);
+    } else {
+      console.warn(`Thumb worker error for ${res.id} (${res.kind}): ${res.error}`);
     }
-    console.warn(`⚠️ thumb gen failed: ${abs} :: ${msg}`);
-  } catch (e) {}
+    drainThumbGenQueueSoon();
+  });
+
+  thumbWorker.on('error', (err) => {
+    console.error('Thumbnail worker thread fatal error:', err);
+    thumbWorker = null;
+    thumbWorkerBusy = false;
+    setTimeout(initThumbWorker, 5000);
+  });
+}
+
+function processNextThumbJob() {
+  if (thumbWorkerBusy || !thumbWorker) return;
+  
+  // Find next unready video in DB
+  const next = db.prepare(`
+    SELECT 'd' as kind, id, filepath FROM downloads WHERE is_thumb_ready = FALSE AND filepath IS NOT NULL AND status NOT IN ('pending', 'queued', 'downloading')
+    UNION ALL
+    SELECT 's' as kind, id, filepath FROM screenshots WHERE is_thumb_ready = FALSE AND filepath IS NOT NULL
+    LIMIT 1
+  `).get();
+
+  if (next) {
+    const thumbPath = next.filepath.replace(/\.[^.]+$/, '_thumb.jpg');
+    thumbWorkerBusy = true;
+    thumbWorker.postMessage({
+      videoPath: next.filepath,
+      outJpgPath: thumbPath,
+      id: next.id,
+      kind: next.kind
+    });
+  }
 }
 
 function drainThumbGenQueueSoon() {
-  if (thumbGenTimer) return;
-  thumbGenTimer = setTimeout(() => {
-    thumbGenTimer = null;
+  setTimeout(() => {
     drainThumbGenQueue();
   }, 150);
 }
 
 function scheduleThumbGeneration(targetPath) {
-  try {
-    thumbGenScheduleTotal++;
-    if (!THUMB_GEN_CONCURRENCY) {
-      thumbGenScheduleDenied.no_concurrency++;
-      return 'no_concurrency';
-    }
-    const abs = path.resolve(String(targetPath || ''));
-    if (!abs) {
-      thumbGenScheduleDenied.empty_path++;
-      return 'empty_path';
-    }
-    if (!safeIsAllowedExistingPath(abs)) {
-      thumbGenScheduleDenied.not_allowed++;
-      return 'not_allowed';
-    }
-    try {
-      const until = thumbGenCooldownUntil.has(abs) ? Number(thumbGenCooldownUntil.get(abs) || 0) : 0;
-      if (until && Date.now() < until) {
-        thumbGenScheduleDenied.cooldown++;
-        return 'cooldown';
-      }
-    } catch (e) {}
-    if (thumbGenInflight.has(abs) || thumbGenQueued.has(abs)) {
-      thumbGenScheduleDenied.dup++;
-      return 'dup';
-    }
-    if (thumbGenQueue.length >= THUMB_GEN_MAX_QUEUE) {
-      thumbGenScheduleDenied.queue_full++;
-      return 'queue_full';
-    }
-    thumbGenQueued.add(abs);
-    thumbGenQueue.push(abs);
-    thumbGenScheduleEnqueued++;
-    drainThumbGenQueueSoon();
-    return 'enqueued';
-  } catch (e) {}
-  return 'error';
+  drainThumbGenQueueSoon();
+  return 'queued';
 }
 
-function drainThumbGenQueue() {
-  try {
-    while (thumbGenActive < THUMB_GEN_CONCURRENCY && thumbGenQueue.length) {
-      const abs = thumbGenQueue.shift();
-      if (!abs) continue;
-      thumbGenQueued.delete(abs);
-      if (thumbGenInflight.has(abs)) continue;
-      thumbGenInflight.add(abs);
-      thumbGenActive++;
-      pickOrCreateThumbPath(abs, { allowGenerate: true, throwOnError: true }).
-      then((out) => {
-        if (out) return;
-        try {
-          const st = fs.existsSync(abs) ? fs.statSync(abs) : null;
-          const ageMs = st ? (Date.now() - (st.mtimeMs || 0)) : 0;
-          if (ageMs > 15000) {
-            logThumbGenFailureOnce(abs, new Error('thumb gen returned null'));
-            try {
-              thumbGenCooldownUntil.set(abs, Date.now() + THUMB_GEN_COOLDOWN_MS);
-              if (thumbGenCooldownUntil.size > 12000) {
-                const keys = Array.from(thumbGenCooldownUntil.keys()).slice(0, Math.max(1, thumbGenCooldownUntil.size - 9000));
-                for (const k of keys) thumbGenCooldownUntil.delete(k);
-              }
-            } catch (e) {}
-          }
-        } catch (e) {}
-      }).
-      catch((e) => {
-        try { logThumbGenFailureOnce(abs, e); } catch (e2) {}
-        try {
-          const st = fs.existsSync(abs) ? fs.statSync(abs) : null;
-          const ageMs = st ? (Date.now() - (st.mtimeMs || 0)) : 0;
-          if (ageMs > 15000) thumbGenCooldownUntil.set(abs, Date.now() + THUMB_GEN_COOLDOWN_MS);
-        } catch (e2) {}
-      }).
-      finally(() => {
-        thumbGenActive = Math.max(0, thumbGenActive - 1);
-        thumbGenInflight.delete(abs);
-        drainThumbGenQueueSoon();
-      });
-    }
-  } catch (e) {}
-}
 
 async function pickOrCreateThumbPath(targetPath, opts) {
   try {
@@ -9216,7 +9254,11 @@ async function pickOrCreateThumbPath(targetPath, opts) {
       } catch (e) {}
 
       const sniff = (() => {
-        try { return sniffMediaKindByMagic(abs); } catch (e) { return null; }
+        try {
+          if (typeof isImagePath === 'function' && isImagePath(abs)) return 'image';
+          if (typeof isVideoPath === 'function' && isVideoPath(abs)) return 'video';
+          return sniffMediaKindByMagic(abs);
+        } catch (e) { return null; }
       })();
 
       if (stat.isFile() && (isVideoPath(abs) || sniff === 'video')) {
@@ -11704,12 +11746,11 @@ function looksLikeDirectFileUrl(url) {
 
     if (host.includes('tiktokcdn.com') || host.includes('ttwstatic.com')) return true;
     if (host.includes('cdninstagram.com') || host.includes('fbcdn.net')) return true;
-    if ((host === 'amateurvoyeurforum.com' || host === 'www.amateurvoyeurforum.com' || host.endsWith('.amateurvoyeurforum.com')) && String(u.pathname || '').toLowerCase() === '/attachment.php' && !!String(u.searchParams.get('attachmentid') || '').trim()) return true;
 
     const p = (u.pathname || '').toLowerCase();
-    const m = p.match(/\.([a-z0-9]{1,8})$/i);
+    const m = p.match(/\.([a-z0-9]{1,8})($|\?|#)/i); // Added query/hash support
     if (!m) {
-      const suffix = p.match(/[-_](zip|rar|7z|tar|gz|jpg|jpeg|png|gif|webp|bmp|mp4|mov|m4v|webm|mkv|mp3|m4a|wav|flac|pdf)$/i);
+      const suffix = p.match(/[-_](zip|rar|7z|tar|gz|jpg|jpeg|png|gif|webp|bmp|mp4|mov|m4v|webm|mkv|mp3|m4a|wav|flac|pdf)($|\?|#)/i);
       return !!suffix;
     }
     const ext = m[1];
@@ -11745,7 +11786,6 @@ function isKnownHtmlWrapperUrl(url) {
     const p = String(u.pathname || '');
     if (host === 'upload.footfetishforum.com' && p.startsWith('/image/')) return true;
     if (host.endsWith('pixhost.to') && p.startsWith('/show/')) return true;
-    if ((host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) && /\/(attachments?|attach)\//i.test(p)) return true;
     if (host === 'jpg.pet' && /^\/img\//i.test(p)) return true;
     if (host === 'pixeldrain.com' && /^\/u\//i.test(p)) return true;
     if (isKnownExternalMediaWrapperHost(host)) return true;
@@ -11888,16 +11928,16 @@ function upgradeKnownLowQualityMediaUrl(rawUrl) {
     const input = String(rawUrl || '').trim();
     if (!input) return '';
     let out = input
-      .replace(/\.md\.(jpg|jpeg|png|gif|webp)$/i, '.$1')
-      .replace(/\.th\.(jpg|jpeg|png|gif|webp)$/i, '.$1');
+      .replace(/\.md\.(jpg|jpeg|png|gif|webp)(?:$|[?#])/i, '.$1')
+      .replace(/\.th\.(jpg|jpeg|png|gif|webp)(?:$|[?#])/i, '.$1');
     try {
       const u = new URL(out);
       const host = String(u.hostname || '').toLowerCase();
       const p = String(u.pathname || '');
       if ((host === 'upload.footfetishforum.com' || host.endsWith('.footfetishforum.com')) && /\/images\//i.test(p)) {
         u.pathname = p
-          .replace(/\.md\.(jpg|jpeg|png|gif|webp)$/i, '.$1')
-          .replace(/\.th\.(jpg|jpeg|png|gif|webp)$/i, '.$1');
+          .replace(/\.md\.(jpg|jpeg|png|gif|webp)(?:$|[?#])/i, '.$1')
+          .replace(/\.th\.(jpg|jpeg|png|gif|webp)(?:$|[?#])/i, '.$1');
         out = u.toString();
       }
       if (host.endsWith('pixhost.to')) {
@@ -11929,9 +11969,14 @@ function scoreDirectMediaCandidate(url, baseUrl = '') {
       }
       if (baseAttachment.slug && s.toLowerCase().includes(baseAttachment.slug)) score += 180;
     }
-    if (/\.(?:th|md)\.(jpg|jpeg|png|gif|webp)(?:$|[?#])/i.test(s)) score -= 160;
-    if (/\/thumbs\//i.test(s)) score -= 180;
-    if (/(?:^|[^a-z])(thumb|thumbnail|preview|poster|cover|small)(?:[^a-z]|$)/i.test(s)) score -= 120;
+    // STRONGLY PENALIZE THUMBNAILS
+    if (/\.(?:th|md)\.(jpg|jpeg|png|gif|webp)(?:$|[?#])/i.test(s)) score -= 5000;
+    if (/\/thumbs\//i.test(s)) score -= 5000;
+    if (/(?:^|[^a-z])(thumb|thumbnail|preview|poster|cover|small)(?:[^a-z]|$)/i.test(s)) score -= 5000;
+    if (/data\/attachments\/\d+\/\d+-.*\.jpg/i.test(s)) {
+      // Asset url, high confidence
+      score += 1500;
+    }
     return score;
   } catch (e) {
     return -1000;
@@ -13152,6 +13197,15 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
             const retryResult = await runOnce([], false, extra, allowRetryNoCheckCertificates);
             return resolve(retryResult);
           }
+          
+          if (lastFile) {
+            const candidate = lastFile.startsWith('/') ? lastFile : path.join(dir, lastFile);
+            if (fs.existsSync(candidate)) {
+               console.log(`   [#${downloadId}] yt-dlp exited with code ${code}, but file exists. Treating as success.`);
+               return resolve({ success: true, code, lastFile, stderrAll });
+            }
+          }
+
           return resolve({ success: false, code, lastFile, stderrAll });
         });
 
@@ -14012,13 +14066,13 @@ expressApp.get('/media/thumb', (req, res) => {
         const st = String(download.status || '').toLowerCase();
         if (!isReadyDownloadStatus(st)) {
           res.setHeader('Cache-Control', 'no-store');
-          return res.redirect(302, `/media/pending-thumb.svg?kind=${encodeURIComponent(kind)}&id=${encodeURIComponent(String(id))}`);
+          return res.status(404).end();
         }
 
         const fp = String(download.filepath || '').trim();
         if (!fp || !safeIsAllowedExistingPath(fp)) {
           res.setHeader('Cache-Control', 'no-store');
-          return res.redirect(302, `/media/pending-thumb.svg?kind=${encodeURIComponent(kind)}&id=${encodeURIComponent(String(id))}`);
+          return res.status(404).end();
         }
         const thumbPath = await pickOrCreateThumbPath(fp, { allowGenerate: false });
         if (!thumbPath) {
@@ -14026,7 +14080,7 @@ expressApp.get('/media/thumb', (req, res) => {
           try {sched = scheduleThumbGeneration(fp) || 'error';} catch (e) {}
           logMissingThumbOnce('media-thumb', id, sched);
           res.setHeader('Cache-Control', 'no-store');
-          return res.redirect(302, `/media/pending-thumb.svg?kind=${encodeURIComponent(kind)}&id=${encodeURIComponent(String(id))}`);
+          return res.status(404).end();
         }
         res.setHeader('Cache-Control', 'public, max-age=86400');
         try {
@@ -14258,15 +14312,17 @@ function inferMediaType(fp) {
   try {
     const p = String(fp || '').trim();
     if (!p) return 'file';
+    
+    // Fast extension bypass
+    const ext = String(path.extname(p)).toLowerCase();
+    if (['.mp4', '.mov', '.m4v', '.webm', '.mkv'].includes(ext)) return 'video';
+    if (['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.svg', '.avif', '.heic', '.heif'].includes(ext)) return 'image';
+
     const abs = path.resolve(p);
     if (safeIsAllowedExistingPath(abs)) {
       const st = fs.statSync(abs);
       if (st && st.isDirectory && st.isDirectory()) {
-        const img = pickThumbnailFile(abs);
-        if (img) return 'image';
-        const v = findFirstVideoInDirDeep(abs) || findFirstVideoInDir(abs);
-        if (v) return 'video';
-        return 'file';
+        return 'folder';
       }
       if (st && st.isFile && st.isFile()) {
         const sn = sniffMediaKindByMagic(abs);
@@ -14276,9 +14332,6 @@ function inferMediaType(fp) {
     }
   } catch (e) {}
 
-  const ext = String(path.extname(String(fp || '')).toLowerCase() || '');
-  if (['.mp4', '.mov', '.m4v', '.webm', '.mkv'].includes(ext)) return 'video';
-  if (['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.svg', '.avif', '.heic', '.heif'].includes(ext)) return 'image';
   return 'file';
 }
 
@@ -14364,9 +14417,10 @@ function makeMediaItem(row) {
   if (channelDisplay) titleDisplay = title ? `${channelDisplay} • ${title}` : channelDisplay;
 
   const src = `/media/file?kind=${encodeURIComponent(row.kind)}&id=${encodeURIComponent(row.id)}`;
+  const preferredThumbFinal = preferredThumb ? (preferredThumb.includes('?') ? `${preferredThumb}&v=6` : `${preferredThumb}?v=6`) : '';
   const thumb = t === 'image' && src ?
   src :
-  preferredThumb || `/media/thumb?kind=${encodeURIComponent(row.kind)}&id=${encodeURIComponent(row.id)}&v=5`;
+  preferredThumbFinal || `/media/thumb?kind=${encodeURIComponent(row.kind)}&id=${encodeURIComponent(row.id)}&v=6`;
 
   return {
     kind: row.kind,
@@ -14385,7 +14439,9 @@ function makeMediaItem(row) {
     source_url: row.source_url || null,
     dedupe_key: dedupeKey || null,
     file_rel: fileRel || null,
-    ready: true,
+    ts_ms: row.ts_ms || 0,
+    is_thumb_ready: !!row.is_thumb_ready,
+    ready: !!row.is_thumb_ready,
     src,
     thumb,
     open: { kind: row.kind, id: row.id }
@@ -14474,16 +14530,15 @@ function encodeCursor(obj) {
 function decodeCursor(str) {
   try {
     const s = String(str || '').trim();
-    if (!s) return { activeOffset: 0, rowOffset: 0, dir: '', fileIndex: 0 };
+    if (!s) return { ts_ms: null, id: null };
     const raw = Buffer.from(s, 'base64').toString('utf8');
     const obj = JSON.parse(raw);
-    const activeOffset = obj.activeOffset === -1 ? -1 : Math.max(0, parseInt(obj.activeOffset || 0, 10) || 0);
-    const rowOffset = Math.max(0, parseInt(obj.rowOffset || 0, 10) || 0);
-    const dir = String(obj.dir || '');
-    const fileIndex = Math.max(0, parseInt(obj.fileIndex || 0, 10) || 0);
-    return { activeOffset, rowOffset, dir, fileIndex };
+    return {
+      ts_ms: obj.ts_ms || null,
+      id: obj.id || null
+    };
   } catch (e) {
-    return { activeOffset: 0, rowOffset: 0, dir: '', fileIndex: 0 };
+    return { ts_ms: null, id: null };
   }
 }
 
@@ -14608,7 +14663,7 @@ function dedupeVideoThumbnailPairs(files) {
   }
 }
 
-function makePathMediaItem({ relPath, platform, channel, title, created_at, thumbTs, url, source_url, rating, rating_kind, rating_id }) {
+function makePathMediaItem({ relPath, platform, channel, title, created_at, thumbTs, ts_ms, is_thumb_ready, url, source_url, rating, rating_kind, rating_id }) {
   const absPath = path.resolve(BASE_DIR, relPath);
   if (isAuxiliaryMediaPath(absPath)) return null;
   const type = inferMediaType(absPath);
@@ -14648,10 +14703,37 @@ function makePathMediaItem({ relPath, platform, channel, title, created_at, thum
     source_url: source_url || null,
     dedupe_key: dedupeKey,
     file_rel: relPath,
+    ts_ms: ts_ms || 0,
+    is_thumb_ready: !!is_thumb_ready,
+    ready: !!is_thumb_ready,
     src: `/media/path?path=${encodeURIComponent(relPath)}`,
     thumb: `/media/path-thumb?path=${encodeURIComponent(relPath)}&v=5${thumbTs ? '&t=' + encodeURIComponent(String(thumbTs)) : ''}`,
     open: { path: relPath }
   };
+}
+
+function isMediaThumbReady(filepath) {
+  if (!filepath) return false;
+  try {
+    const abs = path.resolve(filepath);
+    if (!safeIsAllowedExistingPath(abs)) return false;
+    const sidecarExts = ['.webp', '.jpg', '.jpeg', '.png'];
+    const dir = path.dirname(abs);
+    const base = path.basename(abs, path.extname(abs));
+    for (const ext of sidecarExts) {
+      const cand = path.join(dir, base + ext);
+      if (safeIsInsideBaseDir(cand) && fs.existsSync(cand)) {
+        const st = fs.statSync(cand);
+        if (st && st.size >= 5000) return true;
+      }
+    }
+    const out = makeVideoThumbPath(abs);
+    if (out && safeIsInsideBaseDir(out) && fs.existsSync(out)) {
+      const st2 = fs.statSync(out);
+      if (st2 && st2.size >= MIN_THUMB_BYTES) return true;
+    }
+  } catch (e) {}
+  return false;
 }
 
 function makeIndexedMediaItem(row) {
@@ -14676,6 +14758,8 @@ function makeIndexedMediaItem(row) {
       title: row.title,
       created_at: row.created_at,
       thumbTs,
+      ts_ms: row.ts_ms,
+      is_thumb_ready: row.is_thumb_ready,
       url: row.url,
       source_url: row.source_url,
       rating: row.rating,
@@ -14865,13 +14949,19 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
     if (!includeActive && !includeActiveFiles && isTopCursor) {
       try {
         const now = Date.now();
+        console.time('statsRow');
         const st = await getStatsRowCached();
+        console.timeEnd('statsRow');
         const marker = buildRecentFilesCacheMarker(st);
         const dirFilterKey = enabledDirs && enabledDirs.length ? enabledDirs.sort().join(',') : '_all';
         const key = `recent|${type}|${limit}|${sort}|${dirFilterKey}`;
         const cached = recentFilesTopCache.get(key);
         if (cached && cached.marker === marker && now - (cached.at || 0) < RECENT_FILES_TOP_CACHE_MS) {
           return res.json(cached.payload);
+        }
+        if (recentFilesPromiseCache.has(key)) {
+          const promiseData = await recentFilesPromiseCache.get(key);
+          return res.json(promiseData);
         }
         if (now - recentFilesTopCacheAt > RECENT_FILES_TOP_CACHE_MS * 8) {
           recentFilesTopCacheAt = now;
@@ -14880,15 +14970,20 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
       } catch (e) {}
     }
 
+  const executePromise = (async () => {
     const items = [];
     const seenKeys = new Map();
 
-    const isTopRequest = !cursorRaw || (cur && cur.activeOffset === 0 && cur.rowOffset === 0 && !cur.dir && cur.fileIndex === 0);
+    const isTopRequest = isTopCursor;
+    
+    // Keyset pagination parameters
+    let tsCursor = (cur && cur.ts_ms) ? cur.ts_ms : null;
+    let idCursor = (cur && cur.id) ? cur.id : null;
+
     if (includeActive && isTopRequest) {
       try {
         const cap = Math.min(28, Math.max(8, Math.floor(limit / 2)));
-        const rows = runtimeActiveRows;
-        for (const r of rows || []) {
+        for (const r of runtimeActiveRows || []) {
           if (!r) continue;
           const it = makeActiveDownloadItem(r);
           pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
@@ -14896,65 +14991,58 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
         }
       } catch (e) {}
     }
-    const nextActiveOffset = -1;
-    let rowOffset = cur.rowOffset;
-    const hasDirectoryFilter = enabledDirs && enabledDirs.length > 0 && enabledDirs.length < 10;
-    const maxRowsPerCall = hasDirectoryFilter ? 800 : 260;
-    const getBatch = (sort === 'rating_asc') ? getRecentHybridMediaByRatingAsc : (sort === 'rating_desc') ? getRecentHybridMediaByRatingDesc : (sort === 'oldest') ? getRecentHybridMediaByOldest : (sort === 'name_asc') ? getRecentHybridMediaByNameAsc : (sort === 'name_desc') ? getRecentHybridMediaByNameDesc : (includeActiveFiles ? getRecentHybridMediaWithActiveFiles : getRecentHybridMedia);
-    const batch = await getBatch.all(maxRowsPerCall, rowOffset);
-    for (const row of batch || []) {
-      if (row && row.platform === 'patreon') {
-        console.log(`[DEBUG-PATREON-API] Found DB row: id=${row.id}, kind=${row.kind}, filepath=${row.filepath}, includeActiveFiles=${includeActiveFiles}`);
-      }
 
-      if (!row) {rowOffset += 1;continue;}
+    console.time('getBatch');
+    const batch = await getHybridMediaRecent.all(tsCursor, tsCursor, tsCursor, idCursor, limit + 20); // Repeat tsCursor for ? placeholders
+    console.timeEnd('getBatch');
+
+    for (const row of batch || []) {
+      if (!row) continue;
       
-      // Apply directory filter
-      const relPath = row.kind === 'p' ? row.id : (row.filepath ? path.relative(BASE_DIR, row.filepath) : '');
-      if (enabledDirs && relPath && !shouldIncludePath(relPath, enabledDirs)) {
-        rowOffset += 1;
-        continue;
-      }
-      if (includeActiveFiles && String(row.kind || '') === 'p' && row.rating_kind === 'd' && row.rating_id != null) {
-        const idNum = Number(row.rating_id);
-        if (Number.isFinite(idNum) && !runtimeActiveIdSet.has(idNum)) {
-          try {
-            const dr = await getDownload.get(idNum);
-            const st = String(dr && dr.status ? dr.status : '').toLowerCase();
-            if (st === 'downloading' || st === 'postprocessing' || st === 'queued' || st === 'pending') {
-              rowOffset += 1;
-              continue;
-            }
-          } catch (e) {}
-        }
-      }
       const it = makeIndexedMediaItem(row);
       pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
-      rowOffset += 1;
+      
       if (items.length >= limit) break;
     }
 
-    const nextCursor = encodeCursor({ activeOffset: nextActiveOffset, rowOffset, dir: '', fileIndex: 0 });
-    const done = (batch && batch.length ? batch.length : 0) < maxRowsPerCall;
+    // New Keyset Cursor: points to the LAST item returned
+    let nextCursor = '';
+    if (items.length > 0) {
+      const last = items[items.length - 1];
+      nextCursor = encodeCursor({ ts_ms: last.ts_ms, id: last.id });
+    }
+
+    const done = batch.length < limit;
     const payload = { success: true, items, next_cursor: nextCursor, done };
     const reqTime = Date.now() - reqStartTime;
     console.log(`📤 [${new Date().toISOString().substr(11,8)}] Response /api/media/recent-files - ${items.length} items in ${reqTime}ms`);
-
-    if (!includeActive && !includeActiveFiles && (!cursorRaw || cur && cur.activeOffset === 0 && cur.rowOffset === 0 && !cur.dir && cur.fileIndex === 0)) {
+    return payload;
+  })();
+  
+  if (isTopCursor && !includeActive && !includeActiveFiles) {
+    const dirFilterKey = enabledDirs && enabledDirs.length ? enabledDirs.sort((a,b)=>a.localeCompare(b)).join(',') : '_all';
+    const key = `recent|${type}|${limit}|${sort}|${dirFilterKey}`;
+    recentFilesPromiseCache.set(key, executePromise);
+    try {
+      const payload = await executePromise;
+      recentFilesPromiseCache.delete(key);
       try {
         const st = await getStatsRowCached();
         const marker = buildRecentFilesCacheMarker(st);
-        const dirFilterKey = enabledDirs && enabledDirs.length ? enabledDirs.sort().join(',') : '_all';
-        const key = `recent|${type}|${limit}|${sort}|${dirFilterKey}`;
         recentFilesTopCache.set(key, { at: Date.now(), marker, payload });
         if (recentFilesTopCache.size > 80) {
           const keys = Array.from(recentFilesTopCache.keys()).slice(0, Math.max(1, recentFilesTopCache.size - 60));
           for (const k of keys) recentFilesTopCache.delete(k);
         }
       } catch (e) {}
+      return res.json(payload);
+    } catch (e) {
+      recentFilesPromiseCache.delete(key);
+      throw e;
     }
-
-    return res.json(payload);
+  } else {
+    return res.json(await executePromise);
+  }
   } catch (e) {
     return res.status(500).json({ success: false, error: e.message });
   }
@@ -15007,7 +15095,7 @@ expressApp.get('/api/media/channel-files', async (req, res) => {
     const items = [];
     const seenKeys = new Map();
 
-    const isTopRequest = !cursorRaw || (cur && cur.activeOffset === 0 && cur.rowOffset === 0 && !cur.dir && cur.fileIndex === 0);
+    const isTopRequest = !cursorRaw || (cur && cur.ts_ms == null);
     if (includeActive && isTopRequest) {
       try {
         const cap = Math.min(28, Math.max(8, Math.floor(limit / 2)));
@@ -15022,42 +15110,43 @@ expressApp.get('/api/media/channel-files', async (req, res) => {
         }
       } catch (e) {}
     }
-    const nextActiveOffset = -1;
-    let rowOffset = cur.rowOffset;
-    const hasDirectoryFilter = enabledDirs && enabledDirs.length > 0 && enabledDirs.length < 10;
-    const maxRowsPerCall = hasDirectoryFilter ? 800 : 260;
-    const getBatch = (sort === 'rating_asc') ? getHybridMediaByChannelByRatingAsc : (sort === 'rating_desc') ? getHybridMediaByChannelByRatingDesc : (sort === 'oldest') ? getHybridMediaByChannelByOldest : (sort === 'name_asc') ? getHybridMediaByChannelByNameAsc : (sort === 'name_desc') ? getHybridMediaByChannelByNameDesc : (includeActiveFiles ? getHybridMediaByChannelWithActiveFiles : getHybridMediaByChannel);
-    const batch = await getBatch.all(platform, channel, platform, channel, platform, channel, maxRowsPerCall, rowOffset);
-    for (const row of batch || []) {
-      if (row && row.platform === 'patreon') {
-        console.log(`[DEBUG-PATREON-API] Found DB row: id=${row.id}, kind=${row.kind}, filepath=${row.filepath}, includeActiveFiles=${includeActiveFiles}`);
-      }
 
-      if (!row) {rowOffset += 1;continue;}
-      if (includeActiveFiles && String(row.kind || '') === 'p' && row.rating_kind === 'd' && row.rating_id != null) {
-        const idNum = Number(row.rating_id);
-        if (Number.isFinite(idNum) && !runtimeActiveIdSet.has(idNum)) {
-          try {
-            const dr = await getDownload.get(idNum);
-            const st = String(dr && dr.status ? dr.status : '').toLowerCase();
-            if (st === 'downloading' || st === 'postprocessing' || st === 'queued' || st === 'pending') {
-              rowOffset += 1;
-              continue;
-            }
-          } catch (e) {}
-        }
-      }
+    const cursorTs = cur.ts_ms || null;
+    const cursorId = cur.id || null;
+    const cursorRating = cur.rating || null;
+
+    const getBatch = (sort === 'rating_asc') ? getHybridMediaByChannelByRatingAsc : (sort === 'rating_desc') ? getHybridMediaByChannelByRatingDesc : (sort === 'oldest') ? getHybridMediaByChannelByOldest : (sort === 'name_asc') ? getHybridMediaByChannelByNameAsc : (sort === 'name_desc') ? getHybridMediaByChannelByNameDesc : (includeActiveFiles ? getHybridMediaByChannelWithActiveFiles : getHybridMediaByChannel);
+    
+    let params;
+    if (sort === 'rating_asc' || sort === 'rating_desc') {
+      params = [platform, channel, platform, channel, platform, channel, cursorRating, cursorRating, cursorRating, cursorTs, cursorTs, cursorId, limit];
+    } else {
+      params = [platform, channel, platform, channel, platform, channel, cursorTs, cursorTs, cursorTs, cursorId, limit];
+    }
+
+    const batch = await getBatch.all(...params);
+    for (const row of batch || []) {
+      if (!row) continue;
+      
       const it = makeIndexedMediaItem(row);
       pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
-      rowOffset += 1;
       if (items.length >= limit) break;
     }
 
-    const nextCursor = encodeCursor({ activeOffset: nextActiveOffset, rowOffset, dir: '', fileIndex: 0 });
-    const done = (batch && batch.length ? batch.length : 0) < maxRowsPerCall;
+    let nextCursor = '';
+    if (items.length > 0) {
+      const last = items[items.length - 1];
+      nextCursor = encodeCursor({
+        ts_ms: last.ts_ms,
+        id: last.id,
+        rating: last.rating
+      });
+    }
+
+    const done = (batch && batch.length ? batch.length : 0) < limit;
     const payload = { success: true, items, next_cursor: nextCursor, done };
 
-    if (!includeActive && !includeActiveFiles && (!cursorRaw || cur && cur.activeOffset === 0 && cur.rowOffset === 0 && !cur.dir && cur.fileIndex === 0)) {
+    if (!includeActive && !includeActiveFiles && isTopRequest) {
       try {
         const st = await getStatsRowCached();
         const marker = buildRecentFilesCacheMarker(st);
@@ -15609,7 +15698,7 @@ function getDashboardHTML(downloads, screenshots, batchFiles) {
     return `
     <tr class="status-${status}">
       <td>${d.id}${isGroup ? ` <span style="color:#666">(${Number(d._count || 0)})</span>` : ''}</td>
-      <td>${d.filepath ? `<img src="/download/${d.id}/thumb?v=3" style="width:64px;height:36px;object-fit:cover;border-radius:4px;" onerror="this.style.display='none'" />` : ''}</td>
+      <td>${d.filepath ? `<img src="/download/${d.id}/thumb?v=4" style="width:64px;height:36px;object-fit:cover;border-radius:4px;" onerror="this.style.display='none'" />` : ''}</td>
       <td><span class="badge">${dashCaptureKind(d)} / ${dashMediaTypeFromPath(d.filepath)}${isGroup ? ' / thread' : ''}</span></td>
       <td><span class="badge badge-${d.platform}">${d.platform}</span></td>
       <td>${d.channel}</td>

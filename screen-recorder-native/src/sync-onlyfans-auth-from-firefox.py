@@ -20,8 +20,15 @@ def find_default_firefox_profile() -> Path:
 
 
 def copy_sqlite_for_read(src: Path) -> Path:
-    tmp = Path(tempfile.mkstemp(suffix=src.suffix)[1])
+    tmp_dir = Path(tempfile.mkdtemp())
+    tmp = tmp_dir / src.name
     shutil.copy2(src, tmp)
+    wal = src.with_name(src.name + '-wal')
+    shm = src.with_name(src.name + '-shm')
+    if wal.exists():
+        shutil.copy2(wal, tmp_dir / wal.name)
+    if shm.exists():
+        shutil.copy2(shm, tmp_dir / shm.name)
     return tmp
 
 
@@ -44,7 +51,7 @@ def read_onlyfans_cookies(profile: Path) -> dict:
         except Exception:
             pass
         try:
-            tmp.unlink()
+            shutil.rmtree(tmp.parent)
         except Exception:
             pass
 
@@ -120,8 +127,17 @@ def main() -> int:
     existing_cookie = str(auth.get('cookie') or '')
     auth['cookie'] = build_cookie_string(existing_cookie, live_cookies)
     auth['x_bc'] = str(live_cookies.get('fp') or auth.get('x_bc') or '')
-    if not auth.get('user_agent'):
-        auth['user_agent'] = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:147.0) Gecko/20100101 Firefox/147.0'
+    
+    import subprocess
+    firefox_version = "148.0"
+    try:
+        out = subprocess.check_output(['defaults', 'read', '/Applications/Firefox.app/Contents/Info.plist', 'CFBundleShortVersionString'], text=True).strip()
+        if out and '.' in out:
+            firefox_version = out.split('.')[0] + ".0"
+    except Exception:
+        pass
+        
+    auth['user_agent'] = f'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:{firefox_version}) Gecko/20100101 Firefox/{firefox_version}'
 
     backup = auth_path.with_name(auth_path.name + '.pre_firefox_sync.bak')
     shutil.copy2(auth_path, backup)
@@ -130,6 +146,7 @@ def main() -> int:
     print(f'profile={profile}')
     print(f'auth={auth_path}')
     print(f'backup={backup}')
+    print(f'user_agent={auth["user_agent"]}')
     print('cookies=' + ','.join(sorted(live_cookies.keys())))
     print('auth_id=' + str(live_cookies.get('auth_id', '')))
     print('sess_prefix=' + str(live_cookies.get('sess', ''))[:8])

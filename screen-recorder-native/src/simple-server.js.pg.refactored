@@ -176,17 +176,18 @@ function parseFootFetishForumAttachmentInfo(inputUrl) {
   try {
     const u = new URL(String(inputUrl || ''));
     const host = String(u.hostname || '').toLowerCase();
-    const pathname = String(u.pathname || '');
     if ((host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) && /\/attachments\//i.test(pathname)) {
       const m = pathname.match(/\/attachments\/([^\/]+)\.(\d+)(?:\/|\?|#|$)/i);
-      if (!m) return null;
-      return {
-        kind: 'page',
-        slug: String(m[1] || '').trim().toLowerCase(),
-        id: String(m[2] || '').trim()
-      };
+      if (m) {
+        return {
+          kind: 'page',
+          slug: String(m[1] || '').trim().toLowerCase(),
+          id: String(m[2] || '').trim()
+        };
+      }
     }
-    if (host.includes('digitaloceanspaces.com') && /\/data\/attachments\//i.test(pathname)) {
+    // Remove the digitaloceanspaces.com domain check completely, as assets can be served from footfetishforum.com directly
+    if (/\/data\/attachments\//i.test(pathname) || /\/attachments\//i.test(pathname)) {
       const base = path.basename(pathname || '');
       const m = base.match(/^(\d+)-([^./?#]+)/i);
       if (!m) return null;
@@ -2201,7 +2202,7 @@ function getGalleryHTML() {
     .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
     .card { border: 1px solid #1f2a52; background: #050816; border-radius: 12px; overflow: hidden; cursor: pointer; position: relative; }
     .card:hover { border-color: #00d4ff; }
-    .thumb { width: 100%; height: 140px; background: #000; object-fit: contain; display: block; }
+    .thumb { width: 100%; height: 140px; background: #000; object-fit: cover; display: block; }
     .meta { padding: 8px 10px 10px; }
     .line1 { font-size: 11px; color: #9aa7d1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .line2 { font-size: 12px; color: #eee; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -11704,12 +11705,11 @@ function looksLikeDirectFileUrl(url) {
 
     if (host.includes('tiktokcdn.com') || host.includes('ttwstatic.com')) return true;
     if (host.includes('cdninstagram.com') || host.includes('fbcdn.net')) return true;
-    if ((host === 'amateurvoyeurforum.com' || host === 'www.amateurvoyeurforum.com' || host.endsWith('.amateurvoyeurforum.com')) && String(u.pathname || '').toLowerCase() === '/attachment.php' && !!String(u.searchParams.get('attachmentid') || '').trim()) return true;
 
     const p = (u.pathname || '').toLowerCase();
-    const m = p.match(/\.([a-z0-9]{1,8})$/i);
+    const m = p.match(/\.([a-z0-9]{1,8})($|\?|#)/i); // Added query/hash support
     if (!m) {
-      const suffix = p.match(/[-_](zip|rar|7z|tar|gz|jpg|jpeg|png|gif|webp|bmp|mp4|mov|m4v|webm|mkv|mp3|m4a|wav|flac|pdf)$/i);
+      const suffix = p.match(/[-_](zip|rar|7z|tar|gz|jpg|jpeg|png|gif|webp|bmp|mp4|mov|m4v|webm|mkv|mp3|m4a|wav|flac|pdf)($|\?|#)/i);
       return !!suffix;
     }
     const ext = m[1];
@@ -11745,7 +11745,6 @@ function isKnownHtmlWrapperUrl(url) {
     const p = String(u.pathname || '');
     if (host === 'upload.footfetishforum.com' && p.startsWith('/image/')) return true;
     if (host.endsWith('pixhost.to') && p.startsWith('/show/')) return true;
-    if ((host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) && /\/(attachments?|attach)\//i.test(p)) return true;
     if (host === 'jpg.pet' && /^\/img\//i.test(p)) return true;
     if (host === 'pixeldrain.com' && /^\/u\//i.test(p)) return true;
     if (isKnownExternalMediaWrapperHost(host)) return true;
@@ -11888,16 +11887,16 @@ function upgradeKnownLowQualityMediaUrl(rawUrl) {
     const input = String(rawUrl || '').trim();
     if (!input) return '';
     let out = input
-      .replace(/\.md\.(jpg|jpeg|png|gif|webp)$/i, '.$1')
-      .replace(/\.th\.(jpg|jpeg|png|gif|webp)$/i, '.$1');
+      .replace(/\.md\.(jpg|jpeg|png|gif|webp)(?:$|[?#])/i, '.$1')
+      .replace(/\.th\.(jpg|jpeg|png|gif|webp)(?:$|[?#])/i, '.$1');
     try {
       const u = new URL(out);
       const host = String(u.hostname || '').toLowerCase();
       const p = String(u.pathname || '');
       if ((host === 'upload.footfetishforum.com' || host.endsWith('.footfetishforum.com')) && /\/images\//i.test(p)) {
         u.pathname = p
-          .replace(/\.md\.(jpg|jpeg|png|gif|webp)$/i, '.$1')
-          .replace(/\.th\.(jpg|jpeg|png|gif|webp)$/i, '.$1');
+          .replace(/\.md\.(jpg|jpeg|png|gif|webp)(?:$|[?#])/i, '.$1')
+          .replace(/\.th\.(jpg|jpeg|png|gif|webp)(?:$|[?#])/i, '.$1');
         out = u.toString();
       }
       if (host.endsWith('pixhost.to')) {
@@ -11929,9 +11928,14 @@ function scoreDirectMediaCandidate(url, baseUrl = '') {
       }
       if (baseAttachment.slug && s.toLowerCase().includes(baseAttachment.slug)) score += 180;
     }
-    if (/\.(?:th|md)\.(jpg|jpeg|png|gif|webp)(?:$|[?#])/i.test(s)) score -= 160;
-    if (/\/thumbs\//i.test(s)) score -= 180;
-    if (/(?:^|[^a-z])(thumb|thumbnail|preview|poster|cover|small)(?:[^a-z]|$)/i.test(s)) score -= 120;
+    // STRONGLY PENALIZE THUMBNAILS
+    if (/\.(?:th|md)\.(jpg|jpeg|png|gif|webp)(?:$|[?#])/i.test(s)) score -= 5000;
+    if (/\/thumbs\//i.test(s)) score -= 5000;
+    if (/(?:^|[^a-z])(thumb|thumbnail|preview|poster|cover|small)(?:[^a-z]|$)/i.test(s)) score -= 5000;
+    if (/data\/attachments\/\d+\/\d+-.*\.jpg/i.test(s)) {
+      // Asset url, high confidence
+      score += 1500;
+    }
     return score;
   } catch (e) {
     return -1000;
@@ -13152,6 +13156,15 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
             const retryResult = await runOnce([], false, extra, allowRetryNoCheckCertificates);
             return resolve(retryResult);
           }
+          
+          if (lastFile) {
+            const candidate = lastFile.startsWith('/') ? lastFile : path.join(dir, lastFile);
+            if (fs.existsSync(candidate)) {
+               console.log(`   [#${downloadId}] yt-dlp exited with code ${code}, but file exists. Treating as success.`);
+               return resolve({ success: true, code, lastFile, stderrAll });
+            }
+          }
+
           return resolve({ success: false, code, lastFile, stderrAll });
         });
 
@@ -14364,9 +14377,10 @@ function makeMediaItem(row) {
   if (channelDisplay) titleDisplay = title ? `${channelDisplay} • ${title}` : channelDisplay;
 
   const src = `/media/file?kind=${encodeURIComponent(row.kind)}&id=${encodeURIComponent(row.id)}`;
+  const preferredThumbFinal = preferredThumb ? (preferredThumb.includes('?') ? `${preferredThumb}&v=6` : `${preferredThumb}?v=6`) : '';
   const thumb = t === 'image' && src ?
   src :
-  preferredThumb || `/media/thumb?kind=${encodeURIComponent(row.kind)}&id=${encodeURIComponent(row.id)}&v=5`;
+  preferredThumbFinal || `/media/thumb?kind=${encodeURIComponent(row.kind)}&id=${encodeURIComponent(row.id)}&v=6`;
 
   return {
     kind: row.kind,
@@ -15609,7 +15623,7 @@ function getDashboardHTML(downloads, screenshots, batchFiles) {
     return `
     <tr class="status-${status}">
       <td>${d.id}${isGroup ? ` <span style="color:#666">(${Number(d._count || 0)})</span>` : ''}</td>
-      <td>${d.filepath ? `<img src="/download/${d.id}/thumb?v=3" style="width:64px;height:36px;object-fit:cover;border-radius:4px;" onerror="this.style.display='none'" />` : ''}</td>
+      <td>${d.filepath ? `<img src="/download/${d.id}/thumb?v=4" style="width:64px;height:36px;object-fit:cover;border-radius:4px;" onerror="this.style.display='none'" />` : ''}</td>
       <td><span class="badge">${dashCaptureKind(d)} / ${dashMediaTypeFromPath(d.filepath)}${isGroup ? ' / thread' : ''}</span></td>
       <td><span class="badge badge-${d.platform}">${d.platform}</span></td>
       <td>${d.channel}</td>
