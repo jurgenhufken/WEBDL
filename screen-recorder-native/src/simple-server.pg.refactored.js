@@ -3181,7 +3181,8 @@ function getGalleryHTML() {
 
         const b2 = document.createElement('div');
         b2.className = 'badge r';
-        if (it && it.ready === false) {
+        const isActiveDownload = it && it.ready === false && it.kind === 'd' && it.status && ['queued','pending','downloading','postprocessing'].includes(String(it.status).toLowerCase());
+        if (isActiveDownload) {
           const st = (it.status || 'queued');
           const pct = Number.isFinite(Number(it.progress)) ? Math.max(0, Math.min(100, Number(it.progress))) : 0;
           b2.textContent = st + ' ' + pct + '%';
@@ -3196,7 +3197,7 @@ function getGalleryHTML() {
         l1.textContent = it.channel_display || it.channel || 'unknown';
         const l2 = document.createElement('div');
         l2.className = 'line2';
-        if (it && it.ready === false) {
+        if (isActiveDownload) {
           const st = (it.status || 'queued');
           const pct = Number.isFinite(Number(it.progress)) ? Math.max(0, Math.min(100, Number(it.progress))) : 0;
           l2.textContent = (it.title || '(download)') + ' • ' + st + ' ' + pct + '%';
@@ -3298,7 +3299,8 @@ function getGalleryHTML() {
 
         const b2 = document.createElement('div');
         b2.className = 'badge r';
-        if (it && it.ready === false) {
+        const isActiveDownload2 = it && it.ready === false && it.kind === 'd' && it.status && ['queued','pending','downloading','postprocessing'].includes(String(it.status).toLowerCase());
+        if (isActiveDownload2) {
           const st = (it.status || 'queued');
           const pct = Number.isFinite(Number(it.progress)) ? Math.max(0, Math.min(100, Number(it.progress))) : 0;
           b2.textContent = st + ' ' + pct + '%';
@@ -3313,7 +3315,7 @@ function getGalleryHTML() {
         l1.textContent = it.channel_display || it.channel || 'unknown';
         const l2 = document.createElement('div');
         l2.className = 'line2';
-        if (it && it.ready === false) {
+        if (isActiveDownload2) {
           const st = (it.status || 'queued');
           const pct = Number.isFinite(Number(it.progress)) ? Math.max(0, Math.min(100, Number(it.progress))) : 0;
           l2.textContent = (it.title || '(download)') + ' • ' + st + ' ' + pct + '%';
@@ -5291,7 +5293,7 @@ const getRecentDashboardBatchFiles = db.prepare(db.isPostgres ? `
     d.id AS rating_id
   FROM download_files f
   JOIN downloads d ON d.id = f.download_id
-  WHERE d.status NOT IN ('pending', 'queued')
+  WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
   ORDER BY ts DESC
   LIMIT ?
 ` : `
@@ -5312,7 +5314,7 @@ const getRecentDashboardBatchFiles = db.prepare(db.isPostgres ? `
     d.id AS rating_id
   FROM download_files f
   JOIN downloads d ON d.id = f.download_id
-  WHERE d.status NOT IN ('pending', 'queued')
+  WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
   ORDER BY ts DESC
   LIMIT ?
 `);
@@ -5337,7 +5339,7 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
       d.id AS rating_id
     FROM download_files f
     JOIN downloads d ON d.id = f.download_id
-    WHERE d.status NOT IN ('pending', 'queued')
+    WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
 
     UNION ALL
 
@@ -5404,7 +5406,7 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
       d.id AS rating_id
     FROM download_files f
     JOIN downloads d ON d.id = f.download_id
-    WHERE d.status NOT IN ('pending', 'queued')
+    WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
 
     UNION ALL
 
@@ -5513,7 +5515,7 @@ const getHybridMediaRecent = db.prepare(db.isPostgres ? `
       d.id AS rating_id
     FROM download_files f
     JOIN downloads d ON d.id = f.download_id
-    WHERE d.status NOT IN ('pending', 'queued')
+    WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
 
     UNION ALL
 
@@ -6594,7 +6596,7 @@ const getHybridMediaByChannelWithActiveFiles = db.prepare(db.isPostgres ? `
     FROM download_files f
     JOIN downloads d ON d.id = f.download_id
     WHERE d.platform = ? AND d.channel = ?
-      AND d.status NOT IN ('pending', 'queued')
+      AND d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
 
     UNION ALL
 
@@ -6667,7 +6669,7 @@ const getHybridMediaByChannelWithActiveFiles = db.prepare(db.isPostgres ? `
     FROM download_files f
     JOIN downloads d ON d.id = f.download_id
     WHERE d.platform = ? AND d.channel = ?
-      AND d.status NOT IN ('pending', 'queued')
+      AND d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
 
     UNION ALL
 
