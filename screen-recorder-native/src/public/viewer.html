@@ -1,0 +1,1133 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WEBDL Viewer</title>
+  <style>
+    :root { --bg: #0b0f14; --panel: #101826; --accent: #00d4ff; --accent-hover: #009ecc; --text: #e5e7eb; --text-muted: #9aa4b2; --border: rgba(255,255,255,0.08); }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); padding: 24px; line-height: 1.5; }
+    .container { max-width: 1200px; margin: 0 auto; }
+    .header-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+    h1 { color: #fff; font-size: 24px; font-weight: 600; margin-bottom: 4px; }
+    .subtitle { color: var(--text-muted); font-size: 13px; }
+    .btn-main { background: var(--accent); color: #0b0f14; text-decoration: none; padding: 10px 18px; border-radius: 8px; font-weight: 600; font-size: 14px; transition: all 0.2s; display: inline-flex; align-items: center; gap: 8px; }
+    .btn-main:hover { background: var(--accent-hover); transform: translateY(-1px); }
+    
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 32px; }
+    .stat { background: var(--panel); padding: 20px; border-radius: 12px; border: 1px solid var(--border); transition: transform 0.2s; }
+    .stat:hover { transform: translateY(-2px); border-color: rgba(0,212,255,0.3); }
+    .stat-num { font-size: 32px; font-weight: 700; color: #fff; margin-bottom: 4px; }
+    .stat-label { color: var(--text-muted); font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+    
+    h2 { color: #fff; font-size: 18px; font-weight: 600; margin: 0 0 16px; display: flex; align-items: center; gap: 8px; }
+    
+    .section-card { background: var(--panel); border-radius: 12px; border: 1px solid var(--border); overflow: hidden; margin-bottom: 32px; }
+    
+    table { width: 100%; border-collapse: collapse; text-align: left; }
+    th, td { padding: 14px 20px; border-bottom: 1px solid var(--border); font-size: 14px; }
+    th { color: var(--text-muted); font-weight: 600; text-transform: uppercase; font-size: 12px; letter-spacing: 0.5px; background: rgba(0,0,0,0.2); }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: rgba(255,255,255,0.02); }
+    
+    .status-badge { display: inline-block; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+    .status-completed { background: rgba(46, 204, 113, 0.15); color: #2ecc71; border: 1px solid rgba(46, 204, 113, 0.3); }
+    .status-downloading { background: rgba(0, 212, 255, 0.15); color: var(--accent); border: 1px solid rgba(0, 212, 255, 0.3); }
+    .status-postprocessing { background: rgba(155, 89, 182, 0.15); color: #9b59b6; border: 1px solid rgba(155, 89, 182, 0.3); }
+    .status-queued { background: rgba(243, 156, 18, 0.15); color: #f39c12; border: 1px solid rgba(243, 156, 18, 0.3); }
+    .status-pending { background: rgba(149, 165, 166, 0.15); color: #95a5a6; border: 1px solid rgba(149, 165, 166, 0.3); }
+    .status-error { background: rgba(231, 76, 60, 0.15); color: #e74c3c; border: 1px solid rgba(231, 76, 60, 0.3); }
+    .status-cancelled { background: rgba(52, 73, 94, 0.15); color: #bdc3c7; border: 1px solid rgba(52, 73, 94, 0.3); }
+    
+    .platform-badge { display: inline-block; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; background: #222; color: #ccc; text-transform: capitalize; margin-right: 8px; }
+    
+    .item-title { font-weight: 500; color: #fff; margin-bottom: 4px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .item-meta { font-size: 12px; color: var(--text-muted); }
+    
+    .actions { display: flex; gap: 8px; }
+    .btn-action { background: #222; color: #fff; border: 1px solid #333; padding: 6px 12px; border-radius: 6px; font-size: 12px; cursor: pointer; transition: all 0.2s; font-weight: 500; }
+    .btn-action:hover { background: #333; border-color: #444; }
+    .btn-cancel { color: #e74c3c; border-color: rgba(231, 76, 60, 0.3); background: rgba(231, 76, 60, 0.05); }
+    .btn-cancel:hover { background: rgba(231, 76, 60, 0.15); border-color: rgba(231, 76, 60, 0.5); }
+    
+    .progress-wrapper { width: 100%; min-width: 100px; background: rgba(0,0,0,0.3); border-radius: 4px; height: 6px; overflow: hidden; margin-top: 6px; }
+    .progress-bar { height: 100%; background: var(--accent); transition: width 0.3s ease; }
+    .progress-text { font-size: 11px; color: var(--accent); font-weight: 600; margin-top: 4px; display: block; }
+    
+    .empty-state { padding: 40px; text-align: center; color: var(--text-muted); font-size: 14px; }
+    
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="webdlv-app" id="app">
+    <div class="webdlv-sidebar">
+      <header>
+        <h1>WEBDL Viewer</h1>
+        <div class="controls">
+          <div class="row">
+            <select id="mode">
+              <option value="channel">Kanaal (↑↓ kanaal, ←→ media)</option>
+              <option value="recent">Recent (←→ media)</option>
+            </select>
+          </div>
+          <div class="row">
+            <select id="filter">
+              <option value="media">Media (foto+video)</option>
+              <option value="video">Alleen video</option>
+              <option value="image">Alleen foto</option>
+              <option value="all">Alles</option>
+            </select>
+          </div>
+          <div class="row">
+            <button id="btnReload">↻ Herladen</button>
+            <button id="btnSlideshow">▶︎ Dia</button>
+          </div>
+          <div class="row">
+            <select id="slideshowSec">
+              <option value="2">Dia: 2s</option>
+              <option value="4" selected>Dia: 4s</option>
+              <option value="7">Dia: 7s</option>
+              <option value="10">Dia: 10s</option>
+              <option value="15">Dia: 15s</option>
+              <option value="30">Dia: 30s</option>
+              <option value="60">Dia: 1m</option>
+              <option value="300">Dia: 5m</option>
+            </select>
+            <button id="btnWrap">🔁 Wrap: aan</button>
+          </div>
+          <div class="row">
+            <button id="btnRandom">🔀 Random: uit</button>
+            <button id="btnVideoWait">⏳ Video afwachten: aan</button>
+          </div>
+        </div>
+        <div style="margin-top:10px" class="tiny">
+          ←/→: vorige/volgende
+          <br>↑/↓: kanaal
+          <br>Spatie: play/pause
+          <br>M: mute
+        </div>
+      </header>
+      <div class="list" id="list"></div>
+    </div>
+    <div class="webdlv-backdrop" id="sidebarBackdrop"></div>
+    <div class="main">
+      <div class="topbar">
+        <div class="left">
+          <div class="now" id="nowTitle">-</div>
+          <div class="sub" id="nowSub">-</div>
+        </div>
+        <div class="right">
+          <button id="btnSidebar" style="width:auto;">☰</button>
+          <div id="nowRating"></div>
+          <button id="btnOpen" style="width:auto;">Open</button>
+          <button id="btnFinder" style="width:auto;">Finder</button>
+          <label style="gap:8px;">Vol <input id="vol" class="range" type="range" min="0" max="1" step="0.01" value="0.8"></label>
+          <button id="btnMute" style="width:auto;">Mute</button>
+          <label style="gap:8px;">Tijd <input id="seek" class="range" type="range" min="0" max="1000" step="1" value="0"></label>
+        </div>
+      </div>
+      <div class="viewer">
+        <div class="stage" id="stage">
+          <div class="content" id="content"></div>
+        </div>
+        <div class="hud">
+          <div class="pill" id="hudLeft">-</div>
+          <div class="pill" id="hudRight">-</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="log" id="log">
+    <header>
+      <span>Log</span>
+      <button id="btnLog">Open</button>
+    </header>
+    <div class="body"><pre id="logBody"></pre></div>
+  </div>
+
+  <script>
+    const FALLBACK_THUMB = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
+    const state = {
+      initialized: false,
+      mode: 'recent',
+      tag: '',
+      availableTags: [],
+      filter: 'media',
+      sort: 'recent',
+      wrap: true,
+      random: false,
+      videoWait: true,
+      channels: [],
+      chIndex: 0,
+      items: [],
+      index: 0,
+      cursor: '',
+      done: false,
+      loadingMore: false,
+      slideshow: false,
+      slideshowTimer: null,
+      zoomed: false,
+      scale: 1,
+      panX: 0,
+      panY: 0,
+      dragging: false,
+      dragStart: null
+    };
+
+    const elList = document.getElementById('list');
+    const elMode = document.getElementById('mode');
+    const elFilter = document.getElementById('filter');
+    const elNowTitle = document.getElementById('nowTitle');
+    const elNowSub = document.getElementById('nowSub');
+    const elContent = document.getElementById('content');
+    const elStage = document.getElementById('stage');
+    const elHudLeft = document.getElementById('hudLeft');
+    const elHudRight = document.getElementById('hudRight');
+    const elSeek = document.getElementById('seek');
+    const elVol = document.getElementById('vol');
+    const elBtnMute = document.getElementById('btnMute');
+    const elBtnOpen = document.getElementById('btnOpen');
+    const elBtnFinder = document.getElementById('btnFinder');
+    const elBtnSlideshow = document.getElementById('btnSlideshow');
+    const elSlideshowSec = document.getElementById('slideshowSec');
+    const elBtnWrap = document.getElementById('btnWrap');
+    const elBtnRandom = document.getElementById('btnRandom');
+    const elBtnVideoWait = document.getElementById('btnVideoWait');
+    const elLog = document.getElementById('log');
+    const elLogBody = document.getElementById('logBody');
+    const elBtnLog = document.getElementById('btnLog');
+    const elNowRating = document.getElementById('nowRating');
+    const elApp = document.getElementById('app');
+    const elBtnSidebar = document.getElementById('btnSidebar');
+    const elSidebarBackdrop = document.getElementById('sidebarBackdrop');
+
+    function isSidebarOpen() {
+      try { return !!(elApp && elApp.classList && elApp.classList.contains('sidebar-open')); } catch (e) { return false; }
+    }
+
+    function setSidebarOpen(open) {
+      try {
+        if (!elApp || !elApp.classList) return;
+        if (open) elApp.classList.add('sidebar-open');
+        else elApp.classList.remove('sidebar-open');
+        try { localStorage.setItem('webdl_viewer_sidebar_open', open ? '1' : '0'); } catch (e2) {}
+      } catch (e) {}
+    }
+
+    function log(msg) {
+      const ts = new Date().toLocaleTimeString();
+      elLogBody.textContent = '[' + ts + '] ' + msg + '\n' + elLogBody.textContent;
+    }
+
+    function attachThumbRetry(img) {
+      if (!img) return;
+      try {
+        if (img.dataset && img.dataset._webdlThumbRetry) return;
+        if (img.dataset) img.dataset._webdlThumbRetry = '1';
+      } catch (e) {}
+
+      img.addEventListener('load', () => {
+        try {
+          const cur = String(img.currentSrc || img.src || '');
+          if (cur.startsWith('data:')) return;
+          if (cur.includes('/media/pending-thumb.svg')) {
+            const base = img.dataset ? String(img.dataset.src || '') : '';
+            if (!base) return;
+            const tries = img.dataset ? (parseInt(String(img.dataset.retries || '0'), 10) || 0) : 0;
+            if (tries >= 25) return;
+            if (img.dataset) img.dataset.retries = String(tries + 1);
+            const delay = Math.min(45000, Math.floor(2000 * Math.pow(1.45, tries) + (Math.random() * 500)));
+            setTimeout(() => {
+              try {
+                if (!img.isConnected) return;
+                if (img.dataset && img.dataset._thumbLoaded === '1') return;
+                const u = base + (base.includes('?') ? '&' : '?') + 'r=' + Date.now();
+                img.src = u;
+              } catch (e2) {}
+            }, delay);
+            return;
+          }
+        } catch (e) {}
+        try { if (img.dataset) img.dataset._thumbLoaded = '1'; } catch (e) {}
+      });
+
+      img.addEventListener('error', () => {
+        try {
+          if (img.dataset && img.dataset._thumbLoaded === '1') return;
+          const base = img.dataset ? String(img.dataset.src || '') : '';
+          if (!base) return;
+          const tries = img.dataset ? (parseInt(String(img.dataset.retries || '0'), 10) || 0) : 0;
+          if (tries >= 25) return;
+          if (img.dataset) img.dataset.retries = String(tries + 1);
+          const delay = Math.min(45000, Math.floor(2000 * Math.pow(1.45, tries) + (Math.random() * 500)));
+          setTimeout(() => {
+            try {
+              if (!img.isConnected) return;
+              if (img.dataset && img.dataset._thumbLoaded === '1') return;
+              const u = base + (base.includes('?') ? '&' : '?') + 'r=' + Date.now();
+              img.src = u;
+            } catch (e2) {}
+          }, delay);
+        } catch (e) {}
+      });
+    }
+
+    function api(path) {
+      return fetch(path, { cache: 'no-store' }).then(r => r.json());
+    }
+
+    function postApi(path, body) {
+      return fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) }).then(r => r.json());
+    }
+
+    function clampRating(v) {
+      const n = Number(v);
+      if (!Number.isFinite(n)) return 0;
+      return Math.max(0, Math.min(5, Math.round(n * 2) / 2));
+    }
+
+    function getRatingRef(it) {
+      const kind = it && it.rating_kind ? String(it.rating_kind) : (it && it.kind ? String(it.kind) : '');
+      const id = it && it.rating_id != null ? Number(it.rating_id) : (it && it.id != null ? Number(it.id) : NaN);
+      if (!kind || !Number.isFinite(id)) return null;
+      if (kind !== 'd' && kind !== 's') return null;
+      return { kind, id };
+    }
+
+    function setStars(container, rating) {
+      if (!container) return;
+      const r = clampRating(rating);
+      const stars = Array.from(container.querySelectorAll('.webdl-star'));
+      for (let i = 0; i < stars.length; i++) {
+        const star = stars[i];
+        const idx = i + 1;
+        star.classList.remove('full');
+        star.classList.remove('half');
+        if (r >= idx) star.classList.add('full');
+        else if (r >= (idx - 0.5)) star.classList.add('half');
+      }
+    }
+
+    function updateAllRatingUIs(ref, rating) {
+      try {
+        if (!ref || !ref.kind || ref.id == null) return;
+        const nodes = Array.from(document.querySelectorAll('.webdl-rating[data-kind="' + String(ref.kind) + '"][data-id="' + String(ref.id) + '"]'));
+        for (const n of nodes) setStars(n, rating);
+      } catch (e) {}
+    }
+
+    function applyRatingToState(ref, rating) {
+      try {
+        for (const item of state.items) {
+          const r2 = getRatingRef(item);
+          if (!r2) continue;
+          if (r2.kind === ref.kind && Number(r2.id) === Number(ref.id)) item.rating = rating;
+        }
+      } catch (e) {}
+    }
+
+    function makeViewerRatingEl(it) {
+      const ref = getRatingRef(it);
+      const box = document.createElement('div');
+      box.className = 'webdl-rating';
+      box.dataset.kind = ref ? ref.kind : '';
+      box.dataset.id = ref ? String(ref.id) : '';
+      const current = clampRating(it && it.rating != null ? it.rating : 0);
+      for (let i = 1; i <= 5; i++) {
+        const s = document.createElement('span');
+        s.className = 'webdl-star';
+        s.textContent = '★';
+        s.dataset.i = String(i);
+        box.appendChild(s);
+      }
+      setStars(box, current);
+      if (!ref) {
+        box.style.opacity = '0.35';
+        return box;
+      }
+
+      box.addEventListener('click', async (e) => {
+        try {
+          e.preventDefault();
+          e.stopPropagation();
+          const t = e.target;
+          if (!t || !t.classList || !t.classList.contains('webdl-star')) return;
+          const idx = parseInt(String(t.dataset.i || '0'), 10) || 0;
+          if (idx <= 0) return;
+          const rect = t.getBoundingClientRect();
+          const isHalf = (e.clientX - rect.left) < (rect.width / 2);
+          const next = clampRating(isHalf ? (idx - 0.5) : idx);
+          setStars(box, next);
+          const resp = await postApi('/api/rating', { kind: ref.kind, id: ref.id, rating: next });
+          if (!resp || !resp.success) throw new Error((resp && resp.error) ? resp.error : 'rating opslaan mislukt');
+          applyRatingToState(ref, next);
+          updateAllRatingUIs(ref, next);
+        } catch (err) {}
+      });
+
+      box.addEventListener('contextmenu', async (e) => {
+        try {
+          e.preventDefault();
+          e.stopPropagation();
+          const next = null;
+          setStars(box, next);
+          const resp = await postApi('/api/rating', { kind: ref.kind, id: ref.id, rating: next });
+          if (!resp || !resp.success) return;
+          applyRatingToState(ref, next);
+          updateAllRatingUIs(ref, next);
+        } catch (e2) {}
+      });
+
+      return box;
+    }
+
+    function currentItem() {
+      return state.items[state.index] || null;
+    }
+
+    function applyTransform() {
+      elContent.style.transform = 'translate(' + state.panX + 'px, ' + state.panY + 'px) scale(' + state.scale + ')';
+    }
+
+    function resetZoom() {
+      state.zoomed = false;
+      state.scale = 1;
+      state.panX = 0;
+      state.panY = 0;
+      elStage.classList.remove('zoomed');
+      applyTransform();
+    }
+
+    function toggleZoom() {
+      if (!state.zoomed) {
+        state.zoomed = true;
+        state.scale = 2;
+        state.panX = 0;
+        state.panY = 0;
+        elStage.classList.add('zoomed');
+        applyTransform();
+      } else {
+        resetZoom();
+      }
+    }
+
+    function stopSlideshow() {
+      state.slideshow = false;
+      if (state.slideshowTimer) clearTimeout(state.slideshowTimer);
+      state.slideshowTimer = null;
+      elBtnSlideshow.textContent = '▶︎ Dia';
+    }
+
+    function scheduleSlideshowTick() {
+      if (!state.slideshow) return;
+      const sec = parseInt(elSlideshowSec.value, 10) || 4;
+      
+      let waitTimeMs = Math.max(1, sec) * 1000;
+      
+      if (state.videoWait) {
+        const v = currentVideo();
+        if (v && !v.paused && !v.ended && v.duration) {
+          const remaining = (v.duration - v.currentTime) * 1000;
+          if (remaining > 0) {
+            waitTimeMs = Math.max(waitTimeMs, remaining + 500); 
+          }
+        }
+      }
+
+      state.slideshowTimer = setTimeout(() => {
+        nextItem(1).catch(() => {});
+        scheduleSlideshowTick();
+      }, waitTimeMs);
+    }
+
+    function startSlideshow() {
+      state.slideshow = true;
+      elBtnSlideshow.textContent = '⏸ Dia';
+      scheduleSlideshowTick();
+    }
+
+    function renderList() {
+      elList.innerHTML = '';
+      const frag = document.createDocumentFragment();
+      for (let idx = 0; idx < state.items.length; idx += 1) {
+        const it = state.items[idx] || {};
+        const item = document.createElement('div');
+        item.className = 'item' + (idx === state.index ? ' active' : '');
+        item.dataset.idx = String(idx);
+
+        const row = document.createElement('div');
+        row.className = 'row';
+
+        if (it.thumb) {
+          const img = document.createElement('img');
+          img.className = 'thumb';
+          img.loading = 'lazy';
+          const base = String(it.thumb);
+          if (base.startsWith('data:')) {
+            img.src = base;
+          } else {
+            img.src = FALLBACK_THUMB;
+            try { img.dataset.src = base; } catch (e) {}
+            try { attachThumbRetry(img); } catch (e) {}
+            setTimeout(() => {
+              try {
+                if (!img.isConnected) return;
+                if (img.dataset && img.dataset._thumbLoaded === '1') return;
+                img.src = base + (base.includes('?') ? '&' : '?') + 'r=' + Date.now();
+              } catch (e2) {}
+            }, 0);
+          }
+          row.appendChild(img);
+        }
+
+        const text = document.createElement('div');
+        text.className = 'text';
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        meta.textContent = [it.platform || '-', it.channel || '-', it.type || '-'].join(' | ');
+        const title = document.createElement('div');
+        title.className = 'title';
+        title.textContent = String(it.title || '(zonder titel)');
+        text.appendChild(meta);
+        text.appendChild(title);
+        try {
+          const r = makeViewerRatingEl(it);
+          r.style.marginTop = '6px';
+          text.appendChild(r);
+        } catch (e) {}
+
+        row.appendChild(text);
+        item.appendChild(row);
+        item.addEventListener('click', () => {
+          state.index = idx;
+          showCurrent();
+          renderList();
+        });
+        frag.appendChild(item);
+      }
+      elList.appendChild(frag);
+    }
+
+    function attachMediaHandlers(mediaEl) {
+      if (!mediaEl) return;
+      if (mediaEl.tagName === 'VIDEO') {
+        mediaEl.volume = parseFloat(elVol.value || '0.8');
+        mediaEl.muted = (elBtnMute.dataset.muted === '1');
+        mediaEl.addEventListener('timeupdate', () => {
+          const d = mediaEl.duration || 0;
+          const c = mediaEl.currentTime || 0;
+          if (d > 0) {
+            const v = Math.max(0, Math.min(1000, Math.round((c / d) * 1000)));
+            if (!elSeek.dataset.dragging) elSeek.value = String(v);
+          }
+        });
+      }
+    }
+
+    function showCurrent() {
+      const it = currentItem();
+      resetZoom();
+      elContent.innerHTML = '';
+      elSeek.value = '0';
+
+      elBtnOpen.disabled = !it;
+      elBtnFinder.disabled = !it;
+
+      if (!it) {
+        elNowTitle.textContent = '-';
+        elNowSub.textContent = '-';
+        elHudLeft.textContent = '-';
+        elHudRight.textContent = '-';
+        try { if (elNowRating) elNowRating.innerHTML = ''; } catch (e) {}
+        return;
+      }
+
+      try {
+        if (elNowRating) {
+          elNowRating.innerHTML = '';
+          const r = makeViewerRatingEl(it);
+          r.style.marginTop = '0';
+          elNowRating.appendChild(r);
+        }
+      } catch (e) {}
+
+      elNowTitle.textContent = it.title || '(zonder titel)';
+      const showOrigin = it.source_url && String(it.source_url) !== String(it.url || '');
+      const origin = showOrigin ? (' | origin: ' + String(it.source_url).slice(0, 120)) : '';
+      const src = showOrigin ? (' | src: ' + String(it.url || '').slice(0, 120)) : '';
+      elNowSub.textContent = it.platform + ' | ' + it.channel + ' | ' + it.type + ' | ' + it.created_at + origin + src;
+      elHudLeft.textContent = (state.index + 1) + '/' + state.items.length + (state.done ? '' : '+');
+      elHudRight.textContent = state.mode === 'channel' && state.channels[state.chIndex]
+        ? (state.channels[state.chIndex].platform + ' / ' + state.channels[state.chIndex].channel + ' (' + state.channels[state.chIndex].count + ')')
+        : 'recent';
+
+      let mediaEl = null;
+      if (it.type === 'image') {
+        mediaEl = document.createElement('img');
+        mediaEl.src = it.src;
+        mediaEl.alt = it.title || '';
+      } else if (it.type === 'video') {
+        mediaEl = document.createElement('video');
+        mediaEl.controls = false;
+        mediaEl.playsInline = true;
+        const source = document.createElement('source');
+        source.src = it.src;
+        const ext = (it.src || '').match(/\.(mp4|webm|mov|m4v|mkv|avi)(?:[?#]|$)/i);
+        source.type = ext && ext[1] ? 'video/' + ext[1].toLowerCase().replace('m4v', 'mp4') : 'video/mp4';
+        mediaEl.appendChild(source);
+        mediaEl.autoplay = true;
+      } else {
+        const a = document.createElement('a');
+        a.href = it.src;
+        a.textContent = 'Open bestand';
+        a.style.color = '#00d4ff';
+        a.style.padding = '20px';
+        elContent.appendChild(a);
+        return;
+      }
+
+      mediaEl.style.maxWidth = '100%';
+      mediaEl.style.maxHeight = 'calc(100vh - 120px)';
+      elContent.appendChild(mediaEl);
+      attachMediaHandlers(mediaEl);
+    }
+
+    async function openCurrent(action) {
+      const it = currentItem();
+      if (!it) return;
+      try {
+        const isPath = it.open && it.open.path;
+        const url = isPath ? '/media/open-path' : '/media/open';
+        const payload = isPath ? { path: it.open.path, action } : { kind: it.open.kind, id: it.open.id, action };
+        const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        const data = await resp.json().catch(() => null);
+        if (!data || !data.success) throw new Error((data && data.error) ? data.error : 'actie mislukt');
+      } catch (e) {
+        log((e && e.message) ? e.message : String(e));
+      }
+    }
+
+    async function maybeLoadMore() {
+      if (state.loading || state.loadingMore || state.done) return;
+      state.loadingMore = true;
+      try {
+        if (state.mode === 'recent') {
+          const data = await api('/api/media/recent-files?include_active=0&include_active_files=0&include_downloads=0&limit=200&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&sort=' + encodeURIComponent(state.sort || 'recent'));
+          if (!data.success) throw new Error(data.error || 'recent failed');
+          const newItems = data.items || [];
+          state.items = state.items.concat(newItems);
+          state.cursor = data.next_cursor || '';
+          state.done = !!data.done;
+        } else {
+          const ch = state.channels[state.chIndex];
+          if (!ch) { state.done = true; return; }
+          const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
+          const data = await api('/api/media/channel?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=300&type=' + encodeURIComponent(state.filter) + dirsParam + '&sort=' + encodeURIComponent(state.sort || 'recent'));
+          if (!data.success) throw new Error(data.error || 'channel failed');
+          const newItems = data.items || [];
+          state.items = state.items.concat(newItems);
+          state.cursor = data.next_cursor || '';
+          state.done = !!data.done;
+        }
+      } catch (e) {
+        log(e.message);
+        state.done = true;
+      } finally {
+        state.loadingMore = false;
+      }
+    }
+
+    async function nextItem(delta) {
+      if (!state.items.length) return;
+      
+      let next;
+      if (state.slideshow && state.random) {
+        if (state.items.length <= 1) return;
+        let r;
+        do {
+          r = Math.floor(Math.random() * state.items.length);
+        } while (r === state.index);
+        next = r;
+      } else {
+        next = state.index + delta;
+      }
+
+      if (!state.random && delta > 0 && next >= state.items.length - 2 && !state.done) {
+        await maybeLoadMore();
+        next = state.index + delta;
+      }
+
+      if (state.wrap || (state.slideshow && state.random)) {
+        state.index = (next % state.items.length + state.items.length) % state.items.length;
+      } else {
+        state.index = Math.max(0, Math.min(state.items.length - 1, next));
+      }
+      showCurrent();
+      renderList();
+    }
+
+    async function loadRecent() {
+      if (state.loading) return;
+      state.loading = true;
+      try {
+        state.cursor = '';
+        state.done = false;
+        const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
+        const data = await api('/api/media/recent-files?include_active=0&include_active_files=0&limit=200&cursor=&type=' + encodeURIComponent(state.filter) + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam);
+        if (!data.success) throw new Error(data.error || 'recent failed');
+        state.items = data.items || [];
+        state.cursor = data.next_cursor || '';
+        state.done = !!data.done;
+        state.index = 0;
+        renderList();
+      } finally {
+        state.loading = false;
+      }
+}
+
+    async function loadTags() {
+      try {
+        const data = await api('/api/tags');
+        if (data && data.success) {
+          state.availableTags = data.tags || [];
+          const sel = document.getElementById('tagFilter');
+          if (sel) {
+            const current = sel.value;
+            sel.innerHTML = '<option value="">Alle tags</option>';
+            for (const t of state.availableTags) {
+              const opt = document.createElement('option');
+              opt.value = t.name;
+              opt.textContent = t.name;
+              sel.appendChild(opt);
+            }
+            sel.value = state.tag;
+          }
+        }
+      } catch(e) {}
+    }
+    
+    async function loadChannels() {
+      const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
+      const data = await api('/api/media/channels?limit=500' + dirsParam);
+      if (!data.success) throw new Error(data.error || 'channels failed');
+      state.channels = data.channels || [];
+      state.chIndex = 0;
+      log('Kanalen geladen: ' + state.channels.length);
+    }
+
+    async function loadChannelItems() {
+      if (state.loading) return;
+      state.loading = true;
+      try {
+      const ch = state.channels[state.chIndex];
+      if (!ch) {
+        state.items = [];
+        state.index = 0;
+        state.cursor = '';
+        state.done = true;
+        renderList();
+        showCurrent();
+        state.loading = false; return;
+      }
+      state.cursor = '';
+      state.done = false;
+      const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
+      const data = await api('/api/media/channel-files?include_active=0&include_active_files=0&platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=300&cursor=&type=' + encodeURIComponent(state.filter) + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam);
+      if (!data.success) throw new Error(data.error || 'channel failed');
+      state.items = data.items || [];
+      state.cursor = data.next_cursor || '';
+      state.done = !!data.done;
+      state.index = 0;
+      renderList();
+      showCurrent();
+      log('Kanaal geladen: ' + ch.platform + '/' + ch.channel + ' (' + state.items.length + ')');
+      } finally { state.loading = false; }
+    }
+
+    async function init() {
+      try {
+        const sessionEnabledDirs = getSessionEnabledDirs();
+        if (Array.isArray(sessionEnabledDirs)) {
+          state.enabledDirs = sessionEnabledDirs.slice();
+        } else {
+          const resp = await fetch('/api/directories');
+          const data = await resp.json();
+          if (data.success && data.enabled && data.enabled.length > 0) {
+            state.enabledDirs = data.enabled;
+          }
+        }
+      } catch (e) {}
+      
+      elMode.value = state.mode;
+      elFilter.value = state.filter;
+      await loadTags();
+      if (state.mode === 'recent') {
+        await loadRecent();
+      } else {
+      await loadChannels();
+        await loadChannelItems();
+      }
+      state.initialized = true;
+      setInterval(tick, 2500);
+      tick();
+    }
+
+    function currentVideo() {
+      const v = elContent.querySelector('video');
+      return v || null;
+    }
+
+    document.getElementById('btnReload').addEventListener('click', async () => {
+      stopSlideshow();
+      try {
+        if (state.mode === 'recent') await loadRecent();
+        else { await loadChannels(); await loadChannelItems(); }
+      } catch (e) { log(e.message); }
+    });
+
+    elBtnOpen.addEventListener('click', () => openCurrent('open'));
+    elBtnFinder.addEventListener('click', () => openCurrent('finder'));
+
+    const elBtnTags = document.getElementById('btnTags');
+    const elTagDialog = document.getElementById('tagDialog');
+    const elTagList = document.getElementById('tagList');
+    const elNewTagInput = document.getElementById('newTagInput');
+    const elBtnAddTag = document.getElementById('btnAddTag');
+
+    let currentItemTags = [];
+
+    async function loadCurrentItemTags() {
+      if (!state.current) return;
+      try {
+        const data = await api('/api/media/' + encodeURIComponent(state.current.kind) + '/' + encodeURIComponent(state.current.id) + '/tags');
+        if (data && data.success) {
+          currentItemTags = data.tags || [];
+          renderTagDialog();
+        }
+      } catch (e) {}
+    }
+
+    function renderTagDialog() {
+      if (!elTagList) return;
+      elTagList.innerHTML = '';
+      for (const t of state.availableTags) {
+        const hasTag = currentItemTags.some(ct => ct.id === t.id);
+        const div = document.createElement('div');
+        div.style.display = 'flex';
+        div.style.alignItems = 'center';
+        div.style.marginBottom = '4px';
+        
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = hasTag;
+        cb.style.marginRight = '6px';
+        cb.addEventListener('change', async () => {
+          if (!state.current) return;
+          try {
+            if (cb.checked) {
+              await api('/api/media/' + encodeURIComponent(state.current.kind) + '/' + encodeURIComponent(state.current.id) + '/tags', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ tag_id: t.id })
+              });
+            } else {
+              await api('/api/media/' + encodeURIComponent(state.current.kind) + '/' + encodeURIComponent(state.current.id) + '/tags/' + t.id, {
+                method: 'DELETE'
+              });
+            }
+            await loadCurrentItemTags();
+          } catch(e) {}
+        });
+
+        
+        const lbl = document.createElement('span');
+        lbl.textContent = t.name;
+        lbl.style.color = '#d7e6ff';
+        lbl.style.fontSize = '12px';
+        lbl.style.flex = '1';
+
+        const delBtn = document.createElement('button');
+        delBtn.textContent = '❌';
+        delBtn.style.background = 'none';
+        delBtn.style.border = 'none';
+        delBtn.style.cursor = 'pointer';
+        delBtn.style.fontSize = '10px';
+        delBtn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          if (confirm('Tag "' + t.name + '" volledig verwijderen?')) {
+            try {
+              await api('/api/tags/' + t.id, { method: 'DELETE' });
+              await loadTags();
+              await loadCurrentItemTags();
+            } catch(e){}
+          }
+        });
+
+        div.appendChild(cb);
+        div.appendChild(lbl);
+        div.appendChild(delBtn);
+        elTagList.appendChild(div);
+      }
+    }
+
+    if (elBtnTags) {
+      
+    const elBtnSource = document.getElementById('btnSource');
+    if (elBtnSource) {
+      elBtnSource.addEventListener('click', () => {
+        if (state.current && (state.current.source_url || state.current.url)) {
+          window.open(state.current.source_url || state.current.url, '_blank');
+        }
+      });
+    }
+
+    elBtnTags.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (elTagDialog.style.display === 'none') {
+          elTagDialog.style.display = 'block';
+          await loadTags(); // refresh available
+          await loadCurrentItemTags();
+        } else {
+          elTagDialog.style.display = 'none';
+        }
+      });
+    }
+
+    if (elBtnAddTag) {
+      elBtnAddTag.addEventListener('click', async () => {
+        const name = elNewTagInput.value.trim();
+        if (!name) return;
+        try {
+          await api('/api/tags', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name })
+          });
+          elNewTagInput.value = '';
+          await loadTags();
+          renderTagDialog();
+        } catch(e) {}
+      });
+    }
+
+    // close dialog when clicking outside
+    elModal.addEventListener('click', (e) => {
+      if (elTagDialog && elTagDialog.style.display !== 'none' && !elTagDialog.contains(e.target) && e.target !== elBtnTags) {
+        elTagDialog.style.display = 'none';
+      }
+    });
+
+
+    elMode.addEventListener('change', async () => {
+      stopSlideshow();
+      state.mode = elMode.value;
+      try {
+        if (state.mode === 'recent') {
+          await loadRecent();
+        } else {
+          await loadChannels();
+          await loadChannelItems();
+        }
+      } catch (e) { log(e.message); }
+    });
+
+    elFilter.addEventListener('change', async () => {
+      stopSlideshow();
+      state.filter = elFilter.value;
+      try {
+        if (state.mode === 'recent') await loadRecent();
+        else await loadChannelItems();
+      } catch (e) { log(e.message); }
+    });
+
+    elBtnSlideshow.addEventListener('click', () => {
+      if (state.slideshow) stopSlideshow();
+      else startSlideshow();
+    });
+
+    elBtnWrap.addEventListener('click', () => {
+      state.wrap = !state.wrap;
+      elBtnWrap.textContent = state.wrap ? '🔁 Wrap: aan' : '🔁 Wrap: uit';
+    });
+
+    elBtnRandom.addEventListener('click', () => {
+      state.random = !state.random;
+      elBtnRandom.textContent = state.random ? '🔀 Random: aan' : '🔀 Random: uit';
+    });
+
+    elBtnVideoWait.addEventListener('click', () => {
+      state.videoWait = !state.videoWait;
+      elBtnVideoWait.textContent = state.videoWait ? '⏳ Video afwachten: aan' : '⏳ Video afwachten: uit';
+    });
+
+    elBtnLog.addEventListener('click', () => {
+      elLog.classList.toggle('open');
+      elBtnLog.textContent = elLog.classList.contains('open') ? 'Dicht' : 'Open';
+    });
+
+    elStage.addEventListener('click', () => {});
+
+    elStage.addEventListener('wheel', (e) => {
+      if (!state.zoomed) return;
+      e.preventDefault();
+      const delta = (e.deltaY > 0) ? -0.1 : 0.1;
+      state.scale = Math.max(1, Math.min(6, state.scale + delta));
+      applyTransform();
+    }, { passive: false });
+
+    elStage.addEventListener('mousedown', (e) => {
+      if (!state.zoomed) return;
+      state.dragging = true;
+      state.dragStart = { x: e.clientX, y: e.clientY, panX: state.panX, panY: state.panY };
+      elStage.classList.add('zoomed');
+    });
+
+    window.addEventListener('mousemove', (e) => {
+      if (!state.dragging || !state.dragStart) return;
+      const dx = e.clientX - state.dragStart.x;
+      const dy = e.clientY - state.dragStart.y;
+      state.panX = state.dragStart.panX + dx;
+      state.panY = state.dragStart.panY + dy;
+      applyTransform();
+    });
+
+    window.addEventListener('mouseup', () => {
+      state.dragging = false;
+      state.dragStart = null;
+    });
+
+    elVol.addEventListener('input', () => {
+      const v = currentVideo();
+      if (v) v.volume = parseFloat(elVol.value || '0.8');
+    });
+
+    elBtnMute.dataset.muted = '0';
+    elBtnMute.addEventListener('click', () => {
+      const v = currentVideo();
+      const muted = elBtnMute.dataset.muted === '1';
+      elBtnMute.dataset.muted = muted ? '0' : '1';
+      elBtnMute.textContent = muted ? 'Mute' : 'Unmute';
+      if (v) v.muted = !muted;
+    });
+
+    elSeek.addEventListener('mousedown', () => { elSeek.dataset.dragging = '1'; });
+    elSeek.addEventListener('mouseup', () => { elSeek.dataset.dragging = ''; });
+    elSeek.addEventListener('input', () => {
+      const v = currentVideo();
+      if (!v) return;
+      const d = v.duration || 0;
+      if (d > 0) {
+        const frac = (parseInt(elSeek.value, 10) || 0) / 1000;
+        v.currentTime = Math.max(0, Math.min(d, frac * d));
+      }
+    });
+
+    
+    window.addEventListener('popstate', (e) => {
+      if (elModal.classList.contains('open') && (!e.state || e.state.page !== 'viewer')) {
+        closeModal(true);
+      } else if (!elModal.classList.contains('open') && e.state && e.state.page === 'viewer') {
+        if (typeof e.state.index === 'number') {
+          openModalIndex(e.state.index);
+        }
+      }
+    });
+    
+    window.addEventListener('keydown', async (e) => {
+      if (e.key === 'ArrowRight') { await nextItem(1); e.preventDefault(); }
+      else if (e.key === 'ArrowLeft') { await nextItem(-1); e.preventDefault(); }
+      else if (e.key === 'ArrowUp') {
+        try {
+          if (state.mode === 'channel' && state.channels.length) {
+            stopSlideshow();
+            const next = state.chIndex - 1;
+            state.chIndex = Math.max(0, Math.min(state.channels.length - 1, next));
+            await loadChannelItems();
+          }
+        } catch (e2) {}
+        e.preventDefault();
+      }
+      else if (e.key === 'ArrowDown') {
+        try {
+          if (state.mode === 'channel' && state.channels.length) {
+            stopSlideshow();
+            const next = state.chIndex + 1;
+            state.chIndex = Math.max(0, Math.min(state.channels.length - 1, next));
+            await loadChannelItems();
+          }
+        } catch (e2) {}
+        e.preventDefault();
+      }
+      else if (e.key === ' ') {
+        const v = currentVideo();
+        if (v) {
+          if (v.paused) v.play().catch(() => {});
+          else v.pause();
+        }
+        e.preventDefault();
+      }
+      else if (e.key.toLowerCase() === 'm') {
+        elBtnMute.click();
+        e.preventDefault();
+      }
+      else if (e.key === 'Escape') {
+        try {
+          if (isSidebarOpen()) {
+            setSidebarOpen(false);
+            e.preventDefault();
+            return;
+          }
+        } catch (err2) {}
+        stopSlideshow();
+        try {
+          if (elLog.classList.contains('open')) {
+            elLog.classList.remove('open');
+            elBtnLog.textContent = 'Open';
+            e.preventDefault();
+            return;
+          }
+        } catch (err) {}
+        resetZoom();
+        e.preventDefault();
+      }
+    }, { capture: true });
+
+    try {
+      const saved = (() => { try { return localStorage.getItem('webdl_viewer_sidebar_open'); } catch (e) { return null; } })();
+      if (saved == null || saved === '') setSidebarOpen(true);
+      else setSidebarOpen(saved === '1');
+    } catch (e) {}
+
+    try {
+      if (elBtnSidebar) {
+        elBtnSidebar.addEventListener('click', (e) => {
+          try {
+            e.preventDefault();
+            e.stopPropagation();
+            setSidebarOpen(!isSidebarOpen());
+          } catch (e2) {}
+        });
+      }
+      if (elSidebarBackdrop) {
+        elSidebarBackdrop.addEventListener('click', (e) => {
+          try {
+            e.preventDefault();
+            setSidebarOpen(false);
+          } catch (e2) {}
+        });
+      }
+    } catch (e) {}
+
+    init().catch(e => {
+      const msg = e && e.message ? e.message : String(e);
+      log(msg);
+      elList.innerHTML = '<div style="padding:10px;border:1px solid #7f1d1d;border-radius:8px;color:#fecaca;background:#450a0a;font-size:12px;line-height:1.4;">Viewer init fout: ' + msg.replace(/</g, '&lt;') + '</div>';
+    });
+  </script>
+  </div>
+</body>
+</html>
