@@ -2370,6 +2370,60 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
   LIMIT ? OFFSET ?
 `);
 
+// Diversity seed: latest N completed downloads per platform (fast, ~100 rows)
+const getDiversitySeedItems = db.prepare(db.isPostgres ? `
+  SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
+  FROM (
+    SELECT
+      'd' AS kind,
+      CAST(d.id AS TEXT) AS id,
+      d.platform AS platform,
+      d.channel AS channel,
+      d.title AS title,
+      d.filepath AS filepath,
+      d.created_at::text AS created_at,
+      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
+      d.thumbnail AS thumbnail,
+      d.url AS url,
+      d.source_url AS source_url,
+      d.rating AS rating,
+      'd' AS rating_kind,
+      d.id AS rating_id,
+      ROW_NUMBER() OVER (PARTITION BY d.platform ORDER BY COALESCE(d.finished_at, d.updated_at, d.created_at) DESC) AS rn
+    FROM downloads d
+    WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing', 'error')
+      AND d.filepath IS NOT NULL
+      AND TRIM(d.filepath) != ''
+  ) ranked
+  WHERE rn <= ?
+  ORDER BY ts DESC
+` : `
+  SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
+  FROM (
+    SELECT
+      'd' AS kind,
+      CAST(d.id AS TEXT) AS id,
+      d.platform AS platform,
+      d.channel AS channel,
+      d.title AS title,
+      d.filepath AS filepath,
+      d.created_at AS created_at,
+      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
+      d.thumbnail AS thumbnail,
+      d.url AS url,
+      d.source_url AS source_url,
+      d.rating AS rating,
+      'd' AS rating_kind,
+      d.id AS rating_id,
+      ROW_NUMBER() OVER (PARTITION BY d.platform ORDER BY COALESCE(d.finished_at, d.created_at) DESC) AS rn
+    FROM downloads d
+    WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing', 'error')
+      AND d.filepath IS NOT NULL
+      AND TRIM(d.filepath) != ''
+  ) ranked
+  WHERE rn <= ?
+  ORDER BY ts DESC
+`);
 const getHybridMediaByChannel = db.prepare(db.isPostgres ? `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
@@ -4631,12 +4685,39 @@ async function runDownloadScheduler() {
   let mediumActive = activeLaneCount('medium');
   let lightActive = activeLaneCount('light');
 
-  const rows = await db.prepare("SELECT id, url, platform, channel, title, metadata FROM downloads WHERE status IN ('pending', 'queued') ORDER BY CASE status WHEN 'queued' THEN 1 ELSE 2 END, created_at ASC LIMIT 100").all();
+  const rows = await db.prepare("SELECT id, url, platform, channel, title, metadata, created_at FROM downloads WHERE status IN ('pending', 'queued') ORDER BY CASE status WHEN 'queued' THEN 1 ELSE 2 END, created_at DESC LIMIT 2500").all();
   if (!rows || rows.length === 0) return;
+
+  // Determine the newest download timestamp across both active and queued
+  let newestMs = 0;
+  if (rows.length > 0) {
+    newestMs = new Date(rows[0].created_at).getTime();
+  }
+  for (const ctx of downloadActivityContextById.values()) {
+    if (ctx && ctx.created_at) {
+      const activeMs = new Date(ctx.created_at).getTime();
+      if (activeMs > newestMs) newestMs = activeMs;
+    }
+  }
+
+  // Define a threshold (e.g. 2 hours). Anything older than newestMs - 2h is considered an "old batch"
+  const thresholdMs = newestMs - (2 * 60 * 60 * 1000);
+  let hasNewItemsInQueueOrActive = false;
+  if (newestMs > 0) {
+    // If the newest item is indeed fresh relative to the queue, there's a new batch active
+    // We treat anything newer than thresholdMs as the "new batch"
+    hasNewItemsInQueueOrActive = true;
+  }
 
   for (const row of rows) {
     if (heavyActive >= heavyLimit && mediumActive >= mediumLimit && lightActive >= lightLimit) break;
     
+    // Strict priority: if this row is from an old batch, and we have a new batch in progress or pending, STOP scheduling it.
+    const rowMs = new Date(row.created_at).getTime();
+    if (hasNewItemsInQueueOrActive && rowMs < thresholdMs) {
+      continue; // Skip this old item - do not use available resources for it until new batch is 100% done
+    }
+
     const id = Number(row.id);
     if (!Number.isFinite(id)) continue;
     if (activeProcesses.has(id) || startingJobs.has(id) || cancelledJobs.has(id) || onHoldJobs.has(id)) continue;
@@ -4658,7 +4739,7 @@ async function runDownloadScheduler() {
     
     if (p === 'youtube' || p === 'youtube-shorts') markYoutubeStarted();
     
-    setDownloadActivityContext(id, { url, platform: row.platform, channel: row.channel, title: row.title, lane });
+    setDownloadActivityContext(id, { url, platform: row.platform, channel: row.channel, title: row.title, lane, created_at: row.created_at });
     updateDownloadStatus.run('downloading', 0, null, id).catch(() => {});
     
     let parsedMeta = null;
@@ -11685,6 +11766,52 @@ function makeIndexedMediaItem(row) {
   }
 }
 
+// --- Platform interleave for gallery diversity ---
+function interleavePlatformItems(items, maxConsecutive = 2) {
+  if (!items || items.length <= 1) return items;
+  // Group items by platform, preserving chronological order within each group
+  const byPlatform = new Map();
+  const platformOrder = [];
+  for (const item of items) {
+    const p = String(item.platform || item.channel || 'unknown').toLowerCase();
+    if (!byPlatform.has(p)) {
+      byPlatform.set(p, []);
+      platformOrder.push(p);
+    }
+    byPlatform.get(p).push(item);
+  }
+  // If only one platform, no interleaving possible
+  if (byPlatform.size <= 1) return items;
+  
+  // Cap: no platform gets more than 40% of total items
+  const totalRequested = items.length;
+  const maxPerPlatform = Math.max(4, Math.ceil(totalRequested * 0.40));
+  for (const [p, arr] of byPlatform) {
+    if (arr.length > maxPerPlatform) {
+      byPlatform.set(p, arr.slice(0, maxPerPlatform));
+    }
+  }
+  
+  // Round-robin interleave: take up to maxConsecutive from each platform in turn
+  const result = [];
+  const targetLen = totalRequested;
+  let safety = targetLen + 100;
+  while (result.length < targetLen && safety-- > 0) {
+    let addedThisRound = false;
+    for (const p of platformOrder) {
+      const arr = byPlatform.get(p);
+      if (!arr || arr.length === 0) continue;
+      const take = Math.min(maxConsecutive, arr.length);
+      for (let i = 0; i < take && result.length < targetLen; i++) {
+        result.push(arr.shift());
+      }
+      addedThisRound = true;
+    }
+    if (!addedThisRound) break;
+  }
+  return result;
+}
+
 expressApp.get('/api/media/recent-files', async (req, res) => {
   const reqStartTime = Date.now();
   console.log(`📥 [${new Date().toISOString().substr(11,8)}] GET /api/media/recent-files - limit=${req.query.limit || '120'}, type=${req.query.type || 'all'}, cursor=${req.query.cursor ? 'yes' : 'no'}, dirs=${req.query.dirs ? 'yes' : 'no'}`);
@@ -11698,7 +11825,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
   const cursorRaw = String(req.query.cursor || '').trim();
   const cur = decodeCursor(cursorRaw);
   const includeActive = String(req.query.include_active || '0') !== '0';
-  const includeActiveFiles = String(req.query.include_active_files || '0') !== '0';
+  const includeActiveFiles = false; // Disabled per user request (only show 100% completed)
   let enabledDirs = null;
   try {
     const dirsParam = String(req.query.dirs || '').trim();
@@ -11732,24 +11859,17 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
     const seenKeys = new Map();
 
     const isTopRequest = !cursorRaw || (cur && cur.activeOffset === 0 && cur.rowOffset === 0 && !cur.dir && cur.fileIndex === 0);
-    if (includeActive && isTopRequest) {
-      try {
-        const cap = Math.min(28, Math.max(8, Math.floor(limit / 2)));
-        const rows = runtimeActiveRows;
-        for (const r of rows || []) {
-          if (!r) continue;
-          const it = makeActiveDownloadItem(r);
-          pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
-          if (items.length >= limit || items.length >= cap) break;
-        }
-      } catch (e) {}
-    }
+    // Active/pending placeholders removed from gallery per user request
     const nextActiveOffset = -1;
     let rowOffset = cur.rowOffset;
     const hasDirectoryFilter = enabledDirs && enabledDirs.length > 0 && enabledDirs.length < 10;
+    const isFirstPageRecent = sort === 'recent' && (!cursorRaw || isTopRequest);
     const maxRowsPerCall = hasDirectoryFilter ? 800 : 260;
     const getBatch = (sort === 'rating_asc') ? getRecentHybridMediaByRatingAsc : (sort === 'rating_desc') ? getRecentHybridMediaByRatingDesc : (sort === 'oldest') ? getRecentHybridMediaByOldest : (sort === 'name_asc') ? getRecentHybridMediaByNameAsc : (sort === 'name_desc') ? getRecentHybridMediaByNameDesc : (includeActiveFiles ? getRecentHybridMediaWithActiveFiles : getRecentHybridMedia);
+    
     const batch = await getBatch.all(maxRowsPerCall, rowOffset);
+    
+    // Process main batch normally
     for (const row of batch || []) {
       if (row && row.platform === 'patreon') {
         console.log(`[DEBUG-PATREON-API] Found DB row: id=${row.id}, kind=${row.kind}, filepath=${row.filepath}, includeActiveFiles=${includeActiveFiles}`);
@@ -11782,9 +11902,17 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
       if (items.length >= limit) break;
     }
 
+    // Apply platform interleaving for visual variety on first page
+    let finalItems;
+    if (isFirstPageRecent && items.length > 0) {
+      finalItems = interleavePlatformItems(items).slice(0, limit);
+    } else {
+      finalItems = items;
+    }
+
     const nextCursor = encodeCursor({ activeOffset: nextActiveOffset, rowOffset, dir: '', fileIndex: 0 });
     const done = (batch && batch.length ? batch.length : 0) < maxRowsPerCall;
-    const payload = { success: true, items, next_cursor: nextCursor, done };
+    const payload = { success: true, items: finalItems, next_cursor: nextCursor, done };
     const reqTime = Date.now() - reqStartTime;
     console.log(`📤 [${new Date().toISOString().substr(11,8)}] Response /api/media/recent-files - ${items.length} items in ${reqTime}ms`);
 
@@ -11820,7 +11948,7 @@ expressApp.get('/api/media/channel-files', async (req, res) => {
   const cursorRaw = String(req.query.cursor || '').trim();
   const cur = decodeCursor(cursorRaw);
   const includeActive = String(req.query.include_active || '0') !== '0';
-  const includeActiveFiles = String(req.query.include_active_files || '0') !== '0';
+  const includeActiveFiles = false; // Disabled per user request
   let enabledDirs = null;
   try {
     const dirsParam = String(req.query.dirs || '').trim();
@@ -11856,20 +11984,7 @@ expressApp.get('/api/media/channel-files', async (req, res) => {
     const seenKeys = new Map();
 
     const isTopRequest = !cursorRaw || (cur && cur.activeOffset === 0 && cur.rowOffset === 0 && !cur.dir && cur.fileIndex === 0);
-    if (includeActive && isTopRequest) {
-      try {
-        const cap = Math.min(28, Math.max(8, Math.floor(limit / 2)));
-        const rows = runtimeActiveRows;
-        for (const r of rows || []) {
-          if (!r) continue;
-          if (String(r.platform || '') !== String(platform || '')) continue;
-          if (String(r.channel || '') !== String(channel || '')) continue;
-          const it = makeActiveDownloadItem(r);
-          pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
-          if (items.length >= limit || items.length >= cap) break;
-        }
-      } catch (e) {}
-    }
+    // Active/pending placeholders removed from gallery per user request
     const nextActiveOffset = -1;
     let rowOffset = cur.rowOffset;
     const hasDirectoryFilter = enabledDirs && enabledDirs.length > 0 && enabledDirs.length < 10;
@@ -12087,7 +12202,7 @@ expressApp.post('/api/viewer/navigate', async (req, res) => {
     }
     if (!enabledDirs) enabledDirs = loadDirectoryFilter();
 
-    const includeActiveFiles = filter === 'all';
+    const includeActiveFiles = false; // Disabled per user request
     
     let query;
     let params;
