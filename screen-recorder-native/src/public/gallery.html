@@ -111,7 +111,7 @@
       </select>
       <select id="filter" title="Filter">
         <option value="media" selected>Media (foto+video)</option>
-        <option value="video">Alleen video</option>
+        <option value="video_only">Alleen video</option>
         <option value="image">Alleen foto</option>
         <option value="all">Alles</option>
       </select>
@@ -323,7 +323,7 @@
         const raw = sessionStorage.getItem('gallery.enabledDirs.' + instanceId);
         if (!raw) return null;
         const parsed = JSON.parse(raw);
-        return Array.isArray(parsed) ? parsed.map(v => String(v || '').trim()).filter(Boolean) : [];
+        return Array.isArray(parsed) ? parsed : [];
       } catch (e) {
         return null;
       }
@@ -1532,7 +1532,7 @@
     async function loadChannels() {
       const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
       const searchParam = state.search ? '&q=' + encodeURIComponent(state.search) : '';
-      const data = await api('/api/media/channels?limit=800' + dirsParam + searchParam);
+      const data = await api('/api/media/channels?limit=5000' + dirsParam + searchParam);
       if (!data.success) throw new Error(data.error || 'channels failed');
       state.channels = data.channels || [];
       elChannelSel.innerHTML = '';
@@ -1582,6 +1582,76 @@
       if (state.items.length) openModalIndex(0);
     }
 
+    function resetPaging() {
+      state.cursor = '';
+      state.done = false;
+      state.items = [];
+      state.autoFillLoads = 0;
+      state.hasUserScrolled = false;
+      if (typeof elGrid !== 'undefined' && elGrid) elGrid.innerHTML = '';
+      if (typeof elSentinel !== 'undefined' && elSentinel) elSentinel.innerHTML = '';
+    }
+
+    
+    async function loadNext() {
+      if (state.loading || state.done) return;
+      state.loading = true;
+      const startTime = Date.now();
+      elSentinel.textContent = '⏳ Verbinden met server...';
+      try {
+        let path = '';
+        const searchParam = state.search ? '&q=' + encodeURIComponent(state.search) : '';
+        const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
+        elSentinel.textContent = '📡 Aanvraag verzenden (limit=' + state.limit + ', filters=' + (state.enabledDirs ? state.enabledDirs.length : 'none') + ')...';
+        if (state.mode === 'recent') {
+          path = '/api/media/recent-files?limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam + searchParam;
+        } else {
+           const ch = state.channel;
+           if (!ch) { state.done = true; return; }
+           path = '/api/media/channel-files?channel=' + encodeURIComponent(ch) + '&limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + searchParam + dirsParam;
+        }
+        
+        const resp = await fetch(path);
+        const data = await resp.json();
+        if (!data || !data.success) throw new Error(data && data.error ? data.error : 'Geen data ontvangen');
+        
+        let items = Array.isArray(data.items) ? data.items : [];
+        const existing = new Set(state.items.map(it => itemKey(it)).filter(Boolean));
+        let uniqueItems = [];
+        for (const it of items) {
+          try {
+            const k = itemKey(it);
+            if (!k) {
+              uniqueItems.push(it);
+              continue;
+            }
+            if (existing.has(k)) continue;
+            existing.add(k);
+            uniqueItems.push(it);
+          } catch (e) {
+            uniqueItems.push(it);
+          }
+        }
+        state.items = state.items.concat(uniqueItems);
+        state.cursor = data.next_cursor || '';
+        state.done = data.done || false;
+        addCards(uniqueItems);
+        setHint();
+        state.loading = false;
+        const totalTime = Date.now() - startTime;
+        const stats = items.length + ' items in ' + totalTime + 'ms';
+        if (state.done) {
+          elSentinel.innerHTML = '✓ Klaar: ' + stats;
+        } else {
+          elSentinel.innerHTML = '↓ Scroll voor meer (' + stats + ') <button onclick="loadNext()" style="margin-left:10px;padding:4px 8px;font-size:11px;background:#0f3460;color:#fff;border:1px solid #1f2a52;border-radius:4px;cursor:pointer;">Forceer laden</button>';
+        }
+      } catch (e) {
+        state.loading = false;
+        const totalTime = Date.now() - startTime;
+        elSentinel.textContent = '❌ Fout na ' + totalTime + 'ms: ' + e.message;
+        log('Load error: ' + e.message);
+      }
+    }
     async function reloadAll() {
       if (state.reloading) return;
       state.reloading = true;
@@ -1851,6 +1921,23 @@
       const enabledPaths = Array.isArray(state.enabledDirs) ? state.enabledDirs : null;
 
       const frag = document.createDocumentFragment();
+
+      const btnDeselectAll = document.createElement('button');
+      btnDeselectAll.className = 'btn';
+      btnDeselectAll.style.marginBottom = '8px';
+      btnDeselectAll.style.fontSize = '12px';
+      btnDeselectAll.style.padding = '4px 8px';
+      btnDeselectAll.textContent = 'Deselecteer Alles';
+      btnDeselectAll.onclick = () => {
+        const isAllOff = btnDeselectAll.textContent.includes('Deselecteer');
+        for (const cb of elDirList.querySelectorAll('input[type="checkbox"]')) {
+          cb.checked = !isAllOff;
+        }
+        btnDeselectAll.textContent = isAllOff ? 'Selecteer Alles' : 'Deselecteer Alles';
+        updateDirCount();
+      };
+      frag.appendChild(btnDeselectAll);
+
       for (const plat of Object.keys(tree).sort()) {
         const platInfo = tree[plat];
         
@@ -1869,7 +1956,7 @@
         const div = document.createElement('div');
         div.className = 'dir-platform';
         div.dataset.platform = plat;
-        div.style.marginBottom = '10px';
+        div.style.marginBottom = '4px';
 
         const pheader = document.createElement('label');
         pheader.style.display = 'flex';
@@ -1890,7 +1977,8 @@
         
         const ptit = document.createElement('strong');
         ptit.style.color = '#fff';
-        ptit.textContent = plat + ' (' + platInfo.fileCount + ' files)';
+        ptit.style.cursor = 'pointer';
+        ptit.textContent = '▶ ' + plat + ' (' + platInfo.fileCount + ' files)';
         
         pheader.appendChild(pcheck);
         pheader.appendChild(ptit);
@@ -1898,15 +1986,22 @@
 
         const chCont = document.createElement('div');
         chCont.style.paddingLeft = '24px';
-        chCont.style.display = 'flex';
+        chCont.style.display = (platChecked || selectedChans.size > 0) ? 'flex' : 'none';
+        if (chCont.style.display === 'flex') ptit.textContent = '▼ ' + plat + ' (' + platInfo.fileCount + ' files)';
         chCont.style.flexDirection = 'column';
+
+        ptit.onclick = () => {
+          const isCollapsed = chCont.style.display === 'none';
+          chCont.style.display = isCollapsed ? 'flex' : 'none';
+          ptit.textContent = (isCollapsed ? '▼ ' : '▶ ') + plat + ' (' + platInfo.fileCount + ' files)';
+        };
 
         for (const ch of platInfo.channels) {
            const clabel = document.createElement('label');
            clabel.style.display = 'flex';
            clabel.style.alignItems = 'center';
-           clabel.style.gap = '8px';
-           clabel.style.padding = '4px 6px';
+           clabel.style.gap = '4px';
+           clabel.style.padding = '1px 4px';
            clabel.style.cursor = 'pointer';
 
            const ccheck = document.createElement('input');
@@ -1918,7 +2013,8 @@
            const ctit = document.createElement('span');
            ctit.style.fontSize = '12px';
            ctit.style.color = '#ccc';
-           ctit.textContent = ch.name + ' (' + ch.fileCount + ')';
+           const dName = ch.displayName || (ch.name.startsWith('thread_') ? 'Thread ' + ch.name.substring(7) : ch.name);
+           ctit.textContent = dName + ' (' + ch.fileCount + ')';
 
            clabel.appendChild(ccheck);
            clabel.appendChild(ctit);
@@ -2046,7 +2142,7 @@
         try {
           const dirConfig = await loadDirConfig(false);
           const enabled = Array.isArray(state.enabledDirs) ? state.enabledDirs.slice() : (Array.isArray(dirConfig.enabled) ? dirConfig.enabled.slice() : []);
-          renderDirList({ directories: dirConfig.directories, enabled });
+          renderDirList({ tree: dirConfig.tree, enabled });
         } catch (e) {
           elDirList.textContent = 'Kon mappen niet laden';
           if (elDirCount) elDirCount.textContent = '';
@@ -2204,7 +2300,11 @@
     (async function startup() {
       try {
         await loadDirConfig();
-        const sessionEnabledDirs = getSessionEnabledDirs();
+        let sessionEnabledDirs = getSessionEnabledDirs();
+        if (sessionEnabledDirs && sessionEnabledDirs.some(v => typeof v === 'string' && v === '[object Object]')) {
+           setSessionEnabledDirs(null);
+           sessionEnabledDirs = null;
+        }
         if (sessionEnabledDirs) {
           state.enabledDirs = sessionEnabledDirs.slice();
         } else {

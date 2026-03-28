@@ -349,6 +349,64 @@ function shouldIncludePath(relPath, enabledDirs) {
   return false;
 }
 
+function applyDynamicFiltersToHybridQuery(sql, { treeFilters, searchQ }) {
+  let newSql = sql;
+  const filesConds = [];
+  const downConds = [];
+  const screenConds = [];
+
+  if (treeFilters && Array.isArray(treeFilters) && treeFilters.length > 0) {
+    for (const f of treeFilters) {
+      if (!f || !f.platform) continue;
+      const p = String(f.platform).replace(/'/g, "''").trim();
+      const chs = (f.channels || []).map(c => String(c).replace(/'/g, "''").trim()).filter(Boolean);
+
+      if (chs.length === 0) {
+        filesConds.push(`(d.platform = '${p}')`);
+        downConds.push(`(d.platform = '${p}')`);
+        screenConds.push(`(s.platform = '${p}')`);
+      } else {
+        const chList = chs.map(c => `'${c}'`).join(',');
+        filesConds.push(`(d.platform = '${p}' AND d.channel IN (${chList}))`);
+        downConds.push(`(d.platform = '${p}' AND d.channel IN (${chList}))`);
+        screenConds.push(`(s.platform = '${p}' AND s.channel IN (${chList}))`);
+      }
+    }
+  }
+
+  let treeFilesSql = filesConds.length > 0 ? `(${filesConds.join(' OR ')})` : '';
+  let treeDownSql = downConds.length > 0 ? `(${downConds.join(' OR ')})` : '';
+  let treeScreenSql = screenConds.length > 0 ? `(${screenConds.join(' OR ')})` : '';
+
+  let searchFilesSql = '';
+  let searchDownSql = '';
+  let searchScreenSql = '';
+  
+  if (searchQ) {
+    const terms = String(searchQ).split(' ').map(t => t.replace(/'/g, "''").trim()).filter(Boolean);
+    if (terms.length > 0) {
+      const sd = terms.map(t => `(d.title ILIKE '%${t}%' OR d.channel ILIKE '%${t}%' OR d.platform ILIKE '%${t}%')`).join(' AND ');
+      const sf = terms.map(t => `(d.title ILIKE '%${t}%' OR d.channel ILIKE '%${t}%' OR d.platform ILIKE '%${t}%' OR f.relpath ILIKE '%${t}%')`).join(' AND ');
+      const ss = terms.map(t => `(s.title ILIKE '%${t}%' OR s.channel ILIKE '%${t}%' OR s.platform ILIKE '%${t}%' OR s.filepath ILIKE '%${t}%')`).join(' AND ');
+      searchFilesSql = `(${sf})`;
+      searchDownSql = `(${sd})`;
+      searchScreenSql = `(${ss})`;
+    }
+  }
+
+  const finalFiles = [treeFilesSql, searchFilesSql].filter(Boolean).join(' AND ');
+  const finalDown = [treeDownSql, searchDownSql].filter(Boolean).join(' AND ');
+  const finalScreen = [treeScreenSql, searchScreenSql].filter(Boolean).join(' AND ');
+
+  if (!finalFiles && !finalDown && !finalScreen) return sql;
+
+  if (finalFiles) newSql = newSql.replace(/FROM download_files f\s+JOIN downloads d ON d.id = f\.download_id\s+WHERE d\.status NOT IN \([^)]+\)/g, `$& AND (${finalFiles})`);
+  if (finalDown) newSql = newSql.replace(/FROM downloads d\s+WHERE d\.status NOT IN \([^)]+\)\s+AND d\.filepath IS NOT NULL\s+AND TRIM\(d\.filepath\) != ''(?:\s+AND NOT EXISTS \([^)]+\))?/g, `$& AND (${finalDown})`);
+  if (finalScreen) newSql = newSql.replace(/FROM screenshots s\s+WHERE s\.filepath IS NOT NULL\s+AND TRIM\(s\.filepath\) != ''/g, `$& AND (${finalScreen})`);
+
+  return newSql;
+}
+
 function findFirstHttpUrl(text) {
   try {
     const m = String(text || '').match(/https?:\/\/[^\s"'<>]+/i);
@@ -1192,9 +1250,9 @@ if (!fs.existsSync(BASE_DIR)) {
 // ========================
 // DATABASE
 // ========================
-const DATABASE_URL = String(process.env.DATABASE_URL || '').trim();
-const DEFAULT_DB_ENGINE = DATABASE_URL ? 'postgres' : 'sqlite';
-const WEBDL_DB_ENGINE = String(process.env.WEBDL_DB_ENGINE || DEFAULT_DB_ENGINE).trim();
+const DATABASE_URL = 'postgresql://jurgen@localhost:5432/webdl';
+const DEFAULT_DB_ENGINE = 'postgres';
+const WEBDL_DB_ENGINE = 'postgres';
 if ((WEBDL_DB_ENGINE === 'postgres' || WEBDL_DB_ENGINE === 'pg') && !DATABASE_URL) {
   throw new Error('DATABASE_URL is required when WEBDL_DB_ENGINE=postgres');
 }
@@ -1466,6 +1524,9 @@ function setDownloadActivityContext(downloadId, patch) {
       title: patch && patch.title ? String(patch.title) : (prev.title || ''),
       filepath: patch && patch.filepath ? String(patch.filepath) : (prev.filepath || ''),
       filename: patch && patch.filename ? String(patch.filename) : (prev.filename || ''),
+      thumbnail: patch && typeof patch.thumbnail !== 'undefined' ? String(patch.thumbnail) : (prev.thumbnail || ''),
+      progress: patch && typeof patch.progress !== 'undefined' ? patch.progress : prev.progress,
+      status: patch && patch.status ? String(patch.status) : (prev.status || ''),
       lane: patch && patch.lane ? String(patch.lane) : (prev.lane || ''),
       driver: patch && patch.driver ? String(patch.driver) : (prev.driver || '')
     };
@@ -1496,7 +1557,8 @@ async function hydrateDownloadActivityContext(downloadId) {
       channel: row.channel || '',
       title: row.title || '',
       filepath: row.filepath || '',
-      filename: row.filename || ''
+      filename: row.filename || '',
+      thumbnail: row.thumbnail || ''
     });
   } catch (e) {
     return null;
@@ -1572,7 +1634,7 @@ async function emitDownloadStatusActivity(downloadId, status, progress, error, e
     if (!Number.isFinite(id)) return;
     const st = String(status || '').toLowerCase();
     const pct = Number.isFinite(Number(progress)) ? Math.max(0, Math.min(100, Number(progress))) : null;
-    setDownloadActivityContext(id, extra || {});
+    setDownloadActivityContext(id, { ...extra, progress: pct, status: st });
     const prevStatus = String(downloadActivityLastStatusById.get(id) || '').toLowerCase();
     let shouldLog = false;
     if (st && st !== prevStatus) shouldLog = true;
@@ -1608,6 +1670,7 @@ async function emitDownloadStatusActivity(downloadId, status, progress, error, e
       source_url: extra && extra.source_url ? String(extra.source_url) : (ctx.source_url || null),
       filepath: extra && extra.filepath ? String(extra.filepath) : (ctx.filepath || null),
       filename: extra && extra.filename ? String(extra.filename) : (ctx.filename || null),
+      thumbnail: extra && extra.thumbnail ? String(extra.thumbnail) : (ctx.thumbnail || null),
       lane: extra && extra.lane ? String(extra.lane) : (ctx.lane || null),
       driver: extra && extra.driver ? String(extra.driver) : (ctx.driver || null),
       error: error ? trimDownloadActivityString(error, 220) : null
@@ -1634,7 +1697,7 @@ const updateDownloadStatus = {
     // Auto-tagging hook when a download completes
     if (status === 'completed') {
       try {
-        const d = db.prepare('SELECT title, filename, filepath FROM downloads WHERE id = ' + (db.isPostgres ? '$1' : '?')).get(id);
+        const d = db.prepare('SELECT title, filename, filepath FROM downloads WHERE id = ?').get(id);
         if (d) {
           const text = (d.title || '') + ' ' + (d.filename || '') + ' ' + (d.filepath || '');
           extractAndSaveTags('d', String(id), text);
@@ -2009,7 +2072,7 @@ const getRecentIndexedMedia = db.prepare(db.isPostgres ? `
       s.id AS rating_id
     FROM screenshots s
   )
-  ORDER BY ts DESC
+  ORDER BY ts DESC, id ASC
   LIMIT ? OFFSET ?
 ` : `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, url, source_url, rating, rating_kind, rating_id
@@ -2049,7 +2112,7 @@ const getRecentIndexedMedia = db.prepare(db.isPostgres ? `
       s.id AS rating_id
     FROM screenshots s
   )
-  ORDER BY ts DESC
+  ORDER BY ts DESC, id ASC
   LIMIT ? OFFSET ?
 `);
 
@@ -2062,7 +2125,7 @@ const getRecentDashboardBatchFiles = db.prepare(db.isPostgres ? `
     d.title AS title,
     NULL AS filepath,
     COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-    COALESCE(NULLIF(CAST(f.mtime_ms AS BIGINT), 0), CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT)) AS ts,
+    CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
     NULL AS thumbnail,
     d.url AS url,
     d.source_url AS source_url,
@@ -2072,7 +2135,7 @@ const getRecentDashboardBatchFiles = db.prepare(db.isPostgres ? `
   FROM download_files f
   JOIN downloads d ON d.id = f.download_id
   WHERE d.status NOT IN ('pending', 'queued')
-  ORDER BY ts DESC
+  ORDER BY ts DESC, id ASC
   LIMIT ?
 ` : `
   SELECT
@@ -2093,11 +2156,11 @@ const getRecentDashboardBatchFiles = db.prepare(db.isPostgres ? `
   FROM download_files f
   JOIN downloads d ON d.id = f.download_id
   WHERE d.status NOT IN ('pending', 'queued')
-  ORDER BY ts DESC
+  ORDER BY ts DESC, id ASC
   LIMIT ?
 `);
 
-const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
+const SQL_getRecentHybridMediaWithActiveFiles = db.isPostgres ? `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
     SELECT
@@ -2108,7 +2171,7 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-      COALESCE(NULLIF(CAST(f.mtime_ms AS BIGINT), 0), CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT)) AS ts,
+      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -2117,7 +2180,7 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
       d.id AS rating_id
     FROM download_files f
     JOIN downloads d ON d.id = f.download_id
-    WHERE d.status NOT IN ('pending', 'queued')
+    WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing', 'error')
 
     UNION ALL
 
@@ -2162,7 +2225,7 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
     WHERE s.filepath IS NOT NULL
       AND TRIM(s.filepath) != ''
   )
-  ORDER BY ts DESC
+  ORDER BY ts DESC, id ASC
   LIMIT ? OFFSET ?
 ` : `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
@@ -2184,7 +2247,7 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
       d.id AS rating_id
     FROM download_files f
     JOIN downloads d ON d.id = f.download_id
-    WHERE d.status NOT IN ('pending', 'queued')
+    WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing', 'error')
 
     UNION ALL
 
@@ -2229,11 +2292,11 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
     WHERE s.filepath IS NOT NULL
       AND TRIM(s.filepath) != ''
   )
-  ORDER BY ts DESC
+  ORDER BY ts DESC, id ASC
   LIMIT ? OFFSET ?
-`);
+`;
 
-const getRecentHybridMedia = db.prepare(db.isPostgres ? `
+const SQL_getRecentHybridMedia = db.isPostgres ? `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
     SELECT
@@ -2244,7 +2307,7 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-      COALESCE(NULLIF(CAST(f.mtime_ms AS BIGINT), 0), CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT)) AS ts,
+      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -2298,7 +2361,7 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
     WHERE s.filepath IS NOT NULL
       AND TRIM(s.filepath) != ''
   )
-  ORDER BY ts DESC
+  ORDER BY ts DESC, id ASC
   LIMIT ? OFFSET ?
 ` : `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
@@ -2366,9 +2429,9 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
     WHERE s.filepath IS NOT NULL
       AND TRIM(s.filepath) != ''
   )
-  ORDER BY ts DESC
+  ORDER BY ts DESC, id ASC
   LIMIT ? OFFSET ?
-`);
+`;
 
 // Diversity seed: latest N completed downloads per platform (fast, ~100 rows)
 const getDiversitySeedItems = db.prepare(db.isPostgres ? `
@@ -2396,7 +2459,7 @@ const getDiversitySeedItems = db.prepare(db.isPostgres ? `
       AND TRIM(d.filepath) != ''
   ) ranked
   WHERE rn <= ?
-  ORDER BY ts DESC
+  ORDER BY ts DESC, id ASC
 ` : `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
@@ -2422,7 +2485,7 @@ const getDiversitySeedItems = db.prepare(db.isPostgres ? `
       AND TRIM(d.filepath) != ''
   ) ranked
   WHERE rn <= ?
-  ORDER BY ts DESC
+  ORDER BY ts DESC, id ASC
 `);
 const getHybridMediaByChannel = db.prepare(db.isPostgres ? `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
@@ -2435,7 +2498,7 @@ const getHybridMediaByChannel = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-      COALESCE(NULLIF(CAST(f.mtime_ms AS BIGINT), 0), CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT)) AS ts,
+      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -2492,7 +2555,7 @@ const getHybridMediaByChannel = db.prepare(db.isPostgres ? `
       AND s.filepath IS NOT NULL
       AND TRIM(s.filepath) != ''
   )
-  ORDER BY ts DESC
+  ORDER BY ts DESC, id ASC
   LIMIT ? OFFSET ?
 ` : `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
@@ -2562,11 +2625,11 @@ const getHybridMediaByChannel = db.prepare(db.isPostgres ? `
       AND s.filepath IS NOT NULL
       AND TRIM(s.filepath) != ''
   )
-  ORDER BY ts DESC
+  ORDER BY ts DESC, id ASC
   LIMIT ? OFFSET ?
 `);
 
-const getRecentHybridMediaByOldest = db.prepare(db.isPostgres ? `
+const SQL_getRecentHybridMediaByOldest = db.isPostgres ? `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
     SELECT
@@ -2701,9 +2764,9 @@ const getRecentHybridMediaByOldest = db.prepare(db.isPostgres ? `
   )
   ORDER BY ts ASC
   LIMIT ? OFFSET ?
-`);
+`;
 
-const getRecentHybridMediaByNameAsc = db.prepare(db.isPostgres ? `
+const SQL_getRecentHybridMediaByNameAsc = db.isPostgres ? `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
     SELECT
@@ -2839,9 +2902,9 @@ const getRecentHybridMediaByNameAsc = db.prepare(db.isPostgres ? `
   )
   ORDER BY LOWER(COALESCE(NULLIF(title, ''), id)) ASC, ts DESC
   LIMIT ? OFFSET ?
-`);
+`;
 
-const getRecentHybridMediaByNameDesc = db.prepare(db.isPostgres ? `
+const SQL_getRecentHybridMediaByNameDesc = db.isPostgres ? `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
     SELECT
@@ -2977,7 +3040,7 @@ const getRecentHybridMediaByNameDesc = db.prepare(db.isPostgres ? `
   )
   ORDER BY LOWER(COALESCE(NULLIF(title, ''), id)) DESC, ts DESC
   LIMIT ? OFFSET ?
-`);
+`;
 
 const getHybridMediaByChannelByOldest = db.prepare(db.isPostgres ? `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
@@ -3420,7 +3483,7 @@ const getHybridMediaByChannelWithActiveFiles = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-      COALESCE(NULLIF(CAST(f.mtime_ms AS BIGINT), 0), CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT)) AS ts,
+      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -3477,7 +3540,7 @@ const getHybridMediaByChannelWithActiveFiles = db.prepare(db.isPostgres ? `
       AND s.filepath IS NOT NULL
       AND TRIM(s.filepath) != ''
   )
-  ORDER BY ts DESC
+  ORDER BY ts DESC, id ASC
   LIMIT ? OFFSET ?
 ` : `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
@@ -3548,11 +3611,11 @@ const getHybridMediaByChannelWithActiveFiles = db.prepare(db.isPostgres ? `
       AND s.filepath IS NOT NULL
       AND TRIM(s.filepath) != ''
   )
-  ORDER BY ts DESC
+  ORDER BY ts DESC, id ASC
   LIMIT ? OFFSET ?
 `);
 
-const getRecentHybridMediaByRatingDesc = db.prepare(db.isPostgres ? `
+const SQL_getRecentHybridMediaByRatingDesc = db.isPostgres ? `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
     SELECT
@@ -3688,9 +3751,9 @@ const getRecentHybridMediaByRatingDesc = db.prepare(db.isPostgres ? `
   )
   ORDER BY (rating IS NULL) ASC, rating DESC, ts DESC
   LIMIT ? OFFSET ?
-`);
+`;
 
-const getRecentHybridMediaByRatingAsc = db.prepare(db.isPostgres ? `
+const SQL_getRecentHybridMediaByRatingAsc = db.isPostgres ? `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
     SELECT
@@ -3826,7 +3889,7 @@ const getRecentHybridMediaByRatingAsc = db.prepare(db.isPostgres ? `
   )
   ORDER BY (rating IS NULL) ASC, rating ASC, ts DESC
   LIMIT ? OFFSET ?
-`);
+`;
 
 const getHybridMediaByChannelByRatingDesc = db.prepare(db.isPostgres ? `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
@@ -4156,7 +4219,7 @@ const getIndexedMediaByChannel = db.prepare(db.isPostgres ? `
     FROM screenshots s
     WHERE s.platform = ? AND s.channel = ?
   )
-  ORDER BY ts DESC
+  ORDER BY ts DESC, id ASC
   LIMIT ? OFFSET ?
 ` : `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, url, source_url, rating, rating_kind, rating_id
@@ -4198,7 +4261,7 @@ const getIndexedMediaByChannel = db.prepare(db.isPostgres ? `
     FROM screenshots s
     WHERE s.platform = ? AND s.channel = ?
   )
-  ORDER BY ts DESC
+  ORDER BY ts DESC, id ASC
   LIMIT ? OFFSET ?
 `);
 
@@ -4434,7 +4497,7 @@ const activeProcesses = new Map();
 const activeProcessesMerging = new Set();
 
 const HEAVY_DOWNLOAD_CONCURRENCY = parseInt(process.env.WEBDL_HEAVY_DOWNLOAD_CONCURRENCY || '2', 10);
-const LIGHT_DOWNLOAD_CONCURRENCY = parseInt(process.env.WEBDL_LIGHT_DOWNLOAD_CONCURRENCY || '3', 10);
+const LIGHT_DOWNLOAD_CONCURRENCY = parseInt(process.env.WEBDL_LIGHT_DOWNLOAD_CONCURRENCY || '10', 10);
 
 const initialYoutubeConcurrency = parseInt(process.env.WEBDL_YOUTUBE_DOWNLOAD_CONCURRENCY || '3', 10);
 const initialYoutubeSpacing = parseInt(process.env.WEBDL_YOUTUBE_START_SPACING_MS || '0', 10);
@@ -4664,6 +4727,11 @@ async function runDownloadScheduler() {
       const ctx = downloadActivityContextById.get(id);
       if (ctx && String(ctx.platform || '').toLowerCase() === platform) n++;
     }
+    for (const id of startingJobs) {
+      if (activeProcessesMerging.has(id)) continue;
+      const ctx = downloadActivityContextById.get(id);
+      if (ctx && String(ctx.platform || '').toLowerCase() === platform) n++;
+    }
     return n;
   };
 
@@ -4685,7 +4753,10 @@ async function runDownloadScheduler() {
   let mediumActive = activeLaneCount('medium');
   let lightActive = activeLaneCount('light');
 
-  const rows = await db.prepare("SELECT id, url, platform, channel, title, metadata, created_at FROM downloads WHERE status IN ('pending', 'queued') ORDER BY CASE status WHEN 'queued' THEN 1 ELSE 2 END, created_at DESC LIMIT 2500").all();
+  const isMergingFull = activeProcessesMerging.size >= POSTPROCESS_CONCURRENCY;
+  const MERGE_PLATFORMS = ['youtube', 'youtube-shorts', 'patreon', 'onlyfans', 'fansly'];
+
+  const rows = await db.prepare("SELECT id, url, platform, channel, title, metadata, created_at FROM downloads WHERE status IN ('pending', 'queued') ORDER BY created_at DESC LIMIT 2500").all();
   if (!rows || rows.length === 0) return;
 
   // Determine the newest download timestamp across both active and queued
@@ -4725,6 +4796,8 @@ async function runDownloadScheduler() {
     const p = String(row.platform || '').toLowerCase();
     const url = String(row.url || '').trim();
     const lane = detectLane(p, url);
+    
+    if (isMergingFull && MERGE_PLATFORMS.includes(p)) continue;
     
     if (lane === 'heavy' && heavyActive >= heavyLimit) continue;
     if (lane === 'medium' && mediumActive >= mediumLimit) continue;
@@ -4912,6 +4985,14 @@ async function rehydrateDownloadQueueWithMode(modeRaw, maxRowsRaw) {
 }
 
 async function rehydrateDownloadQueue() {
+  try {
+    const res = await db.prepare("UPDATE downloads SET status = 'queued' WHERE status IN ('downloading', 'postprocessing')").run();
+    if (res && res.changes > 0) {
+      console.log(`[REHYDRATE] Reverted ${res.changes} stuck downloads back to queued.`);
+    }
+  } catch (e) {
+    console.error('rehydrateDownloadQueue failed:', e);
+  }
   runDownloadSchedulerSoon();
 }
 
@@ -5134,12 +5215,24 @@ function safeResolveMediaRelPath(relPath) {
     if (!raw) return null;
 
     const candidates = [];
+    
+    // Handmatige correctie voor OnlyFans paden met ../../../Users/ enz.
+    if (raw.includes('Users/') || raw.includes('Volumes/')) {
+      const match = raw.match(/(?:(?:\.\.\/)+)?(Users\/.*?|Volumes\/.*?)$/);
+      if (match && match[1]) {
+        candidates.push('/' + match[1]);
+      }
+    }
+
     try {
       if (path.isAbsolute(raw)) candidates.push(path.resolve(raw));
     } catch (e) {}
     try {
       const rel = raw.replace(/^\/+/, '');
-      if (rel) candidates.push(path.resolve(BASE_DIR, rel));
+      if (rel) {
+        candidates.push(path.resolve(BASE_DIR, rel));
+        candidates.push(path.join('/Volumes/HDD - One Touch/WEBDL', rel));
+      }
     } catch (e) {}
 
     for (const abs of candidates) {
@@ -5224,7 +5317,8 @@ expressApp.get('/media/pending-thumb.svg', (req, res) => {
   try {
     const kind = String(req.query.kind || '').toLowerCase();
     const id = String(req.query.id || '').trim();
-    const label = (kind === 's' ? 'shot' : kind === 'd' ? 'dl' : 'thumb') + (id ? ` #${id}` : '');
+    const txt = String(req.query.text || '').trim();
+    const label = txt ? txt : (kind === 's' ? 'shot' : kind === 'd' ? 'dl' : 'thumb') + (id ? ` #${id}` : '');
     const t = label.slice(0, 80);
     const safe = t.replace(/&/g, '&amp;').replace(/</g, '&lt;');
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="480" height="270"><rect width="100%" height="100%" fill="#000"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#00d4ff" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="18">${safe}</text></svg>`;
@@ -6531,8 +6625,10 @@ function deriveChannelFromUrl(platform, url) {
   if (platform === 'aznudefeet') {
     const m = u.match(/aznudefeet\.com\/view\/[^\/]+\/[^\/]+\/\d+\/([^\/\?#.]+)\.html/i);
     if (m) return m[1];
+    const mMod = u.match(/aznudefeet\.com\/models\/([^\/\?#]+)/i);
+    if (mMod) return mMod[1];
     const m2 = u.match(/aznudefeet\.com\/([^\/\?#]+)/i);
-    if (m2) return m2[1];
+    if (m2 && !['models', 'categories', 'channels'].includes(m2[1].toLowerCase())) return m2[1];
   }
 
   if (platform === 'telegram') {
@@ -6774,7 +6870,8 @@ function isAznudefeetViewUrl(input) {
     const u = new URL(String(input || ''));
     const host = String(u.hostname || '').toLowerCase();
     if (!(host === 'www.aznudefeet.com' || host === 'aznudefeet.com' || host.endsWith('.aznudefeet.com'))) return false;
-    return /\/view\/[^\/]+\/[^\/]+\/\d+\/[^\/\?#]+\.html/i.test(String(u.pathname || ''));
+    if (host.includes('cdn.aznudefeet.com')) return false;
+    return true;
   } catch (e) {
     return false;
   }
@@ -8112,11 +8209,13 @@ expressApp.post('/download', async (req, res) => {
   const originPlatform = normalizePlatform(metaPlatform, pageUrl || effectiveUrl);
   const pinFffOrigin = !!(originPlatform === 'footfetishforum' && pageUrl && pageUrl !== effectiveUrl && isFootfetishforumThreadUrl(pageUrl));
   const pinAznOrigin = !!(originPlatform === 'aznudefeet' && pageUrl && pageUrl !== effectiveUrl && isAznudefeetViewUrl(pageUrl));
-  const pinToOrigin = !!(pinFffOrigin || pinAznOrigin);
+  const avfPageInfo = originPlatform === 'amateurvoyeurforum' && pageUrl && pageUrl !== effectiveUrl ? parseAmateurVoyeurForumUrlInfo(pageUrl) : null;
+  const pinAvfOrigin = !!(avfPageInfo && avfPageInfo.kind !== 'asset');
+  const pinToOrigin = !!(pinFffOrigin || pinAznOrigin || pinAvfOrigin);
   const fffThreadInfo = pinFffOrigin ? parseFootFetishForumThreadInfo(pageUrl || effectiveUrl) : null;
   const detectedPlatform = detectPlatform(effectiveUrl);
-  const originChannel = pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : metadata && metadata.channel ? metadata.channel : deriveChannelFromUrl(originPlatform, pageUrl || effectiveUrl) || 'unknown';
-  const originTitle = pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : metadata && metadata.title ? metadata.title : deriveTitleFromUrl(pageUrl || effectiveUrl);
+  const originChannel = pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : pinAvfOrigin && avfPageInfo.name ? avfPageInfo.name : metadata && metadata.channel && metadata.channel !== 'unknown' ? metadata.channel : deriveChannelFromUrl(originPlatform, pageUrl || effectiveUrl) || 'unknown';
+  const originTitle = pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : pinAvfOrigin && avfPageInfo.name ? avfPageInfo.name : metadata && metadata.title && metadata.title !== 'untitled' ? metadata.title : deriveTitleFromUrl(pageUrl || effectiveUrl);
 
   const preferDetectedPlatform = !!(pinFffOrigin && detectedPlatform && detectedPlatform !== 'other' && detectedPlatform !== originPlatform);
   const platform = pinToOrigin ? originPlatform : (preferDetectedPlatform ? detectedPlatform : normalizePlatform(metaPlatform, effectiveUrl));
@@ -8124,12 +8223,12 @@ expressApp.post('/download', async (req, res) => {
   originChannel :
   preferDetectedPlatform ?
   deriveChannelFromUrl(platform, effectiveUrl) || originChannel :
-  metadata && metadata.channel ? metadata.channel : deriveChannelFromUrl(platform, effectiveUrl) || 'unknown';
+  metadata && metadata.channel && metadata.channel !== 'unknown' ? metadata.channel : deriveChannelFromUrl(platform, effectiveUrl) || 'unknown';
   const title = pinToOrigin ?
   originTitle :
   preferDetectedPlatform ?
   deriveTitleFromUrl(effectiveUrl) :
-  metadata && metadata.title ? metadata.title : deriveTitleFromUrl(effectiveUrl);
+  metadata && metadata.title && metadata.title !== 'untitled' ? metadata.title : deriveTitleFromUrl(effectiveUrl);
 
   const allowRedditRerun = platform === 'reddit' && isRedditRollingTargetUrl(effectiveUrl);
   const allowPatreonRerun = platform === 'patreon' && (effectiveUrl.includes('/posts') || effectiveUrl.includes('patreon.com/c/'));
@@ -8274,9 +8373,11 @@ expressApp.post('/download/batch', async (req, res) => {
   const originPlatform = normalizePlatform(metaPlatform, pageUrl || '');
   const pinFffOrigin = !!(originPlatform === 'footfetishforum' && pageUrl && isFootfetishforumThreadUrl(pageUrl));
   const pinAznOrigin = !!(originPlatform === 'aznudefeet' && pageUrl && isAznudefeetViewUrl(pageUrl));
+  const avfPageInfo = originPlatform === 'amateurvoyeurforum' && pageUrl ? parseAmateurVoyeurForumUrlInfo(pageUrl) : null;
+  const pinAvfOrigin = !!(avfPageInfo && avfPageInfo.kind !== 'asset');
   const fffThreadInfo = pinFffOrigin ? parseFootFetishForumThreadInfo(pageUrl) : null;
-  const originChannel = pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : metadata && metadata.channel ? metadata.channel : deriveChannelFromUrl(originPlatform, pageUrl) || 'unknown';
-  const originTitle = pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : metadata && metadata.title ? metadata.title : deriveTitleFromUrl(pageUrl);
+  const originChannel = pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : pinAvfOrigin && avfPageInfo.name ? avfPageInfo.name : metadata && metadata.channel && metadata.channel !== 'unknown' ? metadata.channel : deriveChannelFromUrl(originPlatform, pageUrl) || 'unknown';
+  const originTitle = pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : pinAvfOrigin && avfPageInfo.name ? avfPageInfo.name : metadata && metadata.title && metadata.title !== 'untitled' ? metadata.title : deriveTitleFromUrl(pageUrl);
 
   const unique = [];
   const seen = new Set();
@@ -8291,12 +8392,12 @@ expressApp.post('/download/batch', async (req, res) => {
 
   const created = [];
   for (const u of unique) {
-    const pinToOrigin = !!((pinFffOrigin || pinAznOrigin) && pageUrl && pageUrl !== u);
+    const pinToOrigin = !!((pinFffOrigin || pinAznOrigin || pinAvfOrigin) && pageUrl && pageUrl !== u);
     const detectedPlatform = detectPlatform(u);
     const preferDetectedPlatform = !!(pinFffOrigin && pinToOrigin && detectedPlatform && detectedPlatform !== 'other' && detectedPlatform !== originPlatform);
     const platform = pinToOrigin ? originPlatform : (preferDetectedPlatform ? detectedPlatform : normalizePlatform(metaPlatform, u));
-    const channel = pinToOrigin ? originChannel : preferDetectedPlatform ? deriveChannelFromUrl(platform, u) || originChannel : metadata && metadata.channel ? metadata.channel : deriveChannelFromUrl(platform, u) || 'unknown';
-    const title = pinToOrigin ? originTitle : preferDetectedPlatform ? deriveTitleFromUrl(u) : metadata && metadata.title ? metadata.title : deriveTitleFromUrl(u);
+    const channel = pinToOrigin ? originChannel : preferDetectedPlatform ? deriveChannelFromUrl(platform, u) || originChannel : metadata && metadata.channel && metadata.channel !== 'unknown' ? metadata.channel : deriveChannelFromUrl(platform, u) || 'unknown';
+    const title = pinToOrigin ? originTitle : preferDetectedPlatform ? deriveTitleFromUrl(u) : metadata && metadata.title && metadata.title !== 'untitled' ? metadata.title : deriveTitleFromUrl(u);
     const allowRedditRerun = platform === 'reddit' && isRedditRollingTargetUrl(u);
     const allowPatreonRerun = platform === 'patreon' && (u.includes('/posts') || u.includes('patreon.com/c/'));
     const allowRerun = allowRedditRerun || allowPatreonRerun;
@@ -9023,6 +9124,29 @@ function resolveDirectDownloadFilename(url, fallback, rawHeaders) {
   return safe || fallback;
 }
 
+let lastFileboomCookieExtractMs = 0;
+async function ensureFileboomCookies() {
+  const cookiePath = path.join(BASE_DIR, 'fileboom_cookies.txt');
+  let attemptExtract = false;
+  try {
+    if (!fs.existsSync(cookiePath)) attemptExtract = true;
+    else if (Date.now() - fs.statSync(cookiePath).mtimeMs > 30 * 60 * 1000) attemptExtract = true;
+  } catch (e) { attemptExtract = true; }
+  
+  if (attemptExtract && Date.now() - lastFileboomCookieExtractMs > 2 * 60 * 1000) {
+    lastFileboomCookieExtractMs = Date.now();
+    try {
+      const { exec } = require('child_process');
+      const util = require('util');
+      const execAsync = util.promisify(exec);
+      try {
+        await execAsync(`yt-dlp --cookies-from-browser firefox --cookies "${cookiePath}" "https://fboom.me"`, { timeout: 15000 });
+      } catch (e) {}
+    } catch (e) {}
+  }
+  return fs.existsSync(cookiePath) ? cookiePath : null;
+}
+
 async function startDirectFileDownload(downloadId, url, platform, channel, title, metadata) {
   try {
     if (isCancelled(downloadId)) {
@@ -9123,6 +9247,13 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
       metadata && typeof metadata === 'object' && metadata.url && metadata.url !== url ? metadata.url :
       ''
     ).trim();
+    
+    let injectedCookieFile = null;
+    const urlLower = url.toLowerCase();
+    if (urlLower.includes('fboom.me') || urlLower.includes('fileboom.me')) {
+      injectedCookieFile = await ensureFileboomCookies();
+    }
+
     const curlArgs = [
       '-L',
       '--fail',
@@ -9131,6 +9262,11 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
       '-A', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
     ];
     if (referer) curlArgs.push('-e', referer);
+    
+    if (injectedCookieFile) {
+      curlArgs.push('-b', injectedCookieFile, '-c', injectedCookieFile);
+    }
+    
     curlArgs.push('-D', headerFilepath);
     curlArgs.push('-o', tmpFilepath, url);
     const proc = spawnNice('/usr/bin/curl', curlArgs);
@@ -9145,6 +9281,19 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
       activeProcesses.delete(downloadId);
       try {
         if (code === 0 && fs.existsSync(tmpFilepath)) {
+          const stat = fs.statSync(tmpFilepath);
+          if (stat.size < 250000) {
+             const fd = fs.openSync(tmpFilepath, 'r');
+             const buf = Buffer.alloc(256);
+             const bytesRead = fs.readSync(fd, buf, 0, 256, 0);
+             fs.closeSync(fd);
+             const text = buf.toString('utf8', 0, bytesRead).toLowerCase();
+             if (text.includes('<!doctype') || text.includes('<html') || text.includes('<body')) {
+               try { fs.rmSync(tmpFilepath, { force: true }); } catch(e) {}
+               await updateDownloadStatus.run('error', 0, 'Premium/Sessie verlopen: Direct Download weigerde videobestand (HTML paywall/login ontvangen)', downloadId);
+               return;
+             }
+          }
           const rawHeaders = fs.existsSync(headerFilepath) ? fs.readFileSync(headerFilepath, 'utf8') : '';
           const filename = resolveDirectDownloadFilename(url, provisionalFilename, rawHeaders);
           const filepath = uniqueFilePath(path.join(dir, filename), downloadId);
@@ -9470,7 +9619,7 @@ async function startOfscraperDownload(downloadId, url, platform, channel, title,
 
     const proc = spawnNice(OFSCRAPER, [
     '-cg', cfgDir,
-    '-p', 'stats',
+    '-p', 'normal',
     '--action', 'download',
     '--download-area', 'all',
     '--usernames', user,
@@ -9683,6 +9832,9 @@ async function startOfscraperDownload(downloadId, url, platform, channel, title,
             }
           };
           await updateDownload.run('completed', 100, dir, '(multiple)', 0, '', JSON.stringify(metaObj), null, downloadId);
+          try {
+            await indexDownloadFilesForDownload({ id: downloadId, status: 'completed', filepath: dir, _maxFiles: 8000, platform: 'onlyfans' });
+          } catch (e) {}
         } else {
           await updateDownloadStatus.run('error', 0, tail || `ofscraper exit code: ${code} (log: ${logPath || 'n/a'})`, downloadId);
         }
@@ -9939,7 +10091,8 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
     '--merge-output-format', 'mp4',
     '--postprocessor-args', 'ffmpeg:-threads 3',
     '--write-thumbnail',
-    '--write-info-json'];
+    '--write-info-json',
+    '--no-mtime'];
     if (!forceOverwrite) {
       baseArgs.push('--no-overwrites');
     } else {
@@ -9991,7 +10144,14 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
             const match = line.match(/([\d.]+)%/);
             if (match) {
               const pct = Math.round(parseFloat(match[1]));
-              if (!markedPostprocessing) await updateDownloadStatus.run('downloading', pct, null, downloadId);
+              if (markedPostprocessing) {
+                markedPostprocessing = false;
+                if (activeProcessesMerging.has(downloadId)) {
+                  activeProcessesMerging.delete(downloadId);
+                  setTimeout(runDownloadSchedulerSoon, 100); // Trigger scheduler immediately to fill empty CPU slot
+                }
+              }
+              await updateDownloadStatus.run('downloading', pct, null, downloadId);
             }
           }
           if (line.includes('Destination:')) {
@@ -10000,8 +10160,8 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
             lastFile = rawDest.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '');
             console.log(`   [#${downloadId}] lastFile set: ${lastFile}`);
           }
-          if (line.includes('[Merger]') || line.includes('has already been downloaded')) {
-            if (!markedPostprocessing && (line.includes('[Merger]') || line.includes('Merging formats into'))) {
+          if (line.includes('[Merger]') || line.includes('[FixupM3u8]') || line.includes('[ExtractAudio]') || line.includes('has already been downloaded')) {
+            if (!markedPostprocessing && (line.includes('[Merger]') || line.includes('[FixupM3u8]') || line.includes('[ExtractAudio]') || line.includes('Merging formats into'))) {
               markedPostprocessing = true;
               await updateDownloadStatus.run('postprocessing', 100, null, downloadId);
               if (!activeProcessesMerging.has(downloadId)) {
@@ -10913,10 +11073,47 @@ expressApp.get('/download/:id/thumb', async (req, res) => {
 expressApp.get('/media/thumb', (req, res) => {
   (async () => {
     const kind = String(req.query.kind || '').toLowerCase();
-    const id = parseInt(req.query.id, 10);
-    if (!Number.isFinite(id)) return res.status(400).end();
+    const idStr = String(req.query.id || '');
+    const id = kind === 'p' ? idStr : parseInt(idStr, 10);
+    if (kind !== 'p' && !Number.isFinite(id)) return res.status(400).end();
 
     try {
+      if (kind === 'p') {
+        let fp = path.join(BASE_DIR, idStr);
+        if (!fs.existsSync(fp)) {
+          const hddFp = path.join('/Volumes/HDD - One Touch/WEBDL', idStr);
+          if (fs.existsSync(hddFp)) fp = hddFp;
+        }
+        if (!safeIsAllowedExistingPath(fp)) {
+          res.setHeader('Cache-Control', 'no-store');
+          return res.redirect(302, `/media/pending-thumb.svg?kind=${encodeURIComponent(kind)}&id=${encodeURIComponent(idStr)}`);
+        }
+        const thumbPath = await pickOrCreateThumbPath(fp, { allowGenerate: false });
+        if (!thumbPath) {
+          let sched = 'error';
+          try {sched = scheduleThumbGeneration(fp) || 'error';} catch (e) {}
+          logMissingThumbOnce('media-thumb', idStr, sched);
+          res.setHeader('Cache-Control', 'no-store');
+          return res.redirect(302, `/media/pending-thumb.svg?kind=${encodeURIComponent(kind)}&id=${encodeURIComponent(idStr)}`);
+        }
+        res.setHeader('Cache-Control', 'public, max-age=86400');
+        try {
+          const ext = String(path.extname(thumbPath || '')).toLowerCase();
+          const known = new Set(['.mp4', '.mov', '.m4v', '.webm', '.mkv', '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.svg', '.avif', '.heic', '.heif']);
+          if (!known.has(ext)) {
+            const mime = sniffMediaMimeByMagic(thumbPath);
+            if (mime) res.setHeader('Content-Type', mime);
+          }
+        } catch (e) {}
+        return res.sendFile(thumbPath, (err) => {
+          if (!err) return;
+          if (err && (err.code === 'ECONNABORTED' || /aborted/i.test(String(err.message || '')))) return;
+          if (res.headersSent) return;
+          const status = err.status || (err.code === 'ENOENT' ? 404 : 500);
+          if (status === 404) return res.status(404).end();
+          return res.status(500).end();
+        });
+      }
       if (kind === 'd') {
         const download = await getDownload.get(id);
         if (!download) return res.status(404).end();
@@ -11113,22 +11310,32 @@ expressApp.get('/dashboard', async (req, res) => {
 
 expressApp.get('/media/file', async (req, res) => {
   const kind = String(req.query.kind || '').toLowerCase();
-  const id = parseInt(req.query.id, 10);
+  const idStr = String(req.query.id || '');
+  const id = kind === 'p' ? idStr : parseInt(idStr, 10);
   try {
-    console.log(`[GET /media/file] kind=${kind} id=${id} ua=${String(req.headers['user-agent'] || '').slice(0, 60)}`);
+    console.log(`[GET /media/file] kind=${kind} id=${idStr} ua=${String(req.headers['user-agent'] || '').slice(0, 60)}`);
   } catch (e) {}
-  if (!Number.isFinite(id)) return res.status(400).end();
+  if (kind !== 'p' && !Number.isFinite(id)) return res.status(400).end();
 
   try {
+    let fp = '';
     let row = null;
-    if (kind === 'd') row = await getDownload.get(id);else
-    if (kind === 's') row = await db.prepare(`SELECT * FROM screenshots WHERE id=?`).get(id);else
-    return res.status(400).end();
+    if (kind === 'p') {
+      fp = path.join(BASE_DIR, idStr);
+      if (!fs.existsSync(fp)) {
+        const hddFp = path.join('/Volumes/HDD - One Touch/WEBDL', idStr);
+        if (fs.existsSync(hddFp)) fp = hddFp;
+      }
+    } else {
+      if (kind === 'd') row = await getDownload.get(id);else
+      if (kind === 's') row = await db.prepare(`SELECT * FROM screenshots WHERE id=?`).get(id);else
+      return res.status(400).end();
 
-    if (!row) return res.status(404).end();
-    const fp = String(row.filepath || '').trim();
+      if (!row) return res.status(404).end();
+      fp = String(row.filepath || '').trim();
+    }
 
-    if (row.platform === 'patreon') {
+    if (row && row.platform === 'patreon') {
       console.log(`[DEBUG-PATREON-EXPAND] Processing id=${row.id}, fp=${fp}, isAllowed=${safeIsAllowedExistingPath(path.resolve(fp))}`);
     }
 
@@ -11239,7 +11446,7 @@ function makeMediaItem(row) {
     }
 
   if (fp && isAuxiliaryMediaPath(fp)) return null;
-  const t = inferMediaType(fp);
+  const t = inferMediaType(fp || String(row.id || ''));
 
   let fileRel = '';
   try {
@@ -11423,8 +11630,8 @@ function isAuxiliaryMediaPath(inputPath) {
     if (base === 'metadata.json') return true;
     if (base.endsWith('.webp')) return true;
     if (/_thumb_v[0-9]+\.(jpe?g|png|gif)$/i.test(base)) return true;
-    if (/[_\-.](?:thumb|thumbnail|logo|poster|preview|cover)(?:[_\-.][a-z0-9]+)?\.(?:jpe?g|png|gif|webp|bmp|svg|avif|heic|heif)$/i.test(base)) return true;
-    if (/(?:^|[_\-.])(?:thumb|thumbnail|logo|poster|preview|cover)(?:[_\-.][a-z0-9]+)?$/i.test(path.basename(base, path.extname(base)))) return true;
+    if (/[_\-.](?:thumb|thumbnail|poster|preview|cover)(?:[_\-.][a-z0-9]+)?\.(?:jpe?g|png|gif|webp|bmp|svg|avif|heic|heif)$/i.test(base)) return true;
+    if (/(?:^|[_\-.])(?:thumb|thumbnail|poster|preview|cover)(?:[_\-.][a-z0-9]+)?$/i.test(path.basename(base, path.extname(base)))) return true;
   } catch (e) {}
   return false;
 }
@@ -11537,8 +11744,29 @@ function dedupeVideoThumbnailPairs(files) {
   }
 }
 
+function resolveRelPath(relPath) {
+  if (!relPath) return '';
+  
+  // Handmatige correctie voor OnlyFans (ofscraper) paden in de database
+  // Paden zoals: "../../../Users/jurgen/Downloads/WEBDL/..." 
+  // path.resolve(BASE_DIR, rp) zou resulteren in /Users/Users/jurgen/...
+  if (relPath.includes('Users/') || relPath.includes('Volumes/')) {
+    const match = relPath.match(/(?:(?:\.\.\/)+)?(Users\/.*?|Volumes\/.*?)$/);
+    if (match && match[1]) {
+      const abs = '/' + match[1];
+      if (fs.existsSync(abs)) return abs;
+    }
+  }
+
+  const p1 = path.resolve(BASE_DIR, relPath);
+  if (fs.existsSync(p1)) return p1;
+  const p2 = path.join('/Volumes/HDD - One Touch/WEBDL', relPath);
+  if (fs.existsSync(p2)) return p2;
+  return p1; // fallback
+}
+
 function makePathMediaItem({ relPath, platform, channel, title, created_at, thumbTs, url, source_url, rating, rating_kind, rating_id }) {
-  const absPath = path.resolve(BASE_DIR, relPath);
+  const absPath = resolveRelPath(relPath);
   if (isAuxiliaryMediaPath(absPath)) return null;
   const type = inferMediaType(absPath);
   const base = path.basename(relPath);
@@ -11592,7 +11820,7 @@ function makeIndexedMediaItem(row) {
     if (!relPath) return null;
     let thumbTs = 0;
     try {
-      const absPath = path.resolve(BASE_DIR, relPath);
+      const absPath = resolveRelPath(relPath);
       if (safeIsAllowedExistingPath(absPath)) {
         const st = fs.statSync(absPath);
         thumbTs = st && st.mtimeMs ? st.mtimeMs : 0;
@@ -11833,6 +12061,8 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
   } catch (e) {}
   if (!enabledDirs) enabledDirs = loadDirectoryFilter();
 
+  const searchQ = String(req.query.q || '').trim();
+
   try {
     const isTopCursor = !cursorRaw ||
     cur && cur.activeOffset === 0 && cur.rowOffset === 0 && !cur.dir && cur.fileIndex === 0;
@@ -11842,8 +12072,9 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
         const now = Date.now();
         const st = await getStatsRowCached();
         const marker = buildRecentFilesCacheMarker(st);
-        const dirFilterKey = enabledDirs && enabledDirs.length ? enabledDirs.sort().join(',') : '_all';
-        const key = `recent|${type}|${limit}|${sort}|${dirFilterKey}`;
+        const dirFilterKey = enabledDirs && enabledDirs.length ? JSON.stringify(enabledDirs) : '_all';
+        const searchKey = searchQ ? encodeURIComponent(searchQ) : '_none';
+        const key = `recent|${type}|${limit}|${sort}|${dirFilterKey}|${searchKey}`;
         const cached = recentFilesTopCache.get(key);
         if (cached && cached.marker === marker && now - (cached.at || 0) < RECENT_FILES_TOP_CACHE_MS) {
           return res.json(cached.payload);
@@ -11864,42 +12095,72 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
     let rowOffset = cur.rowOffset;
     const hasDirectoryFilter = enabledDirs && enabledDirs.length > 0 && enabledDirs.length < 10;
     const isFirstPageRecent = sort === 'recent' && (!cursorRaw || isTopRequest);
-    const maxRowsPerCall = hasDirectoryFilter ? 800 : 260;
-    const getBatch = (sort === 'rating_asc') ? getRecentHybridMediaByRatingAsc : (sort === 'rating_desc') ? getRecentHybridMediaByRatingDesc : (sort === 'oldest') ? getRecentHybridMediaByOldest : (sort === 'name_asc') ? getRecentHybridMediaByNameAsc : (sort === 'name_desc') ? getRecentHybridMediaByNameDesc : (includeActiveFiles ? getRecentHybridMediaWithActiveFiles : getRecentHybridMedia);
+    const maxRowsPerCall = (hasDirectoryFilter || searchQ) ? 800 : 260;
     
-    const batch = await getBatch.all(maxRowsPerCall, rowOffset);
-    
-    // Process main batch normally
-    for (const row of batch || []) {
-      if (row && row.platform === 'patreon') {
-        console.log(`[DEBUG-PATREON-API] Found DB row: id=${row.id}, kind=${row.kind}, filepath=${row.filepath}, includeActiveFiles=${includeActiveFiles}`);
-      }
-
-      if (!row) {rowOffset += 1;continue;}
-      
-      // Apply directory filter
-      const relPath = row.kind === 'p' ? row.id : (row.filepath ? path.relative(BASE_DIR, row.filepath) : '');
-      if (enabledDirs && relPath && !shouldIncludePath(relPath, enabledDirs)) {
-        rowOffset += 1;
-        continue;
-      }
-      if (includeActiveFiles && String(row.kind || '') === 'p' && row.rating_kind === 'd' && row.rating_id != null) {
-        const idNum = Number(row.rating_id);
-        if (Number.isFinite(idNum) && !runtimeActiveIdSet.has(idNum)) {
-          try {
-            const dr = await getDownload.get(idNum);
-            const st = String(dr && dr.status ? dr.status : '').toLowerCase();
-            if (st === 'downloading' || st === 'postprocessing' || st === 'queued' || st === 'pending') {
-              rowOffset += 1;
-              continue;
-            }
-          } catch (e) {}
+    // Optimization: if filtering on exactly 1 platform+channel, use the fast per-channel query
+    const singleChannelFilter = enabledDirs && enabledDirs.length === 1 && enabledDirs[0].channels && enabledDirs[0].channels.length === 1 && !searchQ && sort === 'recent';
+    let getBatch;
+    if (singleChannelFilter) {
+      const singlePlatform = enabledDirs[0].platform;
+      const singleChannel = enabledDirs[0].channels[0];
+      const channelSql = db.isPostgres ? getHybridMediaByChannel.source : getHybridMediaByChannel.source;
+      getBatch = {
+        all: async (lim, off) => {
+          return await getHybridMediaByChannel.all(singlePlatform, singleChannel, singlePlatform, singleChannel, singlePlatform, singleChannel, lim, off);
         }
+      };
+    } else {
+      const baseSql = (sort === 'rating_asc') ? SQL_getRecentHybridMediaByRatingAsc : (sort === 'rating_desc') ? SQL_getRecentHybridMediaByRatingDesc : (sort === 'oldest') ? SQL_getRecentHybridMediaByOldest : (sort === 'name_asc') ? SQL_getRecentHybridMediaByNameAsc : (sort === 'name_desc') ? SQL_getRecentHybridMediaByNameDesc : (includeActiveFiles ? SQL_getRecentHybridMediaWithActiveFiles : SQL_getRecentHybridMedia);
+      const finalSql = applyDynamicFiltersToHybridQuery(baseSql, { treeFilters: enabledDirs, searchQ });
+      getBatch = db.prepare(finalSql);
+    }
+    
+    let done = false;
+    let totalFetchedFromDb = 0;
+    
+    while (items.length < limit && !done) {
+      const batch = await getBatch.all(maxRowsPerCall, rowOffset);
+      if (!batch || batch.length === 0) {
+        done = true;
+        break;
       }
-      const it = makeIndexedMediaItem(row);
-      pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
-      rowOffset += 1;
-      if (items.length >= limit) break;
+      
+      totalFetchedFromDb += batch.length;
+      if (batch.length < maxRowsPerCall) done = true;
+      
+      // Process main batch normally
+      let dbgNull = 0, dbgPushed = 0, dbgSkipped = 0;
+      for (const row of batch) {
+        if (!row) { rowOffset += 1; continue; }
+        
+        // Directory filter is applied natively in PostgreSQL via applyDirectoryFilterToHybridQuery
+        if (includeActiveFiles && String(row.kind || '') === 'p' && row.rating_kind === 'd' && row.rating_id != null) {
+          const idNum = Number(row.rating_id);
+          if (Number.isFinite(idNum) && !runtimeActiveIdSet.has(idNum)) {
+            try {
+              const dr = await getDownload.get(idNum);
+              const st = String(dr && dr.status ? dr.status : '').toLowerCase();
+              if (st === 'downloading' || st === 'postprocessing' || st === 'queued' || st === 'pending') {
+                rowOffset += 1;
+                continue;
+              }
+            } catch (e) {}
+          }
+        }
+        const it = makeIndexedMediaItem(row);
+        if (!it) { dbgNull++; rowOffset += 1; continue; }
+        const pushed = pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
+        if (!pushed) dbgSkipped++;
+        else dbgPushed++;
+        rowOffset += 1;
+        if (items.length >= limit) break;
+      }
+      if (hasDirectoryFilter) console.log(`[DEBUG-BATCH] batch=${batch.length} null=${dbgNull} pushed=${dbgPushed} skipped=${dbgSkipped} items=${items.length}`);
+      
+      if (totalFetchedFromDb > 10000) {
+        // Failsafe to prevent endless loop if user has NO files that match criteria
+        break;
+      }
     }
 
     // Apply platform interleaving for visual variety on first page
@@ -11911,7 +12172,6 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
     }
 
     const nextCursor = encodeCursor({ activeOffset: nextActiveOffset, rowOffset, dir: '', fileIndex: 0 });
-    const done = (batch && batch.length ? batch.length : 0) < maxRowsPerCall;
     const payload = { success: true, items: finalItems, next_cursor: nextCursor, done };
     const reqTime = Date.now() - reqStartTime;
     console.log(`📤 [${new Date().toISOString().substr(11,8)}] Response /api/media/recent-files - ${items.length} items in ${reqTime}ms`);
@@ -11920,8 +12180,9 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
       try {
         const st = await getStatsRowCached();
         const marker = buildRecentFilesCacheMarker(st);
-        const dirFilterKey = enabledDirs && enabledDirs.length ? enabledDirs.sort().join(',') : '_all';
-        const key = `recent|${type}|${limit}|${sort}|${dirFilterKey}`;
+        const dirFilterKey = enabledDirs && enabledDirs.length ? JSON.stringify(enabledDirs) : '_all';
+        const searchKey = searchQ ? encodeURIComponent(searchQ) : '_none';
+        const key = `recent|${type}|${limit}|${sort}|${dirFilterKey}|${searchKey}`;
         recentFilesTopCache.set(key, { at: Date.now(), marker, payload });
         if (recentFilesTopCache.size > 80) {
           const keys = Array.from(recentFilesTopCache.keys()).slice(0, Math.max(1, recentFilesTopCache.size - 60));
@@ -11967,7 +12228,7 @@ expressApp.get('/api/media/channel-files', async (req, res) => {
         const now = Date.now();
         const st = await getStatsRowCached();
         const marker = buildRecentFilesCacheMarker(st);
-        const dirFilterKey = enabledDirs && enabledDirs.length ? enabledDirs.sort().join(',') : '_all';
+        const dirFilterKey = enabledDirs && enabledDirs.length ? JSON.stringify(enabledDirs) : '_all';
         const key = `channel|${platform}|${channel}|${type}|${limit}|${sort}|${dirFilterKey}`;
         const cached = recentFilesTopCache.get(key);
         if (cached && cached.marker === marker && now - (cached.at || 0) < RECENT_FILES_TOP_CACHE_MS) {
@@ -12024,7 +12285,7 @@ expressApp.get('/api/media/channel-files', async (req, res) => {
       try {
         const st = await getStatsRowCached();
         const marker = buildRecentFilesCacheMarker(st);
-        const dirFilterKey = enabledDirs && enabledDirs.length ? enabledDirs.sort().join(',') : '_all';
+        const dirFilterKey = enabledDirs && enabledDirs.length ? JSON.stringify(enabledDirs) : '_all';
         const key = `channel|${platform}|${channel}|${type}|${limit}|${sort}|${dirFilterKey}`;
         recentFilesTopCache.set(key, { at: Date.now(), marker, payload });
         if (recentFilesTopCache.size > 80) {
@@ -12096,16 +12357,58 @@ expressApp.get('/api/stats', async (req, res) => {
 });
 
 expressApp.get('/api/media/channels', async (req, res) => {
-  const limit = Math.max(1, Math.min(500, parseInt(req.query.limit || '200', 10) || 200));
+  const limit = Math.max(1, Math.min(5000, parseInt(req.query.limit || '200', 10) || 200));
   const offset = Math.max(0, parseInt(req.query.offset || '0', 10) || 0);
   const platform = String(req.query.platform || '').trim();
 
+  const searchQ = String(req.query.q || '').trim();
+  let enabledDirs = null;
   try {
-    let rows = await getMediaChannels.all(limit, offset);
+    const dirsParam = String(req.query.dirs || '').trim();
+    if (dirsParam) enabledDirs = JSON.parse(dirsParam);
+  } catch (e) {}
+
+  try {
+    let baseSql = `
+      SELECT sub.platform, sub.channel, COUNT(*) AS count, MAX(ts) AS last_at, MAX(source_url) AS source_url
+      FROM (
+        SELECT d.platform, d.channel,
+          CASE WHEN d.status = 'completed' THEN COALESCE(d.finished_at, d.updated_at) ELSE d.created_at END AS ts,
+          d.source_url
+        FROM downloads d
+        WHERE d.status NOT IN ('error') AND d.filepath IS NOT NULL AND TRIM(d.filepath) != ''
+        UNION ALL
+        SELECT d.platform, d.channel, f.created_at AS ts, NULL AS source_url
+        FROM download_files f
+        JOIN downloads d ON d.id = f.download_id
+        WHERE d.status NOT IN ('error')
+        UNION ALL
+        SELECT s.platform, s.channel, s.created_at AS ts, NULL AS source_url
+        FROM screenshots s
+        WHERE s.filepath IS NOT NULL AND TRIM(s.filepath) != ''
+      ) sub
+      WHERE sub.platform IS NOT NULL AND TRIM(sub.platform) != ''
+        AND sub.channel IS NOT NULL AND TRIM(sub.channel) != ''
+      GROUP BY sub.platform, sub.channel
+      ORDER BY last_at DESC
+    `;
+    
+    const finalSql = applyDynamicFiltersToHybridQuery(baseSql, { treeFilters: enabledDirs, searchQ });
+    const getBatch = db.prepare(finalSql);
+    
+    let rows = await getBatch.all(limit, offset) || [];
     if (platform) rows = rows.filter((r) => String(r.platform) === platform);
+    for (const r of rows) {
+      if (r.platform === 'footfetishforum') {
+        try {
+          const info = parseFootFetishForumThreadInfo(r.source_url || '');
+          if (info && info.name) r.displayName = info.name;
+        } catch(e){}
+      }
+    }
     res.json({ success: true, channels: rows });
   } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
+    res.status(500).json({ success: false, error: String(e.message||e) });
   }
 });
 
@@ -12180,6 +12483,142 @@ expressApp.get('/api/directories', async (req, res) => {
   }
 });
 
+let _directoryTreeCache = null;
+let _directoryTreeCacheTime = 0;
+expressApp.get('/api/media/directories/tree', async (req, res) => {
+  try {
+    const now = Date.now();
+    if (_directoryTreeCache && (now - _directoryTreeCacheTime) < 30000) {
+      return res.json({ success: true, tree: _directoryTreeCache });
+    }
+    const q = `
+      SELECT platform, channel, 
+             MAX(d.source_url) as sample_source_url,
+             MAX(d.url) as sample_url,
+             COUNT(d.id) as download_count,
+             SUM(COALESCE((SELECT COUNT(f.id) FROM download_files f WHERE f.download_id = d.id), 0)) as file_count
+      FROM downloads d
+      WHERE status = 'completed'
+      GROUP BY platform, channel
+      ORDER BY platform ASC, channel ASC
+    `;
+    const result = { tree: {} };
+    if (db.isPostgres) {
+      const rows = await db.prepare(q).all();
+      for (const row of rows) {
+        const p = row.platform || 'unknown';
+        const c = row.channel || 'unknown';
+        const d_count = parseInt(row.download_count, 10) || 0;
+        const f_count = parseInt(row.file_count, 10) || 0;
+        
+        let d_name = c;
+        if (/^thread_\\d+$/i.test(c)) {
+          const info = parseFootFetishForumThreadInfo(row.sample_source_url || row.sample_url || '');
+          if (info && info.name) d_name = info.name;
+          else d_name = 'Thread ' + c.replace(/^thread_/i, '');
+        }
+
+        if (!result.tree[p]) result.tree[p] = { count: 0, fileCount: 0, channels: [] };
+        result.tree[p].count += d_count;
+        result.tree[p].fileCount += f_count;
+        result.tree[p].channels.push({ name: c, displayName: d_name, count: d_count, fileCount: f_count });
+      }
+    }
+    _directoryTreeCache = result.tree;
+    _directoryTreeCacheTime = now;
+    res.json({ success: true, tree: result.tree });
+  } catch(e) {
+    res.status(500).json({ success: false, error: String(e.message || e) });
+  }
+});
+
+
+expressApp.get('/api/media/duplicates/scan', async (req, res) => {
+  if (!db.isPostgres) return res.status(400).json({ success: false, error: 'Only supported in PostgreSQL' });
+  try {
+    const q = `
+      WITH AllFiles AS (
+        SELECT d.id AS item_id, 'download' AS type, d.filepath AS path, d.filesize, d.title, d.platform, d.channel, CAST(d.created_at AS TEXT) AS created_at
+        FROM downloads d
+        WHERE d.status = 'completed' AND d.filepath IS NOT NULL AND TRIM(d.filepath) != ''
+          AND d.filesize > 1048576 
+        UNION ALL
+        SELECT f.id AS item_id, 'file' AS type, f.relpath AS path, f.filesize, d.title, d.platform, d.channel, CAST(f.created_at AS TEXT) AS created_at
+        FROM download_files f
+        JOIN downloads d ON d.id = f.download_id
+        WHERE d.status = 'completed' AND f.relpath IS NOT NULL AND TRIM(f.relpath) != ''
+          AND f.filesize > 1048576
+      ),
+      SizeGroups AS (
+        SELECT filesize FROM AllFiles GROUP BY filesize HAVING COUNT(*) > 1 AND COUNT(*) < 20
+      )
+      SELECT a.* FROM AllFiles a JOIN SizeGroups s ON a.filesize = s.filesize
+      ORDER BY a.filesize DESC, a.created_at ASC
+    `;
+    const rows = await db.prepare(q).all();
+    
+    // Validate physical files
+    const valid = [];
+    for (const row of rows) {
+      const full = row.type === 'download' ? row.path : path.resolve(BASE_DIR, row.path);
+      try {
+        const st = await fs.promises.stat(full);
+        if (st.isFile()) valid.push({ ...row, fullPath: full });
+      } catch(e) {}
+    }
+
+    const map = new Map();
+    for (const row of valid) {
+      if (!map.has(row.filesize)) map.set(row.filesize, []);
+      map.get(row.filesize).push(row);
+    }
+    
+    const duplicateGroups = [];
+    for (const [size, arr] of map.entries()) {
+      // Find items with UNIQUE paths
+      const uniquePaths = new Set();
+      const uniqueItems = [];
+      for (const item of arr) {
+        if (!uniquePaths.has(item.fullPath)) {
+          uniquePaths.add(item.fullPath);
+          uniqueItems.push(item);
+        }
+      }
+      if (uniqueItems.length > 1) {
+        duplicateGroups.push({ size: Number(size), items: uniqueItems });
+      }
+    }
+    
+    res.json({ success: true, groups: duplicateGroups, totalGroups: duplicateGroups.length });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e.message || e) });
+  }
+});
+
+expressApp.post('/api/media/duplicates/remove', async (req, res) => {
+  if (!db.isPostgres) return res.status(400).json({ success: false, error: 'Only Postgres' });
+  const items = req.body.items;
+  if (!items || !Array.isArray(items)) return res.status(400).json({ success: false, error: 'Missing items array' });
+  
+  let deletedCount = 0;
+  try {
+    for (const item of items) {
+       const full = item.type === 'download' ? item.path : path.resolve(BASE_DIR, item.path);
+       try { await fs.promises.unlink(full); } catch(e) {}
+       
+       if (item.type === 'download') {
+         await db.prepare('DELETE FROM downloads WHERE id = ?').run(item.item_id);
+       } else if (item.type === 'file') {
+         await db.prepare('DELETE FROM download_files WHERE id = ?').run(item.item_id);
+       }
+       deletedCount++;
+    }
+    res.json({ success: true, deleted: deletedCount });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e.message || e) });
+  }
+});
+
 expressApp.post('/api/viewer/navigate', async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   try {
@@ -12211,7 +12650,9 @@ expressApp.post('/api/viewer/navigate', async (req, res) => {
       query = (sort === 'rating_asc') ? getHybridMediaByChannelByRatingAsc : (sort === 'rating_desc') ? getHybridMediaByChannelByRatingDesc : (sort === 'oldest') ? getHybridMediaByChannelByOldest : (sort === 'name_asc') ? getHybridMediaByChannelByNameAsc : (sort === 'name_desc') ? getHybridMediaByChannelByNameDesc : (includeActiveFiles ? getHybridMediaByChannelWithActiveFiles : getHybridMediaByChannel);
       params = [platform, channel, platform, channel, platform, channel, 200, 0];
     } else {
-      query = (sort === 'rating_asc') ? getRecentHybridMediaByRatingAsc : (sort === 'rating_desc') ? getRecentHybridMediaByRatingDesc : (sort === 'oldest') ? getRecentHybridMediaByOldest : (sort === 'name_asc') ? getRecentHybridMediaByNameAsc : (sort === 'name_desc') ? getRecentHybridMediaByNameDesc : (includeActiveFiles ? getRecentHybridMediaWithActiveFiles : getRecentHybridMedia);
+      const baseSql = (sort === 'rating_asc') ? SQL_getRecentHybridMediaByRatingAsc : (sort === 'rating_desc') ? SQL_getRecentHybridMediaByRatingDesc : (sort === 'oldest') ? SQL_getRecentHybridMediaByOldest : (sort === 'name_asc') ? SQL_getRecentHybridMediaByNameAsc : (sort === 'name_desc') ? SQL_getRecentHybridMediaByNameDesc : (includeActiveFiles ? SQL_getRecentHybridMediaWithActiveFiles : SQL_getRecentHybridMedia);
+      const finalSql = applyDirectoryFilterToHybridQuery(baseSql, enabledDirs);
+      query = db.prepare(finalSql);
       params = [200, 0];
     }
     
@@ -12225,7 +12666,7 @@ expressApp.post('/api/viewer/navigate', async (req, res) => {
 
       if (!row) continue;
       const relPath = row.kind === 'p' ? row.id : (row.filepath ? path.relative(BASE_DIR, row.filepath) : '');
-      if (enabledDirs && relPath && !shouldIncludePath(relPath, enabledDirs)) continue;
+      // Directory filter is applied natively in PostgreSQL via applyDirectoryFilterToHybridQuery
       
       const filterType = row.kind === 'p' ? 'active' : (row.filepath && /\.(mp4|webm|mov|avi|mkv)$/i.test(row.filepath)) ? 'video' : 'image';
       if (filter === 'video' && filterType !== 'video') continue;
@@ -12936,11 +13377,20 @@ async function startServer() {
     setTimeout(async () => {
       try {
         try {
-          const resetRows = await db.prepare("UPDATE downloads SET status = 'queued' WHERE status IN ('downloading', 'postprocessing')").run();
-          if (resetRows && resetRows.changes > 0) {
-            console.log(`🧹 Ghost-tracker: ${resetRows.changes} onvoltooide crashtasks succesvol geneutraliseerd naar wachtrij.`);
+          let changed = 0;
+          if (db.isPostgres) {
+            const res = await db.query("UPDATE downloads SET status = 'queued' WHERE status IN ('downloading', 'postprocessing')");
+            changed = res && res.rowCount ? res.rowCount : 0;
+          } else {
+            const res = await db.prepare("UPDATE downloads SET status = 'queued' WHERE status IN ('downloading', 'postprocessing')").run();
+            changed = res && res.changes ? res.changes : 0;
           }
-        } catch (e) {}
+          if (changed > 0) {
+            console.log(`🧹 Ghost-tracker: ${changed} onvoltooide crashtasks succesvol geneutraliseerd naar wachtrij.`);
+          }
+        } catch (e) {
+          console.error('⚠️ Ghost-tracker fout:', e.message);
+        }
         
         try {
           const fixRows = await db.prepare("UPDATE downloads SET platform = 'footfetishforum' WHERE platform = 'digitaloceanspaces' OR url LIKE '%footfetishforum%'").run();
@@ -13127,8 +13577,8 @@ expressApp.post('/api/tags', (req, res) => {
   try {
     const name = String(req.body.name || '').trim().toLowerCase();
     if (!name) throw new Error('Name required');
-    if (db.isPostgres) db.prepare('INSERT INTO tags (name) VALUES ($1) ON CONFLICT (name) DO NOTHING').run(name); else db.prepare('INSERT OR IGNORE INTO tags (name) VALUES (?)').run(name);
-    const tag = db.prepare(db.isPostgres ? 'SELECT * FROM tags WHERE name = $1' : 'SELECT * FROM tags WHERE name = ?').get(name);
+    if (db.isPostgres) db.prepare('INSERT INTO tags (name) VALUES (?) ON CONFLICT (name) DO NOTHING').run(name); else db.prepare('INSERT OR IGNORE INTO tags (name) VALUES (?)').run(name);
+    const tag = db.prepare('SELECT * FROM tags WHERE name = ?').get(name);
     res.json({ success: true, tag });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
@@ -13138,7 +13588,7 @@ expressApp.post('/api/tags', (req, res) => {
 expressApp.delete('/api/tags/:id', (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
-    db.prepare(db.isPostgres ? 'DELETE FROM tags WHERE id = $1' : 'DELETE FROM tags WHERE id = ?').run(id);
+    db.prepare('DELETE FROM tags WHERE id = ?').run(id);
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
@@ -13148,7 +13598,7 @@ expressApp.delete('/api/tags/:id', (req, res) => {
 expressApp.get('/api/media/:kind/:id/tags', (req, res) => {
   try {
     const { kind, id } = req.params;
-    const rows = db.prepare(db.isPostgres ? 'SELECT t.* FROM tags t JOIN media_tags mt ON t.id = mt.tag_id WHERE mt.kind = $1 AND mt.media_id = $2' : 'SELECT t.* FROM tags t JOIN media_tags mt ON t.id = mt.tag_id WHERE mt.kind = ? AND mt.media_id = ?').all(kind, id);
+    const rows = db.prepare('SELECT t.* FROM tags t JOIN media_tags mt ON t.id = mt.tag_id WHERE mt.kind = ? AND mt.media_id = ?').all(kind, id);
     res.json({ success: true, tags: rows });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
@@ -13160,7 +13610,7 @@ expressApp.post('/api/media/:kind/:id/tags', (req, res) => {
     const { kind, id } = req.params;
     const tagId = parseInt(req.body.tag_id, 10);
     if (!tagId) throw new Error('Tag ID required');
-    if (db.isPostgres) db.prepare('INSERT INTO media_tags (kind, media_id, tag_id) VALUES ($1, $2, $3) ON CONFLICT ON CONSTRAINT media_tags_pkey DO NOTHING').run(kind, id, tagId); else db.prepare('INSERT OR IGNORE INTO media_tags (kind, media_id, tag_id) VALUES (?, ?, ?)').run(kind, id, tagId);
+    if (db.isPostgres) db.prepare('INSERT INTO media_tags (kind, media_id, tag_id) VALUES (?, ?, ?) ON CONFLICT ON CONSTRAINT media_tags_pkey DO NOTHING').run(kind, id, tagId); else db.prepare('INSERT OR IGNORE INTO media_tags (kind, media_id, tag_id) VALUES (?, ?, ?)').run(kind, id, tagId);
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
@@ -13170,7 +13620,7 @@ expressApp.post('/api/media/:kind/:id/tags', (req, res) => {
 expressApp.delete('/api/media/:kind/:id/tags/:tagId', (req, res) => {
   try {
     const { kind, id, tagId } = req.params;
-    db.prepare(db.isPostgres ? 'DELETE FROM media_tags WHERE kind = $1 AND media_id = $2 AND tag_id = $3' : 'DELETE FROM media_tags WHERE kind = ? AND media_id = ? AND tag_id = ?').run(kind, id, parseInt(tagId, 10));
+    db.prepare('DELETE FROM media_tags WHERE kind = ? AND media_id = ? AND tag_id = ?').run(kind, id, parseInt(tagId, 10));
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
