@@ -12533,17 +12533,17 @@ expressApp.get('/api/media/channels', async (req, res) => {
       SELECT sub.platform, sub.channel, COUNT(*) AS count, MAX(ts) AS last_at, MAX(source_url) AS source_url
       FROM (
         SELECT d.platform, d.channel,
-          CASE WHEN d.status = 'completed' THEN COALESCE(d.finished_at, d.updated_at) ELSE d.created_at END AS ts,
+          CAST((CASE WHEN d.status = 'completed' THEN COALESCE(d.finished_at, d.updated_at) ELSE d.created_at END) AS TEXT) AS ts,
           d.source_url
         FROM downloads d
         WHERE d.status NOT IN ('error') AND d.filepath IS NOT NULL AND TRIM(d.filepath) != ''
         UNION ALL
-        SELECT d.platform, d.channel, f.created_at AS ts, NULL AS source_url
+        SELECT d.platform, d.channel, CAST(f.created_at AS TEXT) AS ts, NULL AS source_url
         FROM download_files f
         JOIN downloads d ON d.id = f.download_id
         WHERE d.status NOT IN ('error')
         UNION ALL
-        SELECT s.platform, s.channel, s.created_at AS ts, NULL AS source_url
+        SELECT s.platform, s.channel, CAST(s.created_at AS TEXT) AS ts, NULL AS source_url
         FROM screenshots s
         WHERE s.filepath IS NOT NULL AND TRIM(s.filepath) != ''
       ) sub
