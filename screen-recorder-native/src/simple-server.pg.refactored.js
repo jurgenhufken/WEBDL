@@ -1298,6 +1298,33 @@ async function ensurePostgresSchemaReady() {
     `).run();
   } catch (e) { console.error('Error creating media_tags table:', e); }
 
+  try {
+    if (db.isPostgres) {
+      await db.prepare(`
+        CREATE TABLE IF NOT EXISTS graph_nodes (
+          id TEXT PRIMARY KEY,
+          label TEXT NOT NULL,
+          properties JSONB,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `).run();
+      await db.prepare(`
+        CREATE TABLE IF NOT EXISTS graph_edges (
+          id TEXT PRIMARY KEY,
+          source_id TEXT NOT NULL,
+          target_id TEXT NOT NULL,
+          type TEXT NOT NULL,
+          properties JSONB,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (source_id) REFERENCES graph_nodes(id) ON DELETE CASCADE,
+          FOREIGN KEY (target_id) REFERENCES graph_nodes(id) ON DELETE CASCADE
+        )
+      `).run();
+      await db.prepare(`CREATE INDEX IF NOT EXISTS idx_graph_edges_source ON graph_edges(source_id)`).run();
+      await db.prepare(`CREATE INDEX IF NOT EXISTS idx_graph_edges_target ON graph_edges(target_id)`).run();
+      await db.prepare(`CREATE INDEX IF NOT EXISTS idx_graph_edges_type ON graph_edges(type)`).run();
+    }
+  } catch (e) { console.error('Error creating graph tables:', e); }
 }
 
 if (db.isSqlite) db.exec(`
@@ -1373,6 +1400,29 @@ if (db.isSqlite) {
       FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
     );
   `);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS graph_nodes (
+      id TEXT PRIMARY KEY,
+      label TEXT NOT NULL,
+      properties TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS graph_edges (
+      id TEXT PRIMARY KEY,
+      source_id TEXT NOT NULL,
+      target_id TEXT NOT NULL,
+      type TEXT NOT NULL,
+      properties TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(source_id) REFERENCES graph_nodes(id) ON DELETE CASCADE,
+      FOREIGN KEY(target_id) REFERENCES graph_nodes(id) ON DELETE CASCADE
+    );
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_graph_edges_source ON graph_edges(source_id);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_graph_edges_target ON graph_edges(target_id);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_graph_edges_type ON graph_edges(type);`);
 }
 
 try {
@@ -1835,7 +1885,11 @@ const getInProgressDownloadCount = db.prepare(`
   WHERE status IN ('downloading', 'postprocessing')
 `);
 
-const insertCompletedDownload = db.prepare(`
+const insertCompletedDownload = db.prepare(db.isPostgres ? `
+  INSERT INTO downloads (url, platform, channel, title, filename, filepath, filesize, format, status, progress, metadata)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  RETURNING id
+` : `
   INSERT INTO downloads (url, platform, channel, title, filename, filepath, filesize, format, status, progress, metadata)
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
@@ -5141,11 +5195,8 @@ async function rehydrateDownloadQueue() {
 // ========================
 // RECORDING STATE
 // ========================
-let isRecording = false;
-let recordingProcess = null;
-let currentRecordingFile = null;
-let currentRecording = null;
-let currentRecordingMeta = null;
+let isRecording = false; // Legacy fallback
+const activeRecordings = new Map();
 
 let avfoundationDeviceListCache = null;
 
@@ -5236,7 +5287,11 @@ async function relaySocketCommandToHttp(endpoint, payload) {
 
 function broadcastRecordingState() {
   try {
-    io.emit('recording-status-changed', { isRecording });
+    const activeRecordingUrls = Array.from(activeRecordings.keys());
+    io.emit('recording-status-changed', {
+      isRecording: activeRecordings.size > 0,
+      activeRecordingUrls
+    });
   } catch (e) {}
 }
 
@@ -5247,7 +5302,10 @@ io.on('connection', (socket) => {
     connected: true,
     serverTime: new Date().toISOString()
   });
-  socket.emit('recording-status-changed', { isRecording });
+  socket.emit('recording-status-changed', {
+    isRecording: activeRecordings.size > 0,
+    activeRecordingUrls: Array.from(activeRecordings.keys())
+  });
 
   socket.on('webdl:request', async (message, ack) => {
     const reply = (payload) => {
@@ -5269,7 +5327,8 @@ io.on('connection', (socket) => {
     if (action === 'status') {
       reply({
         success: true,
-        isRecording,
+        isRecording: activeRecordings.size > 0,
+        activeRecordingUrls: Array.from(activeRecordings.keys()),
         activeDownloads: (await getRuntimeActiveDownloadRows()).length,
         serverTime: new Date().toISOString()
       });
@@ -7912,7 +7971,18 @@ expressApp.post('/start-recording', async (req, res) => {
     const meta = body && typeof body.metadata === 'object' && body.metadata ? body.metadata : {};
     console.log(`[INGRESS] POST /start-recording url=${String(meta.url || '').slice(0, 200)} platform=${String(meta.platform || '')} channel=${String(meta.channel || '')}`);
   } catch (e) {}
-  if (isRecording || recordingProcess) return res.json({ success: false, error: 'Er loopt al een opname' });
+  const metaPageUrl = String(((req.body || {}).metadata || {}).url || '').trim() || `recording:${Date.now()}`;
+  if (activeRecordings.has(metaPageUrl)) {
+    // This specific URL is already being recorded – trigger a silent stop+restart
+    console.log(`[MULTI-REC] URL already recording, performing needsToggle stop: ${metaPageUrl}`);
+    const existing = activeRecordings.get(metaPageUrl);
+    if (existing && existing.process) {
+      try { existing.process.kill('SIGINT'); } catch (e) {}
+    }
+    activeRecordings.delete(metaPageUrl);
+    broadcastRecordingState();
+    return res.json({ success: true, action: 'stop-recording', needsToggle: true, stoppedUrl: metaPageUrl });
+  }
 
   const { metadata = {}, crop, lock } = req.body || {};
   let resolved = metadata;
@@ -8087,38 +8157,39 @@ expressApp.post('/start-recording', async (req, res) => {
     const cmd = ['ffmpeg', ...args].map((a) => JSON.stringify(a)).join(' ');
     logStream.write(`[WEBDL] CMD: ${cmd}\n\n`);
     logStream.write(`[WEBDL] avfoundation input: ${inputDevice}${resolvedVideoName ? ` | video=${resolvedVideoName}` : ''}${resolvedAudioName ? ` | audio=${resolvedAudioName}` : ''}\n\n`);
-  } catch (e) {
+  } catch (e) {}
 
-    // ignore
-  }
-  recordingProcess = spawn(FFMPEG, args);
+  const newProc = spawn(FFMPEG, args);
+  
+  activeRecordings.set(metaPageUrl, {
+    process: newProc,
+    file: rawFilePath, // The file currently being written to
+    meta: currentRecordingMeta,
+    recordingObj: currentRecording
+  });
 
-  recordingProcess.stderr.on('data', (data) => {
+  newProc.stderr.on('data', (data) => {
     const msg = data.toString();
     logStream.write(msg);
     if (msg.includes('Error') || msg.includes('error')) console.error(`ffmpeg: ${msg}`);
   });
 
-  recordingProcess.on('close', (code) => {
-    console.log(`ffmpeg beëindigd (code ${code})`);
+  newProc.on('close', (code) => {
+    console.log(`ffmpeg beëindigd (code ${code}) voor ${metaPageUrl}`);
     logStream.end();
-    isRecording = false;
-    recordingProcess = null;
+    activeRecordings.delete(metaPageUrl);
     broadcastRecordingState();
   });
 
-  recordingProcess.on('error', (err) => {
-    console.error(`ffmpeg fout: ${err.message}`);
+  newProc.on('error', (err) => {
+    console.error(`ffmpeg fout op ${metaPageUrl}: ${err.message}`);
     logStream.end();
-    isRecording = false;
-    recordingProcess = null;
+    activeRecordings.delete(metaPageUrl);
     broadcastRecordingState();
   });
 
-  isRecording = true;
   broadcastRecordingState();
-  currentRecordingFile = recordingFilePath;
-  console.log(`🔴 Opname gestart: ${recordingFilePath}`);
+  console.log(`🔴 Concurrent Opname gestart: ${rawFilePath}`);
   res.json({ success: true, action: 'start-recording', file: filename, dir, meta: resolved, lock: lockMode, rawFile: lockMode ? path.basename(rawFilePath) : undefined, finalFile: path.basename(finalFilePath), input: { device: inputDevice, video_name: resolvedVideoName, audio_name: resolvedAudioName, pixel_format: inputPixelFormat } });
 });
 
@@ -8139,25 +8210,50 @@ expressApp.post('/recording/crop-update', (req, res) => {
 
 expressApp.post('/stop-recording', (req, res) => {
   try {
-    console.log(`[INGRESS] POST /stop-recording recording=${isRecording ? '1' : '0'}`);
+    console.log(`[INGRESS] POST /stop-recording activeRecordings=${activeRecordings.size}`);
   } catch (e) {}
-  if (!isRecording || !recordingProcess) {
-    return res.json({ success: false, error: 'Er loopt geen opname' });
+
+  // Resolve which recording to stop — by URL if provided, else last one
+  const reqUrl = String(((req.body || {}).metadata || {}).url || '').trim();
+  let targetUrl = '';
+  let entry = null;
+
+  if (reqUrl && activeRecordings.has(reqUrl)) {
+    targetUrl = reqUrl;
+    entry = activeRecordings.get(reqUrl);
+  } else if (activeRecordings.size > 0) {
+    // Fallback: stop the most recently added recording
+    const keys = Array.from(activeRecordings.keys());
+    targetUrl = keys[keys.length - 1];
+    entry = activeRecordings.get(targetUrl);
   }
 
-  const proc = recordingProcess;
-  const lockJob = currentRecording && currentRecording.lock ? {
-    rawFilePath: currentRecording.rawFilePath,
-    finalFilePath: currentRecording.finalFilePath,
-    cropWidth: currentRecording.cropWidth,
-    cropHeight: currentRecording.cropHeight,
-    updates: Array.isArray(currentRecording.updates) ? [...currentRecording.updates] : [],
-    logFile: currentRecording.logFile,
-    meta: currentRecordingMeta
+  if (!entry || !entry.process) {
+    return res.json({ success: false, error: 'Er loopt geen opname' + (reqUrl ? ` voor ${reqUrl}` : '') });
+  }
+
+  const proc = entry.process;
+  const recObj = entry.recordingObj;
+  const recMeta = entry.meta;
+
+  const lockJob = recObj && recObj.lock ? {
+    rawFilePath: recObj.rawFilePath,
+    finalFilePath: recObj.finalFilePath,
+    cropWidth: recObj.cropWidth,
+    cropHeight: recObj.cropHeight,
+    updates: Array.isArray(recObj.updates) ? [...recObj.updates] : [],
+    logFile: recObj.logFile,
+    meta: recMeta
   } : null;
 
-  const file = lockJob ? lockJob.rawFilePath : currentRecordingFile;
-  let responded = false;
+  const file = lockJob ? lockJob.rawFilePath : (entry.file || '');
+
+  // IMMEDIATELY trigger UI unlock
+  activeRecordings.delete(targetUrl);
+  broadcastRecordingState();
+  res.json({ success: true, processing: true, action: 'stop-recording', file, rawFile: file, stoppedUrl: targetUrl });
+
+  let responded = true;
 
   const finish = (success, error, extra = {}) => {
     if (responded) return;
@@ -8166,24 +8262,20 @@ expressApp.post('/stop-recording', (req, res) => {
   };
 
   const cleanup = () => {
-    console.log(`⬛ Opname gestopt: ${currentRecordingFile}`);
-    recordingProcess = null;
-    isRecording = false;
-    currentRecording = null;
+    console.log(`⬛ Opname gestopt: ${file} (${targetUrl})`);
+    activeRecordings.delete(targetUrl);
     broadcastRecordingState();
   };
 
   const softTimeout = setTimeout(() => {
-    if (recordingProcess) {recordingProcess.kill('SIGINT');}
+    try { proc.kill('SIGINT'); } catch (e) {}
   }, 20000);
 
   const hardTimeout = setTimeout(() => {
-    if (recordingProcess) {
-      console.warn('ffmpeg stop timeout, force kill');
-      recordingProcess.kill('SIGKILL');
-      cleanup();
-      finish(false, 'Opname stop timeout');
-    }
+    console.warn('ffmpeg stop timeout, force kill');
+    try { proc.kill('SIGKILL'); } catch (e) {}
+    cleanup();
+    finish(false, 'Opname stop timeout');
   }, 40000);
 
   proc.once('close', async () => {
@@ -8191,7 +8283,7 @@ expressApp.post('/stop-recording', (req, res) => {
     clearTimeout(hardTimeout);
     cleanup();
 
-    const meta = lockJob && lockJob.meta ? lockJob.meta : currentRecordingMeta;
+    const meta = lockJob && lockJob.meta ? lockJob.meta : recMeta;
 
     if (lockJob) {
       try {
@@ -8221,6 +8313,10 @@ expressApp.post('/stop-recording', (req, res) => {
           JSON.stringify(recordMeta)
         );
         dbId = ins && ins.lastInsertRowid ? ins.lastInsertRowid : null;
+        if (dbId) {
+          const rawRelPath = relPathFromBaseDir(fp);
+          await db.prepare('INSERT INTO download_files (download_id, relpath, filesize, created_at, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)').run(dbId, rawRelPath, size);
+        }
       } catch (e) {}
 
       finish(true, null, { processing: true, rawFile: lockJob.rawFilePath, finalFile: lockJob.finalFilePath, logFile: lockJob.logFile });
@@ -8277,6 +8373,14 @@ expressApp.post('/stop-recording', (req, res) => {
                 webdl_recording: { lock: true, raw: lockJob.rawFilePath, final: lockJob.finalFilePath, log: lockJob.logFile, page_url: meta && meta.pageUrl ? meta.pageUrl : null }
               };
               await updateDownload.run('completed', 100, fp, path.basename(fp), finalSize, 'mp4', JSON.stringify(recordMeta), null, dbId);
+              
+              // Ensure the final lock crop file is pushed to download_files replacing the raw one
+              const finalRelPath = relPathFromBaseDir(fp);
+              if (db.isPostgres) {
+                await db.prepare('INSERT INTO download_files (download_id, relpath, filesize, created_at, updated_at) VALUES ($1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT (download_id, relpath) DO UPDATE SET filesize = EXCLUDED.filesize, updated_at = CURRENT_TIMESTAMP').run(dbId, finalRelPath, finalSize);
+              } else {
+                await db.prepare('INSERT INTO download_files (download_id, relpath, filesize, created_at, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT(download_id, relpath) DO UPDATE SET filesize = excluded.filesize, updated_at = CURRENT_TIMESTAMP').run(dbId, finalRelPath, finalSize);
+              }
             } catch (e) {}
           }
 
@@ -8300,7 +8404,7 @@ expressApp.post('/stop-recording', (req, res) => {
         webdl_kind: 'recording',
         webdl_recording: { lock: false, file: fp, log: meta && meta.logFile ? meta.logFile : null, page_url: meta && meta.pageUrl ? meta.pageUrl : null }
       };
-      await insertCompletedDownload.run(
+      const ins = await insertCompletedDownload.run(
         String(meta && meta.recordingUrl ? meta.recordingUrl : '').trim() || `recording:${Date.now()}`,
         String(meta && meta.platform ? meta.platform : 'other'),
         String(meta && meta.channel ? meta.channel : 'unknown'),
@@ -8313,6 +8417,15 @@ expressApp.post('/stop-recording', (req, res) => {
         100,
         JSON.stringify(recordMeta)
       );
+      const standardDbId = ins && ins.lastInsertRowid ? ins.lastInsertRowid : null;
+      if (standardDbId) {
+        const standardRelPath = relPathFromBaseDir(fp);
+        if (db.isPostgres) {
+          await db.prepare('INSERT INTO download_files (download_id, relpath, filesize, created_at, updated_at) VALUES ($1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT (download_id, relpath) DO UPDATE SET filesize = EXCLUDED.filesize, updated_at = CURRENT_TIMESTAMP').run(standardDbId, standardRelPath, size);
+        } else {
+          await db.prepare('INSERT INTO download_files (download_id, relpath, filesize, created_at, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT(download_id, relpath) DO UPDATE SET filesize = excluded.filesize, updated_at = CURRENT_TIMESTAMP').run(standardDbId, standardRelPath, size);
+        }
+      }
     } catch (e) {}
 
     try {
@@ -8337,6 +8450,128 @@ expressApp.post('/stop-recording', (req, res) => {
   } catch (e) {
     console.warn(`ffmpeg stdin stop faalde: ${e.message}`);
     proc.kill('SIGINT');
+  }
+});
+
+// API Endpoints voor Auto-Aanvullen (Datalist) in Upload Modal
+expressApp.get('/api/media/platforms', async (req, res) => {
+  try {
+    const rows = await db.prepare(`SELECT DISTINCT platform FROM downloads WHERE platform IS NOT NULL AND platform != '' ORDER BY platform ASC`).all();
+    res.json({ success: true, platforms: rows.map(r => r.platform) });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+expressApp.get('/api/media/channels', async (req, res) => {
+  try {
+    const platform = String(req.query.platform || '').trim();
+    let q = `SELECT DISTINCT channel FROM downloads WHERE channel IS NOT NULL AND channel != ''`;
+    const params = [];
+    if (platform) { q += ` AND platform = ?`; params.push(platform); }
+    q += ` ORDER BY channel ASC`;
+    const rows = await db.prepare(q).all(...params);
+    res.json({ success: true, channels: rows.map(r => r.channel) });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+expressApp.get('/api/media/check', async (req, res) => {
+  try {
+    const url = String(req.query.url || '').trim();
+    if (!url) return res.json({ success: false, error: 'No URL provided' });
+
+    // Force trailing slash normalization and check exact and source matches
+    const altUrl = url.endsWith('/') ? url.slice(0, -1) : url + '/';
+    const row = await db.prepare('SELECT id, platform, channel, title, status FROM downloads WHERE url = ? OR source_url = ? OR url = ? OR source_url = ? LIMIT 1').get(url, url, altUrl, altUrl);
+    
+    if (row) {
+      res.json({ success: true, exists: true, download: row });
+    } else {
+      res.json({ success: true, exists: false });
+    }
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+expressApp.post('/api/media/manual-upload', upload.array('files', 150), async (req, res) => {
+  try {
+    const { platform, channel, parseFilename, tags, sourceUrl } = req.body;
+    const files = req.files || [];
+    if (files.length === 0) return res.status(400).json({ success: false, error: 'Geen bestanden ontvangen.' });
+    
+    const results = [];
+    for (const file of files) {
+      let finalPlatform = String(platform || 'manual').trim() || 'manual';
+      let finalChannel = String(channel || 'uploads').trim() || 'uploads';
+      let finalTitle = file.originalname;
+
+      if (String(parseFilename) === 'true') {
+        const baseName = file.originalname.replace(/\.[^/.]+$/, "");
+        const parts = baseName.split('-').map(s => s.trim()).filter(s => s);
+        if (parts.length >= 3) {
+          finalPlatform = normalizePlatform(null, parts[0]) || parts[0].toLowerCase().replace(/[^a-z0-9_]/g, '');
+          finalChannel = parts[1].toLowerCase().replace(/[^a-z0-9_]/g, '');
+          finalTitle = parts.slice(2).join(' ').trim();
+        } else if (parts.length === 2) {
+          finalPlatform = normalizePlatform(null, parts[0]) || parts[0].toLowerCase().replace(/[^a-z0-9_]/g, '');
+          finalChannel = parts[1].toLowerCase().replace(/[^a-z0-9_]/g, '');
+        }
+      }
+
+      finalPlatform = finalPlatform.toLowerCase().replace(/[^a-z0-9_]/g, '') || 'manual';
+      finalChannel = finalChannel.toLowerCase().replace(/[^a-z0-9_]/g, '') || 'uploads';
+
+      const targetDir = path.join(BASE_DIR, finalPlatform, finalChannel);
+      if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
+      
+      const safeName = file.originalname.replace(/[^a-zA-Z0-9.\-_ \(\)\[\]]/g, '_');
+      let finalFileName = safeName;
+      let attempt = 1;
+      while (fs.existsSync(path.join(targetDir, finalFileName))) {
+        const ext = path.extname(safeName);
+        const base = path.basename(safeName, ext);
+        finalFileName = `${base}_${attempt}${ext}`;
+        attempt++;
+      }
+
+      const finalPath = path.join(targetDir, finalFileName);
+      fs.copyFileSync(file.path, finalPath);
+      fs.unlinkSync(file.path);
+      
+      const relPath = finalPlatform + '/' + finalChannel + '/' + finalFileName;
+      const url = 'manual://' + relPath;
+      
+      const insDl = await db.prepare(`INSERT INTO downloads (url, source_url, platform, channel, title, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'completed', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) RETURNING id`).get(url, String(sourceUrl||''), finalPlatform, finalChannel, finalTitle);
+      const insFl = await db.prepare(`INSERT INTO download_files (download_id, relpath, created_at) VALUES (?, ?, CURRENT_TIMESTAMP) RETURNING id`).get(insDl.id, relPath);
+      
+      const rawTags = String(tags || '').split(',').map(s => s.trim().toLowerCase()).filter(s => s);
+      if (rawTags.length > 0) {
+        for (const t of rawTags) {
+          const qTags = db.isPostgres ? `INSERT INTO tags (name) VALUES (?) ON CONFLICT (name) DO NOTHING` : `INSERT OR IGNORE INTO tags (name) VALUES (?)`;
+          await db.prepare(qTags).run(t);
+          const tagRow = await db.prepare(`SELECT id FROM tags WHERE name = ?`).get(t);
+          if (tagRow) {
+            if (db.isPostgres) {
+              await db.prepare(`INSERT INTO media_tags (kind, media_id, tag_id) VALUES ($1, $2, $3) ON CONFLICT ON CONSTRAINT media_tags_pkey DO NOTHING`).run('d', String(insDl.id), tagRow.id);
+              await db.prepare(`INSERT INTO media_tags (kind, media_id, tag_id) VALUES ($1, $2, $3) ON CONFLICT ON CONSTRAINT media_tags_pkey DO NOTHING`).run('p', relPath, tagRow.id);
+            } else {
+              await db.prepare(`INSERT OR IGNORE INTO media_tags (kind, media_id, tag_id) VALUES (?, ?, ?)`).run('d', String(insDl.id), tagRow.id);
+              await db.prepare(`INSERT OR IGNORE INTO media_tags (kind, media_id, tag_id) VALUES (?, ?, ?)`).run('p', relPath, tagRow.id);
+            }
+          }
+        }
+      }
+
+      results.push({ filename: finalFileName, platform: finalPlatform, channel: finalChannel, title: finalTitle });
+    }
+    recentFilesCacheAt = 0; // Invalidate recent files cache globally
+    channelFilesCacheAt = 0;
+    res.json({ success: true, count: results.length, results });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
   }
 });
 

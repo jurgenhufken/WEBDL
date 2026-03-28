@@ -106,10 +106,10 @@ async function probeServerStatus(source = 'probe') {
     lastHeartbeatAt = Date.now();
     const status = await getJson('status');
     if (status && status.success !== false && status.status === 'running') {
-      if (typeof status.isRecording !== 'undefined') updateRecordingState(status.isRecording);
+      if (typeof status.isRecording !== 'undefined') updateRecordingState(status.isRecording, status.activeRecordingUrls);
       if (Number.isFinite(Number(status.activeDownloads))) activeDownloads = Number(status.activeDownloads);
     }
-    return { success: true, source, isConnected: true, isRecording, activeDownloads };
+    return { success: true, source, isConnected: true, isRecording, activeRecordingUrls, activeDownloads };
   }
   consecutiveProbeFailures += 1;
   const error = health && health.error ? health.error : 'Health probe mislukt';
@@ -127,7 +127,7 @@ async function probeServerStatus(source = 'probe') {
   if (!mutedAbort && !mutedNetwork) {
     console.warn(`[WEBDL] status probe failed (${source}): ${error}`);
   }
-  return { success: false, source, isConnected: isConnected && !shouldDisconnect, isRecording, activeDownloads, error };
+  return { success: false, source, isConnected: isConnected && !shouldDisconnect, isRecording, activeRecordingUrls, activeDownloads, error };
   })();
   try {
     return await probeInFlight;
@@ -184,11 +184,13 @@ function setConnectedState(next) {
   notifyConnectionStateChange(next);
 }
 
-function updateRecordingState(next) {
+let activeRecordingUrls = [];
+
+function updateRecordingState(next, urls) {
   const normalized = !!next;
-  if (isRecording === normalized) return;
+  activeRecordingUrls = Array.isArray(urls) ? urls : [];
   isRecording = normalized;
-  notifyRecordingStateChange(normalized);
+  notifyRecordingStateChange(normalized, activeRecordingUrls);
 }
 
 async function notifyConnectionStateChange(state) {
@@ -208,12 +210,13 @@ async function notifyConnectionStateChange(state) {
   }
 }
 
-async function notifyRecordingStateChange(state) {
+async function notifyRecordingStateChange(state, urls) {
   for (const tabId of activeTabs) {
     try {
       await browser.tabs.sendMessage(tabId, {
         action: 'recordingStateChanged',
-        isRecording: state
+        isRecording: state,
+        activeRecordingUrls: Array.isArray(urls) ? urls : activeRecordingUrls
       }).catch(() => {
         activeTabs.delete(tabId);
       });
@@ -396,7 +399,7 @@ function connectPersistentSocket() {
 
   socket.on('recording-status-changed', (data) => {
     if (data && typeof data.isRecording !== 'undefined') {
-      updateRecordingState(data.isRecording);
+      updateRecordingState(data.isRecording, data.activeRecordingUrls);
     }
   });
 
@@ -447,6 +450,8 @@ browser.contextMenus.onClicked.addListener(async (info, tab) => {
         action: 'webdlDownloadQueued',
         success: !!resp.success,
         downloadId: resp.downloadId,
+        duplicate: !!resp.duplicate,
+        serverMessage: resp.message,
         error: resp.error,
         url
       }).catch(() => {});
@@ -469,7 +474,7 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   const action = message && message.action ? message.action : '';
   if (action === 'contentScriptLoaded') {
-    sendResponse({ success: true, isConnected, isRecording, activeDownloads });
+    sendResponse({ success: true, isConnected, isRecording, activeRecordingUrls, activeDownloads });
     return false;
   }
 
@@ -482,18 +487,19 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
             sendResponse({
               isConnected: !!probe.isConnected,
               isRecording: !!probe.isRecording,
+              activeRecordingUrls: probe.activeRecordingUrls || activeRecordingUrls,
               activeDownloads: Number.isFinite(Number(probe.activeDownloads)) ? Number(probe.activeDownloads) : activeDownloads
             });
             return;
           }
-          sendResponse({ isConnected, isRecording, activeDownloads });
+          sendResponse({ isConnected, isRecording, activeRecordingUrls, activeDownloads });
         })
         .catch(() => {
-          sendResponse({ isConnected, isRecording, activeDownloads });
+          sendResponse({ isConnected, isRecording, activeRecordingUrls, activeDownloads });
         });
       return true;
     }
-    sendResponse({ isConnected, isRecording, activeDownloads });
+    sendResponse({ isConnected, isRecording, activeRecordingUrls, activeDownloads });
     return false;
   }
 

@@ -128,6 +128,7 @@
       <button id="btnDirSelect" class="btn">📁 Mappen</button>
       <button id="btnRandomGrid" class="btn" style="background:#2f4f4f; margin-left:8px;">🔀 Random Beeld</button>
       <button id="btnDups" class="btn" style="background:#4a2f2f;">🛡 Duplicaten Scanner</button>
+      <button id="btnImportOpen" class="btn" style="background:#205295; margin-left:8px;">📥 Importeer Lokaal</button>
       <div class="yt-controls" id="ytControls" style="display:none;">
         <div class="yt-row">
           <span class="yt-tag">YT</span>
@@ -210,6 +211,69 @@
       <div class="modal-buttons" style="display:flex; justify-content: space-between;">
         <button id="btnDupsScan" class="btn btn-primary" style="background:#4a2f2f;">Start Scan</button>
         <button id="btnDupsClose" class="btn">Sluiten</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Import Modal -->
+  <div id="importModal" class="modal" style="display:none;">
+    <div class="modal-content" style="max-width: 900px;">
+      <h3 style="margin-top:0;">📥 Bestanden Lokaal Importeren</h3>
+      
+      <div style="display:flex; flex-direction:column; gap:16px; margin-bottom: 20px;">
+        
+        <!-- Drag & Drop Zone -->
+        <div id="importDropzone" style="border: 2px dashed #00d4ff; border-radius: 8px; padding: 40px; text-align: center; cursor: pointer; transition: background 0.2s, box-shadow 0.2s; background: #1a2238;">
+          <div style="font-size: 24px; margin-bottom: 10px;">📂 Upload Bestanden</div>
+          <div style="color: #9aa7d1;">Sleep je bestanden (.mp4, .jpg, etc) hiernaartoe, of <strong>klik</strong> om te bladeren.</div>
+          <input type="file" id="importFileInput" multiple accept="video/*,image/*" style="display: none;" />
+        </div>
+
+        <!-- Thumbnail Preview Grid -->
+        <div id="importPreviewGrid" style="display:flex; flex-wrap:wrap; gap:10px; max-height:260px; overflow-y:auto; padding:10px; background:#111; border-radius:4px; min-height:80px; border:1px solid #333;">
+          <div id="importPreviewEmpty" style="width:100%; color:#666; text-align:center; padding-top:20px; font-style:italic;">Geen bestanden geselecteerd...</div>
+        </div>
+
+        <!-- Smart Database Sync Container -->
+        <div style="background:#1e2638; padding:16px; border-radius:6px; border:1px solid #334;">
+          <h4 style="margin:0 0 12px 0; color:#00d4ff; font-size:14px;">⚙️ Categorie Instellingen</h4>
+          
+          <label style="display:flex; align-items:center; gap:8px; margin-bottom:20px; cursor:pointer;">
+            <input type="checkbox" id="importParseCb" checked style="transform:scale(1.2); outline:none;" />
+            <span style="color:#d7e6ff; font-size:13px;">Slim Filter: Probeer <strong>Platform</strong> en <strong>Map</strong> uit bestandsnamen te herkennen (bijv. <em style="color:#aaa;">"instagram - tijanat - beach clip.mp4"</em>)</span>
+          </label>
+
+          <div style="display:grid; grid-template-columns: 1fr 1fr; gap:16px;">
+            <div>
+              <label style="display:block; margin-bottom:6px; font-size:12px; color:#aaa; font-weight:bold;">Standaard Platform</label>
+              <input type="text" id="importPlatform" list="dlPlatforms" placeholder="bijv. instagram" style="width:100%; padding:10px; border-radius:4px; border:1px solid #444; background:#222; color:#fff;" autocomplete="off" />
+              <datalist id="dlPlatforms"></datalist>
+            </div>
+            <div>
+              <label style="display:block; margin-bottom:6px; font-size:12px; color:#aaa; font-weight:bold;">Standaard Kanaal / Map</label>
+              <input type="text" id="importChannel" list="dlChannels" placeholder="bijv. tijanat" style="width:100%; padding:10px; border-radius:4px; border:1px solid #444; background:#222; color:#fff;" autocomplete="off" />
+              <datalist id="dlChannels"></datalist>
+            </div>
+          </div>
+          
+          <div style="margin-top:16px;">
+            <label style="display:block; margin-bottom:6px; font-size:12px; color:#aaa; font-weight:bold;">Originele Source URL (Optioneel)</label>
+            <input type="text" id="importSourceUrl" placeholder="https://..." style="width:100%; padding:10px; border-radius:4px; border:1px solid #444; background:#222; color:#fff;" autocomplete="off" />
+          </div>
+          
+          <div style="margin-top:16px;">
+            <label style="display:block; margin-bottom:6px; font-size:12px; color:#aaa; font-weight:bold;">Bulk Tags toewijzen (Komma gescheiden)</label>
+            <input type="text" id="importTags" placeholder="#strand, #zomer, top_tier" style="width:100%; padding:10px; border-radius:4px; border:1px solid #444; background:#222; color:#fff;" autocomplete="off" />
+          </div>
+        </div>
+        
+      </div>
+      
+      <div id="importStatus" style="color:#00d4ff; margin-bottom:16px; font-weight:bold; font-size:14px; text-align:center; min-height:20px;"></div>
+
+      <div class="modal-buttons" style="display:flex; justify-content: space-between;">
+        <button id="btnImportSubmit" class="btn btn-primary" style="background:#00d4ff; color:#000; font-weight:bold; box-shadow:0 0 8px #00d4ff; padding:10px 24px; font-size:14px; letter-spacing:1px; flex-grow:0.8;">🚀 START BATCH UPLOAD</button>
+        <button id="btnImportClose" class="btn" style="padding:10px 24px;">Sluiten</button>
       </div>
     </div>
   </div>
@@ -1915,6 +1979,246 @@
         }
       });
     }
+    // --- Import Modal Logic ---
+    const elBtnImportOpen = document.getElementById('btnImportOpen');
+    const elImportModal = document.getElementById('importModal');
+    const elBtnImportClose = document.getElementById('btnImportClose');
+    const elImportDropzone = document.getElementById('importDropzone');
+    const elImportFileInput = document.getElementById('importFileInput');
+    const elImportPreviewGrid = document.getElementById('importPreviewGrid');
+    const elImportPreviewEmpty = document.getElementById('importPreviewEmpty');
+    const dlPlatforms = document.getElementById('dlPlatforms');
+    const dlChannels = document.getElementById('dlChannels');
+    const elImportPlatform = document.getElementById('importPlatform');
+    const elImportChannel = document.getElementById('importChannel');
+    const elImportSourceUrl = document.getElementById('importSourceUrl');
+    const elImportParseCb = document.getElementById('importParseCb');
+    const elImportTags = document.getElementById('importTags');
+    const elBtnImportSubmit = document.getElementById('btnImportSubmit');
+    const elImportStatus = document.getElementById('importStatus');
+
+    let importFiles = [];
+
+    // Load platforms and channels from API
+    async function loadImportDatalists() {
+      try {
+        const pRes = await api('/api/media/platforms');
+        if (pRes.success && pRes.platforms) {
+          dlPlatforms.innerHTML = '';
+          pRes.platforms.forEach(p => {
+            const opt = document.createElement('option');
+            opt.value = p;
+            dlPlatforms.appendChild(opt);
+          });
+        }
+        const cRes = await api('/api/media/channels');
+        if (cRes.success && cRes.channels) {
+          dlChannels.innerHTML = '';
+          cRes.channels.forEach(c => {
+            const opt = document.createElement('option');
+            opt.value = c;
+            dlChannels.appendChild(opt);
+          });
+        }
+      } catch (e) {
+        console.error('Failed to load datalists:', e);
+      }
+    }
+
+    if (elBtnImportOpen) {
+      elBtnImportOpen.addEventListener('click', async () => {
+        elImportStatus.textContent = '';
+        importFiles = [];
+        renderImportPreviews();
+        elImportPlatform.value = '';
+        elImportChannel.value = '';
+        elImportSourceUrl.value = '';
+        elImportTags.value = '';
+        await loadImportDatalists();
+        elImportModal.style.display = 'flex';
+      });
+    }
+
+    if (elBtnImportClose) {
+      elBtnImportClose.addEventListener('click', () => {
+        elImportModal.style.display = 'none';
+      });
+    }
+    
+    if (elImportModal) {
+      elImportModal.addEventListener('click', (e) => {
+        if (e.target === elImportModal) elImportModal.style.display = 'none';
+      });
+    }
+
+    // Drag, Drop & File Selection
+    if (elImportDropzone) {
+      elImportDropzone.addEventListener('click', () => elImportFileInput.click());
+      elImportDropzone.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        elImportDropzone.style.background = '#2a3b5c';
+        elImportDropzone.style.boxShadow = '0 0 15px rgba(0, 212, 255, 0.4)';
+      });
+      elImportDropzone.addEventListener('dragleave', (e) => {
+        e.preventDefault();
+        elImportDropzone.style.background = '#1a2238';
+        elImportDropzone.style.boxShadow = 'none';
+      });
+      elImportDropzone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        elImportDropzone.style.background = '#1a2238';
+        elImportDropzone.style.boxShadow = 'none';
+        if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+          handleImportFiles(e.dataTransfer.files);
+        }
+      });
+    }
+
+    if (elImportFileInput) {
+      elImportFileInput.addEventListener('change', (e) => {
+        if (e.target.files && e.target.files.length > 0) {
+          handleImportFiles(e.target.files);
+        }
+      });
+    }
+    
+    // Parse helper
+    function getParsedData(filename) {
+      if (!elImportParseCb.checked) return null;
+      const baseName = filename.replace(/\.[^/.]+$/, "");
+      const parts = baseName.split('-').map(s => s.trim()).filter(s => s);
+      if (parts.length >= 3) {
+         return { p: parts[0].toLowerCase().replace(/[^a-z0-9_]/g, ''), c: parts[1].toLowerCase().replace(/[^a-z0-9_]/g, '') };
+      } else if (parts.length === 2) {
+         return { p: parts[0].toLowerCase().replace(/[^a-z0-9_]/g, ''), c: parts[1].toLowerCase().replace(/[^a-z0-9_]/g, '') };
+      }
+      return null;
+    }
+
+    if (elImportParseCb) elImportParseCb.addEventListener('change', renderImportPreviews);
+    if (elImportPlatform) elImportPlatform.addEventListener('input', renderImportPreviews);
+    if (elImportChannel) elImportChannel.addEventListener('input', renderImportPreviews);
+
+    function handleImportFiles(fileList) {
+      for (const file of fileList) {
+        if (!importFiles.find(f => f.name === file.name && f.size === file.size)) {
+          importFiles.push(file);
+        }
+      }
+      renderImportPreviews();
+    }
+
+    function renderImportPreviews() {
+      if (!elImportPreviewGrid) return;
+      elImportPreviewGrid.innerHTML = '';
+      if (importFiles.length === 0) {
+        if (elImportPreviewEmpty) {
+          elImportPreviewGrid.appendChild(elImportPreviewEmpty);
+        }
+        return;
+      }
+      
+      const globalPlatform = (elImportPlatform.value || '').trim() || 'manual';
+      const globalChannel = (elImportChannel.value || '').trim() || 'uploads';
+
+      for (let idx = 0; idx < importFiles.length; idx++) {
+        const file = importFiles[idx];
+        const card = document.createElement('div');
+        card.style.width = '120px';
+        card.style.background = '#222';
+        card.style.borderRadius = '6px';
+        card.style.padding = '8px';
+        card.style.position = 'relative';
+        card.style.border = '1px solid #444';
+        card.style.display = 'flex';
+        card.style.flexDirection = 'column';
+        card.style.gap = '4px';
+
+        const isVideo = file.type.startsWith('video');
+        const icon = isVideo ? '🎬' : '🖼️';
+        
+        let pLabel = globalPlatform;
+        let cLabel = globalChannel;
+        const parsed = getParsedData(file.name);
+        if (parsed) {
+           pLabel = parsed.p || pLabel;
+           cLabel = parsed.c || cLabel;
+        }
+
+        card.innerHTML = `
+          <div style="font-size:30px; text-align:center; margin-bottom:4px; height:40px; display:flex; align-items:center; justify-content:center;">${icon}</div>
+          <div style="font-size:10px; color:#bbb; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${file.name}">${file.name}</div>
+          <div style="font-size:10px; color:#00d4ff; font-weight:bold; background:#111; padding:2px 4px; border-radius:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${pLabel}">P: ${pLabel}</div>
+          <div style="font-size:10px; color:#ff00d4; font-weight:bold; background:#111; padding:2px 4px; border-radius:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${cLabel}">C: ${cLabel}</div>
+          <button class="remove-btn" data-idx="${idx}" style="position:absolute; top:-6px; right:-6px; background:#d32f2f; color:#fff; border:none; border-radius:50%; width:20px; height:20px; font-size:12px; cursor:pointer; line-height:0; padding:0; display:flex; align-items:center; justify-content:center; box-shadow:0 2px 4px rgba(0,0,0,0.5);">×</button>
+        `;
+        elImportPreviewGrid.appendChild(card);
+      }
+
+      Array.from(elImportPreviewGrid.querySelectorAll('.remove-btn')).forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const idx = parseInt(btn.getAttribute('data-idx'));
+          importFiles.splice(idx, 1);
+          renderImportPreviews();
+        });
+      });
+    }
+
+    if (elBtnImportSubmit) {
+      elBtnImportSubmit.addEventListener('click', async () => {
+        if (importFiles.length === 0) {
+          elImportStatus.textContent = '❌ Voeg eerst bestanden toe!';
+          return;
+        }
+        
+        elImportStatus.style.color = '#ffaa00';
+        elImportStatus.textContent = '⏳ Bezig met uploaden... Even geduld a.u.b.';
+        elBtnImportSubmit.disabled = true;
+        elBtnImportSubmit.style.opacity = '0.5';
+        
+        const fd = new FormData();
+        fd.append('platform', elImportPlatform.value.trim());
+        fd.append('channel', elImportChannel.value.trim());
+        fd.append('sourceUrl', elImportSourceUrl.value.trim());
+        fd.append('parseFilename', elImportParseCb.checked ? 'true' : 'false');
+        fd.append('tags', elImportTags.value.trim());
+        for (const file of importFiles) {
+          fd.append('files', file);
+        }
+        
+        try {
+          const res = await fetch('/api/media/manual-upload', {
+            method: 'POST',
+            body: fd
+          });
+          const data = await res.json();
+          if (data.success) {
+            elImportStatus.style.color = '#00ff00';
+            elImportStatus.textContent = `✅ Succesvol ${data.count} bestanden verwerkt!`;
+            importFiles = [];
+            renderImportPreviews();
+            setTimeout(() => {
+              elImportModal.style.display = 'none';
+              elBtnImportSubmit.disabled = false;
+              elBtnImportSubmit.style.opacity = '1';
+              reloadAll();
+            }, 1500);
+          } else {
+            elImportStatus.style.color = '#ff3333';
+            elImportStatus.textContent = '❌ Fout: ' + data.error;
+            elBtnImportSubmit.disabled = false;
+            elBtnImportSubmit.style.opacity = '1';
+          }
+        } catch (e) {
+          elImportStatus.style.color = '#ff3333';
+          elImportStatus.textContent = '❌ Netwerk/Upload fout: ' + String(e);
+          elBtnImportSubmit.disabled = false;
+          elBtnImportSubmit.style.opacity = '1';
+        }
+      });
+    }
+
     const elDirModal = document.getElementById('dirModal');
     const elBtnDirClose = document.getElementById('btnDirClose');
     const elBtnDirCancel = document.getElementById('btnDirCancel');

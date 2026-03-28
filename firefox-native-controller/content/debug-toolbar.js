@@ -1834,9 +1834,26 @@
   });
   toolbar.appendChild(metaInfo);
 
+  async function checkUrlStatus(url) {
+    try {
+      const resp = await getServerJson(`api/media/check?url=${encodeURIComponent(url)}`, 3000);
+      const el = document.getElementById('webdl-url-status');
+      if (el && resp && resp.success) {
+        if (resp.exists) {
+          el.innerHTML = '✅ <span style="font-size:10px;">In Library</span>';
+          el.style.color = '#4CAF50';
+        } else {
+          el.innerHTML = '🆕 <span style="font-size:10px;">Nieuw</span>';
+          el.style.color = '#2196F3';
+        }
+      }
+    } catch (e) {}
+  }
+
   function updateMetaDisplay() {
     const m = scrapeMetadata();
     metaInfo.innerHTML = `<span style="color:#00d4ff">${m.platform}</span> | ${m.channel}<br><span style="color:#ccc">${m.title.substring(0, 60)}${m.title.length > 60 ? '...' : ''}</span>`;
+    if (m.url) checkUrlStatus(m.url);
     try {
       if (threadBatchDownloadBtn) {
         const ok = isFootFetishForumThreadPage();
@@ -1911,7 +1928,7 @@
     borderRadius: '4px', marginBottom: '6px', display: 'flex',
     justifyContent: 'space-between', alignItems: 'center'
   });
-  statusBar.innerHTML = '<span id="webdl-conn" style="color:#F44336">Verbinden...</span><span id="webdl-dl-count" style="color:#888">0 downloads</span>';
+  statusBar.innerHTML = '<span id="webdl-conn" style="color:#F44336">Verbinden...</span><span id="webdl-url-status" style="margin-left:8px;font-weight:bold;color:#888;">🔍 Checken...</span><span id="webdl-dl-count" style="color:#888;margin-left:auto;">0 downloads</span>';
   toolbar.appendChild(statusBar);
 
   // Notificatie area
@@ -2167,6 +2184,32 @@
     return { success: false, error: lastError || 'Server niet bereikbaar' };
   }
 
+  async function getServerJson(endpoint, timeoutMs = REQUEST_TIMEOUT_MS) {
+    let lastError = null;
+    for (const base of getServerCandidates()) {
+      const controller = new AbortController();
+      const t = setTimeout(() => controller.abort(), Math.max(500, Number(timeoutMs) || REQUEST_TIMEOUT_MS));
+      try {
+        const resp = await fetch(`${base}/${endpoint}`, {
+          method: 'GET',
+          headers: { 'Accept': 'application/json' },
+          signal: controller.signal
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          lastError = (data && data.error) ? data.error : `Server fout: ${resp.status}`;
+          continue;
+        }
+        return data;
+      } catch (e) {
+        lastError = e && e.message ? e.message : String(e);
+      } finally {
+        clearTimeout(t);
+      }
+    }
+    return { success: false, error: lastError || 'Server niet bereikbaar' };
+  }
+
   async function getStatusViaHttp(timeoutMs = 5000) {
     let lastError = null;
     for (const base of getServerCandidates()) {
@@ -2280,8 +2323,8 @@
       if (Number.isFinite(Number(data.activeDownloads))) {
         document.getElementById('webdl-dl-count').textContent = `${Number(data.activeDownloads) || 0} actief`;
       }
-      if (typeof data.isRecording !== 'undefined' && data.isRecording !== isRecording) {
-        updateRecUI(!!data.isRecording);
+      if (typeof data.isRecording !== 'undefined') {
+        updateRecUI(!!data.isRecording, data.activeRecordingUrls);
       }
     } catch (e) {}
   }
@@ -3341,16 +3384,21 @@
   let cropUpdateTimer = null;
   let frameUpdateTimer = null;
 
-  function updateRecUI(recording) {
-    isRecording = recording;
-    if (!recording && cropUpdateTimer) {
+  function updateRecUI(recording, activeUrls) {
+    // Per-tab check: is THIS tab's URL in the activeRecordingUrls array?
+    const myUrl = window.location.href;
+    const myRecording = Array.isArray(activeUrls) && activeUrls.length
+      ? activeUrls.some(u => myUrl.startsWith(u) || u.startsWith(myUrl.split('?')[0]))
+      : !!recording;
+    isRecording = myRecording;
+    if (!myRecording && cropUpdateTimer) {
       clearInterval(cropUpdateTimer);
       cropUpdateTimer = null;
     }
-    if (recording) {
+    if (myRecording) {
       captureFrame.style.display = 'none';
     }
-    if (recording) {
+    if (myRecording) {
       recStartBtn.textContent = '\u23fa REC...';
       recStartBtn.style.opacity = '0.5'; recStartBtn.style.cursor = 'not-allowed';
       recStopBtn.style.opacity = '1'; recStopBtn.style.cursor = 'pointer';
@@ -3467,6 +3515,36 @@
             if (next && !next.error) sendCropUpdate(next);
           }, 250);
         }
+      } else if (result && result.needsToggle) {
+        addLog('START geklikt op tabblad met actieve opname. Dit tabblad was al aan het opnemen, de opname wordt nu netjes afgesloten...');
+        const toggleResult = await stopRecordingRequest({});
+        if (toggleResult.success) {
+          applyConnectionState(true);
+          updateRecUI(false);
+          showNotification('Opname succesvol afgesloten.');
+          addLog('Opname afgesloten (toggle)');
+        } else {
+          showNotification(`Fout bij afsluiten opname: ${toggleResult.error}`, true);
+        }
+      } else if (result && result.needsForce) {
+        if (confirm("Er loopt al een opname op de achtergrond. Wil je deze geforceerd beëindigen en een nieuwe starten?")) {
+          const forceResult = await startRecordingRequest({ metadata: meta, crop, lock: true, force: true });
+          if (forceResult.success) {
+            applyConnectionState(true);
+            updateRecUI(true);
+            showNotification(`Opname geforceerd herstart: ${forceResult.file}`);
+            addLog(`REC geforceerd herstart: ${forceResult.file}`);
+            if (!cropUpdateTimer) {
+              cropUpdateTimer = setInterval(() => {
+                if (!isRecording) return;
+                const next = getVideoCropRect();
+                if (next && !next.error) sendCropUpdate(next);
+              }, 250);
+            }
+          } else {
+            showNotification(forceResult.error, true);
+          }
+        }
       } else {
         if (result && result.error) addLog(`REC start geweigerd: ${result.error}`, 'error');
         showNotification(result.error, true);
@@ -3480,8 +3558,9 @@
   recStopBtn.addEventListener('click', async () => {
     if (!isRecording) return;
     addLog('Opname stoppen...');
+    const meta = scrapeMetadata();
     try {
-      const result = await stopRecordingRequest({});
+      const result = await stopRecordingRequest({ metadata: meta });
       if (result.success) {
         applyConnectionState(true);
         updateRecUI(false);
@@ -3531,7 +3610,16 @@
     }
 
     if (message && message.action === 'webdlDownloadQueued') {
-      if (message.success && message.downloadId) {
+      if (message.success && message.duplicate) {
+        showNotification(`Download geskipt: bestand bestaat al (#${message.downloadId})`, true);
+        if (confirm(`${message.serverMessage || 'Dit bestand is al gedownload.'}\n\nWil je dit bestand geforceerd opnieuw downloaden?`)) {
+          showNotification('Geforceerde download in wachtrij gezet...');
+          addLog(`Geforceerde rechtsklik download: ${message.url}`);
+          const meta = scrapeMetadata();
+          meta.url = message.url;
+          browser.runtime.sendMessage({ action: 'queueDownload', payload: { url: message.url, force: true, metadata: meta } });
+        }
+      } else if (message.success && message.downloadId) {
         showNotification(`Download #${message.downloadId} in wachtrij`);
         try { addLog(`Rechtsklik download gestart #${message.downloadId}`); } catch (e) {}
         pollDownload(message.downloadId);
@@ -3551,7 +3639,7 @@
       if (message.isConnected) checkServer();
     }
     if (message.action === 'recordingStateChanged') {
-      updateRecUI(!!message.isRecording);
+      updateRecUI(!!message.isRecording, message.activeRecordingUrls);
     }
     return true;
   });
@@ -3562,7 +3650,7 @@
         applyConnectionState(!!status.isConnected);
       }
       if (status && typeof status.isRecording !== 'undefined') {
-        updateRecUI(!!status.isRecording);
+        updateRecUI(!!status.isRecording, status.activeRecordingUrls);
       }
       if (status && Number.isFinite(Number(status.activeDownloads))) {
         document.getElementById('webdl-dl-count').textContent = `${Number(status.activeDownloads) || 0} actief`;
