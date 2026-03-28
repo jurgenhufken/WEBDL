@@ -121,6 +121,7 @@
         <option value="rating_asc">Rating laag→hoog</option>
       </select>
       <select id="channelSel" style="min-width: 280px; display:none;"></select>
+      <input type="text" id="inpSearch" placeholder="🔍 Zoeken..." style="padding: 6px 12px; border-radius: 4px; border: 1px solid #444; background: #222; color: #fff; margin-right: 8px;">
       <button id="btnReload" class="btn">↻ Herladen</button>
       <button id="btnDirSelect" class="btn">📁 Mappen</button>
       <button id="btnDups" class="btn" style="background:#4a2f2f;">🛡 Duplicaten Scanner</button>
@@ -193,6 +194,20 @@
         <button id="btnSource" class="btn">Bron</button>
       </header>
       <div class="body" id="mBody"></div>
+    </div>
+  </div>
+
+  <!-- Duplicates Modal -->
+  <div id="dupsModal" class="modal" style="display:none;">
+    <div class="modal-content" style="max-width: 900px;">
+      <h3>Duplicaten Scanner</h3>
+      <div id="dupsContent" style="max-height: 60vh; overflow-y: auto; margin-bottom: 16px;">
+         <p>Klik op 'Scan' om te zoeken naar dubbele bestanden...</p>
+      </div>
+      <div class="modal-buttons" style="display:flex; justify-content: space-between;">
+        <button id="btnDupsScan" class="btn btn-primary" style="background:#4a2f2f;">Start Scan</button>
+        <button id="btnDupsClose" class="btn">Sluiten</button>
+      </div>
     </div>
   </div>
 
@@ -1768,7 +1783,28 @@
       tick();
     } catch (e) {}
 
-    document.getElementById('btnReload').addEventListener('click', () => reloadAll());
+    const elBtnReload = document.getElementById('btnReload');
+    if (elBtnReload) elBtnReload.addEventListener('click', () => reloadAll());
+
+    const elInpSearch = document.getElementById('inpSearch');
+    if (elInpSearch) {
+      elInpSearch.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          const val = elInpSearch.value.trim();
+          if (val !== state.search) {
+            state.search = val;
+            reloadAll();
+          }
+        }
+      });
+      elInpSearch.addEventListener('change', (e) => {
+        const val = elInpSearch.value.trim();
+        if (val !== state.search) {
+          state.search = val;
+          reloadAll();
+        }
+      });
+    }
     const elBtnDirSelect = document.getElementById('btnDirSelect');
     const elDirModal = document.getElementById('dirModal');
     const elBtnDirClose = document.getElementById('btnDirClose');
@@ -2165,7 +2201,20 @@
       else if (e.key === 'Escape') { e.preventDefault(); closeModal(); }
     });
 
-    init().catch(e => { elSentinel.textContent = 'Fout: ' + e.message; });
+    (async function startup() {
+      try {
+        await loadDirConfig();
+        const sessionEnabledDirs = getSessionEnabledDirs();
+        if (sessionEnabledDirs) {
+          state.enabledDirs = sessionEnabledDirs.slice();
+        } else {
+          state.enabledDirs = null; // null = all
+        }
+        await reloadAll();
+      } catch (e) {
+        elSentinel.textContent = 'Fout bij opstarten: ' + e.message;
+      }
+    })();
   </script>
 </body>
 </html>
