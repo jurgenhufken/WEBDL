@@ -12363,7 +12363,7 @@ expressApp.get('/api/media/channel-files', async (req, res) => {
   res.setHeader('Expires', '0');
   const platform = String(req.query.platform || '').trim();
   const channel = String(req.query.channel || '').trim();
-  const limit = Math.max(1, Math.min(500, parseInt(req.query.limit || '120', 10) || 120));
+  const limit = Math.max(1, Math.min(5000, parseInt(req.query.limit || '120', 10) || 120));
   const type = String(req.query.type || 'all').toLowerCase();
   const sort = String(req.query.sort || 'recent').toLowerCase();
   const cursorRaw = String(req.query.cursor || '').trim();
@@ -12652,15 +12652,30 @@ expressApp.get('/api/media/directories/tree', async (req, res) => {
       return res.json({ success: true, tree: _directoryTreeCache });
     }
     const q = `
-      SELECT platform, channel, 
-             MAX(d.source_url) as sample_source_url,
-             MAX(d.url) as sample_url,
-             COUNT(d.id) as download_count,
-             SUM(COALESCE((SELECT COUNT(f.id) FROM download_files f WHERE f.download_id = d.id), 0)) as file_count
-      FROM downloads d
-      WHERE status = 'completed'
-      GROUP BY platform, channel
-      ORDER BY platform ASC, channel ASC
+      SELECT sub.platform, sub.channel,
+             MAX(sub.source_url) as sample_source_url,
+             MAX(sub.url) as sample_url,
+             SUM(CASE WHEN sub.kind = 'd' THEN 1 ELSE 0 END) as download_count,
+             SUM(CASE WHEN sub.kind = 'f' THEN 1 ELSE 0 END) as file_count,
+             SUM(CASE WHEN sub.kind = 's' THEN 1 ELSE 0 END) as screenshot_count
+      FROM (
+        SELECT 'd' AS kind, d.platform, d.channel, d.source_url, d.url
+        FROM downloads d
+        WHERE d.status NOT IN ('error') AND d.filepath IS NOT NULL AND TRIM(d.filepath) != ''
+        UNION ALL
+        SELECT 'f' AS kind, d.platform, d.channel, NULL AS source_url, d.url
+        FROM download_files f
+        JOIN downloads d ON d.id = f.download_id
+        WHERE d.status NOT IN ('error')
+        UNION ALL
+        SELECT 's' AS kind, s.platform, s.channel, NULL AS source_url, s.url
+        FROM screenshots s
+        WHERE s.filepath IS NOT NULL AND TRIM(s.filepath) != ''
+      ) sub
+      WHERE sub.platform IS NOT NULL AND TRIM(sub.platform) != ''
+        AND sub.channel IS NOT NULL AND TRIM(sub.channel) != ''
+      GROUP BY sub.platform, sub.channel
+      ORDER BY sub.platform ASC, sub.channel ASC
     `;
     const result = { tree: {} };
     if (db.isPostgres) {
@@ -12670,6 +12685,7 @@ expressApp.get('/api/media/directories/tree', async (req, res) => {
         const c = row.channel || 'unknown';
         const d_count = parseInt(row.download_count, 10) || 0;
         const f_count = parseInt(row.file_count, 10) || 0;
+        const s_count = parseInt(row.screenshot_count, 10) || 0;
         
         let d_name = c;
         if (/^thread_\\d+$/i.test(c)) {
@@ -12678,10 +12694,11 @@ expressApp.get('/api/media/directories/tree', async (req, res) => {
           else d_name = 'Thread ' + c.replace(/^thread_/i, '');
         }
 
-        if (!result.tree[p]) result.tree[p] = { count: 0, fileCount: 0, channels: [] };
+        if (!result.tree[p]) result.tree[p] = { count: 0, fileCount: 0, screenshotCount: 0, channels: [] };
         result.tree[p].count += d_count;
         result.tree[p].fileCount += f_count;
-        result.tree[p].channels.push({ name: c, displayName: d_name, count: d_count, fileCount: f_count });
+        result.tree[p].screenshotCount = (result.tree[p].screenshotCount || 0) + s_count;
+        result.tree[p].channels.push({ name: c, displayName: d_name, count: d_count, fileCount: f_count, screenshotCount: s_count });
       }
     }
     _directoryTreeCache = result.tree;

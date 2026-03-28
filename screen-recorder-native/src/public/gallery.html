@@ -1902,16 +1902,16 @@
     
     if (elBtnRandomGrid) {
       elBtnRandomGrid.addEventListener('click', async () => {
-        // Zorg dat we cross-channel globale random opvragen van the server
-        state.mode = 'recent';
-        state.sort = 'random';
-        if (elMode) elMode.value = 'recent';
-        if (elSort) elSort.value = 'random';
-        
-        await reloadAll();
-        // Na reload bevat state.items 120 globaal willekeurige the items
-        if (state.items && state.items.length > 0) {
-          openModalIndex(0);
+        if (typeof toggleRandomMode === 'function') {
+           await toggleRandomMode();
+        } else {
+           state.random = !state.random;
+           state.mode = 'recent';
+           state.sort = state.random ? 'random' : 'recent';
+           if (elMode) elMode.value = 'recent';
+           if (elSort) elSort.value = state.sort;
+           await reloadAll();
+           if (state.items && state.items.length > 0) openModalIndex(0);
         }
       });
     }
@@ -2017,7 +2017,8 @@
         const ptit = document.createElement('strong');
         ptit.style.color = '#fff';
         ptit.style.cursor = 'pointer';
-        ptit.textContent = '▶ ' + plat + ' (' + platInfo.fileCount + ' files)';
+        const totalFilesP = (platInfo.fileCount || 0) + (platInfo.screenshotCount || 0);
+        ptit.textContent = '▶ ' + plat + ' (' + totalFilesP + ' files)';
         
         pheader.appendChild(pcheck);
         pheader.appendChild(ptit);
@@ -2031,7 +2032,7 @@
         ptit.onclick = () => {
           const isCollapsed = chCont.style.display === 'none';
           chCont.style.display = isCollapsed ? 'flex' : 'none';
-          ptit.textContent = (isCollapsed ? '▼ ' : '▶ ') + plat + ' (' + platInfo.fileCount + ' files)';
+          ptit.textContent = (isCollapsed ? '▼ ' : '▶ ') + plat + ' (' + totalFilesP + ' files)';
         };
 
         for (const ch of platInfo.channels) {
@@ -2052,7 +2053,8 @@
            ctit.style.fontSize = '12px';
            ctit.style.color = '#ccc';
            const dName = ch.displayName || (ch.name.startsWith('thread_') ? 'Thread ' + ch.name.substring(7) : ch.name);
-           ctit.textContent = dName + ' (' + ch.fileCount + ')';
+           const totalFilesC = (ch.fileCount || 0) + (ch.screenshotCount || 0);
+           ctit.textContent = dName + ' (' + totalFilesC + ')';
 
            clabel.appendChild(ccheck);
            clabel.appendChild(ctit);
@@ -2241,23 +2243,78 @@
         else startSlideshow();
       });
     }
+    async function toggleRandomMode() {
+      state.random = !state.random;
+      
+      const onColor = '#00d4ff';
+      const onText = '#000';
+      const txt = state.random ? '🔀 Mix (AAN)' : '🔀 Mix (UIT)';
+      
+      if (elMBtnRandom) {
+        elMBtnRandom.textContent = txt;
+        elMBtnRandom.style.background = state.random ? onColor : '';
+        elMBtnRandom.style.color = state.random ? onText : '';
+        elMBtnRandom.style.boxShadow = state.random ? '0 0 8px #00d4ff' : 'none';
+      }
+      
+      if (typeof elBtnRandomGrid !== 'undefined' && elBtnRandomGrid) {
+        elBtnRandomGrid.textContent = txt;
+        elBtnRandomGrid.style.background = state.random ? onColor : '#2f4f4f';
+        elBtnRandomGrid.style.color = state.random ? onText : '';
+        elBtnRandomGrid.style.boxShadow = state.random ? '0 0 8px #00d4ff' : 'none';
+      }
+      
+      const currentItem = state.current || (state.items && state.currentIndex >= 0 ? state.items[state.currentIndex] : null);
+
+      if (state.random) {
+        state.mode = 'recent';
+        state.sort = 'random';
+        state.limit = 120; // reset
+        if (elMode) elMode.value = 'recent';
+        if (elSort) elSort.value = 'random';
+        await reloadAll();
+        if (state.items && state.items.length > 0) openModalIndex(0);
+      } else {
+        if (currentItem && currentItem.platform && currentItem.channel) {
+          state.mode = 'channel';
+          state.channel = { platform: currentItem.platform, channel: currentItem.channel };
+          if (elMode) elMode.value = 'channel';
+          if (elChannelSel) {
+            elChannelSel.style.display = '';
+            // Only dynamically add the option if it doesn't cleanly exist already
+            const optVal = currentItem.platform + '||' + currentItem.channel;
+            const existingOpt = Array.from(elChannelSel.options).find(o => o.value === optVal);
+            if (!existingOpt) {
+               const no = document.createElement('option');
+               no.value = optVal;
+               no.textContent = currentItem.platform + ' / ' + currentItem.channel;
+               elChannelSel.appendChild(no);
+            }
+            elChannelSel.value = optVal;
+          }
+          state.limit = 5000;
+        } else {
+          state.limit = 120;
+        }
+        
+        state.sort = 'recent';
+        if (elSort) elSort.value = 'recent';
+        
+        await reloadAll();
+        state.limit = 120; // restore default
+        
+        let newIdx = 0;
+        if (currentItem) {
+          const fIdx = state.items.findIndex(it => it.id === currentItem.id || it.filepath === currentItem.filepath);
+          if (fIdx >= 0) newIdx = fIdx;
+        }
+        if (state.items && state.items.length > 0) openModalIndex(newIdx);
+      }
+    }
+
     if (elMBtnRandom) {
       elMBtnRandom.addEventListener('click', async () => {
-        state.random = !state.random;
-        elMBtnRandom.textContent = state.random ? '🔀 Mix Aan' : '🔀 Mix Uit';
-        if (state.random) {
-          state.mode = 'recent';
-          state.sort = 'random';
-          if (elMode) elMode.value = 'recent';
-          if (elSort) elSort.value = 'random';
-          await reloadAll();
-          if (state.items && state.items.length > 0) openModalIndex(0);
-        } else {
-          state.sort = 'recent';
-          if (elSort) elSort.value = 'recent';
-          await reloadAll();
-          if (state.items && state.items.length > 0) openModalIndex(0);
-        }
+        await toggleRandomMode();
       });
     }
     if (elMSlideshowSec) {
@@ -2327,15 +2384,8 @@
       else if (e.key === 'ArrowUp') { e.preventDefault(); await changeViewerChannel(-1); }
       else if (e.key === 'ArrowDown') { e.preventDefault(); await changeViewerChannel(1); }
       else if (e.key === ' ') {
-        const v = currentVideo();
-        if (v) {
-          if (state.reversePlayback) {
-            stopReversePlayback();
-          }
-          if (v.paused) v.play().catch(() => {});
-          else v.pause();
-        }
         e.preventDefault();
+        await toggleRandomMode();
       }
       else if (e.key.toLowerCase() === 'm') {
         const v = currentVideo();

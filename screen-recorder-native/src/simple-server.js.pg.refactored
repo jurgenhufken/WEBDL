@@ -1697,7 +1697,7 @@ const updateDownloadStatus = {
     // Auto-tagging hook when a download completes
     if (status === 'completed') {
       try {
-        const d = db.prepare('SELECT title, filename, filepath FROM downloads WHERE id = ' + (db.isPostgres ? '$1' : '?')).get(id);
+        const d = db.prepare('SELECT title, filename, filepath FROM downloads WHERE id = ?').get(id);
         if (d) {
           const text = (d.title || '') + ' ' + (d.filename || '') + ' ' + (d.filepath || '');
           extractAndSaveTags('d', String(id), text);
@@ -2125,7 +2125,7 @@ const getRecentDashboardBatchFiles = db.prepare(db.isPostgres ? `
     d.title AS title,
     NULL AS filepath,
     COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-    COALESCE(NULLIF(CAST(f.mtime_ms AS BIGINT), 0), CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT)) AS ts,
+    CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
     NULL AS thumbnail,
     d.url AS url,
     d.source_url AS source_url,
@@ -2171,7 +2171,7 @@ const SQL_getRecentHybridMediaWithActiveFiles = db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-      COALESCE(NULLIF(CAST(f.mtime_ms AS BIGINT), 0), CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT)) AS ts,
+      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -2307,7 +2307,7 @@ const SQL_getRecentHybridMedia = db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-      COALESCE(NULLIF(CAST(f.mtime_ms AS BIGINT), 0), CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT)) AS ts,
+      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -2498,7 +2498,7 @@ const getHybridMediaByChannel = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-      COALESCE(NULLIF(CAST(f.mtime_ms AS BIGINT), 0), CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT)) AS ts,
+      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -3483,7 +3483,7 @@ const getHybridMediaByChannelWithActiveFiles = db.prepare(db.isPostgres ? `
       d.title AS title,
       NULL AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-      COALESCE(NULLIF(CAST(f.mtime_ms AS BIGINT), 0), CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT)) AS ts,
+      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -9607,7 +9607,7 @@ async function startOfscraperDownload(downloadId, url, platform, channel, title,
 
     const proc = spawnNice(OFSCRAPER, [
     '-cg', cfgDir,
-    '-p', 'stats',
+    '-p', 'normal',
     '--action', 'download',
     '--download-area', 'all',
     '--usernames', user,
@@ -9820,6 +9820,9 @@ async function startOfscraperDownload(downloadId, url, platform, channel, title,
             }
           };
           await updateDownload.run('completed', 100, dir, '(multiple)', 0, '', JSON.stringify(metaObj), null, downloadId);
+          try {
+            await indexDownloadFilesForDownload({ id: downloadId, status: 'completed', filepath: dir, _maxFiles: 8000, platform: 'onlyfans' });
+          } catch (e) {}
         } else {
           await updateDownloadStatus.run('error', 0, tail || `ofscraper exit code: ${code} (log: ${logPath || 'n/a'})`, downloadId);
         }
@@ -11989,7 +11992,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
         const now = Date.now();
         const st = await getStatsRowCached();
         const marker = buildRecentFilesCacheMarker(st);
-        const dirFilterKey = enabledDirs && enabledDirs.length ? enabledDirs.sort().join(',') : '_all';
+        const dirFilterKey = enabledDirs && enabledDirs.length ? JSON.stringify(enabledDirs) : '_all';
         const searchKey = searchQ ? encodeURIComponent(searchQ) : '_none';
         const key = `recent|${type}|${limit}|${sort}|${dirFilterKey}|${searchKey}`;
         const cached = recentFilesTopCache.get(key);
@@ -12077,7 +12080,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
       try {
         const st = await getStatsRowCached();
         const marker = buildRecentFilesCacheMarker(st);
-        const dirFilterKey = enabledDirs && enabledDirs.length ? enabledDirs.sort().join(',') : '_all';
+        const dirFilterKey = enabledDirs && enabledDirs.length ? JSON.stringify(enabledDirs) : '_all';
         const searchKey = searchQ ? encodeURIComponent(searchQ) : '_none';
         const key = `recent|${type}|${limit}|${sort}|${dirFilterKey}|${searchKey}`;
         recentFilesTopCache.set(key, { at: Date.now(), marker, payload });
@@ -12125,7 +12128,7 @@ expressApp.get('/api/media/channel-files', async (req, res) => {
         const now = Date.now();
         const st = await getStatsRowCached();
         const marker = buildRecentFilesCacheMarker(st);
-        const dirFilterKey = enabledDirs && enabledDirs.length ? enabledDirs.sort().join(',') : '_all';
+        const dirFilterKey = enabledDirs && enabledDirs.length ? JSON.stringify(enabledDirs) : '_all';
         const key = `channel|${platform}|${channel}|${type}|${limit}|${sort}|${dirFilterKey}`;
         const cached = recentFilesTopCache.get(key);
         if (cached && cached.marker === marker && now - (cached.at || 0) < RECENT_FILES_TOP_CACHE_MS) {
@@ -12182,7 +12185,7 @@ expressApp.get('/api/media/channel-files', async (req, res) => {
       try {
         const st = await getStatsRowCached();
         const marker = buildRecentFilesCacheMarker(st);
-        const dirFilterKey = enabledDirs && enabledDirs.length ? enabledDirs.sort().join(',') : '_all';
+        const dirFilterKey = enabledDirs && enabledDirs.length ? JSON.stringify(enabledDirs) : '_all';
         const key = `channel|${platform}|${channel}|${type}|${limit}|${sort}|${dirFilterKey}`;
         recentFilesTopCache.set(key, { at: Date.now(), marker, payload });
         if (recentFilesTopCache.size > 80) {
@@ -12390,7 +12393,7 @@ expressApp.get('/api/media/directories/tree', async (req, res) => {
     `;
     const result = { tree: {} };
     if (db.isPostgres) {
-      const { rows } = await pgPool.query(q);
+      const rows = await db.prepare(q).all();
       for (const row of rows) {
         const p = row.platform || 'unknown';
         const c = row.channel || 'unknown';
@@ -12416,12 +12419,12 @@ expressApp.get('/api/media/duplicates/scan', async (req, res) => {
   try {
     const q = `
       WITH AllFiles AS (
-        SELECT d.id AS item_id, 'download' AS type, d.filepath AS path, d.filesize, d.title, d.platform, d.channel, d.created_at
+        SELECT d.id AS item_id, 'download' AS type, d.filepath AS path, d.filesize, d.title, d.platform, d.channel, CAST(d.created_at AS TEXT) AS created_at
         FROM downloads d
         WHERE d.status = 'completed' AND d.filepath IS NOT NULL AND TRIM(d.filepath) != ''
           AND d.filesize > 1048576 
         UNION ALL
-        SELECT f.id AS item_id, 'file' AS type, f.relpath AS path, f.filesize, d.title, d.platform, d.channel, f.created_at
+        SELECT f.id AS item_id, 'file' AS type, f.relpath AS path, f.filesize, d.title, d.platform, d.channel, CAST(f.created_at AS TEXT) AS created_at
         FROM download_files f
         JOIN downloads d ON d.id = f.download_id
         WHERE d.status = 'completed' AND f.relpath IS NOT NULL AND TRIM(f.relpath) != ''
@@ -12433,7 +12436,7 @@ expressApp.get('/api/media/duplicates/scan', async (req, res) => {
       SELECT a.* FROM AllFiles a JOIN SizeGroups s ON a.filesize = s.filesize
       ORDER BY a.filesize DESC, a.created_at ASC
     `;
-    const { rows } = await pgPool.query(q);
+    const rows = await db.prepare(q).all();
     
     // Validate physical files
     const valid = [];
@@ -12485,9 +12488,9 @@ expressApp.post('/api/media/duplicates/remove', async (req, res) => {
        try { await fs.promises.unlink(full); } catch(e) {}
        
        if (item.type === 'download') {
-         await pgPool.query('DELETE FROM downloads WHERE id = $1', [item.item_id]);
+         await db.prepare('DELETE FROM downloads WHERE id = ?').run(item.item_id);
        } else if (item.type === 'file') {
-         await pgPool.query('DELETE FROM download_files WHERE id = $1', [item.item_id]);
+         await db.prepare('DELETE FROM download_files WHERE id = ?').run(item.item_id);
        }
        deletedCount++;
     }
@@ -13455,8 +13458,8 @@ expressApp.post('/api/tags', (req, res) => {
   try {
     const name = String(req.body.name || '').trim().toLowerCase();
     if (!name) throw new Error('Name required');
-    if (db.isPostgres) db.prepare('INSERT INTO tags (name) VALUES ($1) ON CONFLICT (name) DO NOTHING').run(name); else db.prepare('INSERT OR IGNORE INTO tags (name) VALUES (?)').run(name);
-    const tag = db.prepare(db.isPostgres ? 'SELECT * FROM tags WHERE name = $1' : 'SELECT * FROM tags WHERE name = ?').get(name);
+    if (db.isPostgres) db.prepare('INSERT INTO tags (name) VALUES (?) ON CONFLICT (name) DO NOTHING').run(name); else db.prepare('INSERT OR IGNORE INTO tags (name) VALUES (?)').run(name);
+    const tag = db.prepare('SELECT * FROM tags WHERE name = ?').get(name);
     res.json({ success: true, tag });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
@@ -13466,7 +13469,7 @@ expressApp.post('/api/tags', (req, res) => {
 expressApp.delete('/api/tags/:id', (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
-    db.prepare(db.isPostgres ? 'DELETE FROM tags WHERE id = $1' : 'DELETE FROM tags WHERE id = ?').run(id);
+    db.prepare('DELETE FROM tags WHERE id = ?').run(id);
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
@@ -13476,7 +13479,7 @@ expressApp.delete('/api/tags/:id', (req, res) => {
 expressApp.get('/api/media/:kind/:id/tags', (req, res) => {
   try {
     const { kind, id } = req.params;
-    const rows = db.prepare(db.isPostgres ? 'SELECT t.* FROM tags t JOIN media_tags mt ON t.id = mt.tag_id WHERE mt.kind = $1 AND mt.media_id = $2' : 'SELECT t.* FROM tags t JOIN media_tags mt ON t.id = mt.tag_id WHERE mt.kind = ? AND mt.media_id = ?').all(kind, id);
+    const rows = db.prepare('SELECT t.* FROM tags t JOIN media_tags mt ON t.id = mt.tag_id WHERE mt.kind = ? AND mt.media_id = ?').all(kind, id);
     res.json({ success: true, tags: rows });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
@@ -13488,7 +13491,7 @@ expressApp.post('/api/media/:kind/:id/tags', (req, res) => {
     const { kind, id } = req.params;
     const tagId = parseInt(req.body.tag_id, 10);
     if (!tagId) throw new Error('Tag ID required');
-    if (db.isPostgres) db.prepare('INSERT INTO media_tags (kind, media_id, tag_id) VALUES ($1, $2, $3) ON CONFLICT ON CONSTRAINT media_tags_pkey DO NOTHING').run(kind, id, tagId); else db.prepare('INSERT OR IGNORE INTO media_tags (kind, media_id, tag_id) VALUES (?, ?, ?)').run(kind, id, tagId);
+    if (db.isPostgres) db.prepare('INSERT INTO media_tags (kind, media_id, tag_id) VALUES (?, ?, ?) ON CONFLICT ON CONSTRAINT media_tags_pkey DO NOTHING').run(kind, id, tagId); else db.prepare('INSERT OR IGNORE INTO media_tags (kind, media_id, tag_id) VALUES (?, ?, ?)').run(kind, id, tagId);
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
@@ -13498,7 +13501,7 @@ expressApp.post('/api/media/:kind/:id/tags', (req, res) => {
 expressApp.delete('/api/media/:kind/:id/tags/:tagId', (req, res) => {
   try {
     const { kind, id, tagId } = req.params;
-    db.prepare(db.isPostgres ? 'DELETE FROM media_tags WHERE kind = $1 AND media_id = $2 AND tag_id = $3' : 'DELETE FROM media_tags WHERE kind = ? AND media_id = ? AND tag_id = ?').run(kind, id, parseInt(tagId, 10));
+    db.prepare('DELETE FROM media_tags WHERE kind = ? AND media_id = ? AND tag_id = ?').run(kind, id, parseInt(tagId, 10));
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
