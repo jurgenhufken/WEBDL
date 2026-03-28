@@ -88,6 +88,17 @@
     .queue-progress-bar { position:absolute; bottom:0; left:0; width:100%; height:4px; background:rgba(255,255,255,0.2); z-index:15; }
     .queue-progress-fil { height:100%; background:#00d4ff; width:0%; transition:width 0.3s cubic-bezier(0.4, 0, 0.2, 1); box-shadow: 0 0 8px rgba(0,212,255,0.6); }
     .queue-pct-badge { position:absolute; top:8px; right:8px; background:rgba(0,0,0,0.7); color:#0cf; padding:2px 8px; border-radius:12px; font-size:11px; font-weight:700; backdrop-filter:blur(4px); border:1px solid rgba(0,212,255,0.3); z-index:15; }
+    
+    .queue-progress-fil.postprocessing { 
+      background-image: linear-gradient(-45deg, rgba(255,255,255,0.2) 25%, transparent 25%, transparent 50%, rgba(255,255,255,0.2) 50%, rgba(255,255,255,0.2) 75%, transparent 75%, transparent); 
+      background-size: 30px 30px; 
+      background-color: #ff8c00; 
+      box-shadow: 0 0 8px rgba(255,140,0,0.6); 
+      animation: barberPole 1.2s linear infinite, pulseOrange 2s ease-in-out infinite; 
+    }
+    .queue-pct-badge.postprocessing { color:#ff8c00; border-color:rgba(255,140,0,0.4); font-size:10px; font-weight:800; padding:2px 6px; }
+    @keyframes pulseOrange { 0% { opacity: 0.7; } 50% { opacity: 1; box-shadow: 0 0 14px rgba(255,140,0,0.9); } 100% { opacity: 0.7; } }
+    @keyframes barberPole { 0% { background-position: 0 0; } 100% { background-position: 30px 0; } }
   </style>
 </head>
 <body>
@@ -112,6 +123,7 @@
       <select id="channelSel" style="min-width: 280px; display:none;"></select>
       <button id="btnReload" class="btn">↻ Herladen</button>
       <button id="btnDirSelect" class="btn">📁 Mappen</button>
+      <button id="btnDups" class="btn" style="background:#4a2f2f;">🛡 Duplicaten Scanner</button>
       <div class="yt-controls" id="ytControls" style="display:none;">
         <div class="yt-row">
           <span class="yt-tag">YT</span>
@@ -244,6 +256,7 @@
     const elMBtnVideoWait = document.getElementById('mBtnVideoWait');
 
     const state = {
+      search: '', 
       mode: 'recent',
       filter: 'media',
       sort: 'recent',
@@ -574,7 +587,9 @@
             const thumbUrl = getActiveThumbUrl(a);
             const rawPct = typeof a.progress === 'number' ? a.progress : 0;
             const pct = Math.max(0, Math.min(100, Math.round(rawPct)));
-            const pctText = pct > 0 ? pct + '%' : '...';
+            const isPost = a.status === 'postprocessing';
+            const pctText = isPost ? 'NABEWERKEN' : (pct + '%');
+            const ppClass = isPost ? ' postprocessing' : '';
             
             const fallbackCall = thumbUrl.includes('ytimg') 
               ? `this.onerror=null;this.src='/media/pending-thumb.svg?v=${Date.now()}&text=' + encodeURIComponent('${String(a.title || 'Downloading...').replace(/'/g, "\\'")}');`
@@ -583,9 +598,9 @@
             card.innerHTML = `
               <div class="queue-thumb-box">
                 <img class="queue-thumb" src="${thumbUrl}" onerror="${fallbackCall}">
-                <div class="queue-pct-badge">${pctText}</div>
+                <div class="queue-pct-badge${ppClass}">${pctText}</div>
                 <div class="queue-overlay-bottom">
-                  <div class="queue-progress-bar"><div class="queue-progress-fil" style="width:${pct}%"></div></div>
+                  <div class="queue-progress-bar"><div class="queue-progress-fil${ppClass}" style="width:${pct}%"></div></div>
                 </div>
               </div>
               <div class="queue-info">
@@ -1500,7 +1515,9 @@
     }
 
     async function loadChannels() {
-      const data = await api('/api/media/channels?limit=800');
+      const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
+      const searchParam = state.search ? '&q=' + encodeURIComponent(state.search) : '';
+      const data = await api('/api/media/channels?limit=800' + dirsParam + searchParam);
       if (!data.success) throw new Error(data.error || 'channels failed');
       state.channels = data.channels || [];
       elChannelSel.innerHTML = '';
@@ -1572,83 +1589,10 @@
       try {
         let path = '';
         const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
+        const searchParam = state.search ? '&q=' + encodeURIComponent(state.search) : '';
+        elSentinel.textContent = '📡 Aanvraag verzenden (limit=' + state.limit + ')...';
         if (state.mode === 'recent') {
-          path = '/api/media/recent-files?limit=60&cursor=&type=' + encodeURIComponent(state.filter) + '&include_active=0' + dirsParam ;
-        } else {
-          const ch = state.channel;
-          if (!ch) return;
-          path = '/api/media/channel-files?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=60&cursor=&type=' + encodeURIComponent(state.filter) + '&include_active=0' + dirsParam ;
-        }
-        const data = await api(path);
-        if (!data || !data.success) return;
-        const got = Array.isArray(data.items) ? data.items : [];
-        const fresh = [];
-        for (const it of got) {
-          const k = itemKey(it);
-          if (!k) continue;
-          let found = false;
-          for (const existing of state.items) {
-            if (itemKey(existing) === k) { found = true; break; }
-          }
-          if (!found) fresh.push(it);
-        }
-        if (!fresh.length) return;
-        state.items = fresh.concat(state.items);
-        prependCards(fresh);
-        setHint();
-      } catch (e) {}
-    }
-
-    async function init() {
-      try {
-        const resp = await fetch('/api/directories');
-        const data = await resp.json();
-        if (data && data.success) {
-          state.dirConfig = {
-            directories: Array.isArray(data.directories) ? data.directories.slice() : [],
-            enabled: Array.isArray(data.enabled) ? data.enabled.slice() : []
-          };
-          const sessionEnabledDirs = getSessionEnabledDirs();
-          if (Array.isArray(sessionEnabledDirs)) {
-            state.enabledDirs = sessionEnabledDirs.slice();
-          } else if (Array.isArray(data.directories)) {
-            state.enabledDirs = data.directories.slice();
-          } else {
-            state.enabledDirs = null;
-          }
-        }
-      } catch (e) {}
-      
-      elMode.value = state.mode;
-      elFilter.value = state.filter;
-      if (state.mode === 'recent') {
-        await loadNext();
-      } else {
-        await loadChannels();
-      }
-    }
-
-    function resetPaging() {
-      state.cursor = '';
-      state.done = false;
-      state.items = [];
-      state.autoFillLoads = 0;
-      state.hasUserScrolled = false;
-      clearGrid();
-      setHint();
-    }
-
-    async function loadNext() {
-      if (state.loading || state.done) return;
-      state.loading = true;
-      const startTime = Date.now();
-      elSentinel.textContent = '⏳ Verbinden met server...';
-      try {
-        let path = '';
-        const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
-        elSentinel.textContent = '📡 Aanvraag verzenden (limit=' + state.limit + ', filters=' + (state.enabledDirs ? state.enabledDirs.length : 'none') + ')...';
-        if (state.mode === 'recent') {
-          path = '/api/media/recent-files?limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0' + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam;
+          path = '/api/media/recent-files?limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam + searchParam;
         } else {
           const ch = state.channel;
           if (!ch) { state.done = true; return; }
@@ -1837,53 +1781,128 @@
 
     function getSelectedDirsFromModal() {
       if (!elDirList) return [];
-      return Array.from(elDirList.querySelectorAll('input[type="checkbox"]')).filter(c => c.checked).map(c => c.value);
+      const res = [];
+      for (const p of elDirList.querySelectorAll('.dir-platform')) {
+        const platName = p.dataset.platform;
+        if (p.querySelector('.plat-check').checked) {
+          res.push({ platform: platName, channels: [] });
+        } else {
+          const checked = Array.from(p.querySelectorAll('.chan-check')).filter(c => c.checked).map(c => c.value);
+          if (checked.length > 0) res.push({ platform: platName, channels: checked });
+        }
+      }
+      return res;
     }
 
     function updateDirCount() {
       if (!elDirCount || !elDirList) return;
-      const checks = Array.from(elDirList.querySelectorAll('input[type="checkbox"]'));
-      const checked = checks.filter(c => c.checked).length;
-      elDirCount.textContent = checked + '/' + checks.length + ' geselecteerd';
+      let plats = 0, chans = 0;
+      for (const p of elDirList.querySelectorAll('.dir-platform')) {
+        if (p.querySelector('.plat-check').checked) plats++;
+        else {
+           const checked = Array.from(p.querySelectorAll('.chan-check')).filter(c => c.checked).length;
+           if (checked > 0) chans += checked;
+        }
+      }
+      elDirCount.textContent = `${plats} platforms, ${chans} channels selected`;
     }
 
     function renderDirList(dirConfig) {
       if (!elDirList) return;
-      const directories = Array.isArray(dirConfig && dirConfig.directories) ? dirConfig.directories : [];
-      const enabled = Array.isArray(dirConfig && dirConfig.enabled) ? dirConfig.enabled : [];
-      const enabledSet = new Set(enabled);
       elDirList.innerHTML = '';
+      if (!dirConfig || !dirConfig.tree) return;
+      const tree = dirConfig.tree;
+      const enabledPaths = Array.isArray(state.enabledDirs) ? state.enabledDirs : null;
+
       const frag = document.createDocumentFragment();
-      for (const dirName of directories) {
-        const label = document.createElement('label');
-        label.className = 'dir-item';
-        label.style.display = 'flex';
-        label.style.alignItems = 'center';
-        label.style.gap = '8px';
-        label.style.padding = '6px';
-        label.style.borderBottom = '1px solid #1f2a52';
-        label.style.cursor = 'pointer';
+      for (const plat of Object.keys(tree).sort()) {
+        const platInfo = tree[plat];
+        
+        let platChecked = false;
+        let selectedChans = new Set();
+        if (enabledPaths) {
+           const match = enabledPaths.find(e => e.platform === plat);
+           if (match) {
+             if (!match.channels || match.channels.length === 0) platChecked = true;
+             else match.channels.forEach(c => selectedChans.add(c));
+           }
+        } else {
+           platChecked = true;
+        }
 
-        const input = document.createElement('input');
-        input.type = 'checkbox';
-        input.value = dirName;
-        input.checked = enabledSet.has(dirName);
-        input.addEventListener('change', updateDirCount);
+        const div = document.createElement('div');
+        div.className = 'dir-platform';
+        div.dataset.platform = plat;
+        div.style.marginBottom = '10px';
 
-        const wrap = document.createElement('div');
-        wrap.style.display = 'flex';
-        wrap.style.flexDirection = 'column';
-        wrap.style.flex = '1';
+        const pheader = document.createElement('label');
+        pheader.style.display = 'flex';
+        pheader.style.alignItems = 'center';
+        pheader.style.gap = '8px';
+        pheader.style.padding = '6px';
+        pheader.style.background = '#1a2238';
+        pheader.style.cursor = 'pointer';
 
-        const title = document.createElement('span');
-        title.style.fontSize = '12px';
-        title.style.color = '#eee';
-        title.textContent = dirName;
+        const pcheck = document.createElement('input');
+        pcheck.type = 'checkbox';
+        pcheck.className = 'plat-check';
+        // if platChecked is false, see if all channels are selected
+        if (!platChecked && selectedChans.size > 0 && selectedChans.size === platInfo.channels.length) {
+          platChecked = true;
+        }
+        pcheck.checked = platChecked;
+        
+        const ptit = document.createElement('strong');
+        ptit.style.color = '#fff';
+        ptit.textContent = plat + ' (' + platInfo.fileCount + ' files)';
+        
+        pheader.appendChild(pcheck);
+        pheader.appendChild(ptit);
+        div.appendChild(pheader);
 
-        wrap.appendChild(title);
-        label.appendChild(input);
-        label.appendChild(wrap);
-        frag.appendChild(label);
+        const chCont = document.createElement('div');
+        chCont.style.paddingLeft = '24px';
+        chCont.style.display = 'flex';
+        chCont.style.flexDirection = 'column';
+
+        for (const ch of platInfo.channels) {
+           const clabel = document.createElement('label');
+           clabel.style.display = 'flex';
+           clabel.style.alignItems = 'center';
+           clabel.style.gap = '8px';
+           clabel.style.padding = '4px 6px';
+           clabel.style.cursor = 'pointer';
+
+           const ccheck = document.createElement('input');
+           ccheck.type = 'checkbox';
+           ccheck.className = 'chan-check';
+           ccheck.value = ch.name;
+           ccheck.checked = platChecked || selectedChans.has(ch.name);
+           
+           const ctit = document.createElement('span');
+           ctit.style.fontSize = '12px';
+           ctit.style.color = '#ccc';
+           ctit.textContent = ch.name + ' (' + ch.fileCount + ')';
+
+           clabel.appendChild(ccheck);
+           clabel.appendChild(ctit);
+           chCont.appendChild(clabel);
+
+           ccheck.addEventListener('change', () => {
+             if (!ccheck.checked) pcheck.checked = false;
+             updateDirCount();
+           });
+        }
+        
+        pcheck.addEventListener('change', () => {
+           for (const cc of chCont.querySelectorAll('.chan-check')) {
+             cc.checked = pcheck.checked;
+           }
+           updateDirCount();
+        });
+
+        div.appendChild(chCont);
+        frag.appendChild(div);
       }
       elDirList.appendChild(frag);
       updateDirCount();
@@ -1891,16 +1910,97 @@
 
     async function loadDirConfig(force) {
       if (!force && state.dirConfig) return state.dirConfig;
-      const data = await api('/api/directories');
+      const data = await api('/api/media/directories/tree');
       if (!data || !data.success) throw new Error(data && data.error ? data.error : 'directories load failed');
-      state.dirConfig = {
-        directories: Array.isArray(data.directories) ? data.directories.slice() : [],
-        enabled: Array.isArray(data.enabled) ? data.enabled.slice() : []
-      };
+      state.dirConfig = { tree: data.tree };
       return state.dirConfig;
     }
 
-    if (elBtnDirSelect && elDirModal) {
+    
+      const elBtnDups = document.getElementById('btnDups');
+      const elDupsModal = document.getElementById('dupsModal');
+      const elDupsContent = document.getElementById('dupsContent');
+      const elBtnDupsScan = document.getElementById('btnDupsScan');
+      const elBtnDupsClose = document.getElementById('btnDupsClose');
+
+      if (elBtnDups) {
+        elBtnDups.addEventListener('click', () => elDupsModal.style.display = 'flex');
+        elBtnDupsClose.addEventListener('click', () => elDupsModal.style.display = 'none');
+        elBtnDupsScan.addEventListener('click', async () => {
+          elDupsContent.innerHTML = '<p>Scannen... Dit kan even duren (5-15 seconden)...</p>';
+          try {
+            const res = await api('/api/media/duplicates/scan');
+            if (!res.success) throw new Error(res.error);
+            renderDups(res.groups);
+          } catch(e) {
+            elDupsContent.innerHTML = '<p>Fout: ' + e.message + '</p>';
+          }
+        });
+      }
+
+      function formatBytes(bytes) {
+         if(bytes === 0) return '0 Bytes';
+         const k = 1024, dm = 2, sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+         const i = Math.floor(Math.log(bytes) / Math.log(k));
+         return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+      }
+
+      function renderDups(groups) {
+        if (!groups || groups.length === 0) {
+          elDupsContent.innerHTML = '<p>🎉 Geen duplicaten gevonden!</p>';
+          return;
+        }
+        let ht = '<p>' + groups.length + ' groepen met duplicaten gevonden. Vink de items aan die je wilt VERWIJDEREN.</p>';
+        ht += '<button id="btnDupsRemoveSelected" class="btn" style="background:#a33; margin-bottom:10px;">Geselecteerde Verwijderen</button>';
+        
+        let i = 0;
+        for (const g of groups) {
+          ht += '<div style="background:#1a2238; padding:10px; margin-bottom:10px; border-radius:4px;">';
+          ht += '<strong style="color:#ffaa00;">Groep ' + (++i) + '</strong> (' + formatBytes(g.size) + ')<br/>';
+          
+          let first = true;
+          for (const item of g.items) {
+             const checked = first ? '' : 'checked';
+             const cdate = item.created_at ? new Date(item.created_at).toLocaleString('nl-NL') : 'onbekend';
+             ht += '<label style="display:flex; gap:8px; margin-top:8px; align-items:flex-start; cursor:pointer;">';
+             ht += '<input type="checkbox" class="cb-dupe" data-payload="' + encodeURIComponent(JSON.stringify(item)) + '" ' + checked + ' style="margin-top:4px;" />';
+             ht += '<div style="font-size:12px; color:#ccc;">';
+             ht += '<strong style="color:#0f0;">[' + item.platform + ']</strong> ' + (item.title || item.path) + '<br/>';
+             ht += '<div style="word-break:break-all; color:#999; margin-top:2px; font-family:monospace;">' + item.path + '</div>';
+             ht += '<div style="color:#888; font-size:10px; margin-top:2px;">Type: ' + item.type + ' | Aangemaakt: ' + cdate + '</div>';
+             ht += '</div></label>';
+             first = false;
+          }
+          ht += '</div>';
+        }
+        elDupsContent.innerHTML = ht;
+
+        const btnRemove = document.getElementById('btnDupsRemoveSelected');
+        if (btnRemove) {
+          btnRemove.addEventListener('click', async () => {
+            const checks = Array.from(elDupsContent.querySelectorAll('.cb-dupe')).filter(c => c.checked);
+            if (checks.length === 0) return alert('Kies minstens 1 bestand om te verwijderen.');
+            if (!confirm('Let op: Dit verwijdert '+checks.length+' bestand(en) DEFINITIEF van je schijf en database. Weet je het heel zeker?')) return;
+            
+            const payload = checks.map(c => JSON.parse(decodeURIComponent(c.getAttribute('data-payload'))));
+            elBtnDupsScan.disabled = true;
+            elDupsContent.innerHTML = '<p>Bezig met verwijderen...</p>';
+            try {
+               const res = await postApi('/api/media/duplicates/remove', { items: payload });
+               if (!res.success) throw new Error(res.error);
+               alert(res.deleted + ' bestanden succesvol verwijderd!');
+               elBtnDupsScan.click(); 
+            } catch(e) {
+               alert('Fout: ' + e.message);
+               elBtnDupsScan.click();
+            } finally {
+               elBtnDupsScan.disabled = false;
+            }
+          });
+        }
+      }
+
+      if (elBtnDirSelect && elDirModal) {
       const closeDirModal = () => { elDirModal.style.display = 'none'; };
 
       elBtnDirSelect.addEventListener('click', async () => {

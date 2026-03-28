@@ -349,20 +349,61 @@ function shouldIncludePath(relPath, enabledDirs) {
   return false;
 }
 
-function applyDirectoryFilterToHybridQuery(sql, enabledDirs) {
-  if (!enabledDirs || enabledDirs.length === 0) return sql;
-  const dirs = enabledDirs.map(d => String(d).replace(/'/g, "''").trim()).filter(Boolean);
-  if (dirs.length === 0) return sql;
-
-  const condFiles = dirs.map(dir => `(d.platform = '${dir}' OR f.relpath LIKE '${dir}/%' OR f.relpath = '${dir}')`).join(' OR ');
-  const condDownloads = dirs.map(dir => `(d.platform = '${dir}' OR d.filepath LIKE '${BASE_DIR}/${dir}/%' OR d.filepath = '${BASE_DIR}/${dir}' OR CAST(d.id AS TEXT) LIKE '${dir}/%')`).join(' OR ');
-  const condScreenshots = dirs.map(dir => `(s.platform = '${dir}' OR s.filepath LIKE '${BASE_DIR}/${dir}/%' OR s.filepath = '${BASE_DIR}/${dir}' OR CAST(s.id AS TEXT) LIKE '${dir}/%')`).join(' OR ');
-
+function applyDynamicFiltersToHybridQuery(sql, { treeFilters, searchQ }) {
   let newSql = sql;
-  newSql = newSql.replace(/FROM download_files f\s+JOIN downloads d ON d.id = f\.download_id\s+WHERE d\.status NOT IN \([^)]+\)/g, `$& AND (${condFiles})`);
-  newSql = newSql.replace(/FROM downloads d\s+WHERE d\.status NOT IN \([^)]+\)\s+AND d\.filepath IS NOT NULL\s+AND TRIM\(d\.filepath\) != ''(?:\s+AND NOT EXISTS \([^)]+\))?/g, `$& AND (${condDownloads})`);
-  newSql = newSql.replace(/FROM screenshots s\s+WHERE s\.filepath IS NOT NULL\s+AND TRIM\(s\.filepath\) != ''/g, `$& AND (${condScreenshots})`);
+  const filesConds = [];
+  const downConds = [];
+  const screenConds = [];
+
+  if (treeFilters && Array.isArray(treeFilters) && treeFilters.length > 0) {
+    for (const f of treeFilters) {
+      if (!f || !f.platform) continue;
+      const p = String(f.platform).replace(/'/g, "''").trim();
+      const chs = (f.channels || []).map(c => String(c).replace(/'/g, "''").trim()).filter(Boolean);
+
+      if (chs.length === 0) {
+        filesConds.push(`(d.platform = '${p}')`);
+        downConds.push(`(d.platform = '${p}')`);
+        screenConds.push(`(s.platform = '${p}')`);
+      } else {
+        const chList = chs.map(c => `'${c}'`).join(',');
+        filesConds.push(`(d.platform = '${p}' AND d.channel IN (${chList}))`);
+        downConds.push(`(d.platform = '${p}' AND d.channel IN (${chList}))`);
+        screenConds.push(`(s.platform = '${p}' AND s.channel IN (${chList}))`);
+      }
+    }
+  }
+
+  let treeFilesSql = filesConds.length > 0 ? `(${filesConds.join(' OR ')})` : '';
+  let treeDownSql = downConds.length > 0 ? `(${downConds.join(' OR ')})` : '';
+  let treeScreenSql = screenConds.length > 0 ? `(${screenConds.join(' OR ')})` : '';
+
+  let searchFilesSql = '';
+  let searchDownSql = '';
+  let searchScreenSql = '';
   
+  if (searchQ) {
+    const terms = String(searchQ).split(' ').map(t => t.replace(/'/g, "''").trim()).filter(Boolean);
+    if (terms.length > 0) {
+      const sd = terms.map(t => `(d.title ILIKE '%${t}%' OR d.channel ILIKE '%${t}%' OR d.platform ILIKE '%${t}%')`).join(' AND ');
+      const sf = terms.map(t => `(d.title ILIKE '%${t}%' OR d.channel ILIKE '%${t}%' OR d.platform ILIKE '%${t}%' OR f.relpath ILIKE '%${t}%')`).join(' AND ');
+      const ss = terms.map(t => `(s.title ILIKE '%${t}%' OR s.channel ILIKE '%${t}%' OR s.platform ILIKE '%${t}%' OR s.filepath ILIKE '%${t}%')`).join(' AND ');
+      searchFilesSql = `(${sf})`;
+      searchDownSql = `(${sd})`;
+      searchScreenSql = `(${ss})`;
+    }
+  }
+
+  const finalFiles = [treeFilesSql, searchFilesSql].filter(Boolean).join(' AND ');
+  const finalDown = [treeDownSql, searchDownSql].filter(Boolean).join(' AND ');
+  const finalScreen = [treeScreenSql, searchScreenSql].filter(Boolean).join(' AND ');
+
+  if (!finalFiles && !finalDown && !finalScreen) return sql;
+
+  if (finalFiles) newSql = newSql.replace(/FROM download_files f\s+JOIN downloads d ON d.id = f\.download_id\s+WHERE d\.status NOT IN \([^)]+\)/g, `$& AND (${finalFiles})`);
+  if (finalDown) newSql = newSql.replace(/FROM downloads d\s+WHERE d\.status NOT IN \([^)]+\)\s+AND d\.filepath IS NOT NULL\s+AND TRIM\(d\.filepath\) != ''(?:\s+AND NOT EXISTS \([^)]+\))?/g, `$& AND (${finalDown})`);
+  if (finalScreen) newSql = newSql.replace(/FROM screenshots s\s+WHERE s\.filepath IS NOT NULL\s+AND TRIM\(s\.filepath\) != ''/g, `$& AND (${finalScreen})`);
+
   return newSql;
 }
 
@@ -11937,6 +11978,8 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
   } catch (e) {}
   if (!enabledDirs) enabledDirs = loadDirectoryFilter();
 
+  const searchQ = String(req.query.q || '').trim();
+
   try {
     const isTopCursor = !cursorRaw ||
     cur && cur.activeOffset === 0 && cur.rowOffset === 0 && !cur.dir && cur.fileIndex === 0;
@@ -11947,7 +11990,8 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
         const st = await getStatsRowCached();
         const marker = buildRecentFilesCacheMarker(st);
         const dirFilterKey = enabledDirs && enabledDirs.length ? enabledDirs.sort().join(',') : '_all';
-        const key = `recent|${type}|${limit}|${sort}|${dirFilterKey}`;
+        const searchKey = searchQ ? encodeURIComponent(searchQ) : '_none';
+        const key = `recent|${type}|${limit}|${sort}|${dirFilterKey}|${searchKey}`;
         const cached = recentFilesTopCache.get(key);
         if (cached && cached.marker === marker && now - (cached.at || 0) < RECENT_FILES_TOP_CACHE_MS) {
           return res.json(cached.payload);
@@ -11968,9 +12012,9 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
     let rowOffset = cur.rowOffset;
     const hasDirectoryFilter = enabledDirs && enabledDirs.length > 0 && enabledDirs.length < 10;
     const isFirstPageRecent = sort === 'recent' && (!cursorRaw || isTopRequest);
-    const maxRowsPerCall = hasDirectoryFilter ? 800 : 260;
+    const maxRowsPerCall = (hasDirectoryFilter || searchQ) ? 800 : 260;
     const baseSql = (sort === 'rating_asc') ? SQL_getRecentHybridMediaByRatingAsc : (sort === 'rating_desc') ? SQL_getRecentHybridMediaByRatingDesc : (sort === 'oldest') ? SQL_getRecentHybridMediaByOldest : (sort === 'name_asc') ? SQL_getRecentHybridMediaByNameAsc : (sort === 'name_desc') ? SQL_getRecentHybridMediaByNameDesc : (includeActiveFiles ? SQL_getRecentHybridMediaWithActiveFiles : SQL_getRecentHybridMedia);
-    const finalSql = applyDirectoryFilterToHybridQuery(baseSql, enabledDirs);
+    const finalSql = applyDynamicFiltersToHybridQuery(baseSql, { treeFilters: enabledDirs, searchQ });
     const getBatch = db.prepare(finalSql);
     
     let done = false;
@@ -11990,12 +12034,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
       for (const row of batch) {
         if (!row) { rowOffset += 1; continue; }
         
-        // Apply directory filter
-        const relPath = row.kind === 'p' ? row.id : (row.filepath ? path.relative(BASE_DIR, row.filepath) : '');
-        if (enabledDirs && relPath && !shouldIncludePath(relPath, enabledDirs)) {
-          rowOffset += 1;
-          continue;
-        }
+        // Directory filter is applied natively in PostgreSQL via applyDirectoryFilterToHybridQuery
         if (includeActiveFiles && String(row.kind || '') === 'p' && row.rating_kind === 'd' && row.rating_id != null) {
           const idNum = Number(row.rating_id);
           if (Number.isFinite(idNum) && !runtimeActiveIdSet.has(idNum)) {
@@ -12039,7 +12078,8 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
         const st = await getStatsRowCached();
         const marker = buildRecentFilesCacheMarker(st);
         const dirFilterKey = enabledDirs && enabledDirs.length ? enabledDirs.sort().join(',') : '_all';
-        const key = `recent|${type}|${limit}|${sort}|${dirFilterKey}`;
+        const searchKey = searchQ ? encodeURIComponent(searchQ) : '_none';
+        const key = `recent|${type}|${limit}|${sort}|${dirFilterKey}|${searchKey}`;
         recentFilesTopCache.set(key, { at: Date.now(), marker, payload });
         if (recentFilesTopCache.size > 80) {
           const keys = Array.from(recentFilesTopCache.keys()).slice(0, Math.max(1, recentFilesTopCache.size - 60));
@@ -12218,12 +12258,45 @@ expressApp.get('/api/media/channels', async (req, res) => {
   const offset = Math.max(0, parseInt(req.query.offset || '0', 10) || 0);
   const platform = String(req.query.platform || '').trim();
 
+  const searchQ = String(req.query.q || '').trim();
+  let enabledDirs = null;
   try {
-    let rows = await getMediaChannels.all(limit, offset);
+    const dirsParam = String(req.query.dirs || '').trim();
+    if (dirsParam) enabledDirs = JSON.parse(dirsParam);
+  } catch (e) {}
+
+  try {
+    let baseSql = `
+      SELECT sub.platform, sub.channel, COUNT(*) AS count, MAX(ts) AS last_at
+      FROM (
+        SELECT d.platform, d.channel,
+          CASE WHEN d.status = 'completed' THEN COALESCE(d.finished_at, d.updated_at) ELSE d.created_at END AS ts
+        FROM downloads d
+        WHERE d.status NOT IN ('error') AND d.filepath IS NOT NULL AND TRIM(d.filepath) != ''
+        UNION ALL
+        SELECT f.platform, f.channel, f.created_at AS ts
+        FROM download_files f
+        JOIN downloads d ON d.id = f.download_id
+        WHERE d.status NOT IN ('error')
+        UNION ALL
+        SELECT s.platform, s.channel, s.created_at AS ts
+        FROM screenshots s
+        WHERE s.filepath IS NOT NULL AND TRIM(s.filepath) != ''
+      ) sub
+      WHERE sub.platform IS NOT NULL AND TRIM(sub.platform) != ''
+        AND sub.channel IS NOT NULL AND TRIM(sub.channel) != ''
+      GROUP BY sub.platform, sub.channel
+      ORDER BY last_at DESC
+    `;
+    
+    const finalSql = applyDynamicFiltersToHybridQuery(baseSql, { treeFilters: enabledDirs, searchQ });
+    const getBatch = db.prepare(finalSql);
+    
+    let rows = await getBatch.all(limit, offset) || [];
     if (platform) rows = rows.filter((r) => String(r.platform) === platform);
     res.json({ success: true, channels: rows });
   } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
+    res.status(500).json({ success: false, error: String(e.message||e) });
   }
 });
 
@@ -12298,6 +12371,132 @@ expressApp.get('/api/directories', async (req, res) => {
   }
 });
 
+let _directoryTreeCache = null;
+let _directoryTreeCacheTime = 0;
+expressApp.get('/api/media/directories/tree', async (req, res) => {
+  try {
+    const now = Date.now();
+    if (_directoryTreeCache && (now - _directoryTreeCacheTime) < 30000) {
+      return res.json({ success: true, tree: _directoryTreeCache });
+    }
+    const q = `
+      SELECT platform, channel, 
+             COUNT(d.id) as download_count,
+             SUM(COALESCE((SELECT COUNT(f.id) FROM download_files f WHERE f.download_id = d.id), 0)) as file_count
+      FROM downloads d
+      WHERE status = 'completed'
+      GROUP BY platform, channel
+      ORDER BY platform ASC, channel ASC
+    `;
+    const result = { tree: {} };
+    if (db.isPostgres) {
+      const { rows } = await pgPool.query(q);
+      for (const row of rows) {
+        const p = row.platform || 'unknown';
+        const c = row.channel || 'unknown';
+        const d_count = parseInt(row.download_count, 10) || 0;
+        const f_count = parseInt(row.file_count, 10) || 0;
+        if (!result.tree[p]) result.tree[p] = { count: 0, fileCount: 0, channels: [] };
+        result.tree[p].count += d_count;
+        result.tree[p].fileCount += f_count;
+        result.tree[p].channels.push({ name: c, count: d_count, fileCount: f_count });
+      }
+    }
+    _directoryTreeCache = result.tree;
+    _directoryTreeCacheTime = now;
+    res.json({ success: true, tree: result.tree });
+  } catch(e) {
+    res.status(500).json({ success: false, error: String(e.message || e) });
+  }
+});
+
+
+expressApp.get('/api/media/duplicates/scan', async (req, res) => {
+  if (!db.isPostgres) return res.status(400).json({ success: false, error: 'Only supported in PostgreSQL' });
+  try {
+    const q = `
+      WITH AllFiles AS (
+        SELECT d.id AS item_id, 'download' AS type, d.filepath AS path, d.filesize, d.title, d.platform, d.channel, d.created_at
+        FROM downloads d
+        WHERE d.status = 'completed' AND d.filepath IS NOT NULL AND TRIM(d.filepath) != ''
+          AND d.filesize > 1048576 
+        UNION ALL
+        SELECT f.id AS item_id, 'file' AS type, f.relpath AS path, f.filesize, d.title, d.platform, d.channel, f.created_at
+        FROM download_files f
+        JOIN downloads d ON d.id = f.download_id
+        WHERE d.status = 'completed' AND f.relpath IS NOT NULL AND TRIM(f.relpath) != ''
+          AND f.filesize > 1048576
+      ),
+      SizeGroups AS (
+        SELECT filesize FROM AllFiles GROUP BY filesize HAVING COUNT(*) > 1 AND COUNT(*) < 20
+      )
+      SELECT a.* FROM AllFiles a JOIN SizeGroups s ON a.filesize = s.filesize
+      ORDER BY a.filesize DESC, a.created_at ASC
+    `;
+    const { rows } = await pgPool.query(q);
+    
+    // Validate physical files
+    const valid = [];
+    for (const row of rows) {
+      const full = row.type === 'download' ? row.path : path.resolve(BASE_DIR, row.path);
+      try {
+        const st = await fs.promises.stat(full);
+        if (st.isFile()) valid.push({ ...row, fullPath: full });
+      } catch(e) {}
+    }
+
+    const map = new Map();
+    for (const row of valid) {
+      if (!map.has(row.filesize)) map.set(row.filesize, []);
+      map.get(row.filesize).push(row);
+    }
+    
+    const duplicateGroups = [];
+    for (const [size, arr] of map.entries()) {
+      // Find items with UNIQUE paths
+      const uniquePaths = new Set();
+      const uniqueItems = [];
+      for (const item of arr) {
+        if (!uniquePaths.has(item.fullPath)) {
+          uniquePaths.add(item.fullPath);
+          uniqueItems.push(item);
+        }
+      }
+      if (uniqueItems.length > 1) {
+        duplicateGroups.push({ size: Number(size), items: uniqueItems });
+      }
+    }
+    
+    res.json({ success: true, groups: duplicateGroups, totalGroups: duplicateGroups.length });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e.message || e) });
+  }
+});
+
+expressApp.post('/api/media/duplicates/remove', async (req, res) => {
+  if (!db.isPostgres) return res.status(400).json({ success: false, error: 'Only Postgres' });
+  const items = req.body.items;
+  if (!items || !Array.isArray(items)) return res.status(400).json({ success: false, error: 'Missing items array' });
+  
+  let deletedCount = 0;
+  try {
+    for (const item of items) {
+       const full = item.type === 'download' ? item.path : path.resolve(BASE_DIR, item.path);
+       try { await fs.promises.unlink(full); } catch(e) {}
+       
+       if (item.type === 'download') {
+         await pgPool.query('DELETE FROM downloads WHERE id = $1', [item.item_id]);
+       } else if (item.type === 'file') {
+         await pgPool.query('DELETE FROM download_files WHERE id = $1', [item.item_id]);
+       }
+       deletedCount++;
+    }
+    res.json({ success: true, deleted: deletedCount });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e.message || e) });
+  }
+});
+
 expressApp.post('/api/viewer/navigate', async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   try {
@@ -12345,7 +12544,7 @@ expressApp.post('/api/viewer/navigate', async (req, res) => {
 
       if (!row) continue;
       const relPath = row.kind === 'p' ? row.id : (row.filepath ? path.relative(BASE_DIR, row.filepath) : '');
-      if (enabledDirs && relPath && !shouldIncludePath(relPath, enabledDirs)) continue;
+      // Directory filter is applied natively in PostgreSQL via applyDirectoryFilterToHybridQuery
       
       const filterType = row.kind === 'p' ? 'active' : (row.filepath && /\.(mp4|webm|mov|avi|mkv)$/i.test(row.filepath)) ? 'video' : 'image';
       if (filter === 'video' && filterType !== 'video') continue;
