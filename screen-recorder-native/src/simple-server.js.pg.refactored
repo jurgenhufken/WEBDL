@@ -349,6 +349,23 @@ function shouldIncludePath(relPath, enabledDirs) {
   return false;
 }
 
+function applyDirectoryFilterToHybridQuery(sql, enabledDirs) {
+  if (!enabledDirs || enabledDirs.length === 0) return sql;
+  const dirs = enabledDirs.map(d => String(d).replace(/'/g, "''").trim()).filter(Boolean);
+  if (dirs.length === 0) return sql;
+
+  const condFiles = dirs.map(dir => `(d.platform = '${dir}' OR f.relpath LIKE '${dir}/%' OR f.relpath = '${dir}')`).join(' OR ');
+  const condDownloads = dirs.map(dir => `(d.platform = '${dir}' OR d.filepath LIKE '${BASE_DIR}/${dir}/%' OR d.filepath = '${BASE_DIR}/${dir}' OR CAST(d.id AS TEXT) LIKE '${dir}/%')`).join(' OR ');
+  const condScreenshots = dirs.map(dir => `(s.platform = '${dir}' OR s.filepath LIKE '${BASE_DIR}/${dir}/%' OR s.filepath = '${BASE_DIR}/${dir}' OR CAST(s.id AS TEXT) LIKE '${dir}/%')`).join(' OR ');
+
+  let newSql = sql;
+  newSql = newSql.replace(/FROM download_files f\s+JOIN downloads d ON d.id = f\.download_id\s+WHERE d\.status NOT IN \([^)]+\)/g, `$& AND (${condFiles})`);
+  newSql = newSql.replace(/FROM downloads d\s+WHERE d\.status NOT IN \([^)]+\)\s+AND d\.filepath IS NOT NULL\s+AND TRIM\(d\.filepath\) != ''(?:\s+AND NOT EXISTS \([^)]+\))?/g, `$& AND (${condDownloads})`);
+  newSql = newSql.replace(/FROM screenshots s\s+WHERE s\.filepath IS NOT NULL\s+AND TRIM\(s\.filepath\) != ''/g, `$& AND (${condScreenshots})`);
+  
+  return newSql;
+}
+
 function findFirstHttpUrl(text) {
   try {
     const m = String(text || '').match(/https?:\/\/[^\s"'<>]+/i);
@@ -1466,6 +1483,9 @@ function setDownloadActivityContext(downloadId, patch) {
       title: patch && patch.title ? String(patch.title) : (prev.title || ''),
       filepath: patch && patch.filepath ? String(patch.filepath) : (prev.filepath || ''),
       filename: patch && patch.filename ? String(patch.filename) : (prev.filename || ''),
+      thumbnail: patch && typeof patch.thumbnail !== 'undefined' ? String(patch.thumbnail) : (prev.thumbnail || ''),
+      progress: patch && typeof patch.progress !== 'undefined' ? patch.progress : prev.progress,
+      status: patch && patch.status ? String(patch.status) : (prev.status || ''),
       lane: patch && patch.lane ? String(patch.lane) : (prev.lane || ''),
       driver: patch && patch.driver ? String(patch.driver) : (prev.driver || '')
     };
@@ -1573,7 +1593,7 @@ async function emitDownloadStatusActivity(downloadId, status, progress, error, e
     if (!Number.isFinite(id)) return;
     const st = String(status || '').toLowerCase();
     const pct = Number.isFinite(Number(progress)) ? Math.max(0, Math.min(100, Number(progress))) : null;
-    setDownloadActivityContext(id, extra || {});
+    setDownloadActivityContext(id, { ...extra, progress: pct, status: st });
     const prevStatus = String(downloadActivityLastStatusById.get(id) || '').toLowerCase();
     let shouldLog = false;
     if (st && st !== prevStatus) shouldLog = true;
@@ -2099,7 +2119,7 @@ const getRecentDashboardBatchFiles = db.prepare(db.isPostgres ? `
   LIMIT ?
 `);
 
-const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
+const SQL_getRecentHybridMediaWithActiveFiles = db.isPostgres ? `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
     SELECT
@@ -2233,9 +2253,9 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
   )
   ORDER BY ts DESC
   LIMIT ? OFFSET ?
-`);
+`;
 
-const getRecentHybridMedia = db.prepare(db.isPostgres ? `
+const SQL_getRecentHybridMedia = db.isPostgres ? `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
     SELECT
@@ -2370,7 +2390,7 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
   )
   ORDER BY ts DESC
   LIMIT ? OFFSET ?
-`);
+`;
 
 // Diversity seed: latest N completed downloads per platform (fast, ~100 rows)
 const getDiversitySeedItems = db.prepare(db.isPostgres ? `
@@ -2568,7 +2588,7 @@ const getHybridMediaByChannel = db.prepare(db.isPostgres ? `
   LIMIT ? OFFSET ?
 `);
 
-const getRecentHybridMediaByOldest = db.prepare(db.isPostgres ? `
+const SQL_getRecentHybridMediaByOldest = db.isPostgres ? `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
     SELECT
@@ -2703,9 +2723,9 @@ const getRecentHybridMediaByOldest = db.prepare(db.isPostgres ? `
   )
   ORDER BY ts ASC
   LIMIT ? OFFSET ?
-`);
+`;
 
-const getRecentHybridMediaByNameAsc = db.prepare(db.isPostgres ? `
+const SQL_getRecentHybridMediaByNameAsc = db.isPostgres ? `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
     SELECT
@@ -2841,9 +2861,9 @@ const getRecentHybridMediaByNameAsc = db.prepare(db.isPostgres ? `
   )
   ORDER BY LOWER(COALESCE(NULLIF(title, ''), id)) ASC, ts DESC
   LIMIT ? OFFSET ?
-`);
+`;
 
-const getRecentHybridMediaByNameDesc = db.prepare(db.isPostgres ? `
+const SQL_getRecentHybridMediaByNameDesc = db.isPostgres ? `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
     SELECT
@@ -2979,7 +2999,7 @@ const getRecentHybridMediaByNameDesc = db.prepare(db.isPostgres ? `
   )
   ORDER BY LOWER(COALESCE(NULLIF(title, ''), id)) DESC, ts DESC
   LIMIT ? OFFSET ?
-`);
+`;
 
 const getHybridMediaByChannelByOldest = db.prepare(db.isPostgres ? `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
@@ -3554,7 +3574,7 @@ const getHybridMediaByChannelWithActiveFiles = db.prepare(db.isPostgres ? `
   LIMIT ? OFFSET ?
 `);
 
-const getRecentHybridMediaByRatingDesc = db.prepare(db.isPostgres ? `
+const SQL_getRecentHybridMediaByRatingDesc = db.isPostgres ? `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
     SELECT
@@ -3690,9 +3710,9 @@ const getRecentHybridMediaByRatingDesc = db.prepare(db.isPostgres ? `
   )
   ORDER BY (rating IS NULL) ASC, rating DESC, ts DESC
   LIMIT ? OFFSET ?
-`);
+`;
 
-const getRecentHybridMediaByRatingAsc = db.prepare(db.isPostgres ? `
+const SQL_getRecentHybridMediaByRatingAsc = db.isPostgres ? `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
     SELECT
@@ -3828,7 +3848,7 @@ const getRecentHybridMediaByRatingAsc = db.prepare(db.isPostgres ? `
   )
   ORDER BY (rating IS NULL) ASC, rating ASC, ts DESC
   LIMIT ? OFFSET ?
-`);
+`;
 
 const getHybridMediaByChannelByRatingDesc = db.prepare(db.isPostgres ? `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
@@ -4436,7 +4456,7 @@ const activeProcesses = new Map();
 const activeProcessesMerging = new Set();
 
 const HEAVY_DOWNLOAD_CONCURRENCY = parseInt(process.env.WEBDL_HEAVY_DOWNLOAD_CONCURRENCY || '2', 10);
-const LIGHT_DOWNLOAD_CONCURRENCY = parseInt(process.env.WEBDL_LIGHT_DOWNLOAD_CONCURRENCY || '3', 10);
+const LIGHT_DOWNLOAD_CONCURRENCY = parseInt(process.env.WEBDL_LIGHT_DOWNLOAD_CONCURRENCY || '10', 10);
 
 const initialYoutubeConcurrency = parseInt(process.env.WEBDL_YOUTUBE_DOWNLOAD_CONCURRENCY || '3', 10);
 const initialYoutubeSpacing = parseInt(process.env.WEBDL_YOUTUBE_START_SPACING_MS || '0', 10);
@@ -4666,6 +4686,11 @@ async function runDownloadScheduler() {
       const ctx = downloadActivityContextById.get(id);
       if (ctx && String(ctx.platform || '').toLowerCase() === platform) n++;
     }
+    for (const id of startingJobs) {
+      if (activeProcessesMerging.has(id)) continue;
+      const ctx = downloadActivityContextById.get(id);
+      if (ctx && String(ctx.platform || '').toLowerCase() === platform) n++;
+    }
     return n;
   };
 
@@ -4686,6 +4711,9 @@ async function runDownloadScheduler() {
   let heavyActive = activeLaneCount('heavy');
   let mediumActive = activeLaneCount('medium');
   let lightActive = activeLaneCount('light');
+
+  const isMergingFull = activeProcessesMerging.size >= POSTPROCESS_CONCURRENCY;
+  const MERGE_PLATFORMS = ['youtube', 'youtube-shorts', 'patreon', 'onlyfans', 'fansly'];
 
   const rows = await db.prepare("SELECT id, url, platform, channel, title, metadata, created_at FROM downloads WHERE status IN ('pending', 'queued') ORDER BY created_at DESC LIMIT 2500").all();
   if (!rows || rows.length === 0) return;
@@ -4727,6 +4755,8 @@ async function runDownloadScheduler() {
     const p = String(row.platform || '').toLowerCase();
     const url = String(row.url || '').trim();
     const lane = detectLane(p, url);
+    
+    if (isMergingFull && MERGE_PLATFORMS.includes(p)) continue;
     
     if (lane === 'heavy' && heavyActive >= heavyLimit) continue;
     if (lane === 'medium' && mediumActive >= mediumLimit) continue;
@@ -4914,6 +4944,14 @@ async function rehydrateDownloadQueueWithMode(modeRaw, maxRowsRaw) {
 }
 
 async function rehydrateDownloadQueue() {
+  try {
+    const res = await db.prepare("UPDATE downloads SET status = 'queued' WHERE status IN ('downloading', 'postprocessing')").run();
+    if (res && res.changes > 0) {
+      console.log(`[REHYDRATE] Reverted ${res.changes} stuck downloads back to queued.`);
+    }
+  } catch (e) {
+    console.error('rehydrateDownloadQueue failed:', e);
+  }
   runDownloadSchedulerSoon();
 }
 
@@ -6534,8 +6572,10 @@ function deriveChannelFromUrl(platform, url) {
   if (platform === 'aznudefeet') {
     const m = u.match(/aznudefeet\.com\/view\/[^\/]+\/[^\/]+\/\d+\/([^\/\?#.]+)\.html/i);
     if (m) return m[1];
+    const mMod = u.match(/aznudefeet\.com\/models\/([^\/\?#]+)/i);
+    if (mMod) return mMod[1];
     const m2 = u.match(/aznudefeet\.com\/([^\/\?#]+)/i);
-    if (m2) return m2[1];
+    if (m2 && !['models', 'categories', 'channels'].includes(m2[1].toLowerCase())) return m2[1];
   }
 
   if (platform === 'telegram') {
@@ -6777,7 +6817,8 @@ function isAznudefeetViewUrl(input) {
     const u = new URL(String(input || ''));
     const host = String(u.hostname || '').toLowerCase();
     if (!(host === 'www.aznudefeet.com' || host === 'aznudefeet.com' || host.endsWith('.aznudefeet.com'))) return false;
-    return /\/view\/[^\/]+\/[^\/]+\/\d+\/[^\/\?#]+\.html/i.test(String(u.pathname || ''));
+    if (host.includes('cdn.aznudefeet.com')) return false;
+    return true;
   } catch (e) {
     return false;
   }
@@ -8115,11 +8156,13 @@ expressApp.post('/download', async (req, res) => {
   const originPlatform = normalizePlatform(metaPlatform, pageUrl || effectiveUrl);
   const pinFffOrigin = !!(originPlatform === 'footfetishforum' && pageUrl && pageUrl !== effectiveUrl && isFootfetishforumThreadUrl(pageUrl));
   const pinAznOrigin = !!(originPlatform === 'aznudefeet' && pageUrl && pageUrl !== effectiveUrl && isAznudefeetViewUrl(pageUrl));
-  const pinToOrigin = !!(pinFffOrigin || pinAznOrigin);
+  const avfPageInfo = originPlatform === 'amateurvoyeurforum' && pageUrl && pageUrl !== effectiveUrl ? parseAmateurVoyeurForumUrlInfo(pageUrl) : null;
+  const pinAvfOrigin = !!(avfPageInfo && avfPageInfo.kind !== 'asset');
+  const pinToOrigin = !!(pinFffOrigin || pinAznOrigin || pinAvfOrigin);
   const fffThreadInfo = pinFffOrigin ? parseFootFetishForumThreadInfo(pageUrl || effectiveUrl) : null;
   const detectedPlatform = detectPlatform(effectiveUrl);
-  const originChannel = pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : metadata && metadata.channel ? metadata.channel : deriveChannelFromUrl(originPlatform, pageUrl || effectiveUrl) || 'unknown';
-  const originTitle = pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : metadata && metadata.title ? metadata.title : deriveTitleFromUrl(pageUrl || effectiveUrl);
+  const originChannel = pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : pinAvfOrigin && avfPageInfo.name ? avfPageInfo.name : metadata && metadata.channel && metadata.channel !== 'unknown' ? metadata.channel : deriveChannelFromUrl(originPlatform, pageUrl || effectiveUrl) || 'unknown';
+  const originTitle = pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : pinAvfOrigin && avfPageInfo.name ? avfPageInfo.name : metadata && metadata.title && metadata.title !== 'untitled' ? metadata.title : deriveTitleFromUrl(pageUrl || effectiveUrl);
 
   const preferDetectedPlatform = !!(pinFffOrigin && detectedPlatform && detectedPlatform !== 'other' && detectedPlatform !== originPlatform);
   const platform = pinToOrigin ? originPlatform : (preferDetectedPlatform ? detectedPlatform : normalizePlatform(metaPlatform, effectiveUrl));
@@ -8127,12 +8170,12 @@ expressApp.post('/download', async (req, res) => {
   originChannel :
   preferDetectedPlatform ?
   deriveChannelFromUrl(platform, effectiveUrl) || originChannel :
-  metadata && metadata.channel ? metadata.channel : deriveChannelFromUrl(platform, effectiveUrl) || 'unknown';
+  metadata && metadata.channel && metadata.channel !== 'unknown' ? metadata.channel : deriveChannelFromUrl(platform, effectiveUrl) || 'unknown';
   const title = pinToOrigin ?
   originTitle :
   preferDetectedPlatform ?
   deriveTitleFromUrl(effectiveUrl) :
-  metadata && metadata.title ? metadata.title : deriveTitleFromUrl(effectiveUrl);
+  metadata && metadata.title && metadata.title !== 'untitled' ? metadata.title : deriveTitleFromUrl(effectiveUrl);
 
   const allowRedditRerun = platform === 'reddit' && isRedditRollingTargetUrl(effectiveUrl);
   const allowPatreonRerun = platform === 'patreon' && (effectiveUrl.includes('/posts') || effectiveUrl.includes('patreon.com/c/'));
@@ -8277,9 +8320,11 @@ expressApp.post('/download/batch', async (req, res) => {
   const originPlatform = normalizePlatform(metaPlatform, pageUrl || '');
   const pinFffOrigin = !!(originPlatform === 'footfetishforum' && pageUrl && isFootfetishforumThreadUrl(pageUrl));
   const pinAznOrigin = !!(originPlatform === 'aznudefeet' && pageUrl && isAznudefeetViewUrl(pageUrl));
+  const avfPageInfo = originPlatform === 'amateurvoyeurforum' && pageUrl ? parseAmateurVoyeurForumUrlInfo(pageUrl) : null;
+  const pinAvfOrigin = !!(avfPageInfo && avfPageInfo.kind !== 'asset');
   const fffThreadInfo = pinFffOrigin ? parseFootFetishForumThreadInfo(pageUrl) : null;
-  const originChannel = pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : metadata && metadata.channel ? metadata.channel : deriveChannelFromUrl(originPlatform, pageUrl) || 'unknown';
-  const originTitle = pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : metadata && metadata.title ? metadata.title : deriveTitleFromUrl(pageUrl);
+  const originChannel = pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : pinAvfOrigin && avfPageInfo.name ? avfPageInfo.name : metadata && metadata.channel && metadata.channel !== 'unknown' ? metadata.channel : deriveChannelFromUrl(originPlatform, pageUrl) || 'unknown';
+  const originTitle = pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : pinAvfOrigin && avfPageInfo.name ? avfPageInfo.name : metadata && metadata.title && metadata.title !== 'untitled' ? metadata.title : deriveTitleFromUrl(pageUrl);
 
   const unique = [];
   const seen = new Set();
@@ -8294,12 +8339,12 @@ expressApp.post('/download/batch', async (req, res) => {
 
   const created = [];
   for (const u of unique) {
-    const pinToOrigin = !!((pinFffOrigin || pinAznOrigin) && pageUrl && pageUrl !== u);
+    const pinToOrigin = !!((pinFffOrigin || pinAznOrigin || pinAvfOrigin) && pageUrl && pageUrl !== u);
     const detectedPlatform = detectPlatform(u);
     const preferDetectedPlatform = !!(pinFffOrigin && pinToOrigin && detectedPlatform && detectedPlatform !== 'other' && detectedPlatform !== originPlatform);
     const platform = pinToOrigin ? originPlatform : (preferDetectedPlatform ? detectedPlatform : normalizePlatform(metaPlatform, u));
-    const channel = pinToOrigin ? originChannel : preferDetectedPlatform ? deriveChannelFromUrl(platform, u) || originChannel : metadata && metadata.channel ? metadata.channel : deriveChannelFromUrl(platform, u) || 'unknown';
-    const title = pinToOrigin ? originTitle : preferDetectedPlatform ? deriveTitleFromUrl(u) : metadata && metadata.title ? metadata.title : deriveTitleFromUrl(u);
+    const channel = pinToOrigin ? originChannel : preferDetectedPlatform ? deriveChannelFromUrl(platform, u) || originChannel : metadata && metadata.channel && metadata.channel !== 'unknown' ? metadata.channel : deriveChannelFromUrl(platform, u) || 'unknown';
+    const title = pinToOrigin ? originTitle : preferDetectedPlatform ? deriveTitleFromUrl(u) : metadata && metadata.title && metadata.title !== 'untitled' ? metadata.title : deriveTitleFromUrl(u);
     const allowRedditRerun = platform === 'reddit' && isRedditRollingTargetUrl(u);
     const allowPatreonRerun = platform === 'patreon' && (u.includes('/posts') || u.includes('patreon.com/c/'));
     const allowRerun = allowRedditRerun || allowPatreonRerun;
@@ -9026,6 +9071,29 @@ function resolveDirectDownloadFilename(url, fallback, rawHeaders) {
   return safe || fallback;
 }
 
+let lastFileboomCookieExtractMs = 0;
+async function ensureFileboomCookies() {
+  const cookiePath = path.join(BASE_DIR, 'fileboom_cookies.txt');
+  let attemptExtract = false;
+  try {
+    if (!fs.existsSync(cookiePath)) attemptExtract = true;
+    else if (Date.now() - fs.statSync(cookiePath).mtimeMs > 30 * 60 * 1000) attemptExtract = true;
+  } catch (e) { attemptExtract = true; }
+  
+  if (attemptExtract && Date.now() - lastFileboomCookieExtractMs > 2 * 60 * 1000) {
+    lastFileboomCookieExtractMs = Date.now();
+    try {
+      const { exec } = require('child_process');
+      const util = require('util');
+      const execAsync = util.promisify(exec);
+      try {
+        await execAsync(`yt-dlp --cookies-from-browser firefox --cookies "${cookiePath}" "https://fboom.me"`, { timeout: 15000 });
+      } catch (e) {}
+    } catch (e) {}
+  }
+  return fs.existsSync(cookiePath) ? cookiePath : null;
+}
+
 async function startDirectFileDownload(downloadId, url, platform, channel, title, metadata) {
   try {
     if (isCancelled(downloadId)) {
@@ -9126,6 +9194,13 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
       metadata && typeof metadata === 'object' && metadata.url && metadata.url !== url ? metadata.url :
       ''
     ).trim();
+    
+    let injectedCookieFile = null;
+    const urlLower = url.toLowerCase();
+    if (urlLower.includes('fboom.me') || urlLower.includes('fileboom.me')) {
+      injectedCookieFile = await ensureFileboomCookies();
+    }
+
     const curlArgs = [
       '-L',
       '--fail',
@@ -9134,6 +9209,11 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
       '-A', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
     ];
     if (referer) curlArgs.push('-e', referer);
+    
+    if (injectedCookieFile) {
+      curlArgs.push('-b', injectedCookieFile, '-c', injectedCookieFile);
+    }
+    
     curlArgs.push('-D', headerFilepath);
     curlArgs.push('-o', tmpFilepath, url);
     const proc = spawnNice('/usr/bin/curl', curlArgs);
@@ -9148,6 +9228,19 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
       activeProcesses.delete(downloadId);
       try {
         if (code === 0 && fs.existsSync(tmpFilepath)) {
+          const stat = fs.statSync(tmpFilepath);
+          if (stat.size < 250000) {
+             const fd = fs.openSync(tmpFilepath, 'r');
+             const buf = Buffer.alloc(256);
+             const bytesRead = fs.readSync(fd, buf, 0, 256, 0);
+             fs.closeSync(fd);
+             const text = buf.toString('utf8', 0, bytesRead).toLowerCase();
+             if (text.includes('<!doctype') || text.includes('<html') || text.includes('<body')) {
+               try { fs.rmSync(tmpFilepath, { force: true }); } catch(e) {}
+               await updateDownloadStatus.run('error', 0, 'Premium/Sessie verlopen: Direct Download weigerde videobestand (HTML paywall/login ontvangen)', downloadId);
+               return;
+             }
+          }
           const rawHeaders = fs.existsSync(headerFilepath) ? fs.readFileSync(headerFilepath, 'utf8') : '';
           const filename = resolveDirectDownloadFilename(url, provisionalFilename, rawHeaders);
           const filepath = uniqueFilePath(path.join(dir, filename), downloadId);
@@ -9995,7 +10088,14 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
             const match = line.match(/([\d.]+)%/);
             if (match) {
               const pct = Math.round(parseFloat(match[1]));
-              if (!markedPostprocessing) await updateDownloadStatus.run('downloading', pct, null, downloadId);
+              if (markedPostprocessing) {
+                markedPostprocessing = false;
+                if (activeProcessesMerging.has(downloadId)) {
+                  activeProcessesMerging.delete(downloadId);
+                  setTimeout(runDownloadSchedulerSoon, 100); // Trigger scheduler immediately to fill empty CPU slot
+                }
+              }
+              await updateDownloadStatus.run('downloading', pct, null, downloadId);
             }
           }
           if (line.includes('Destination:')) {
@@ -10004,8 +10104,8 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
             lastFile = rawDest.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '');
             console.log(`   [#${downloadId}] lastFile set: ${lastFile}`);
           }
-          if (line.includes('[Merger]') || line.includes('has already been downloaded')) {
-            if (!markedPostprocessing && (line.includes('[Merger]') || line.includes('Merging formats into'))) {
+          if (line.includes('[Merger]') || line.includes('[FixupM3u8]') || line.includes('[ExtractAudio]') || line.includes('has already been downloaded')) {
+            if (!markedPostprocessing && (line.includes('[Merger]') || line.includes('[FixupM3u8]') || line.includes('[ExtractAudio]') || line.includes('Merging formats into'))) {
               markedPostprocessing = true;
               await updateDownloadStatus.run('postprocessing', 100, null, downloadId);
               if (!activeProcessesMerging.has(downloadId)) {
@@ -11869,41 +11969,56 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
     const hasDirectoryFilter = enabledDirs && enabledDirs.length > 0 && enabledDirs.length < 10;
     const isFirstPageRecent = sort === 'recent' && (!cursorRaw || isTopRequest);
     const maxRowsPerCall = hasDirectoryFilter ? 800 : 260;
-    const getBatch = (sort === 'rating_asc') ? getRecentHybridMediaByRatingAsc : (sort === 'rating_desc') ? getRecentHybridMediaByRatingDesc : (sort === 'oldest') ? getRecentHybridMediaByOldest : (sort === 'name_asc') ? getRecentHybridMediaByNameAsc : (sort === 'name_desc') ? getRecentHybridMediaByNameDesc : (includeActiveFiles ? getRecentHybridMediaWithActiveFiles : getRecentHybridMedia);
+    const baseSql = (sort === 'rating_asc') ? SQL_getRecentHybridMediaByRatingAsc : (sort === 'rating_desc') ? SQL_getRecentHybridMediaByRatingDesc : (sort === 'oldest') ? SQL_getRecentHybridMediaByOldest : (sort === 'name_asc') ? SQL_getRecentHybridMediaByNameAsc : (sort === 'name_desc') ? SQL_getRecentHybridMediaByNameDesc : (includeActiveFiles ? SQL_getRecentHybridMediaWithActiveFiles : SQL_getRecentHybridMedia);
+    const finalSql = applyDirectoryFilterToHybridQuery(baseSql, enabledDirs);
+    const getBatch = db.prepare(finalSql);
     
-    const batch = await getBatch.all(maxRowsPerCall, rowOffset);
+    let done = false;
+    let totalFetchedFromDb = 0;
     
-    // Process main batch normally
-    for (const row of batch || []) {
-      if (row && row.platform === 'patreon') {
-        console.log(`[DEBUG-PATREON-API] Found DB row: id=${row.id}, kind=${row.kind}, filepath=${row.filepath}, includeActiveFiles=${includeActiveFiles}`);
+    while (items.length < limit && !done) {
+      const batch = await getBatch.all(maxRowsPerCall, rowOffset);
+      if (!batch || batch.length === 0) {
+        done = true;
+        break;
       }
-
-      if (!row) {rowOffset += 1;continue;}
       
-      // Apply directory filter
-      const relPath = row.kind === 'p' ? row.id : (row.filepath ? path.relative(BASE_DIR, row.filepath) : '');
-      if (enabledDirs && relPath && !shouldIncludePath(relPath, enabledDirs)) {
-        rowOffset += 1;
-        continue;
-      }
-      if (includeActiveFiles && String(row.kind || '') === 'p' && row.rating_kind === 'd' && row.rating_id != null) {
-        const idNum = Number(row.rating_id);
-        if (Number.isFinite(idNum) && !runtimeActiveIdSet.has(idNum)) {
-          try {
-            const dr = await getDownload.get(idNum);
-            const st = String(dr && dr.status ? dr.status : '').toLowerCase();
-            if (st === 'downloading' || st === 'postprocessing' || st === 'queued' || st === 'pending') {
-              rowOffset += 1;
-              continue;
-            }
-          } catch (e) {}
+      totalFetchedFromDb += batch.length;
+      if (batch.length < maxRowsPerCall) done = true;
+      
+      // Process main batch normally
+      for (const row of batch) {
+        if (!row) { rowOffset += 1; continue; }
+        
+        // Apply directory filter
+        const relPath = row.kind === 'p' ? row.id : (row.filepath ? path.relative(BASE_DIR, row.filepath) : '');
+        if (enabledDirs && relPath && !shouldIncludePath(relPath, enabledDirs)) {
+          rowOffset += 1;
+          continue;
         }
+        if (includeActiveFiles && String(row.kind || '') === 'p' && row.rating_kind === 'd' && row.rating_id != null) {
+          const idNum = Number(row.rating_id);
+          if (Number.isFinite(idNum) && !runtimeActiveIdSet.has(idNum)) {
+            try {
+              const dr = await getDownload.get(idNum);
+              const st = String(dr && dr.status ? dr.status : '').toLowerCase();
+              if (st === 'downloading' || st === 'postprocessing' || st === 'queued' || st === 'pending') {
+                rowOffset += 1;
+                continue;
+              }
+            } catch (e) {}
+          }
+        }
+        const it = makeIndexedMediaItem(row);
+        pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
+        rowOffset += 1;
+        if (items.length >= limit) break;
       }
-      const it = makeIndexedMediaItem(row);
-      pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
-      rowOffset += 1;
-      if (items.length >= limit) break;
+      
+      if (totalFetchedFromDb > 10000) {
+        // Failsafe to prevent endless loop if user has NO files that match criteria
+        break;
+      }
     }
 
     // Apply platform interleaving for visual variety on first page
@@ -11915,7 +12030,6 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
     }
 
     const nextCursor = encodeCursor({ activeOffset: nextActiveOffset, rowOffset, dir: '', fileIndex: 0 });
-    const done = (batch && batch.length ? batch.length : 0) < maxRowsPerCall;
     const payload = { success: true, items: finalItems, next_cursor: nextCursor, done };
     const reqTime = Date.now() - reqStartTime;
     console.log(`📤 [${new Date().toISOString().substr(11,8)}] Response /api/media/recent-files - ${items.length} items in ${reqTime}ms`);
@@ -12215,7 +12329,9 @@ expressApp.post('/api/viewer/navigate', async (req, res) => {
       query = (sort === 'rating_asc') ? getHybridMediaByChannelByRatingAsc : (sort === 'rating_desc') ? getHybridMediaByChannelByRatingDesc : (sort === 'oldest') ? getHybridMediaByChannelByOldest : (sort === 'name_asc') ? getHybridMediaByChannelByNameAsc : (sort === 'name_desc') ? getHybridMediaByChannelByNameDesc : (includeActiveFiles ? getHybridMediaByChannelWithActiveFiles : getHybridMediaByChannel);
       params = [platform, channel, platform, channel, platform, channel, 200, 0];
     } else {
-      query = (sort === 'rating_asc') ? getRecentHybridMediaByRatingAsc : (sort === 'rating_desc') ? getRecentHybridMediaByRatingDesc : (sort === 'oldest') ? getRecentHybridMediaByOldest : (sort === 'name_asc') ? getRecentHybridMediaByNameAsc : (sort === 'name_desc') ? getRecentHybridMediaByNameDesc : (includeActiveFiles ? getRecentHybridMediaWithActiveFiles : getRecentHybridMedia);
+      const baseSql = (sort === 'rating_asc') ? SQL_getRecentHybridMediaByRatingAsc : (sort === 'rating_desc') ? SQL_getRecentHybridMediaByRatingDesc : (sort === 'oldest') ? SQL_getRecentHybridMediaByOldest : (sort === 'name_asc') ? SQL_getRecentHybridMediaByNameAsc : (sort === 'name_desc') ? SQL_getRecentHybridMediaByNameDesc : (includeActiveFiles ? SQL_getRecentHybridMediaWithActiveFiles : SQL_getRecentHybridMedia);
+      const finalSql = applyDirectoryFilterToHybridQuery(baseSql, enabledDirs);
+      query = db.prepare(finalSql);
       params = [200, 0];
     }
     
@@ -12940,11 +13056,20 @@ async function startServer() {
     setTimeout(async () => {
       try {
         try {
-          const resetRows = await db.prepare("UPDATE downloads SET status = 'queued' WHERE status IN ('downloading', 'postprocessing')").run();
-          if (resetRows && resetRows.changes > 0) {
-            console.log(`🧹 Ghost-tracker: ${resetRows.changes} onvoltooide crashtasks succesvol geneutraliseerd naar wachtrij.`);
+          let changed = 0;
+          if (db.isPostgres) {
+            const res = await db.query("UPDATE downloads SET status = 'queued' WHERE status IN ('downloading', 'postprocessing')");
+            changed = res && res.rowCount ? res.rowCount : 0;
+          } else {
+            const res = await db.prepare("UPDATE downloads SET status = 'queued' WHERE status IN ('downloading', 'postprocessing')").run();
+            changed = res && res.changes ? res.changes : 0;
           }
-        } catch (e) {}
+          if (changed > 0) {
+            console.log(`🧹 Ghost-tracker: ${changed} onvoltooide crashtasks succesvol geneutraliseerd naar wachtrij.`);
+          }
+        } catch (e) {
+          console.error('⚠️ Ghost-tracker fout:', e.message);
+        }
         
         try {
           const fixRows = await db.prepare("UPDATE downloads SET platform = 'footfetishforum' WHERE platform = 'digitaloceanspaces' OR url LIKE '%footfetishforum%'").run();
