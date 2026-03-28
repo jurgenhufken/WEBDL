@@ -115,8 +115,10 @@
         <option value="image">Alleen foto</option>
         <option value="all">Alles</option>
       </select>
-      <select id="sort" title="Sorteren">
+      <select id="sortSel" style="padding:6px 12px;border-radius:4px;border:1px solid #444;background:#222;color:#fff;">
         <option value="recent" selected>Nieuwste</option>
+        <option value="random">Willekeurig (Mix)</option>
+        <option value="oldest">Oudste</option>
         <option value="rating_desc">Rating hoog→laag</option>
         <option value="rating_asc">Rating laag→hoog</option>
       </select>
@@ -124,6 +126,7 @@
       <input type="text" id="inpSearch" placeholder="🔍 Zoeken..." style="padding: 6px 12px; border-radius: 4px; border: 1px solid #444; background: #222; color: #fff; margin-right: 8px;">
       <button id="btnReload" class="btn">↻ Herladen</button>
       <button id="btnDirSelect" class="btn">📁 Mappen</button>
+      <button id="btnRandomGrid" class="btn" style="background:#2f4f4f; margin-left:8px;">🔀 Random Beeld</button>
       <button id="btnDups" class="btn" style="background:#4a2f2f;">🛡 Duplicaten Scanner</button>
       <div class="yt-controls" id="ytControls" style="display:none;">
         <div class="yt-row">
@@ -236,7 +239,7 @@
     const FALLBACK_THUMB = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="480" height="270"><rect width="100%" height="100%" fill="transparent"/></svg>');
     const elMode = document.getElementById('mode');
     const elFilter = document.getElementById('filter');
-    const elSort = document.getElementById('sort');
+    const elSort = document.getElementById('sortSel');
     const elChannelSel = document.getElementById('channelSel');
     const elGrid = document.getElementById('grid');
     const elSentinel = document.getElementById('sentinel');
@@ -603,8 +606,9 @@
             const rawPct = typeof a.progress === 'number' ? a.progress : 0;
             const pct = Math.max(0, Math.min(100, Math.round(rawPct)));
             const isPost = a.status === 'postprocessing';
-            const pctText = isPost ? 'NABEWERKEN' : (pct + '%');
-            const ppClass = isPost ? ' postprocessing' : '';
+            const isQueued = a.status === 'queued';
+            const pctText = isPost ? 'NABEWERKEN' : (isQueued ? 'WACHTRIJ' : (pct + '%'));
+            const ppClass = isPost ? ' postprocessing' : (isQueued ? ' queued' : '');
             
             const fallbackCall = thumbUrl.includes('ytimg') 
               ? `this.onerror=null;this.src='/media/pending-thumb.svg?v=${Date.now()}&text=' + encodeURIComponent('${String(a.title || 'Downloading...').replace(/'/g, "\\'")}');`
@@ -1220,16 +1224,18 @@
       if (elPanel) elPanel.classList.remove('portrait');
       
       // Sync modal dropdowns with current state
-      if (elMFilter) elMFilter.value = state.filter;
-      if (elMSort) elMSort.value = state.sort;
-
       const isReady = !(it && it.ready === false);
-      elBtnOpen.disabled = !isReady;
-      elBtnFinder.disabled = !isReady;
-      if (elBtnSource) { elBtnSource.style.display = it.source_url ? '' : 'none'; elBtnSource.onclick = () => window.open(it.source_url, '_blank'); }
+      try {
+        if (elMFilter) elMFilter.value = state.filter;
+        if (elMSort) elMSort.value = state.sort;
 
-      elMTitle.textContent = it.title_display || it.title || '(zonder titel)';
-      elMSub.textContent = fmtItemSub(it);
+        elBtnOpen.disabled = !isReady;
+        elBtnFinder.disabled = !isReady;
+        if (elBtnSource) { elBtnSource.style.display = it.source_url ? '' : 'none'; elBtnSource.onclick = () => window.open(it.source_url, '_blank'); }
+
+        elMTitle.textContent = it.title_display || it.title || '(zonder titel)';
+        elMSub.textContent = fmtItemSub(it);
+      } catch(e) {}
       try {
         if (elMRating) {
           elMRating.innerHTML = '';
@@ -1338,41 +1344,44 @@
     }
 
     function closeModal(fromHistory = false) {
-      if (fromHistory !== true && window.history.state && window.history.state.page === 'viewer') {
-        window.history.back();
-        return;
-      }
-      try { history.replaceState({ page: 'gallery' }, '', '/gallery'); } catch(e) {}
-    
-      stopSlideshow();
-      if (state.reverseInterval) {
-        clearInterval(state.reverseInterval);
-        state.reverseInterval = null;
-      }
-      state.reversePlayback = false;
+      // Direct visueel sluiten the voorkomen The lockups
+      try {
+        elModal.classList.remove('open');
+        elMBody.innerHTML = '';
+        state.current = null;
+        state.currentIndex = -1;
+      } catch(e) {}
+
+      try { stopSlideshow(); } catch(e) {}
       
-      // Stop video playback
-      if (state.currentMediaEl) {
-        try {
+      try {
+        if (state.reverseInterval) {
+          clearInterval(state.reverseInterval);
+          state.reverseInterval = null;
+        }
+        state.reversePlayback = false;
+      } catch(e) {}
+      
+      try {
+        if (state.currentMediaEl) {
           if (state.currentMediaEl.tagName === 'VIDEO') {
             state.currentMediaEl.pause();
             state.currentMediaEl.src = '';
             state.currentMediaEl.load();
           }
-        } catch (e) {}
-      }
-      
-      elModal.classList.remove('open');
-      elMBody.innerHTML = '';
-      state.current = null;
-      state.currentIndex = -1;
-      state.currentMediaEl = null;
-      resetZoom();
-      resetRotation();
-      
-      if (!skipHistory && window.location.hash === '#viewer') {
-        history.back();
-      }
+        }
+        state.currentMediaEl = null;
+        resetZoom();
+        resetRotation();
+      } catch (e) {}
+
+      try {
+        if (fromHistory !== true && window.history.state && window.history.state.page === 'viewer') {
+          setTimeout(() => { window.history.back(); }, 10);
+        } else {
+          history.replaceState({ page: 'gallery' }, '', '/gallery');
+        }
+      } catch(e) {}
     }
 
     async function openCurrent(action) {
@@ -1467,7 +1476,7 @@
       if (state.currentIndex < 0) return;
       
       let target;
-      if (state.slideshow && state.random) {
+      if (state.random) {
         if (state.items.length <= 1) return;
         let r;
         do {
@@ -1539,9 +1548,7 @@
       for (const ch of state.channels) {
         const opt = document.createElement('option');
         opt.value = ch.platform + '||' + ch.channel;
-        const chLabel = (String(ch.platform || '').toLowerCase() === 'footfetishforum' && /^thread_\d+$/i.test(String(ch.channel || '')))
-          ? ('Thread ' + String(ch.channel || '').replace(/^thread_/i, ''))
-          : ch.channel;
+        const chLabel = ch.displayName || ch.channel;
         opt.textContent = ch.platform + '/' + chLabel + ' (' + ch.count + ')';
         elChannelSel.appendChild(opt);
       }
@@ -1553,7 +1560,7 @@
       }
     }
 
-    async function changeViewerChannel(delta) {
+    async function changeViewerChannel(delta, autoOpen = true) {
       if (state.mode !== 'channel') {
         state.mode = 'channel';
         if (elMode) elMode.value = 'channel';
@@ -1563,6 +1570,15 @@
         await loadChannels();
       }
       if (!Array.isArray(state.channels) || !state.channels.length) return;
+      
+      // Update state.channel to match currently viewed item if possible
+      if (state.currentIndex >= 0 && state.currentIndex < state.items.length) {
+         const currentItem = state.items[state.currentIndex];
+         if (currentItem && currentItem.platform && currentItem.channel) {
+            state.channel = { platform: currentItem.platform, channel: currentItem.channel };
+         }
+      }
+
       let idx = state.channels.findIndex((ch) => {
         return ch && state.channel
           && String(ch.platform || '') === String(state.channel.platform || '')
@@ -1579,7 +1595,7 @@
       if (elChannelSel) elChannelSel.value = state.channel.platform + '||' + state.channel.channel;
       resetPaging();
       await loadNext();
-      if (state.items.length) openModalIndex(0);
+      if (autoOpen && state.items.length) openModalIndex(0);
     }
 
     function resetPaging() {
@@ -1596,66 +1612,83 @@
     async function loadNext() {
       if (state.loading || state.done) return;
       state.loading = true;
-      const startTime = Date.now();
-      elSentinel.textContent = '⏳ Verbinden met server...';
       try {
-        let path = '';
-        const searchParam = state.search ? '&q=' + encodeURIComponent(state.search) : '';
-        const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
-        elSentinel.textContent = '📡 Aanvraag verzenden (limit=' + state.limit + ', filters=' + (state.enabledDirs ? state.enabledDirs.length : 'none') + ')...';
-        if (state.mode === 'recent') {
-          path = '/api/media/recent-files?limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam + searchParam;
-        } else {
-           const ch = state.channel;
-           if (!ch) { state.done = true; return; }
-           path = '/api/media/channel-files?channel=' + encodeURIComponent(ch) + '&limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + searchParam + dirsParam;
-        }
-        
-        const resp = await fetch(path);
-        const data = await resp.json();
-        if (!data || !data.success) throw new Error(data && data.error ? data.error : 'Geen data ontvangen');
-        
-        let items = Array.isArray(data.items) ? data.items : [];
-        const existing = new Set(state.items.map(it => itemKey(it)).filter(Boolean));
-        let uniqueItems = [];
-        for (const it of items) {
-          try {
-            const k = itemKey(it);
-            if (!k) {
-              uniqueItems.push(it);
-              continue;
-            }
-            if (existing.has(k)) continue;
-            existing.add(k);
-            uniqueItems.push(it);
-          } catch (e) {
-            uniqueItems.push(it);
+        const startTime = Date.now();
+        elSentinel.textContent = '⏳ Verbinden met server...';
+        try {
+          let path = '';
+          const searchParam = state.search ? '&q=' + encodeURIComponent(state.search) : '';
+          const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
+          elSentinel.textContent = '📡 Aanvraag verzenden (limit=' + state.limit + ', filters=' + (state.enabledDirs ? state.enabledDirs.length : 'none') + ')...';
+          if (state.mode === 'recent') {
+            path = '/api/media/recent-files?limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam + searchParam;
+          } else {
+             const ch = state.channel;
+             if (!ch) { state.done = true; return; }
+             path = '/api/media/channel-files?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0&sort=' + encodeURIComponent(state.sort || 'recent') + searchParam + dirsParam;
           }
+          
+          const resp = await fetch(path);
+          const data = await resp.json();
+          if (!data || !data.success) throw new Error(data && data.error ? data.error : 'Geen data ontvangen');
+          
+          let items = Array.isArray(data.items) ? data.items : [];
+          const existing = new Set(state.items.map(it => itemKey(it)).filter(Boolean));
+          let uniqueItems = [];
+          for (const it of items) {
+            try {
+              const k = itemKey(it);
+              if (!k) {
+                uniqueItems.push(it);
+                continue;
+              }
+              if (existing.has(k)) continue;
+              existing.add(k);
+              uniqueItems.push(it);
+            } catch (e) {
+              uniqueItems.push(it);
+            }
+          }
+          state.items = state.items.concat(uniqueItems);
+          state.cursor = data.next_cursor || '';
+          state.done = data.done || false;
+          
+          if (uniqueItems.length === 0) {
+            if (state.sort === 'random') {
+              state.done = true;
+            } else {
+              state.autoFillLoads = (state.autoFillLoads || 0) + 1;
+              if (state.autoFillLoads > 5) {
+                state.done = true;
+              }
+            }
+          } else {
+            state.autoFillLoads = 0;
+          }
+          
+          addCards(uniqueItems);
+          setHint();
+          const totalTime = Date.now() - startTime;
+          const stats = items.length + ' items in ' + totalTime + 'ms';
+          if (state.done) {
+            elSentinel.innerHTML = '✓ Klaar: ' + stats;
+          } else {
+            elSentinel.innerHTML = '↓ Scroll voor meer (' + stats + ') <button onclick="loadNext()" style="margin-left:10px;padding:4px 8px;font-size:11px;background:#0f3460;color:#fff;border:1px solid #1f2a52;border-radius:4px;cursor:pointer;">Forceer laden</button>';
+          }
+        } catch (e) {
+          const totalTime = Date.now() - startTime;
+          elSentinel.textContent = '❌ Fout na ' + totalTime + 'ms: ' + e.message;
+          log('Load error: ' + e.message);
         }
-        state.items = state.items.concat(uniqueItems);
-        state.cursor = data.next_cursor || '';
-        state.done = data.done || false;
-        addCards(uniqueItems);
-        setHint();
+      } finally {
         state.loading = false;
-        const totalTime = Date.now() - startTime;
-        const stats = items.length + ' items in ' + totalTime + 'ms';
-        if (state.done) {
-          elSentinel.innerHTML = '✓ Klaar: ' + stats;
-        } else {
-          elSentinel.innerHTML = '↓ Scroll voor meer (' + stats + ') <button onclick="loadNext()" style="margin-left:10px;padding:4px 8px;font-size:11px;background:#0f3460;color:#fff;border:1px solid #1f2a52;border-radius:4px;cursor:pointer;">Forceer laden</button>';
-        }
-      } catch (e) {
-        state.loading = false;
-        const totalTime = Date.now() - startTime;
-        elSentinel.textContent = '❌ Fout na ' + totalTime + 'ms: ' + e.message;
-        log('Load error: ' + e.message);
       }
     }
     async function reloadAll() {
       if (state.reloading) return;
       state.reloading = true;
       resetPaging();
+      state.channels = null; // Invalidate cache so ArrowUp/Down gets latest filtered channels
       try {
         if (state.mode === 'channel') {
           elChannelSel.style.display = '';
@@ -1876,6 +1909,15 @@
       });
     }
     const elBtnDirSelect = document.getElementById('btnDirSelect');
+    const elBtnRandomGrid = document.getElementById('btnRandomGrid');
+    
+    if (elBtnRandomGrid) {
+      elBtnRandomGrid.addEventListener('click', async () => {
+        if (!state.items || state.items.length === 0) return;
+        const r = Math.floor(Math.random() * state.items.length);
+        openModalIndex(r);
+      });
+    }
     const elDirModal = document.getElementById('dirModal');
     const elBtnDirClose = document.getElementById('btnDirClose');
     const elBtnDirCancel = document.getElementById('btnDirCancel');
@@ -1986,8 +2028,7 @@
 
         const chCont = document.createElement('div');
         chCont.style.paddingLeft = '24px';
-        chCont.style.display = (platChecked || selectedChans.size > 0) ? 'flex' : 'none';
-        if (chCont.style.display === 'flex') ptit.textContent = '▼ ' + plat + ' (' + platInfo.fileCount + ' files)';
+        chCont.style.display = 'none';
         chCont.style.flexDirection = 'column';
 
         ptit.onclick = () => {
@@ -2267,8 +2308,8 @@
       const isFormTarget = tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA';
       if (!elModal.classList.contains('open')) {
         if (isFormTarget) return;
-        if (e.key === 'ArrowUp') { e.preventDefault(); state.mode = 'recent'; elMode.value = 'recent'; await reloadAll(); return; }
-        if (e.key === 'ArrowDown') { e.preventDefault(); state.mode = 'channel'; elMode.value = 'channel'; await reloadAll(); return; }
+        if (e.key === 'ArrowUp') { e.preventDefault(); await changeViewerChannel(-1, false); return; }
+        if (e.key === 'ArrowDown') { e.preventDefault(); await changeViewerChannel(1, false); return; }
         return;
       }
       if (isFormTarget && e.key !== 'Escape') return;

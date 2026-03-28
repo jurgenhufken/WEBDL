@@ -3042,6 +3042,144 @@ const SQL_getRecentHybridMediaByNameDesc = db.isPostgres ? `
   LIMIT ? OFFSET ?
 `;
 
+const SQL_getRecentHybridMediaByRandom = db.isPostgres ? `
+  SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
+  FROM (
+    SELECT
+      'p' AS kind,
+      f.relpath AS id,
+      d.platform AS platform,
+      d.channel AS channel,
+      d.title AS title,
+      NULL AS filepath,
+      COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
+      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
+      NULL AS thumbnail,
+      d.url AS url,
+      d.source_url AS source_url,
+      d.rating AS rating,
+      'd' AS rating_kind,
+      d.id AS rating_id
+    FROM download_files f TABLESAMPLE BERNOULLI(5)
+    JOIN downloads d ON d.id = f.download_id
+    WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing', 'error')
+
+    UNION ALL
+
+    SELECT
+      'd' AS kind,
+      CAST(d.id AS TEXT) AS id,
+      d.platform AS platform,
+      d.channel AS channel,
+      d.title AS title,
+      d.filepath AS filepath,
+      d.created_at::text AS created_at,
+      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
+      d.thumbnail AS thumbnail,
+      d.url AS url,
+      d.source_url AS source_url,
+      d.rating AS rating,
+      'd' AS rating_kind,
+      d.id AS rating_id
+    FROM downloads d TABLESAMPLE BERNOULLI(5)
+    WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing', 'error')
+      AND d.filepath IS NOT NULL
+      AND TRIM(d.filepath) != ''
+      AND NOT EXISTS (SELECT 1 FROM download_files f2 WHERE f2.download_id = d.id)
+
+    UNION ALL
+
+    SELECT
+      's' AS kind,
+      CAST(s.id AS TEXT) AS id,
+      s.platform AS platform,
+      s.channel AS channel,
+      s.title AS title,
+      s.filepath AS filepath,
+      s.created_at::text AS created_at,
+      CAST(EXTRACT(EPOCH FROM s.created_at) * 1000 AS BIGINT) AS ts,
+      NULL AS thumbnail,
+      s.url AS url,
+      NULL AS source_url,
+      s.rating AS rating,
+      's' AS rating_kind,
+      s.id AS rating_id
+    FROM screenshots s TABLESAMPLE BERNOULLI(5)
+    WHERE s.filepath IS NOT NULL
+      AND TRIM(s.filepath) != ''
+  ) sub
+  ORDER BY RANDOM()
+  LIMIT ? OFFSET ?
+` : `
+  SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
+  FROM (
+    SELECT
+      'p' AS kind,
+      f.relpath AS id,
+      d.platform AS platform,
+      d.channel AS channel,
+      d.title AS title,
+      NULL AS filepath,
+      COALESCE(f.created_at, d.created_at) AS created_at,
+      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
+      NULL AS thumbnail,
+      d.url AS url,
+      d.source_url AS source_url,
+      d.rating AS rating,
+      'd' AS rating_kind,
+      d.id AS rating_id
+    FROM download_files f
+    JOIN downloads d ON d.id = f.download_id
+    WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing', 'error')
+
+    UNION ALL
+
+    SELECT
+      'd' AS kind,
+      CAST(d.id AS TEXT) AS id,
+      d.platform AS platform,
+      d.channel AS channel,
+      d.title AS title,
+      d.filepath AS filepath,
+      d.created_at AS created_at,
+      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
+      d.thumbnail AS thumbnail,
+      d.url AS url,
+      d.source_url AS source_url,
+      d.rating AS rating,
+      'd' AS rating_kind,
+      d.id AS rating_id
+    FROM downloads d
+    WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing', 'error')
+      AND d.filepath IS NOT NULL
+      AND TRIM(d.filepath) != ''
+      AND NOT EXISTS (SELECT 1 FROM download_files f2 WHERE f2.download_id = d.id)
+
+    UNION ALL
+
+    SELECT
+      's' AS kind,
+      CAST(s.id AS TEXT) AS id,
+      s.platform AS platform,
+      s.channel AS channel,
+      s.title AS title,
+      s.filepath AS filepath,
+      s.created_at AS created_at,
+      CAST(strftime('%s', s.created_at) AS INTEGER) * 1000 AS ts,
+      NULL AS thumbnail,
+      s.url AS url,
+      NULL AS source_url,
+      s.rating AS rating,
+      's' AS rating_kind,
+      s.id AS rating_id
+    FROM screenshots s
+    WHERE s.filepath IS NOT NULL
+      AND TRIM(s.filepath) != ''
+  ) sub
+  ORDER BY RANDOM()
+  LIMIT ? OFFSET ?
+`;
+
 const getHybridMediaByChannelByOldest = db.prepare(db.isPostgres ? `
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
@@ -4711,65 +4849,66 @@ function runDownloadSchedulerSoon() {
 }
 
 async function runDownloadScheduler() {
-  const heavyLimit = Math.max(0, HEAVY_DOWNLOAD_CONCURRENCY);
-  const lightLimit = Math.max(0, LIGHT_DOWNLOAD_CONCURRENCY);
-  const mediumLimit = Math.max(0, parseInt(process.env.WEBDL_MEDIUM_DOWNLOAD_CONCURRENCY || '4', 10));
-  
-  const youtubeSettings = getYoutubeRuntimeConfig();
-  const youtubeLimit = Math.max(0, youtubeSettings.concurrency);
-  const youtubeSpacingMs = Math.max(0, youtubeSettings.spacingMs);
-  const youtubeJitterMs = Math.max(0, youtubeSettings.jitterMs);
+  try {
+    const heavyLimit = Math.max(0, HEAVY_DOWNLOAD_CONCURRENCY);
+    const lightLimit = Math.max(0, LIGHT_DOWNLOAD_CONCURRENCY);
+    const mediumLimit = Math.max(0, parseInt(process.env.WEBDL_MEDIUM_DOWNLOAD_CONCURRENCY || '4', 10));
+    
+    const youtubeSettings = getYoutubeRuntimeConfig();
+    const youtubeLimit = Math.max(0, youtubeSettings.concurrency);
+    const youtubeSpacingMs = Math.max(0, youtubeSettings.spacingMs);
+    const youtubeJitterMs = Math.max(0, youtubeSettings.jitterMs);
 
-  const countRuntimePlatform = (platform) => {
-    let n = 0;
-    for (const [id, proc] of activeProcesses.entries()) {
-      if (activeProcessesMerging.has(id)) continue;
-      const ctx = downloadActivityContextById.get(id);
-      if (ctx && String(ctx.platform || '').toLowerCase() === platform) n++;
+    const countRuntimePlatform = (platform) => {
+      let n = 0;
+      for (const [id, proc] of activeProcesses.entries()) {
+        if (activeProcessesMerging.has(id)) continue;
+        const ctx = downloadActivityContextById.get(id);
+        if (ctx && String(ctx.platform || '').toLowerCase() === platform) n++;
+      }
+      for (const id of startingJobs) {
+        if (activeProcessesMerging.has(id)) continue;
+        const ctx = downloadActivityContextById.get(id);
+        if (ctx && String(ctx.platform || '').toLowerCase() === platform) n++;
+      }
+      return n;
+    };
+
+    const canStartYoutubeNow = () => {
+      const active = countRuntimePlatform('youtube');
+      if (active >= youtubeLimit) return false;
+      const now = Date.now();
+      if (lastYoutubeStartMs && now < lastYoutubeStartMs) return false;
+      return true;
+    };
+
+    const markYoutubeStarted = () => {
+      const base = youtubeSpacingMs;
+      const jitter = youtubeJitterMs > 0 ? Math.floor(Math.random() * (youtubeJitterMs + 1)) : 0;
+      lastYoutubeStartMs = Date.now() + base + jitter;
+    };
+
+    let heavyActive = activeLaneCount('heavy');
+    let mediumActive = activeLaneCount('medium');
+    let lightActive = activeLaneCount('light');
+
+    const isMergingFull = activeProcessesMerging.size >= POSTPROCESS_CONCURRENCY;
+    const MERGE_PLATFORMS = ['youtube', 'youtube-shorts', 'patreon', 'onlyfans', 'fansly'];
+
+    const rows = await db.prepare("SELECT id, url, platform, channel, title, metadata, created_at FROM downloads WHERE status IN ('pending', 'queued') ORDER BY created_at DESC LIMIT 2500").all();
+    if (!rows || rows.length === 0) return;
+    
+    // Determine the newest download timestamp across both active and queued
+    let newestMs = 0;
+    if (rows.length > 0) {
+      newestMs = new Date(rows[0].created_at).getTime();
     }
-    for (const id of startingJobs) {
-      if (activeProcessesMerging.has(id)) continue;
-      const ctx = downloadActivityContextById.get(id);
-      if (ctx && String(ctx.platform || '').toLowerCase() === platform) n++;
+    for (const ctx of downloadActivityContextById.values()) {
+      if (ctx && ctx.created_at) {
+        const activeMs = new Date(ctx.created_at).getTime();
+        if (activeMs > newestMs) newestMs = activeMs;
+      }
     }
-    return n;
-  };
-
-  const canStartYoutubeNow = () => {
-    const active = countRuntimePlatform('youtube');
-    if (active >= youtubeLimit) return false;
-    const now = Date.now();
-    if (lastYoutubeStartMs && now < lastYoutubeStartMs) return false;
-    return true;
-  };
-
-  const markYoutubeStarted = () => {
-    const base = youtubeSpacingMs;
-    const jitter = youtubeJitterMs > 0 ? Math.floor(Math.random() * (youtubeJitterMs + 1)) : 0;
-    lastYoutubeStartMs = Date.now() + base + jitter;
-  };
-
-  let heavyActive = activeLaneCount('heavy');
-  let mediumActive = activeLaneCount('medium');
-  let lightActive = activeLaneCount('light');
-
-  const isMergingFull = activeProcessesMerging.size >= POSTPROCESS_CONCURRENCY;
-  const MERGE_PLATFORMS = ['youtube', 'youtube-shorts', 'patreon', 'onlyfans', 'fansly'];
-
-  const rows = await db.prepare("SELECT id, url, platform, channel, title, metadata, created_at FROM downloads WHERE status IN ('pending', 'queued') ORDER BY created_at DESC LIMIT 2500").all();
-  if (!rows || rows.length === 0) return;
-
-  // Determine the newest download timestamp across both active and queued
-  let newestMs = 0;
-  if (rows.length > 0) {
-    newestMs = new Date(rows[0].created_at).getTime();
-  }
-  for (const ctx of downloadActivityContextById.values()) {
-    if (ctx && ctx.created_at) {
-      const activeMs = new Date(ctx.created_at).getTime();
-      if (activeMs > newestMs) newestMs = activeMs;
-    }
-  }
 
   // Define a threshold (e.g. 2 hours). Anything older than newestMs - 2h is considered an "old batch"
   const thresholdMs = newestMs - (2 * 60 * 60 * 1000);
@@ -4830,6 +4969,9 @@ async function runDownloadScheduler() {
       if (Date.now() - startTime < 500 && (p === 'youtube' || p === 'youtube-shorts')) lastYoutubeStartMs = 0;
       runDownloadSchedulerSoon();
     });
+  }
+  } catch (err) {
+    console.error('[Scheduler] Error in runDownloadScheduler:', err);
   }
 }
 
@@ -7091,6 +7233,24 @@ expressApp.get('/status', async (req, res) => {
     for (const [id, ctx] of downloadActivityContextById.entries()) {
       if (activeProcIds.has(id) || startingJobs.has(id)) {
         activeDownloadsList.push({ id, ...ctx });
+      }
+    }
+  } catch (e) {}
+
+  try {
+    if (activeDownloadsList.length < 4 && dbQueuedCount > 0) {
+      const qrows = await db.prepare("SELECT id, url, platform, channel, title FROM downloads WHERE status = 'queued' ORDER BY created_at ASC LIMIT ?").all(4 - activeDownloadsList.length);
+      for (const qr of qrows || []) {
+        if (!activeProcIds.has(qr.id) && !startingJobs.has(qr.id)) {
+           activeDownloadsList.push({
+             id: qr.id,
+             progress: 0,
+             status: 'queued',
+             platform: qr.platform,
+             channel: qr.channel,
+             title: qr.title
+           });
+        }
       }
     }
   } catch (e) {}
@@ -12110,7 +12270,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
         }
       };
     } else {
-      const baseSql = (sort === 'rating_asc') ? SQL_getRecentHybridMediaByRatingAsc : (sort === 'rating_desc') ? SQL_getRecentHybridMediaByRatingDesc : (sort === 'oldest') ? SQL_getRecentHybridMediaByOldest : (sort === 'name_asc') ? SQL_getRecentHybridMediaByNameAsc : (sort === 'name_desc') ? SQL_getRecentHybridMediaByNameDesc : (includeActiveFiles ? SQL_getRecentHybridMediaWithActiveFiles : SQL_getRecentHybridMedia);
+      const baseSql = (sort === 'random') ? SQL_getRecentHybridMediaByRandom : (sort === 'rating_asc') ? SQL_getRecentHybridMediaByRatingAsc : (sort === 'rating_desc') ? SQL_getRecentHybridMediaByRatingDesc : (sort === 'oldest') ? SQL_getRecentHybridMediaByOldest : (sort === 'name_asc') ? SQL_getRecentHybridMediaByNameAsc : (sort === 'name_desc') ? SQL_getRecentHybridMediaByNameDesc : (includeActiveFiles ? SQL_getRecentHybridMediaWithActiveFiles : SQL_getRecentHybridMedia);
       const finalSql = applyDynamicFiltersToHybridQuery(baseSql, { treeFilters: enabledDirs, searchQ });
       getBatch = db.prepare(finalSql);
     }
