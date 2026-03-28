@@ -66,6 +66,19 @@
     .dir-item label { flex: 1; cursor: pointer; color: #d7e6ff; font-size: 13px; }
     .dir-footer { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid #1f2a52; justify-content: flex-end; }
     .btn-primary { background: #2a4a82 !important; font-weight: bold; }
+    .queue-bar { padding: 10px 14px; background: rgba(5,8,22,0.95); border-top: 1px solid #1f2a52; }
+    .queue-title { font-size: 11px; font-weight: bold; color: #ffbc00; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.5px; }
+    .queue-grid { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 4px; scrollbar-width: thin; scrollbar-color: #1f2a52 transparent; }
+    .queue-grid::-webkit-scrollbar { height: 6px; }
+    .queue-grid::-webkit-scrollbar-track { background: transparent; }
+    .queue-grid::-webkit-scrollbar-thumb { background: #1f2a52; border-radius: 3px; }
+    .queue-card { flex: 0 0 140px; background: #070b1a; border: 1px solid #1f2a52; border-radius: 6px; overflow: hidden; display: flex; flex-direction: column; }
+    .queue-card:hover { border-color: #00d4ff; }
+    .queue-thumb { height: 75px; width: 100%; object-fit: cover; background: #000; }
+    .queue-meta { padding: 6px; font-size: 10px; color: #d7e6ff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.3; }
+    .queue-platform { font-size: 9px; color: #00d4ff; font-weight: bold; text-transform: uppercase; }
+    .queue-progress-bg { height: 3px; background: #1f2a52; width: 100%; }
+    .queue-progress-fil { height: 100%; background: #00d4ff; width: 0%; transition: width 0.3s ease-out; }
   </style>
 </head>
 <body>
@@ -105,8 +118,9 @@
       <div class="spacer"></div>
       <div class="hint" id="hint">-</div>
     </div>
-    <div id="active-bar" style="background: rgba(2,6,20,0.85); padding: 8px 14px; font-size: 11px; color: #ffbc00; border-top: 1px solid #1f2a52; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; display: none;">
-      <span style="font-weight: bold; margin-right: 8px;">🔴 Momenteel bezig:</span> <span id="active-items-text"></span>
+    <div id="queue-bar" class="queue-bar" style="display: none;">
+      <div class="queue-title">🔴 Momenteel bezig / Wachtrij</div>
+      <div class="queue-grid" id="queue-grid"></div>
     </div>
   </div>
 
@@ -299,45 +313,7 @@
       return (it && it.kind ? String(it.kind) : '') + ':' + String(it && it.id != null ? it.id : '');
     }
 
-    function setHint() {
-      const s = state.status;
-      const dl = s && Number.isFinite(s.activeDownloads) ? s.activeDownloads : null;
-      const qh = s && s.queues && s.queues.heavy ? s.queues.heavy : null;
-      const qm = s && s.queues && s.queues.medium ? s.queues.medium : null;
-      const ql = s && s.queues && s.queues.light ? s.queues.light : null;
-      
-      const dbT = s && s.totalSystemDownloads ? s.totalSystemDownloads : 0;
-      const dbQ = (s && s.queuedDownloads ? s.queuedDownloads : 0) + (s && s.pendingDownloads ? s.pendingDownloads : 0);
-      const dbC = s && s.completedDownloads ? s.completedDownloads : 0;
 
-      const extra = (dl !== null)
-        ? (' | Actief: ' + dl + ((qh && ql && qm)
-          ? (' | MemQueue: H ' + qh.queued + ' | M ' + qm.queued + ' | L ' + ql.queued)
-          : ''))
-        : '';
-        
-      const globalStats = s ? (' | 🌍 DB Wachtrij: ' + dbQ.toLocaleString('nl-NL') + ' | Voltooid: ' + dbC.toLocaleString('nl-NL') + ' / ' + dbT.toLocaleString('nl-NL')) : '';
-
-      if (state.mode === 'recent') {
-        elHint.textContent = 'Items: ' + state.items.length + extra + globalStats;
-      } else {
-        const ch = state.channel;
-        elHint.textContent = ch ? (ch.platform + '/' + ch.channel + ' • items: ' + state.items.length + extra + globalStats) : 'Geen kanaal';
-      }
-
-      // Live "Up Next" Active Bar
-      const elBar = document.getElementById('active-bar');
-      const elBarText = document.getElementById('active-items-text');
-      if (s && s.active_items && s.active_items.length > 0) {
-        const txt = s.active_items.map(a => `[${a.platform}] ${a.title}`).join(' // ');
-        if (elBar && elBarText) {
-          elBarText.textContent = txt;
-          elBar.style.display = 'block';
-        }
-      } else {
-        if (elBar) elBar.style.display = 'none';
-      }
-    }
 
     function clearGrid() {
       elGrid.innerHTML = '';
@@ -529,6 +505,26 @@
       return box;
     }
 
+    function getActiveThumbUrl(a) {
+      if (a.thumbnail && !String(a.thumbnail).includes('/download/') && !String(a.thumbnail).includes('/thumb')) return a.thumbnail;
+      if (a.url && /\.(jpg|jpeg|png|webp|gif|avif|bmp)(?:\?|$)/i.test(String(a.url))) return a.url;
+      if (a.platform === 'youtube' && a.url) {
+        try {
+          const u = new URL(a.url);
+          let vid = '';
+          if (u.hostname.includes('youtube.com') && u.searchParams.has('v')) {
+            vid = u.searchParams.get('v');
+          } else if (u.hostname.includes('youtu.be')) {
+            vid = u.pathname.substring(1);
+          } else if (u.hostname.includes('youtube.com') && u.pathname.startsWith('/shorts/')) {
+            vid = u.pathname.split('/')[2];
+          }
+          if (vid) return 'https://i.ytimg.com/vi/' + vid + '/mqdefault.jpg';
+        } catch(e) {}
+      }
+      return '/media/pending-thumb.svg?v=' + Date.now() + '&text=' + encodeURIComponent(a.title || 'Downloading...');
+    }
+
     function setHint() {
       const s = state.status;
       const dl = s && Number.isFinite(s.activeDownloads) ? s.activeDownloads : null;
@@ -553,6 +549,40 @@
       } else {
         const ch = state.channel;
         elHint.textContent = ch ? (ch.platform + '/' + ch.channel + ' • items: ' + state.items.length + extra + globalStats) : 'Geen kanaal';
+      }
+
+      const elQueueBar = document.getElementById('queue-bar');
+      const elQueueGrid = document.getElementById('queue-grid');
+      if (elQueueBar && elQueueGrid) {
+        if (s && s.active_items && s.active_items.length > 0) {
+          elQueueGrid.innerHTML = '';
+          for (const a of s.active_items) {
+            const card = document.createElement('div');
+            card.className = 'queue-card';
+            
+            const thumbUrl = getActiveThumbUrl(a);
+            const pct = typeof a.progress === 'number' ? Math.max(0, Math.min(100, Math.round(a.progress))) : 0;
+            const fallbackCall = thumbUrl.includes('ytimg') 
+              ? `this.onerror=null;this.src='/media/pending-thumb.svg?v=${Date.now()}&text=' + encodeURIComponent('${String(a.title || 'Downloading...').replace(/'/g, "\\'")}');`
+              : `this.onerror=null;this.src=FALLBACK_THUMB;`;
+            
+            card.innerHTML = `
+              <img class="queue-thumb" src="${thumbUrl}" onerror="${fallbackCall}">
+              <div class="queue-meta">
+                <div class="queue-platform">${String(a.platform || 'unknown')}</div>
+                <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${String(a.title || 'Downloading...').replace(/"/g, '&quot;')}">${String(a.title || 'Downloading...')}</div>
+              </div>
+              <div class="queue-progress-bg">
+                <div class="queue-progress-fil" style="width: ${pct}%"></div>
+              </div>
+            `;
+            elQueueGrid.appendChild(card);
+          }
+          elQueueBar.style.display = 'block';
+        } else {
+          elQueueBar.style.display = 'none';
+          elQueueGrid.innerHTML = '';
+        }
       }
     }
 

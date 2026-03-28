@@ -1496,7 +1496,8 @@ async function hydrateDownloadActivityContext(downloadId) {
       channel: row.channel || '',
       title: row.title || '',
       filepath: row.filepath || '',
-      filename: row.filename || ''
+      filename: row.filename || '',
+      thumbnail: row.thumbnail || ''
     });
   } catch (e) {
     return null;
@@ -1608,6 +1609,7 @@ async function emitDownloadStatusActivity(downloadId, status, progress, error, e
       source_url: extra && extra.source_url ? String(extra.source_url) : (ctx.source_url || null),
       filepath: extra && extra.filepath ? String(extra.filepath) : (ctx.filepath || null),
       filename: extra && extra.filename ? String(extra.filename) : (ctx.filename || null),
+      thumbnail: extra && extra.thumbnail ? String(extra.thumbnail) : (ctx.thumbnail || null),
       lane: extra && extra.lane ? String(extra.lane) : (ctx.lane || null),
       driver: extra && extra.driver ? String(extra.driver) : (ctx.driver || null),
       error: error ? trimDownloadActivityString(error, 220) : null
@@ -4685,7 +4687,7 @@ async function runDownloadScheduler() {
   let mediumActive = activeLaneCount('medium');
   let lightActive = activeLaneCount('light');
 
-  const rows = await db.prepare("SELECT id, url, platform, channel, title, metadata, created_at FROM downloads WHERE status IN ('pending', 'queued') ORDER BY CASE status WHEN 'queued' THEN 1 ELSE 2 END, created_at DESC LIMIT 2500").all();
+  const rows = await db.prepare("SELECT id, url, platform, channel, title, metadata, created_at FROM downloads WHERE status IN ('pending', 'queued') ORDER BY created_at DESC LIMIT 2500").all();
   if (!rows || rows.length === 0) return;
 
   // Determine the newest download timestamp across both active and queued
@@ -5224,7 +5226,8 @@ expressApp.get('/media/pending-thumb.svg', (req, res) => {
   try {
     const kind = String(req.query.kind || '').toLowerCase();
     const id = String(req.query.id || '').trim();
-    const label = (kind === 's' ? 'shot' : kind === 'd' ? 'dl' : 'thumb') + (id ? ` #${id}` : '');
+    const txt = String(req.query.text || '').trim();
+    const label = txt ? txt : (kind === 's' ? 'shot' : kind === 'd' ? 'dl' : 'thumb') + (id ? ` #${id}` : '');
     const t = label.slice(0, 80);
     const safe = t.replace(/&/g, '&amp;').replace(/</g, '&lt;');
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="480" height="270"><rect width="100%" height="100%" fill="#000"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#00d4ff" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="18">${safe}</text></svg>`;
