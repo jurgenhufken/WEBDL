@@ -9942,7 +9942,8 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
     '--merge-output-format', 'mp4',
     '--postprocessor-args', 'ffmpeg:-threads 3',
     '--write-thumbnail',
-    '--write-info-json'];
+    '--write-info-json',
+    '--no-mtime'];
     if (!forceOverwrite) {
       baseArgs.push('--no-overwrites');
     } else {
