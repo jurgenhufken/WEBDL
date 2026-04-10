@@ -192,8 +192,8 @@
  
  (sleep 1; open "$HOME/Downloads/WEBDL") >/dev/null 2>&1 &
  (sleep 4; open "http://localhost:35729/addon/firefox-debug-controller.xpi?t=$(date +%s)") >/dev/null 2>&1 &
- SRC="src/simple-server.js.pg.refactored"
- DST="src/simple-server.pg.refactored.js"
+ SRC="src/simple-server.js"
+ DST="src/simple-server.compiled.js"
  echo "Kopiëren van serverbron: $SRC -> $DST"
  if [ ! -f "$SRC" ]; then
      echo "FOUT: bronbestand ontbreekt: $SRC"

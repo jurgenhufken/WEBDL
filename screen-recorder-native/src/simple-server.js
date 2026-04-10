@@ -10,103 +10,26 @@ const { createDb } = require('./db-adapter');
 const multer = require('multer');
 const upload = multer({ dest: path.join(os.tmpdir(), 'webdl-uploads')   });
 // ========================
-// CONFIGURATIE
+// CONFIGURATIE (GEEXTRAHEERD)
 // ========================
-const PORT = Math.max(1, parseInt(process.env.WEBDL_PORT || '35729', 10) || 35729);
-const BASE_DIR = path.join(os.homedir(), 'Downloads', 'WEBDL');
-const DB_PATH = path.join(BASE_DIR, 'webdl.db');
-const DIRECTORY_FILTER_CONFIG = path.join(os.homedir(), '.config', 'webdl', 'directory-filter.json');
-const YT_DLP = '/opt/homebrew/bin/yt-dlp';
-const FFMPEG = process.env.WEBDL_FFMPEG || '/opt/homebrew/bin/ffmpeg';
-const FFPROBE = process.env.WEBDL_FFPROBE || '/opt/homebrew/bin/ffprobe';
-const OFSCRAPER = process.env.WEBDL_OFSCRAPER || path.join(os.homedir(), '.local', 'bin', 'ofscraper');
-const OFSCRAPER_CONFIG_DIR = process.env.WEBDL_OFSCRAPER_CONFIG_DIR || path.join(os.homedir(), '.config', 'ofscraper');
-const GALLERY_DL = process.env.WEBDL_GALLERY_DL || path.join(os.homedir(), '.local', 'bin', 'gallery-dl');
-const INSTALOADER = process.env.WEBDL_INSTALOADER || path.join(os.homedir(), '.local', 'bin', 'instaloader');
-const REDDIT_DL = process.env.WEBDL_REDDIT_DL || path.join(os.homedir(), '.local', 'bin', 'reddit-dl');
-const TDL = String(process.env.WEBDL_TDL || '').trim() || path.join(os.homedir(), 'go', 'bin', 'tdl');
-const TDL_NAMESPACE = String(process.env.WEBDL_TDL_NAMESPACE || 'webdl').trim();
-const TDL_THREADS = Math.max(1, parseInt(process.env.WEBDL_TDL_THREADS || '4', 10) || 4);
-const TDL_CONCURRENCY = Math.max(1, parseInt(process.env.WEBDL_TDL_CONCURRENCY || '2', 10) || 2);
-const REDDIT_DL_CLIENT_ID = String(process.env.WEBDL_REDDIT_CLIENT_ID || '').trim();
-const REDDIT_DL_CLIENT_SECRET = String(process.env.WEBDL_REDDIT_CLIENT_SECRET || '').trim();
-const REDDIT_DL_USERNAME = String(process.env.WEBDL_REDDIT_USERNAME || '').trim();
-const REDDIT_DL_PASSWORD = String(process.env.WEBDL_REDDIT_PASSWORD || '').trim();
-const REDDIT_DL_AUTH_FILE = String(process.env.WEBDL_REDDIT_AUTH_FILE || '').trim();
-const REDDIT_INDEX_MAX_ITEMS = Math.max(1, parseInt(process.env.WEBDL_REDDIT_INDEX_MAX_ITEMS || '5000', 10) || 5000);
-const REDDIT_INDEX_MAX_PAGES = Math.max(1, parseInt(process.env.WEBDL_REDDIT_INDEX_MAX_PAGES || '120', 10) || 120);
-const VIDEO_DEVICE = process.env.WEBDL_VIDEO_DEVICE || 'auto';
-const AUDIO_DEVICE = process.env.WEBDL_AUDIO_DEVICE || 'none';
-const RECORDING_FPS = process.env.WEBDL_RECORDING_FPS || '30';
-const VIDEO_CODEC = process.env.WEBDL_VIDEO_CODEC || 'h264_videotoolbox';
-const VIDEO_BITRATE = process.env.WEBDL_VIDEO_BITRATE || '6000k';
-const LIBX264_PRESET = process.env.WEBDL_X264_PRESET || 'veryfast';
-const AUDIO_BITRATE = process.env.WEBDL_AUDIO_BITRATE || '192k';
-const RECORDING_AUDIO_CODEC = process.env.WEBDL_RECORDING_AUDIO_CODEC || 'aac_at';
-const RECORDING_INPUT_PIXEL_FORMAT = String(process.env.WEBDL_RECORDING_INPUT_PIXEL_FORMAT || 'auto').trim();
-const FFMPEG_PROBESIZE = process.env.WEBDL_FFMPEG_PROBESIZE || '50M';
-const FFMPEG_ANALYZEDURATION = process.env.WEBDL_FFMPEG_ANALYZEDURATION || '50M';
-const METADATA_BLOCKED_DOMAIN_SUFFIXES = [
-'motherless.com',
-'pornzog.com',
-'txxx.com',
-'omegleporn.to',
-'tnaflix.com',
-'thisvid.com',
-'pornone.com',
-'pornhex.com',
-'xxxi.porn',
-'cums.net',
-'gig.sex'];
+const config = require('./config');
+const logger = require('./utils/logger'); // Overschrijft console.log globaal automatisch via require
 
-const DEFAULT_RECORDING_FPS_MODE = VIDEO_CODEC === 'h264_videotoolbox' ? 'cfr' : 'passthrough';
-const RECORDING_FPS_MODE = String(process.env.WEBDL_RECORDING_FPS_MODE || DEFAULT_RECORDING_FPS_MODE).toLowerCase();
-const FFMPEG_THREAD_QUEUE_SIZE = process.env.WEBDL_FFMPEG_THREAD_QUEUE_SIZE || '8192';
-const FFMPEG_RTBUFSIZE = process.env.WEBDL_FFMPEG_RTBUFSIZE || '1500M';
-const FFMPEG_MAX_MUXING_QUEUE_SIZE = process.env.WEBDL_FFMPEG_MAX_MUXING_QUEUE_SIZE || '4096';
-const MIN_SCREENSHOT_BYTES = parseInt(process.env.WEBDL_MIN_SCREENSHOT_BYTES || '12000', 10);
-const MIN_THUMB_BYTES = Math.max(256, parseInt(process.env.WEBDL_MIN_THUMB_BYTES || '2048', 10) || 2048);
-const FINALCUT_ENABLED = String(process.env.WEBDL_FINALCUT_OUTPUT || '0') === '1';
-const FINALCUT_VIDEO_CODEC = process.env.WEBDL_FINALCUT_VIDEO_CODEC || 'libx264';
-const FINALCUT_X264_PRESET = process.env.WEBDL_FINALCUT_X264_PRESET || 'fast';
-const FINALCUT_X264_CRF = process.env.WEBDL_FINALCUT_X264_CRF || '18';
-const FINALCUT_AUDIO_BITRATE = process.env.WEBDL_FINALCUT_AUDIO_BITRATE || AUDIO_BITRATE;
-const ADDON_PACKAGE_PATH = process.env.WEBDL_ADDON_PACKAGE_PATH || path.join(BASE_DIR, 'firefox-debug-controller.xpi');
-const LEGACY_ADDON_PACKAGE_PATH = path.join(os.homedir(), 'WEBDL', 'firefox-debug-controller.xpi');
-
-const LOG_FILE = process.env.WEBDL_LOG_FILE || path.join(BASE_DIR, 'webdl-server.log');
-let logStream = null;
-try {
-  try { fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true }); } catch (e) {}
-  logStream = fs.createWriteStream(LOG_FILE, { flags: 'a' });
-} catch (e) {
-  logStream = null;
-}
-
-function writeLogLine(level, args) {
-  try {
-    if (!logStream) return;
-    const ts = new Date().toISOString();
-    const msg = Array.from(args || []).map((x) => {
-      try {
-        if (typeof x === 'string') return x;
-        return util.inspect(x, { depth: 5, maxArrayLength: 120 });
-      } catch (e) {
-        return String(x);
-      }
-    }).join(' ');
-    logStream.write(`[${ts}] ${String(level || 'LOG').toUpperCase()} ${msg}\n`);
-  } catch (e) {}
-}
-
-try {
-  const origLog = console.log.bind(console);
-  const origWarn = console.warn.bind(console);
-  const origError = console.error.bind(console);
-  console.log = (...args) => { try { writeLogLine('log', args); } catch (e) {} return origLog(...args); };
-  console.warn = (...args) => { try { writeLogLine('warn', args); } catch (e) {} return origWarn(...args); };
-  console.error = (...args) => { try { writeLogLine('error', args); } catch (e) {} return origError(...args); };
-} catch (e) {}
+const {
+  PORT, BASE_DIR, DB_PATH, POSTGRES_URL, DB_ENGINE, LOG_FILE, DIRECTORY_FILTER_CONFIG,
+  YT_DLP, FFMPEG, FFPROBE, OFSCRAPER, OFSCRAPER_CONFIG_DIR, GALLERY_DL, INSTALOADER, REDDIT_DL,
+  TDL, TDL_NAMESPACE, TDL_THREADS, TDL_CONCURRENCY,
+  REDDIT_DL_CLIENT_ID, REDDIT_DL_CLIENT_SECRET, REDDIT_DL_USERNAME, REDDIT_DL_PASSWORD, REDDIT_DL_AUTH_FILE, REDDIT_INDEX_MAX_ITEMS, REDDIT_INDEX_MAX_PAGES,
+  VIDEO_DEVICE, AUDIO_DEVICE, RECORDING_FPS, VIDEO_CODEC, VIDEO_BITRATE, LIBX264_PRESET, AUDIO_BITRATE, RECORDING_AUDIO_CODEC, RECORDING_INPUT_PIXEL_FORMAT, RECORDING_FPS_MODE,
+  FFMPEG_PROBESIZE, FFMPEG_ANALYZEDURATION, FFMPEG_THREAD_QUEUE_SIZE, FFMPEG_RTBUFSIZE, FFMPEG_MAX_MUXING_QUEUE_SIZE,
+  MIN_SCREENSHOT_BYTES, MIN_THUMB_BYTES,
+  FINALCUT_ENABLED, FINALCUT_VIDEO_CODEC, FINALCUT_X264_PRESET, FINALCUT_X264_CRF, FINALCUT_AUDIO_BITRATE,
+  ADDON_PACKAGE_PATH, LEGACY_ADDON_PACKAGE_PATH,
+  DEFAULT_VDH_IMPORT_DIR, ADDON_AUTO_BUILD_ON_START, ADDON_FORCE_REBUILD_ON_START, 
+  AUTO_IMPORT_ON_START, AUTO_IMPORT_ROOT_DIR, AUTO_IMPORT_MAX_DEPTH_RAW, AUTO_IMPORT_MIN_FILE_AGE_MS, AUTO_IMPORT_FLATTEN_TO_WEBDL, AUTO_IMPORT_MOVE_SOURCE, AUTO_IMPORT_POLL_MS,
+  STARTUP_REHYDRATE_DELAY_MS, STARTUP_REHYDRATE_MAX_ROWS, STARTUP_REHYDRATE_MODE,
+  METADATA_BLOCKED_DOMAIN_SUFFIXES, getAutoImportMaxDepth
+} = config;
 
 function tailTextFile(filePath, maxLines, maxBytes) {
   try {
@@ -275,55 +198,9 @@ function stripAnsiCodes(input) {
 const IMPORTABLE_VIDEO_EXTS = new Set([
 '.mp4', '.mov', '.m4v', '.webm', '.mkv', '.avi', '.wmv', '.flv', '.ts', '.m2ts']
 );
-const DEFAULT_VDH_IMPORT_DIR = path.resolve(process.env.WEBDL_IMPORT_VDH_DIR || path.join(BASE_DIR, 'imports', 'videodownloadhelper'));
-const ADDON_AUTO_BUILD_ON_START = String(process.env.WEBDL_ADDON_AUTO_BUILD_ON_START || '0').trim() !== '0';
-const ADDON_FORCE_REBUILD_ON_START = String(process.env.WEBDL_ADDON_FORCE_REBUILD_ON_START || '1').trim() !== '0';
-const AUTO_IMPORT_ON_START = String(process.env.WEBDL_AUTO_IMPORT_ON_START || '1').trim() !== '0';
-const DEFAULT_AUTO_IMPORT_ROOT_DIR = (() => {
-  try {
-    const base = path.join(os.homedir(), 'Downloads');
-    const candidates = [
-    path.join(base, 'videodownloaderhelper'),
-    path.join(base, 'videodownloadhelper'),
-    path.join(base, 'Video DownloadHelper'),
-    path.join(base, 'VideoDownloadHelper'),
-    path.join(base, 'vdh')];
 
-    for (const c of candidates) {
-      try {
-        if (c && fs.existsSync(c) && fs.statSync(c).isDirectory()) return c;
-      } catch (e) {}
-    }
-    return base;
-  } catch (e) {
-    return path.join(os.homedir(), 'Downloads');
-  }
-})();
-const AUTO_IMPORT_ROOT_DIR = String(process.env.WEBDL_AUTO_IMPORT_ROOT_DIR || DEFAULT_AUTO_IMPORT_ROOT_DIR).trim();
-const AUTO_IMPORT_MAX_DEPTH_RAW = parseInt(process.env.WEBDL_AUTO_IMPORT_MAX_DEPTH || '2', 10);
-const AUTO_IMPORT_MIN_FILE_AGE_MS = Math.max(0, parseInt(process.env.WEBDL_AUTO_IMPORT_MIN_FILE_AGE_MS || '8000', 10) || 8000);
-const AUTO_IMPORT_FLATTEN_TO_WEBDL = String(process.env.WEBDL_AUTO_IMPORT_FLATTEN_TO_WEBDL || '1').trim() !== '0';
-const AUTO_IMPORT_MOVE_SOURCE = String(process.env.WEBDL_AUTO_IMPORT_MOVE_SOURCE || '1').trim() !== '0';
-const AUTO_IMPORT_DEFAULT_POLL_MS = (() => {
-  try {
-    const base = path.resolve(path.join(os.homedir(), 'Downloads'));
-    const root = path.resolve(AUTO_IMPORT_ROOT_DIR || base);
-    if (root === base) return 0;
-    return 8000;
-  } catch (e) {
-    return 0;
-  }
-})();
-const AUTO_IMPORT_POLL_MS = Math.max(0, parseInt(process.env.WEBDL_AUTO_IMPORT_POLL_MS || String(AUTO_IMPORT_DEFAULT_POLL_MS), 10) || 0);
-const STARTUP_REHYDRATE_DELAY_MS = Math.max(0, parseInt(process.env.WEBDL_STARTUP_REHYDRATE_DELAY_MS || '2500', 10) || 2500);
-const STARTUP_REHYDRATE_MAX_ROWS = Math.max(0, parseInt(process.env.WEBDL_STARTUP_REHYDRATE_MAX_ROWS || '250', 10) || 250);
-const STARTUP_REHYDRATE_MODE = String(process.env.WEBDL_STARTUP_REHYDRATE_MODE || 'active').trim().toLowerCase();
-
-function getAutoImportMaxDepth() {
-  if (!Number.isFinite(AUTO_IMPORT_MAX_DEPTH_RAW)) return 2;
-  if (AUTO_IMPORT_MAX_DEPTH_RAW < 0) return 99;
-  return AUTO_IMPORT_MAX_DEPTH_RAW;
-}
+// Auto-import settings en Startup rehydrate settings worden nu beheerd in src/config.js.
+// De variabelen zijn bovenaan via destructuring beschikbaar.
 
 function loadDirectoryFilter() {
   try {
@@ -339,12 +216,13 @@ function loadDirectoryFilter() {
 }
 
 function shouldIncludePath(relPath, enabledDirs) {
-  // Always visible as per user request (show all downloads)
-  return true;
+  if (!enabledDirs || enabledDirs.length === 0) return true;
   const p = String(relPath || '').trim();
   if (!p) return true;
   for (const dir of enabledDirs) {
-    if (p.startsWith(dir + '/') || p === dir) return true;
+    if (p === dir || p.startsWith(dir + '/') || p.includes('/' + dir + '/') || p.endsWith('/' + dir)) {
+      return true;
+    }
   }
   return false;
 }
@@ -1789,14 +1667,23 @@ function getViewerHTML() {
 
     async function init() {
       try {
-        const sessionEnabledDirs = getSessionEnabledDirs();
-        if (Array.isArray(sessionEnabledDirs)) {
-          state.enabledDirs = sessionEnabledDirs.slice();
-        } else {
-          const resp = await fetch('/api/directories');
-          const data = await resp.json();
-          if (data.success && data.enabled && data.enabled.length > 0) {
-            state.enabledDirs = data.enabled;
+        const resp = await fetch('/api/directories');
+        const data = await resp.json();
+        if (data && data.success) {
+          const sessionEnabledDirs = getSessionEnabledDirs();
+          if (Array.isArray(sessionEnabledDirs)) {
+            const validDirs = new Set(data.directories || []);
+            const filtered = sessionEnabledDirs.filter(d => validDirs.has(d));
+            if (filtered.length > 0) {
+              state.enabledDirs = filtered;
+            } else {
+              state.enabledDirs = Array.isArray(data.directories) ? data.directories.slice() : null;
+              setSessionEnabledDirs(null);
+            }
+          } else if (Array.isArray(data.directories)) {
+            state.enabledDirs = data.directories.slice();
+          } else {
+            state.enabledDirs = null;
           }
         }
       } catch (e) {}
@@ -2109,6 +1996,11 @@ function getViewerHTML() {
         }
         e.preventDefault();
       }
+      else if (e.key === 'Control' && e.location === 1) {
+        state.random = !state.random;
+        if (elBtnRandom) elBtnRandom.textContent = state.random ? '🔀 Random: aan' : '🔀 Random: uit';
+        e.preventDefault();
+      }
       else if (e.key.toLowerCase() === 'm') {
         elBtnMute.click();
         e.preventDefault();
@@ -2241,6 +2133,27 @@ function getGalleryHTML() {
     .dir-item label { flex: 1; cursor: pointer; color: #d7e6ff; font-size: 13px; }
     .dir-footer { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid #1f2a52; justify-content: flex-end; }
     .btn-primary { background: #2a4a82 !important; font-weight: bold; }
+    .queue-bar { padding: 10px 14px; background: rgba(5,8,22,0.95); border-top: 1px solid #1f2a52; }
+    .queue-title { font-size: 11px; font-weight: bold; color: #ffbc00; text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.5px; }
+    .queue-grid { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 4px; scrollbar-width: thin; scrollbar-color: #1f2a52 transparent; }
+    .queue-grid::-webkit-scrollbar { height: 6px; }
+    .queue-grid::-webkit-scrollbar-track { background: transparent; }
+    .queue-grid::-webkit-scrollbar-thumb { background: #1f2a52; border-radius: 3px; }
+    .queue-card { flex: 0 0 140px; background: #070b1a; border: 1px solid #1f2a52; border-radius: 6px; overflow: hidden; display: flex; flex-direction: column; position: relative; }
+    .queue-card:hover { border-color: #00d4ff; }
+    .queue-thumb-box { width:100%; padding-top:56.25%; position:relative; overflow:hidden; background:#000; border-radius:6px 6px 0 0; }
+    .queue-thumb { position:absolute; top:0; left:0; width:100%; height:100%; object-fit:cover; opacity:0.8; }
+    .queue-overlay-bottom { position:absolute; bottom:0; left:0; width:100%; z-index:10; }
+    .queue-progress-bar { width:100%; height:4px; background:rgba(255,255,255,0.2); }
+    .queue-progress-fil { height:100%; background:#00d4ff; width:0%; transition:width 0.3s cubic-bezier(0.4, 0, 0.2, 1); box-shadow: 0 0 8px rgba(0,212,255,0.6); }
+    .queue-progress-fil.postprocessing { background: #ff00ff; box-shadow: 0 0 12px rgba(255,0,255,0.8); }
+    .queue-progress-fil.queued { background: #ffaa00; box-shadow: 0 0 8px rgba(255,170,0,0.6); }
+    .queue-pct-badge { position:absolute; top:6px; right:6px; z-index:15; background:rgba(0,0,0,0.8); color:#00d4ff; font-weight:bold; font-size:10px; padding:2px 5px; border-radius:4px; text-shadow:0 0 4px #00d4ff; }
+    .queue-pct-badge.postprocessing { color: #ff00ff; text-shadow: 0 0 4px #ff00ff; box-shadow: 0 0 8px rgba(255,0,255,0.3); }
+    .queue-pct-badge.queued { color: #ffaa00; background:rgba(40,20,0,0.9); }
+    .queue-info { padding: 6px 8px; flex: 1; display: flex; flex-direction: column; justify-content: flex-start; }
+    .queue-platform { font-size: 9px; font-weight: bold; color: #8892b0; margin-bottom: 3px; }
+    .queue-title { font-size: 11px; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.2; font-weight: normal; text-transform: none; letter-spacing: normal; }
   </style>
 </head>
 <body>
@@ -2279,6 +2192,10 @@ function getGalleryHTML() {
       </div>
       <div class="spacer"></div>
       <div class="hint" id="hint">-</div>
+    </div>
+    <div id="queue-bar" class="queue-bar" style="display: none;">
+      <div class="queue-title">🔴 Momenteel bezig / Wachtrij</div>
+      <div class="queue-grid" id="queue-grid"></div>
     </div>
   </div>
 
@@ -2688,30 +2605,88 @@ function getGalleryHTML() {
       return box;
     }
 
+    function getActiveThumbUrl(a) {
+      if (a.thumbnail && !String(a.thumbnail).includes('/download/') && !String(a.thumbnail).includes('/thumb')) return a.thumbnail;
+      if (a.url && /\.(jpg|jpeg|png|webp|gif|avif|bmp)(?:\?|$)/i.test(String(a.url))) return a.url;
+      if (a.platform === 'youtube' && a.url) {
+        try {
+          const u = new URL(a.url);
+          let vid = '';
+          if (u.hostname.includes('youtube.com') && u.searchParams.has('v')) {
+            vid = u.searchParams.get('v');
+          } else if (u.hostname.includes('youtu.be')) {
+            vid = u.pathname.substring(1);
+          } else if (u.hostname.includes('youtube.com') && u.pathname.startsWith('/shorts/')) {
+            vid = u.pathname.split('/')[2];
+          }
+          if (vid) return 'https://i.ytimg.com/vi/' + vid + '/mqdefault.jpg';
+        } catch(e) {}
+      }
+      return '/media/pending-thumb.svg?v=' + Date.now() + '&text=' + encodeURIComponent(a.title || 'Downloading...');
+    }
+
     function setHint() {
+      const s = state.status;
+      const dl = s && Number.isFinite(s.activeDownloads) ? s.activeDownloads : null;
+      const qh = s && s.queues && s.queues.heavy ? s.queues.heavy : null;
+      const ql = s && s.queues && s.queues.light ? s.queues.light : null;
+      const extra = (dl !== null)
+        ? (' | actief: ' + dl + ((qh && ql)
+          ? (' | queue H ' + qh.active + '/' + qh.limit + ' (+' + qh.queued + ') | L ' + ql.active + '/' + ql.limit + ' (+' + ql.queued + ')')
+          : ''))
+        : '';
+        
       if (state.mode === 'recent') {
-        const s = state.status;
-        const dl = s && Number.isFinite(s.activeDownloads) ? s.activeDownloads : null;
-        const qh = s && s.queues && s.queues.heavy ? s.queues.heavy : null;
-        const ql = s && s.queues && s.queues.light ? s.queues.light : null;
-        const extra = (dl !== null)
-          ? (' | actief: ' + dl + ((qh && ql)
-            ? (' | queue H ' + qh.active + '/' + qh.limit + ' (+' + qh.queued + ') | L ' + ql.active + '/' + ql.limit + ' (+' + ql.queued + ')')
-            : ''))
-          : '';
         elHint.textContent = 'Items: ' + state.items.length + extra;
       } else {
         const ch = state.channel;
-        const s = state.status;
-        const dl = s && Number.isFinite(s.activeDownloads) ? s.activeDownloads : null;
-        const qh = s && s.queues && s.queues.heavy ? s.queues.heavy : null;
-        const ql = s && s.queues && s.queues.light ? s.queues.light : null;
-        const extra = (dl !== null)
-          ? (' | actief: ' + dl + ((qh && ql)
-            ? (' | queue H ' + qh.active + '/' + qh.limit + ' (+' + qh.queued + ') | L ' + ql.active + '/' + ql.limit + ' (+' + ql.queued + ')')
-            : ''))
-          : '';
         elHint.textContent = ch ? (ch.platform + '/' + ch.channel + ' • items: ' + state.items.length + extra) : 'Geen kanaal';
+      }
+
+      const elQueueBar = document.getElementById('queue-bar');
+      const elQueueGrid = document.getElementById('queue-grid');
+      if (elQueueBar && elQueueGrid) {
+        if (s && s.active_items && s.active_items.length > 0) {
+          elQueueGrid.innerHTML = '';
+          const maxShows = 8;
+          for (let i=0; i < Math.min(s.active_items.length, maxShows); i++) {
+            const a = s.active_items[i];
+            const card = document.createElement('div');
+            card.className = 'queue-card';
+            
+            const thumbUrl = getActiveThumbUrl(a);
+            const rawPct = typeof a.progress === 'number' ? a.progress : 0;
+            const pct = Math.max(0, Math.min(100, Math.round(rawPct)));
+            const isPost = a.status === 'postprocessing';
+            const isQueued = a.status === 'queued';
+            const pctText = isPost ? 'NABELICHTEN' : (isQueued ? 'WACHTRIJ' : (pct + '%'));
+            const ppClass = isPost ? ' postprocessing' : (isQueued ? ' queued' : '');
+            
+            const safetitle = String(a.title || 'Downloading...').replace(/'/g, "\\\\\\'");
+            const fallbackCall = thumbUrl.includes('ytimg') 
+              ? "this.onerror=null;this.src='/media/pending-thumb.svg?v=" + Date.now() + "&text=' + encodeURIComponent('" + safetitle + "');"
+              : "this.onerror=null;this.src=FALLBACK_THUMB;";
+            
+            card.innerHTML = \`
+              <div class="queue-thumb-box">
+                <img class="queue-thumb" src="\${thumbUrl}" onerror="\${fallbackCall}">
+                <div class="queue-pct-badge\${ppClass}">\${pctText}</div>
+                <div class="queue-overlay-bottom">
+                  <div class="queue-progress-bar"><div class="queue-progress-fil\${ppClass}" style="width:\${pct}%"></div></div>
+                </div>
+              </div>
+              <div class="queue-info">
+                <div class="queue-platform">\${String(a.platform || 'ONBEKEND').toUpperCase()}</div>
+                <div class="queue-title">\${String(a.title || 'Laden...')}</div>
+              </div>
+            \`;
+            elQueueGrid.appendChild(card);
+          }
+          elQueueBar.style.display = 'block';
+        } else {
+          elQueueBar.style.display = 'none';
+          elQueueGrid.innerHTML = '';
+        }
       }
     }
 
@@ -3718,7 +3693,14 @@ function getGalleryHTML() {
           };
           const sessionEnabledDirs = getSessionEnabledDirs();
           if (Array.isArray(sessionEnabledDirs)) {
-            state.enabledDirs = sessionEnabledDirs.slice();
+            const validDirs = new Set(data.directories || []);
+            const filtered = sessionEnabledDirs.filter(d => validDirs.has(d));
+            if (filtered.length > 0) {
+              state.enabledDirs = filtered;
+            } else {
+              state.enabledDirs = Array.isArray(data.directories) ? data.directories.slice() : null;
+              setSessionEnabledDirs(null);
+            }
           } else if (Array.isArray(data.directories)) {
             state.enabledDirs = data.directories.slice();
           } else {
@@ -3945,53 +3927,155 @@ function getGalleryHTML() {
 
     function getSelectedDirsFromModal() {
       if (!elDirList) return [];
-      return Array.from(elDirList.querySelectorAll('input[type="checkbox"]')).filter(c => c.checked).map(c => c.value);
+      const selected = [];
+      const topLevels = Array.from(elDirList.querySelectorAll('.dir-top-level > input[type="checkbox"]'))
+                             .filter(c => c.checked).map(c => c.value);
+      selected.push(...topLevels);
+
+      const subLevels = Array.from(elDirList.querySelectorAll('.dir-sub-level input[type="checkbox"]'))
+                             .filter(c => c.checked && !topLevels.includes(c.dataset.parent))
+                             .map(c => c.value);
+      selected.push(...subLevels);
+      return selected;
     }
 
     function updateDirCount() {
       if (!elDirCount || !elDirList) return;
-      const checks = Array.from(elDirList.querySelectorAll('input[type="checkbox"]'));
+      const checks = Array.from(elDirList.querySelectorAll('.dir-top-level > input[type="checkbox"]'));
       const checked = checks.filter(c => c.checked).length;
       elDirCount.textContent = checked + '/' + checks.length + ' geselecteerd';
+      
+      Array.from(elDirList.querySelectorAll('.dir-top-level > input[type="checkbox"]')).forEach(c => {
+         const parentVal = c.value;
+         const isChecked = c.checked;
+         const subBoxes = Array.from(elDirList.querySelectorAll('.dir-sub-level input[data-parent="' + parentVal + '"]'));
+         subBoxes.forEach(sb => {
+             sb.disabled = isChecked;
+             if (isChecked) sb.checked = true;
+         });
+      });
     }
 
     function renderDirList(dirConfig) {
       if (!elDirList) return;
       const directories = Array.isArray(dirConfig && dirConfig.directories) ? dirConfig.directories : [];
+      const dirInfo = Array.isArray(dirConfig && dirConfig.directoriesInfo) ? dirConfig.directoriesInfo : [];
       const enabled = Array.isArray(dirConfig && dirConfig.enabled) ? dirConfig.enabled : [];
       const enabledSet = new Set(enabled);
+      
+      const subMap = {};
+      for (const info of dirInfo) {
+        const parts = info.path.split('/');
+        const parent = parts[0];
+        if (!subMap[parent]) subMap[parent] = { files: 0, subs: [] };
+        if (parts.length > 1) {
+          subMap[parent].subs.push(info);
+        }
+        subMap[parent].files += info.count;
+      }
+      
       elDirList.innerHTML = '';
       const frag = document.createDocumentFragment();
       for (const dirName of directories) {
-        const label = document.createElement('label');
-        label.className = 'dir-item';
-        label.style.display = 'flex';
-        label.style.alignItems = 'center';
-        label.style.gap = '8px';
-        label.style.padding = '6px';
-        label.style.borderBottom = '1px solid #1f2a52';
-        label.style.cursor = 'pointer';
+         const topWrap = document.createElement('div');
+         topWrap.className = 'dir-top-level';
+         topWrap.style.marginBottom = '6px';
+         topWrap.style.borderBottom = '1px solid #1f2a52';
+         topWrap.style.paddingBottom = '6px';
 
-        const input = document.createElement('input');
-        input.type = 'checkbox';
-        input.value = dirName;
-        input.checked = enabledSet.has(dirName);
-        input.addEventListener('change', updateDirCount);
+         const label = document.createElement('label');
+         label.style.display = 'flex';
+         label.style.alignItems = 'center';
+         label.style.gap = '8px';
+         label.style.cursor = 'pointer';
 
-        const wrap = document.createElement('div');
-        wrap.style.display = 'flex';
-        wrap.style.flexDirection = 'column';
-        wrap.style.flex = '1';
+         const input = document.createElement('input');
+         input.type = 'checkbox';
+         input.value = dirName;
+         input.checked = enabledSet.has(dirName);
+         input.addEventListener('change', updateDirCount);
 
-        const title = document.createElement('span');
-        title.style.fontSize = '12px';
-        title.style.color = '#eee';
-        title.textContent = dirName;
-
-        wrap.appendChild(title);
-        label.appendChild(input);
-        label.appendChild(wrap);
-        frag.appendChild(label);
+         const title = document.createElement('span');
+         title.style.fontSize = '14px';
+         title.style.color = '#fff';
+         title.style.fontWeight = 'bold';
+         title.textContent = dirName;
+         
+         label.appendChild(input);
+         label.appendChild(title);
+         
+         const infoBlock = subMap[dirName];
+         if (infoBlock) {
+             const badge = document.createElement('span');
+             badge.style.fontSize = '10px';
+             badge.style.background = '#0f3460';
+             badge.style.padding = '2px 6px';
+             badge.style.borderRadius = '10px';
+             badge.style.marginLeft = 'auto';
+             badge.textContent = infoBlock.files + ' files';
+             
+             if (infoBlock.subs.length > 0) {
+                 const tgl = document.createElement('button');
+                 tgl.textContent = '▼ ' + infoBlock.subs.length + ' subs';
+                 tgl.style.fontSize = '10px';
+                 tgl.style.background = 'none';
+                 tgl.style.border = '1px solid #1f2a52';
+                 tgl.style.color = '#00d4ff';
+                 tgl.style.padding = '2px 6px';
+                 tgl.style.borderRadius = '4px';
+                 tgl.style.marginLeft = '6px';
+                 
+                 const subContainer = document.createElement('div');
+                 subContainer.className = 'dir-sub-level';
+                 subContainer.style.display = 'none';
+                 subContainer.style.marginLeft = '24px';
+                 subContainer.style.marginTop = '6px';
+                 subContainer.style.flexDirection = 'column';
+                 subContainer.style.gap = '4px';
+                 
+                 tgl.addEventListener('click', (e) => {
+                     e.preventDefault();
+                     e.stopPropagation();
+                     const isViz = subContainer.style.display !== 'none';
+                     subContainer.style.display = isViz ? 'none' : 'flex';
+                     tgl.textContent = (isViz ? '▼ ' : '▲ ') + infoBlock.subs.length + ' subs';
+                 });
+                 
+                 for (const sub of infoBlock.subs) {
+                     const sLbl = document.createElement('label');
+                     sLbl.style.display = 'flex';
+                     sLbl.style.alignItems = 'center';
+                     sLbl.style.gap = '6px';
+                     sLbl.style.cursor = 'pointer';
+                     
+                     const sInp = document.createElement('input');
+                     sInp.type = 'checkbox';
+                     sInp.value = sub.path;
+                     sInp.dataset.parent = dirName;
+                     sInp.checked = enabledSet.has(sub.path) || input.checked;
+                     sInp.disabled = input.checked;
+                     
+                     const sTxt = document.createElement('span');
+                     sTxt.style.fontSize = '11px';
+                     sTxt.style.color = '#ccc';
+                     sTxt.textContent = sub.path.slice(dirName.length + 1) + ' (' + sub.count + ')';
+                     
+                     sLbl.appendChild(sInp);
+                     sLbl.appendChild(sTxt);
+                     subContainer.appendChild(sLbl);
+                 }
+                 label.appendChild(badge);
+                 label.appendChild(tgl);
+                 topWrap.appendChild(label);
+                 topWrap.appendChild(subContainer);
+             } else {
+                 label.appendChild(badge);
+                 topWrap.appendChild(label);
+             }
+         } else {
+             topWrap.appendChild(label);
+         }
+         frag.appendChild(topWrap);
       }
       elDirList.appendChild(frag);
       updateDirCount();
@@ -4003,6 +4087,7 @@ function getGalleryHTML() {
       if (!data || !data.success) throw new Error(data && data.error ? data.error : 'directories load failed');
       state.dirConfig = {
         directories: Array.isArray(data.directories) ? data.directories.slice() : [],
+        directoriesInfo: Array.isArray(data.directoriesInfo) ? data.directoriesInfo.slice() : [],
         enabled: Array.isArray(data.enabled) ? data.enabled.slice() : []
       };
       return state.dirConfig;
@@ -4018,7 +4103,7 @@ function getGalleryHTML() {
         try {
           const dirConfig = await loadDirConfig(false);
           const enabled = Array.isArray(state.enabledDirs) ? state.enabledDirs.slice() : (Array.isArray(dirConfig.enabled) ? dirConfig.enabled.slice() : []);
-          renderDirList({ directories: dirConfig.directories, enabled });
+          renderDirList({ directories: dirConfig.directories, directoriesInfo: dirConfig.directoriesInfo, enabled });
         } catch (e) {
           elDirList.textContent = 'Kon mappen niet laden';
           if (elDirCount) elDirCount.textContent = '';
@@ -4143,8 +4228,6 @@ function getGalleryHTML() {
       const isFormTarget = tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA';
       if (!elModal.classList.contains('open')) {
         if (isFormTarget) return;
-        if (e.key === 'ArrowUp') { e.preventDefault(); state.mode = 'recent'; elMode.value = 'recent'; await reloadAll(); return; }
-        if (e.key === 'ArrowDown') { e.preventDefault(); state.mode = 'channel'; elMode.value = 'channel'; await reloadAll(); return; }
         return;
       }
       if (isFormTarget && e.key !== 'Escape') return;
@@ -4161,6 +4244,10 @@ function getGalleryHTML() {
           if (v.paused) v.play().catch(() => {});
           else v.pause();
         }
+        e.preventDefault();
+      }
+      else if (e.key === 'Control' && e.location === 1) {
+        if (elMBtnRandom) elMBtnRandom.click();
         e.preventDefault();
       }
       else if (e.key.toLowerCase() === 'm') {
@@ -4601,6 +4688,9 @@ function setDownloadActivityContext(downloadId, patch) {
       title: patch && patch.title ? String(patch.title) : (prev.title || ''),
       filepath: patch && patch.filepath ? String(patch.filepath) : (prev.filepath || ''),
       filename: patch && patch.filename ? String(patch.filename) : (prev.filename || ''),
+      thumbnail: patch && typeof patch.thumbnail !== 'undefined' ? String(patch.thumbnail) : (prev.thumbnail || ''),
+      progress: patch && typeof patch.progress !== 'undefined' ? patch.progress : prev.progress,
+      status: patch && patch.status ? String(patch.status) : (prev.status || ''),
       lane: patch && patch.lane ? String(patch.lane) : (prev.lane || ''),
       driver: patch && patch.driver ? String(patch.driver) : (prev.driver || '')
     };
@@ -4707,7 +4797,7 @@ async function emitDownloadStatusActivity(downloadId, status, progress, error, e
     if (!Number.isFinite(id)) return;
     const st = String(status || '').toLowerCase();
     const pct = Number.isFinite(Number(progress)) ? Math.max(0, Math.min(100, Number(progress))) : null;
-    setDownloadActivityContext(id, extra || {});
+    setDownloadActivityContext(id, { ...(extra || {}), status: st, progress: pct });
     const prevStatus = String(downloadActivityLastStatusById.get(id) || '').toLowerCase();
     let shouldLog = false;
     if (st && st !== prevStatus) shouldLog = true;
@@ -5105,6 +5195,31 @@ async function maybeAutoIndexDownloadFiles() {
   } finally {
     downloadFilesAutoIndexInProgress = false;
   }
+}
+
+async function indexDownloadDirImmediately(downloadId) {
+  try {
+    const id = Number(downloadId);
+    if (!Number.isFinite(id)) return false;
+    const row = await getDownload.get(id);
+    if (!row) return false;
+    
+    // We allowNotReady=true so that it indexes even if the DB says 'downloading'
+    // This is run right before/after the status is set to 'completed'
+    const r = { ...row, _allowNotReady: true, _maxFiles: DOWNLOAD_FILES_AUTO_INDEX_MAX_FILES };
+    const res = await indexDownloadFilesForDownload(r);
+    
+    if (res && res.ok) {
+      const now = Date.now();
+      downloadFilesAutoIndexLastById.set(id, now);
+      downloadFilesActiveIndexLastById.set(id, now);
+      try { recentFilesTopCache.clear(); } catch(e) {}
+      return true;
+    }
+  } catch (e) {
+    console.error(`⚠️ Fout in indexDownloadDirImmediately: ${e.message}`);
+  }
+  return false;
 }
 
 const getRecentIndexedMedia = db.prepare(db.isPostgres ? `
@@ -8159,12 +8274,8 @@ async function rehydrateDownloadQueue() {
 
 // ========================
 // RECORDING STATE
-// ========================
-let isRecording = false;
-let recordingProcess = null;
-let currentRecordingFile = null;
-let currentRecording = null;
-let currentRecordingMeta = null;
+let activeRecordings = new Map();
+Object.defineProperty(global, 'isRecording', { get: () => activeRecordings.size > 0 });
 
 let avfoundationDeviceListCache = null;
 
@@ -10122,10 +10233,40 @@ expressApp.get('/status', async (req, res) => {
   } catch (e) {
     dbStatusError = (e && e.message) ? e.message : String(e);
   }
+  // Build active_items for the gallery's queue bar using real-time context
+  const activeDownloadsList = [];
+  try {
+    for (const [id, ctx] of downloadActivityContextById.entries()) {
+      if (activeProcIds.has(id) || startingJobs.has(id)) {
+        activeDownloadsList.push({ id, ...ctx });
+      }
+    }
+  } catch (e) {}
+
+  // Pad with queued downloads if we have room
+  try {
+    if (activeDownloadsList.length < 4 && dbQueuedCount > 0) {
+      const qrows = await db.prepare("SELECT id, url, platform, channel, title FROM downloads WHERE status = 'queued' ORDER BY created_at ASC LIMIT ?").all(4 - activeDownloadsList.length);
+      for (const qr of qrows || []) {
+        if (!activeProcIds.has(qr.id) && !startingJobs.has(qr.id)) {
+          activeDownloadsList.push({
+            id: qr.id,
+            progress: 0,
+            status: 'queued',
+            platform: qr.platform,
+            channel: qr.channel,
+            title: qr.title
+          });
+        }
+      }
+    }
+  } catch (e) {}
+
   res.json({
     status: 'running',
     isRecording,
     activeDownloads: runtimeActive.length,
+    active_items: activeDownloadsList,
     queuedDownloads: dbQueuedCount,
     pendingDownloads: dbPendingCount,
     totalActiveDownloads: dbActiveCount,
@@ -10173,6 +10314,8 @@ expressApp.get('/status', async (req, res) => {
     recent_download_activity: recentDownloadActivity.slice(-80).reverse(),
     youtube: getYoutubeRuntimeConfig(),
     serverTime: new Date().toISOString(),
+    totalSystemDownloads: dbActiveCount,
+    completedDownloads: 0,
     videoDevice: VIDEO_DEVICE,
     audioDevice: AUDIO_DEVICE
   });
@@ -10773,9 +10916,33 @@ expressApp.post('/start-recording', async (req, res) => {
     const meta = body && typeof body.metadata === 'object' && body.metadata ? body.metadata : {};
     console.log(`[INGRESS] POST /start-recording url=${String(meta.url || '').slice(0, 200)} platform=${String(meta.platform || '')} channel=${String(meta.channel || '')}`);
   } catch (e) {}
-  if (isRecording || recordingProcess) return res.json({ success: false, error: 'Er loopt al een opname' });
 
   const { metadata = {}, crop, lock } = req.body || {};
+  const recId = String((metadata && metadata.url) || req.body.url || 'default_rec').trim();
+
+  const force = req.body.force === true;
+
+  if (activeRecordings.has(recId)) {
+    if (force) {
+      console.log(`[MULTI-REC] Force restart requested for ${recId}`);
+      // Wait for previous to die if any
+      const existing = activeRecordings.get(recId);
+      if (existing && existing.recordingProcess) {
+        try { existing.recordingProcess.kill('SIGINT'); } catch (e) {}
+      }
+      activeRecordings.delete(recId);
+      broadcastRecordingState();
+      await new Promise(r => setTimeout(r, 800));
+    } else {
+      console.log(`[MULTI-REC] URL already recording, prompting needsForce: ${recId}`);
+      return res.json({ success: true, action: 'start-recording', needsForce: true, existingUrl: recId });
+    }
+  }
+  let recordingProcess = null;
+  let currentRecordingFile = null;
+  let currentRecording = null;
+  let currentRecordingMeta = null;
+
   let resolved = metadata;
   try {
     resolved = await resolveMetadata(metadata.url, metadata);
@@ -10962,29 +11129,42 @@ expressApp.post('/start-recording', async (req, res) => {
 
   recordingProcess.on('close', (code) => {
     console.log(`ffmpeg beëindigd (code ${code})`);
-    logStream.end();
-    isRecording = false;
-    recordingProcess = null;
+    try { logStream.end(); } catch (e) {}
+    const active = activeRecordings.get(recId);
+    if (active && active.recordingProcess === recordingProcess) {
+      activeRecordings.delete(recId);
+    }
     broadcastRecordingState();
   });
 
   recordingProcess.on('error', (err) => {
     console.error(`ffmpeg fout: ${err.message}`);
-    logStream.end();
-    isRecording = false;
-    recordingProcess = null;
+    try { logStream.end(); } catch (e) {}
+    const active = activeRecordings.get(recId);
+    if (active && active.recordingProcess === recordingProcess) {
+      activeRecordings.delete(recId);
+    }
     broadcastRecordingState();
   });
 
-  isRecording = true;
-  broadcastRecordingState();
   currentRecordingFile = recordingFilePath;
+  activeRecordings.set(recId, {
+    recordingProcess,
+    currentRecordingFile,
+    currentRecording,
+    currentRecordingMeta
+  });
+  broadcastRecordingState();
   console.log(`🔴 Opname gestart: ${recordingFilePath}`);
   res.json({ success: true, action: 'start-recording', file: filename, dir, meta: resolved, lock: lockMode, rawFile: lockMode ? path.basename(rawFilePath) : undefined, finalFile: path.basename(finalFilePath), input: { device: inputDevice, video_name: resolvedVideoName, audio_name: resolvedAudioName, pixel_format: inputPixelFormat } });
 });
 
 expressApp.post('/recording/crop-update', (req, res) => {
-  if (!isRecording || !currentRecording || !currentRecording.lock) {
+  const recId = String((req.body && req.body.url) || 'default_rec').trim();
+  let currentRecording = activeRecordings.has(recId) ? activeRecordings.get(recId).currentRecording : null;
+  if (!currentRecording && activeRecordings.size > 0) currentRecording = activeRecordings.values().next().value.currentRecording;
+
+  if (!currentRecording || !currentRecording.lock) {
     return res.json({ success: false, error: 'Geen actieve lock-opname' });
   }
 
@@ -10999,12 +11179,26 @@ expressApp.post('/recording/crop-update', (req, res) => {
 });
 
 expressApp.post('/stop-recording', (req, res) => {
-  try {
-    console.log(`[INGRESS] POST /stop-recording recording=${isRecording ? '1' : '0'}`);
-  } catch (e) {}
-  if (!isRecording || !recordingProcess) {
+  const reqId = String((req.body && (req.body.id || req.body.tabId || (req.body.metadata && req.body.metadata.url))) || '').trim();
+  let session = null;
+  let activeRecId = null;
+
+  if (reqId && activeRecordings.has(reqId)) {
+    session = activeRecordings.get(reqId);
+    activeRecId = reqId;
+  } else if (activeRecordings.size > 0) {
+    activeRecId = activeRecordings.keys().next().value;
+    session = activeRecordings.get(activeRecId);
+  }
+
+  if (!session) {
     return res.json({ success: false, error: 'Er loopt geen opname' });
   }
+
+  const recordingProcess = session.recordingProcess;
+  const currentRecordingFile = session.currentRecordingFile;
+  const currentRecording = session.currentRecording;
+  const currentRecordingMeta = session.currentRecordingMeta;
 
   const proc = recordingProcess;
   const lockJob = currentRecording && currentRecording.lock ? {
@@ -11028,9 +11222,7 @@ expressApp.post('/stop-recording', (req, res) => {
 
   const cleanup = () => {
     console.log(`⬛ Opname gestopt: ${currentRecordingFile}`);
-    recordingProcess = null;
-    isRecording = false;
-    currentRecording = null;
+    activeRecordings.delete(activeRecId);
     broadcastRecordingState();
   };
 
@@ -11665,6 +11857,7 @@ async function startRedditDlDownload(downloadId, url, platform, channel, title, 
         media_count: safeCount,
         media_bytes: safeTotalBytes
       };
+      await indexDownloadDirImmediately(downloadId);
       await updateDownload.run('completed', 100, dir, filenameLabel, safeTotalBytes, '', JSON.stringify(metaObj), null, downloadId);
       return;
     }
@@ -12768,6 +12961,7 @@ async function startOfscraperDownload(downloadId, url, platform, channel, title,
           return;
         }
         const metaObj = { tool: 'ofscraper', platform: 'onlyfans', channel: outChannel, title, url, outputDir: dir };
+        await indexDownloadDirImmediately(downloadId);
         await updateDownload.run('completed', 100, dir, '(multiple)', 0, '', JSON.stringify(metaObj), null, downloadId);
       } else {
         const hasFiles = dirHasAnyFiles();
@@ -12789,6 +12983,7 @@ async function startOfscraperDownload(downloadId, url, platform, channel, title,
               logPath: logPath || null
             }
           };
+          await indexDownloadDirImmediately(downloadId);
           await updateDownload.run('completed', 100, dir, '(multiple)', 0, '', JSON.stringify(metaObj), null, downloadId);
         } else {
           await updateDownloadStatus.run('error', 0, tail || `ofscraper exit code: ${code} (log: ${logPath || 'n/a'})`, downloadId);
@@ -12963,6 +13158,7 @@ async function startInstaloaderDownload(downloadId, url, platform, channel, titl
 
     if (last.code === 0 && dirHasAnyMediaFiles(dir)) {
       const metaObj = { tool: 'instaloader', platform: 'instagram', channel: outChannel, title, url, target: igTarget, outputDir: dir };
+      await indexDownloadDirImmediately(downloadId);
       await updateDownload.run('completed', 100, dir, '(multiple)', 0, '', JSON.stringify(metaObj), null, downloadId);
       return;
     }
@@ -14916,50 +15112,57 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
     const hasDirectoryFilter = enabledDirs && enabledDirs.length > 0 && enabledDirs.length < 10;
     const maxRowsPerCall = hasDirectoryFilter ? 800 : 260;
     const getBatch = (sort === 'rating_asc') ? getRecentHybridMediaByRatingAsc : (sort === 'rating_desc') ? getRecentHybridMediaByRatingDesc : (sort === 'oldest') ? getRecentHybridMediaByOldest : (sort === 'name_asc') ? getRecentHybridMediaByNameAsc : (sort === 'name_desc') ? getRecentHybridMediaByNameDesc : (includeActiveFiles ? getRecentHybridMediaWithActiveFiles : getRecentHybridMedia);
-    const batch = await getBatch.all(maxRowsPerCall, rowOffset);
-    for (const row of batch || []) {
-      if (row && row.platform === 'patreon') {
-        console.log(`[DEBUG-PATREON-API] Found DB row: id=${row.id}, kind=${row.kind}, filepath=${row.filepath}, includeActiveFiles=${includeActiveFiles}`);
+    let loopDone = false;
+    let safetyLimit = 0;
+    while (items.length < limit && !loopDone && safetyLimit < 15) {
+      safetyLimit++;
+      const batch = await getBatch.all(maxRowsPerCall, rowOffset);
+      if (!batch || batch.length === 0) {
+        loopDone = true;
+        break;
       }
 
-      if (!row) {rowOffset += 1;continue;}
-      
-      // Apply directory filter
-      const relPath = row.kind === 'p' ? row.id : (row.filepath ? path.relative(BASE_DIR, row.filepath) : '');
-      if (enabledDirs && relPath && !shouldIncludePath(relPath, enabledDirs)) {
-        rowOffset += 1;
-        continue;
-      }
-      if (includeActiveFiles && String(row.kind || '') === 'p' && row.rating_kind === 'd' && row.rating_id != null) {
-        const idNum = Number(row.rating_id);
-        if (Number.isFinite(idNum) && !runtimeActiveIdSet.has(idNum)) {
-          try {
-            const dr = await getDownload.get(idNum);
-            const st = String(dr && dr.status ? dr.status : '').toLowerCase();
-            if (st === 'downloading' || st === 'postprocessing' || st === 'queued' || st === 'pending') {
-              rowOffset += 1;
-              continue;
-            }
-          } catch (e) {}
+      for (const row of batch || []) {
+        if (row && row.platform === 'patreon') {
+          console.log(`[DEBUG-PATREON-API] Found DB row: id=${row.id}, kind=${row.kind}, filepath=${row.filepath}, includeActiveFiles=${includeActiveFiles}`);
         }
+
+        if (!row) {rowOffset += 1;continue;}
+        
+        // Apply directory filter
+        const relPath = row.kind === 'p' ? row.id : (row.filepath ? path.relative(BASE_DIR, row.filepath) : '');
+        if (enabledDirs && relPath && !shouldIncludePath(relPath, enabledDirs)) {
+          rowOffset += 1;
+          continue;
+        }
+
+        if (includeActiveFiles && String(row.kind || '') === 'p' && row.rating_kind === 'd' && row.rating_id != null) {
+          const idNum = Number(row.rating_id);
+          if (Number.isFinite(idNum) && !runtimeActiveIdSet.has(idNum)) {
+            try {
+              const dr = await getDownload.get(idNum);
+              const st = String(dr && dr.status ? dr.status : '').toLowerCase();
+              if (st === 'downloading' || st === 'postprocessing' || st === 'queued' || st === 'pending') {
+                rowOffset += 1;
+                continue;
+              }
+            } catch (e) {}
+          }
+        }
+        
+        const it = makeIndexedMediaItem(row);
+        pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
+        rowOffset += 1;
+        if (items.length >= limit) break;
       }
-      if (row.platform === 'wikifeet') {
-        console.log(`[DEBUG-WIKIFEET] checking row: kind=${row.kind}, id=${row.id}, relPath=${relPath}`);
+      
+      if (batch.length < maxRowsPerCall) {
+        loopDone = true;
       }
-      const it = makeIndexedMediaItem(row);
-      if (row.platform === 'wikifeet') {
-        console.log(`[DEBUG-WIKIFEET] makeIndexedMediaItem returned:`, it ? `kind=${it.kind}, id=${it.id}, dedupe_key=${it.dedupe_key}` : 'null');
-      }
-      const pushed = pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
-      if (row.platform === 'wikifeet') {
-        console.log(`[DEBUG-WIKIFEET] pushUniqueMediaItem returned: ${pushed}, items length now: ${items.length}`);
-      }
-      rowOffset += 1;
-      if (items.length >= limit) break;
     }
 
     const nextCursor = encodeCursor({ activeOffset: nextActiveOffset, rowOffset, dir: '', fileIndex: 0 });
-    const done = (batch && batch.length ? batch.length : 0) < maxRowsPerCall;
+    const done = loopDone;
     const payload = { success: true, items, next_cursor: nextCursor, done };
     const reqTime = Date.now() - reqStartTime;
     console.log(`📤 [${new Date().toISOString().substr(11,8)}] Response /api/media/recent-files - ${items.length} items in ${reqTime}ms`);
@@ -15051,34 +15254,55 @@ expressApp.get('/api/media/channel-files', async (req, res) => {
     const hasDirectoryFilter = enabledDirs && enabledDirs.length > 0 && enabledDirs.length < 10;
     const maxRowsPerCall = hasDirectoryFilter ? 800 : 260;
     const getBatch = (sort === 'rating_asc') ? getHybridMediaByChannelByRatingAsc : (sort === 'rating_desc') ? getHybridMediaByChannelByRatingDesc : (sort === 'oldest') ? getHybridMediaByChannelByOldest : (sort === 'name_asc') ? getHybridMediaByChannelByNameAsc : (sort === 'name_desc') ? getHybridMediaByChannelByNameDesc : (includeActiveFiles ? getHybridMediaByChannelWithActiveFiles : getHybridMediaByChannel);
-    const batch = await getBatch.all(platform, channel, platform, channel, platform, channel, maxRowsPerCall, rowOffset);
-    for (const row of batch || []) {
-      if (row && row.platform === 'patreon') {
-        console.log(`[DEBUG-PATREON-API] Found DB row: id=${row.id}, kind=${row.kind}, filepath=${row.filepath}, includeActiveFiles=${includeActiveFiles}`);
+    let loopDone = false;
+    let safetyLimit = 0;
+    while (items.length < limit && !loopDone && safetyLimit < 15) {
+      safetyLimit++;
+      const batch = await getBatch.all(platform, channel, platform, channel, platform, channel, maxRowsPerCall, rowOffset);
+      if (!batch || batch.length === 0) {
+        loopDone = true;
+        break;
       }
 
-      if (!row) {rowOffset += 1;continue;}
-      if (includeActiveFiles && String(row.kind || '') === 'p' && row.rating_kind === 'd' && row.rating_id != null) {
-        const idNum = Number(row.rating_id);
-        if (Number.isFinite(idNum) && !runtimeActiveIdSet.has(idNum)) {
-          try {
-            const dr = await getDownload.get(idNum);
-            const st = String(dr && dr.status ? dr.status : '').toLowerCase();
-            if (st === 'downloading' || st === 'postprocessing' || st === 'queued' || st === 'pending') {
-              rowOffset += 1;
-              continue;
-            }
-          } catch (e) {}
+      for (const row of batch || []) {
+        if (row && row.platform === 'patreon') {
+          console.log(`[DEBUG-PATREON-API] Found DB row: id=${row.id}, kind=${row.kind}, filepath=${row.filepath}, includeActiveFiles=${includeActiveFiles}`);
         }
+
+        if (!row) {rowOffset += 1;continue;}
+
+        const relPath = row.kind === 'p' ? row.id : (row.filepath ? path.relative(BASE_DIR, row.filepath) : '');
+        if (enabledDirs && relPath && !shouldIncludePath(relPath, enabledDirs)) {
+          rowOffset += 1;
+          continue;
+        }
+        
+        if (includeActiveFiles && String(row.kind || '') === 'p' && row.rating_kind === 'd' && row.rating_id != null) {
+          const idNum = Number(row.rating_id);
+          if (Number.isFinite(idNum) && !runtimeActiveIdSet.has(idNum)) {
+            try {
+              const dr = await getDownload.get(idNum);
+              const st = String(dr && dr.status ? dr.status : '').toLowerCase();
+              if (st === 'downloading' || st === 'postprocessing' || st === 'queued' || st === 'pending') {
+                rowOffset += 1;
+                continue;
+              }
+            } catch (e) {}
+          }
+        }
+        const it = makeIndexedMediaItem(row);
+        pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
+        rowOffset += 1;
+        if (items.length >= limit) break;
       }
-      const it = makeIndexedMediaItem(row);
-      pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
-      rowOffset += 1;
-      if (items.length >= limit) break;
+      
+      if (batch.length < maxRowsPerCall) {
+        loopDone = true;
+      }
     }
 
     const nextCursor = encodeCursor({ activeOffset: nextActiveOffset, rowOffset, dir: '', fileIndex: 0 });
-    const done = (batch && batch.length ? batch.length : 0) < maxRowsPerCall;
+    const done = loopDone;
     const payload = { success: true, items, next_cursor: nextCursor, done };
 
     if (!includeActive && !includeActiveFiles && (!cursorRaw || cur && cur.activeOffset === 0 && cur.rowOffset === 0 && !cur.dir && cur.fileIndex === 0)) {
@@ -15204,7 +15428,7 @@ expressApp.get('/gallery', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
-  res.send(getGalleryHTML());
+  res.sendFile(require('path').join(__dirname, 'public', 'gallery.html'));
 });
 
 expressApp.get('/check-cam-girls-db.html', (req, res) => {
@@ -15228,11 +15452,39 @@ expressApp.get('/api/directories', async (req, res) => {
     
     directories.sort();
     
-    const enabledDirs = loadDirectoryFilter() || directories;
+    const directoriesInfo = [];
+    try {
+      if (typeof db !== 'undefined' && db && db.isPostgres) {
+        const regex = '^' + BASE_DIR.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&') + '/(.*)/[^/]+$';
+        const sql = `
+          SELECT dir, SUM(c) as c FROM (
+            SELECT substring(filepath, ?) as dir, COUNT(*) as c
+            FROM downloads WHERE status != 'error' AND filepath IS NOT NULL AND filepath != ''
+            GROUP BY 1
+            UNION ALL
+            SELECT substring(f.relpath, '^(.*)/[^/]+$') as dir, COUNT(*) as c
+            FROM download_files f JOIN downloads d ON d.id = f.download_id WHERE d.status != 'error' 
+            GROUP BY 1
+            UNION ALL
+            SELECT substring(filepath, ?) as dir, COUNT(*) as c
+            FROM screenshots WHERE filepath IS NOT NULL AND filepath != ''
+            GROUP BY 1
+          ) sub WHERE dir IS NOT NULL AND dir != '' AND dir NOT LIKE '/%'
+          GROUP BY dir
+        `;
+        const rows = await db.prepare(sql).all(regex, regex);
+        for (const row of rows) {
+          directoriesInfo.push({ path: row.dir, count: parseInt(row.c, 10) });
+        }
+      }
+    } catch(e) { console.error('Error fetching directory counts:', e); }
+
+    const enabledDirs = loadDirectoryFilter() || directories.slice();
     
     res.json({ 
       success: true, 
       directories: directories,
+      directoriesInfo: directoriesInfo,
       enabled: enabledDirs,
       baseDir: BASE_DIR
     });

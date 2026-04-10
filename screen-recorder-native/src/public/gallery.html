@@ -758,7 +758,13 @@
               img.style.display = 'block';
               try { if (img.dataset) img.dataset.src = ''; } catch (e) {}
               try { if (img.dataset) img.dataset.real = base; } catch (e) {}
-              try { if (img.dataset) img.dataset._thumbLoaded = '1'; } catch (e) {}
+              
+              const cur = String(preloader.currentSrc || preloader.src || '');
+              if (cur.includes('/media/pending-thumb.svg')) {
+                try { thumbIo.observe(img); } catch (e) {}
+              } else {
+                try { if (img.dataset) img.dataset._thumbLoaded = '1'; } catch (e) {}
+              }
               try { if (img.dataset) img.dataset._thumbQueued = ''; } catch (e) {}
               try { if (img.dataset) img.dataset._thumbFallback = ''; } catch (e) {}
             } catch (e) {}
@@ -768,6 +774,7 @@
               img.src = FALLBACK_THUMB;
               img.style.display = 'none';
               try { if (img.dataset) img.dataset._thumbFallback = '1'; } catch (e) {}
+              try { thumbIo.observe(img); } catch (e) {}
             } catch (e) {}
           };
           preloader.src = base;
@@ -800,10 +807,16 @@
       } catch (e) {}
     }
 
+    function markThumbDone(img) {
+      if (!img) return;
+      try { thumbInflight.delete(img); } catch (e) {}
+      drainThumbQueueSoon();
+    }
+
     function enqueueThumb(img) {
       try {
         if (!img || !img.dataset) return;
-        const base = String(img.dataset.src || '');
+        const base = String(img.dataset.real || img.dataset.src || '');
         if (!base) return;
         if (img.dataset._thumbQueued === '1') return;
         if (img.dataset._thumbLoaded === '1') return;
@@ -820,12 +833,35 @@
           if (!img || !img.dataset) continue;
           if (!img.isConnected) continue;
           img.dataset._thumbQueued = '';
-          const base = String(img.dataset.src || '');
+          const base = String(img.dataset.real || img.dataset.src || '');
           if (!base) continue;
           if (thumbInflight.has(img)) continue;
           const tries = parseInt(String(img.dataset.retries || '0'), 10) || 0;
           const bust = tries > 0 ? ((base.indexOf('?') >= 0 ? '&' : '?') + 'r=' + Date.now() + '-' + tries) : '';
           thumbInflight.add(img);
+          
+          if (!img.onload || String(img.onload).includes('markThumbDone')) {
+            img.onload = () => {
+              try {
+                const cur = String(img.currentSrc || img.src || '');
+                if (!cur.includes('/media/pending-thumb.svg') && cur !== FALLBACK_THUMB) {
+                  try { if (img.dataset) img.dataset._thumbLoaded = '1'; } catch (e) {}
+                  try { thumbIo.unobserve(img); } catch (e) {}
+                }
+              } catch (e) {}
+              markThumbDone(img);
+            };
+          }
+          if (!img.onerror || String(img.onerror).includes('FALLBACK_THUMB')) {
+            img.onerror = () => {
+              try {
+                img.onerror = null;
+                img.src = FALLBACK_THUMB;
+              } catch (e) {}
+              markThumbDone(img);
+            };
+          }
+          
           img.src = base + bust;
         }
       } catch (e) {}
@@ -869,7 +905,7 @@
         let n = 0;
         for (const img of imgs) {
           if (!img) continue;
-          const src = img.dataset ? String(img.dataset.src || '') : (img.getAttribute ? String(img.getAttribute('data-src') || '') : '');
+          const src = img.dataset ? String(img.dataset.real || img.dataset.src || '') : (img.getAttribute ? String(img.getAttribute('data-src') || '') : '');
           if (!src) continue;
           try {
             const r = img.getBoundingClientRect();
@@ -1085,6 +1121,7 @@
         img.alt = it.title || '';
         img.onerror = () => {
           try {
+            console.error('Grid img.onerror fired for:', img.src, 'original base:', img.dataset && img.dataset.real);
             img.onerror = null;
             img.src = FALLBACK_THUMB;
           } catch (e) {}
@@ -1757,23 +1794,26 @@
 
     async function softRefreshTop() {
       if (state.loading || state.reloading || state.items.length === 0) return;
+      const refreshStart = Date.now();
       try {
+        // Fetch the NEWEST items from scratch (no cursor) so we catch new downloads
         let path = '';
+        const fetchLimit = Math.min(state.limit, 120);
         const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
         const searchParam = state.search ? '&q=' + encodeURIComponent(state.search) : '';
-        elSentinel.textContent = '📡 Aanvraag verzenden (limit=' + state.limit + ')...';
         if (state.mode === 'recent') {
-          path = '/api/media/recent-files?limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam + searchParam;
+          path = '/api/media/recent-files?limit=' + fetchLimit + '&cursor=&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam + searchParam;
         } else {
           const ch = state.channel;
-          if (!ch) { state.done = true; return; }
-          path = '/api/media/channel-files?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0' + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam;
+          if (!ch) return;
+          path = '/api/media/channel-files?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=' + fetchLimit + '&cursor=&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0' + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam;
         }
         const data = await api(path);
-        const fetchTime = Date.now() - startTime;
-        elSentinel.textContent = '⚙️ Verwerken (' + fetchTime + 'ms)...';
-        if (!data.success) throw new Error(data.error || 'load failed');
+        if (!data || !data.success) return;
         const items = data.items || [];
+        if (!items.length) return;
+
+        // Find which items are genuinely new (not already in state.items)
         const existing = new Set();
         for (const it of state.items) {
           try {
@@ -1781,39 +1821,27 @@
             if (k) existing.add(k);
           } catch (e) {}
         }
-        const uniqueItems = [];
+        const newItems = [];
         for (const it of items) {
           try {
             const k = itemKey(it);
-            if (!k) {
-              uniqueItems.push(it);
-              continue;
-            }
+            if (!k) continue;
             if (existing.has(k)) continue;
             existing.add(k);
-            uniqueItems.push(it);
-          } catch (e) {
-            uniqueItems.push(it);
-          }
+            newItems.push(it);
+          } catch (e) {}
         }
-        state.items = state.items.concat(uniqueItems);
-        state.cursor = data.next_cursor || '';
-        state.done = data.done || false;
-        addCards(uniqueItems);
-        setHint();
-        state.loading = false;
-        const totalTime = Date.now() - startTime;
-        const stats = items.length + ' items in ' + totalTime + 'ms';
-        if (state.done) {
-          elSentinel.innerHTML = '✓ Klaar: ' + stats;
-        } else {
-          elSentinel.innerHTML = '↓ Scroll voor meer (' + stats + ') <button onclick="loadNext()" style="margin-left:10px;padding:4px 8px;font-size:11px;background:#0f3460;color:#fff;border:1px solid #1f2a52;border-radius:4px;cursor:pointer;">Forceer laden</button>';
+
+        if (newItems.length > 0) {
+          // Prepend new items to state and DOM
+          state.items = newItems.concat(state.items);
+          prependCards(newItems);
+          setHint();
+          const elapsed = Date.now() - refreshStart;
+          console.log('[softRefreshTop] Prepended ' + newItems.length + ' new items in ' + elapsed + 'ms');
         }
       } catch (e) {
-        state.loading = false;
-        const totalTime = Date.now() - startTime;
-        elSentinel.textContent = '❌ Fout na ' + totalTime + 'ms: ' + e.message;
-        log('Load error: ' + e.message);
+        console.warn('[softRefreshTop] Error:', e.message);
       }
     }
 
