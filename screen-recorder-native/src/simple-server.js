@@ -10237,7 +10237,7 @@ expressApp.get('/status', async (req, res) => {
   const activeDownloadsList = [];
   try {
     for (const [id, ctx] of downloadActivityContextById.entries()) {
-      if (activeProcIds.has(id) || startingJobs.has(id)) {
+      if (activeProcIds.has(id) || startingJobs.has(id) || activePostprocessJobs.has(id)) {
         activeDownloadsList.push({ id, ...ctx });
       }
     }
@@ -10255,7 +10255,8 @@ expressApp.get('/status', async (req, res) => {
             status: 'queued',
             platform: qr.platform,
             channel: qr.channel,
-            title: qr.title
+            title: qr.title,
+            lane: detectLane(qr.platform)
           });
         }
       }
