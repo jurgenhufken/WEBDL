@@ -11952,6 +11952,7 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
   }
 
   if (
+    platform === 'twitter' ||
     platform === 'wikifeet' ||
     platform === 'wikifeetx' ||
     platform === 'kinky' ||
@@ -13270,7 +13271,13 @@ async function startGalleryDlDownload(downloadId, url, platform, channel, title,
       return;
     }
 
-    const proc = spawnNice(GALLERY_DL, [url], { cwd: dir });
+    const gdlArgs = [url];
+    // For Twitter/X: download entire conversation thread (all replies with media)
+    // Needs Firefox cookies for authenticated timeline access (conversations API)
+    if (platform === 'twitter') {
+      gdlArgs.unshift('--cookies-from-browser', 'firefox', '-o', 'conversations=true', '-o', 'replies=true');
+    }
+    const proc = spawnNice(GALLERY_DL, gdlArgs, { cwd: dir });
     activeProcesses.set(downloadId, proc);
     try {startingJobs.delete(downloadId);} catch (e) {}
 

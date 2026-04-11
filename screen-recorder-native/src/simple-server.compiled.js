@@ -5490,28 +5490,31 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
   LIMIT ? OFFSET ?
 `);
 
-const getRecentHybridMedia = db.prepare(db.isPostgres ? `
+const getRecentHybridMedia = db.prepare(`
   SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
   FROM (
-    SELECT
-      'p' AS kind,
-      f.relpath AS id,
-      d.platform AS platform,
-      d.channel AS channel,
-      d.title AS title,
-      f.relpath AS filepath,
-      COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
-      NULL AS thumbnail,
-      d.url AS url,
-      d.source_url AS source_url,
-      d.rating AS rating,
-      'd' AS rating_kind,
-      d.id AS rating_id
-    FROM download_files f
-    JOIN downloads d ON d.id = f.download_id
-    WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
-      AND d.id > (SELECT MAX(id) - 5000 FROM downloads)
+    SELECT * FROM (
+      SELECT DISTINCT ON (f.relpath)
+        'p' AS kind,
+        f.relpath AS id,
+        d.platform AS platform,
+        d.channel AS channel,
+        d.title AS title,
+        f.relpath AS filepath,
+        COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
+        CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
+        NULL::text AS thumbnail,
+        d.url AS url,
+        d.source_url AS source_url,
+        d.rating AS rating,
+        'd' AS rating_kind,
+        d.id AS rating_id
+      FROM download_files f
+      JOIN downloads d ON d.id = f.download_id
+      WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
+        AND d.id > (SELECT MAX(id) - 5000 FROM downloads)
+      ORDER BY f.relpath, (CASE WHEN lower(d.channel) = 'unknown' THEN 0 ELSE 1 END) DESC, d.id DESC
+    ) deduped_files
 
     UNION ALL
 
@@ -5535,6 +5538,7 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
       AND d.filepath IS NOT NULL
       AND d.filepath != ''
       AND d.id > (SELECT MAX(id) - 5000 FROM downloads)
+      AND NOT EXISTS (SELECT 1 FROM download_files f2 WHERE f2.download_id = d.id)
 
     UNION ALL
 
@@ -5547,75 +5551,6 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
       s.filepath AS filepath,
       s.created_at::text AS created_at,
       CAST(EXTRACT(EPOCH FROM s.created_at) * 1000 AS BIGINT) AS ts,
-      NULL AS thumbnail,
-      s.url AS url,
-      NULL AS source_url,
-      s.rating AS rating,
-      's' AS rating_kind,
-      s.id AS rating_id
-    FROM screenshots s
-    WHERE s.filepath IS NOT NULL
-      AND s.filepath != ''
-  )
-  ORDER BY ts DESC
-  LIMIT ? OFFSET ?
-` : `
-  SELECT kind, id, platform, channel, title, filepath, created_at, ts, thumbnail, url, source_url, rating, rating_kind, rating_id
-  FROM (
-    SELECT
-      'p' AS kind,
-      f.relpath AS id,
-      d.platform AS platform,
-      d.channel AS channel,
-      d.title AS title,
-      f.relpath AS filepath,
-      COALESCE(f.created_at, d.created_at) AS created_at,
-      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
-      NULL AS thumbnail,
-      d.url AS url,
-      d.source_url AS source_url,
-      d.rating AS rating,
-      'd' AS rating_kind,
-      d.id AS rating_id
-    FROM download_files f
-    JOIN downloads d ON d.id = f.download_id
-    WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
-      AND d.id > (SELECT MAX(id) - 5000 FROM downloads)
-
-    UNION ALL
-
-    SELECT
-      'd' AS kind,
-      CAST(d.id AS TEXT) AS id,
-      d.platform AS platform,
-      d.channel AS channel,
-      d.title AS title,
-      d.filepath AS filepath,
-      d.created_at AS created_at,
-      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
-      d.thumbnail AS thumbnail,
-      d.url AS url,
-      d.source_url AS source_url,
-      d.rating AS rating,
-      'd' AS rating_kind,
-      d.id AS rating_id
-    FROM downloads d
-    WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
-      AND d.filepath IS NOT NULL
-      AND d.filepath != ''
-      AND d.id > (SELECT MAX(id) - 5000 FROM downloads)
-
-    UNION ALL
-
-    SELECT
-      's' AS kind,
-      CAST(s.id AS TEXT) AS id,
-      s.platform AS platform,
-      s.channel AS channel,
-      s.title AS title,
-      s.filepath AS filepath,
-      s.created_at AS created_at,
-      CAST(strftime('%s', s.created_at) AS INTEGER) * 1000 AS ts,
       NULL AS thumbnail,
       s.url AS url,
       NULL AS source_url,
@@ -12017,6 +11952,7 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
   }
 
   if (
+    platform === 'twitter' ||
     platform === 'wikifeet' ||
     platform === 'wikifeetx' ||
     platform === 'kinky' ||
@@ -13335,7 +13271,13 @@ async function startGalleryDlDownload(downloadId, url, platform, channel, title,
       return;
     }
 
-    const proc = spawnNice(GALLERY_DL, [url], { cwd: dir });
+    const gdlArgs = [url];
+    // For Twitter/X: download entire conversation thread (all replies with media)
+    // Needs Firefox cookies for authenticated timeline access (conversations API)
+    if (platform === 'twitter') {
+      gdlArgs.unshift('--cookies-from-browser', 'firefox', '-o', 'conversations=true', '-o', 'replies=true');
+    }
+    const proc = spawnNice(GALLERY_DL, gdlArgs, { cwd: dir });
     activeProcesses.set(downloadId, proc);
     try {startingJobs.delete(downloadId);} catch (e) {}
 
@@ -13368,6 +13310,30 @@ async function startGalleryDlDownload(downloadId, url, platform, channel, title,
           }
           console.log(`   📂 Geïndexeerd: ${indexed} files voor download #${downloadId}`);
           recentFilesTopCache.clear();
+
+          // Post-download channel derivation: if channel is still 'unknown', try to derive from gallery-dl output
+          if (!outChannel || outChannel === 'unknown') {
+            try {
+              let betterChannel = null;
+              for (const fullPath of files) {
+                const relFromDir = path.relative(dir, fullPath);
+                // gallery-dl/pornpics/94245654 Gallery Title/file.jpg
+                const gdMatch = relFromDir.match(/gallery-dl\/pornpics\/(?:\d+\s+)?([^\/]+)\//i);
+                if (gdMatch && gdMatch[1]) {
+                  betterChannel = gdMatch[1];
+                  break;
+                }
+              }
+              if (betterChannel) {
+                await db.prepare(
+                  db.isPostgres
+                    ? 'UPDATE downloads SET channel = $1 WHERE id = $2'
+                    : 'UPDATE downloads SET channel = ? WHERE id = ?'
+                ).run(betterChannel, downloadId);
+                console.log(`   📝 Channel afgeleid: "${betterChannel}" voor download #${downloadId}`);
+              }
+            } catch (e) {}
+          }
         } catch (e) {
           console.log(`   ⚠️  Indexing fout: ${e.message}`);
         }
@@ -15240,20 +15206,36 @@ function makePathMediaItem({ relPath, platform, channel, title, created_at, thum
       if (info && info.name) channelDisplay = info.name;
       else if (/^thread_\d+$/i.test(channelDisplay)) channelDisplay = 'Thread ' + channelDisplay.replace(/^thread_/i, '');
     }
+    // For 'unknown' channel, try to derive from relPath directory structure
+    if (!channelDisplay || channelDisplay.toLowerCase() === 'unknown') {
+      // relPath like: pornpics/Gallery Name/gallery-dl/pornpics/ID Title/file.jpg
+      const parts = relPath.split('/');
+      if (parts.length >= 2 && parts[0].toLowerCase() === plat && parts[1] && parts[1].toLowerCase() !== 'unknown') {
+        channelDisplay = parts[1];
+      }
+      // Also try gallery-dl subpath: pornpics/unknown/gallery-dl/pornpics/94245654 Title/file.jpg
+      if ((!channelDisplay || channelDisplay.toLowerCase() === 'unknown') && relPath.includes('gallery-dl/pornpics/')) {
+        const gdMatch = relPath.match(/gallery-dl\/pornpics\/(?:\d+\s+)?([^\/]+)\//i);
+        if (gdMatch && gdMatch[1]) channelDisplay = gdMatch[1];
+      }
+    }
+    // Strip gallery-dl numeric ID prefix from channel names (e.g. "94245654 Title" → "Title")
+    if (channelDisplay && /^\d{6,}\s+/.test(channelDisplay)) {
+      channelDisplay = channelDisplay.replace(/^\d+\s+/, '');
+    }
   } catch (e) {}
 
-  const combinedTitle = title ? `${title} • ${base}` : base;
-  let titleDisplay = channelDisplay ? `${channelDisplay} • ${combinedTitle}` : combinedTitle;
+  // For individual files, show just the filename — not the parent download's title
+  const isUnknown = !channelDisplay || channelDisplay.toLowerCase() === 'unknown';
+  const combinedTitle = !isUnknown ? `${channelDisplay} • ${base}` : (title && title !== base ? `${title} • ${base}` : base);
+  let titleDisplay = combinedTitle;
 
-  let dedupeKey = absPath;
-  try {
-    if (fs.existsSync(absPath)) dedupeKey = fs.realpathSync(absPath);
-  } catch (e) { dedupeKey = absPath; }
+  const dedupeKey = absPath;
   return {
     kind: 'p',
     id: relPath,
     platform,
-    channel: channel,
+    channel: channelDisplay || channel,
     channel_display: channelDisplay,
     title: combinedTitle,
     title_display: titleDisplay,
@@ -15468,31 +15450,19 @@ async function getDynamicHybridBatch(stmt, typeFilter, ...args) {
   let sql = stmt.source || '';
   if (!sql) return await stmt.all(...args);
 
-  const isPG = typeof db.isPostgres !== 'undefined' ? db.isPostgres : !!db.pool;
-  const vFilter = isPG ? 
-    "(f.relpath ILIKE '%.mp4' OR f.relpath ILIKE '%.webm' OR f.relpath ILIKE '%.mov' OR f.relpath ILIKE '%.mkv')" :
-    "(f.relpath LIKE '%.mp4' OR f.relpath LIKE '%.webm' OR f.relpath LIKE '%.mov' OR f.relpath LIKE '%.mkv')";
-  const iFilter = isPG ? 
-    "(f.relpath ILIKE '%.jpg' OR f.relpath ILIKE '%.jpeg' OR f.relpath ILIKE '%.png' OR f.relpath ILIKE '%.gif' OR f.relpath ILIKE '%.webp')" : 
-    "(f.relpath LIKE '%.jpg' OR f.relpath LIKE '%.jpeg' OR f.relpath LIKE '%.png' OR f.relpath LIKE '%.gif' OR f.relpath LIKE '%.webp')";
+  // Apply type filter by wrapping the entire query in an outer WHERE on filepath
+  const ext = typeFilter === 'video_only'
+    ? "(filepath ILIKE '%.mp4' OR filepath ILIKE '%.webm' OR filepath ILIKE '%.mov' OR filepath ILIKE '%.mkv')"
+    : "(filepath ILIKE '%.jpg' OR filepath ILIKE '%.jpeg' OR filepath ILIKE '%.png' OR filepath ILIKE '%.gif' OR filepath ILIKE '%.webp')";
   
-  const dvFilter = vFilter.replace(/f\.relpath/g, 'd.filepath');
-  const diFilter = iFilter.replace(/f\.relpath/g, 'd.filepath');
-  const svFilter = vFilter.replace(/f\.relpath/g, 's.filepath');
-  const siFilter = iFilter.replace(/f\.relpath/g, 's.filepath');
-
-  const insertF = typeFilter === 'video_only' ? vFilter : iFilter;
-  const insertD = typeFilter === 'video_only' ? dvFilter : diFilter;
-  const insertS = typeFilter === 'video_only' ? svFilter : siFilter;
-
-  const branches = sql.split('UNION ALL');
-  if (branches.length >= 3) {
-    branches[0] = branches[0] + ' AND ' + insertF + ' ';
-    branches[1] = branches[1] + ' AND ' + insertD + ' ';
-    // branches[2] ends with `) \n ORDER BY ... LIMIT ? OFFSET ?`
-    // We must inject before the closing parenthesis!
-    branches[2] = branches[2].replace(/\n\s*\)\s*ORDER BY/, ' AND ' + insertS + '\n  ) ORDER BY');
-    sql = branches.join('\nUNION ALL\n');
+  // The query is: SELECT ... FROM (...) ORDER BY ts DESC LIMIT ? OFFSET ?
+  // Wrap it: SELECT * FROM (original) outer_wrap WHERE ext ORDER BY ts DESC LIMIT ? OFFSET ?
+  // Remove the trailing ORDER BY/LIMIT/OFFSET, wrap, re-add
+  const orderMatch = sql.match(/\n\s*(ORDER BY\s+ts\s+(?:DESC|ASC)\s*\n\s*LIMIT\s+\?\s+OFFSET\s+\?)\s*$/i);
+  if (orderMatch) {
+    const orderClause = orderMatch[1];
+    const baseQuery = sql.slice(0, sql.length - orderMatch[0].length);
+    sql = `SELECT * FROM (${baseQuery}) _typed WHERE ${ext}\n  ${orderClause}`;
   }
 
   const dynamicStmt = db.prepare(sql);
