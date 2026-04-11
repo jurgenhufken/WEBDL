@@ -17004,6 +17004,94 @@ async function startServer() {
       setTimeout(() => { maybeAutoIndexDownloadFiles().catch(() => { }); }, 1800);
       setInterval(() => { maybeAutoIndexDownloadFiles().catch(() => { }); }, DOWNLOAD_FILES_AUTO_INDEX_MS);
     } catch (e) { }
+
+    // ── 4K Downloader auto-index watcher ──────────────────────────────
+    // Watches _4KDownloader dirs for new files and auto-indexes them.
+    const _4K_WATCH_DIRS = [
+      path.join(BASE_DIR, '_4KDownloader'),
+      '/Volumes/HDD - One Touch/WEBDL/_4KDownloader',
+    ];
+    const _4K_VIDEO_EXTS = new Set(['.mp4', '.mkv', '.webm', '.mov', '.m4v']);
+    const _4K_MIN_AGE_MS = 3000; // wait 3s after last write before indexing
+    const _4K_DEBOUNCE_MS = 5000;
+    let _4kIndexTimer = null;
+    const _4kPendingFiles = new Set();
+
+    async function index4kFile(absPath) {
+      try {
+        if (!fs.existsSync(absPath)) return;
+        const ext = path.extname(absPath).toLowerCase();
+        if (!_4K_VIDEO_EXTS.has(ext)) return;
+        const st = fs.statSync(absPath);
+        if (!st.isFile() || st.size < 1024) return;
+        if (Date.now() - (st.mtimeMs || 0) < _4K_MIN_AGE_MS) return; // still writing
+
+        // Check if already in DB
+        const existing = await getDownloadIdByFilepath.get(absPath);
+        if (existing && existing.id) return;
+
+        // Derive channel from parent dir name
+        const rel = absPath.split(/_4KDownloader[\\/]/)[1] || '';
+        const parts = rel.split(/[\\/]/).filter(Boolean);
+        const channel = parts.length >= 2 ? parts[0] : '4KDownloader';
+        const title = path.basename(absPath, ext).replace(/_/g, ' ').trim() || 'imported';
+        const ts = new Date(Math.min(Date.now(), st.mtimeMs || Date.now())).toISOString();
+
+        await insertCompletedDownload.run(
+          'file://' + absPath,  // url
+          'youtube',            // platform
+          channel,              // channel
+          title,                // title
+          path.basename(absPath), // filename
+          absPath,              // filepath
+          st.size || 0,         // filesize
+          ext.replace('.', ''), // format
+          'completed',          // status
+          100,                  // progress
+          JSON.stringify({ webdl_kind: 'imported_video', importer: '4k-watcher' }) // metadata
+        );
+        console.log(`📥 [4K-Watcher] Geïndexeerd: ${channel}/${path.basename(absPath)}`);
+        recentFilesTopCache.clear();
+      } catch (e) {
+        if (e && e.message && !e.message.includes('duplicate')) {
+          console.warn(`⚠️ [4K-Watcher] Index fout: ${e.message}`);
+        }
+      }
+    }
+
+    function flush4kPending() {
+      const batch = [..._4kPendingFiles];
+      _4kPendingFiles.clear();
+      if (!batch.length) return;
+      (async () => {
+        for (const fp of batch) {
+          await index4kFile(fp);
+        }
+      })().catch(() => {});
+    }
+
+    for (const watchDir of _4K_WATCH_DIRS) {
+      if (!fs.existsSync(watchDir)) {
+        console.log(`📂 [4K-Watcher] Map niet gevonden: ${watchDir} (overgeslagen)`);
+        continue;
+      }
+      try {
+        fs.watch(watchDir, { recursive: true }, (eventType, filename) => {
+          if (!filename) return;
+          const ext = path.extname(filename).toLowerCase();
+          if (!_4K_VIDEO_EXTS.has(ext)) return;
+          const absPath = path.join(watchDir, filename);
+          _4kPendingFiles.add(absPath);
+          if (_4kIndexTimer) clearTimeout(_4kIndexTimer);
+          _4kIndexTimer = setTimeout(flush4kPending, _4K_DEBOUNCE_MS);
+        });
+        console.log(`👁️  [4K-Watcher] Bewaakt: ${watchDir}`);
+      } catch (e) {
+        console.warn(`⚠️ [4K-Watcher] Watch mislukt: ${watchDir}: ${e.message}`);
+      }
+    }
+    // ── einde 4K Downloader watcher ───────────────────────────────────
+
   });
 
 }
