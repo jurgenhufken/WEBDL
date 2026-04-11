@@ -15713,31 +15713,48 @@ function expandRowToMediaItems(row, cursorFileIndex = 0, maxItems = 500) {
   }
 }
 async function getDynamicHybridBatch(stmt, typeFilter, ...args) {
-  if (typeFilter !== 'video_only' && typeFilter !== 'image_only') {
+  // Extract optional platformFilter from last args if it's an object with _platformFilter key
+  let platformFilter = null;
+  if (args.length > 0 && args[args.length - 1] && typeof args[args.length - 1] === 'object' && args[args.length - 1]._platformFilter) {
+    platformFilter = args.pop();
+  }
+
+  const needsTypeFilter = (typeFilter === 'video_only' || typeFilter === 'image_only');
+  const needsPlatformFilter = platformFilter && platformFilter.platforms && platformFilter.platforms.length > 0;
+
+  if (!needsTypeFilter && !needsPlatformFilter) {
     return await stmt.all(...args);
   }
+
   let sql = stmt.source || '';
   if (!sql) return await stmt.all(...args);
 
-  // Apply type filter by wrapping the entire query
-  const ext = typeFilter === 'video_only'
-    ? "(filepath ILIKE '%.mp4' OR filepath ILIKE '%.webm' OR filepath ILIKE '%.mov' OR filepath ILIKE '%.mkv' OR filepath ILIKE '%.MP4' OR filepath ILIKE '%.MOV')"
-    : "(filepath ILIKE '%.jpg' OR filepath ILIKE '%.jpeg' OR filepath ILIKE '%.png' OR filepath ILIKE '%.gif' OR filepath ILIKE '%.webp' OR filepath ILIKE '%.avif')";
-
-  // Simple robust approach: wrap the entire query as subquery and add WHERE filter
-  // The original query ends with ORDER BY ts DESC LIMIT ? OFFSET ?
-  // We wrap it: SELECT * FROM (SELECT * FROM (original_without_order_limit) _inner WHERE ext) _typed ORDER BY ts DESC LIMIT ? OFFSET ?
-  
-  // Find and strip trailing ORDER BY ... LIMIT ... OFFSET ... (flexible whitespace/newline matching)
-  const orderMatch = sql.match(/(ORDER\s+BY\s+ts\s+(?:DESC|ASC)\s*(?:NULLS\s+(?:FIRST|LAST)\s*)?LIMIT\s+\?\s*OFFSET\s+\?)\s*$/is);
-  if (orderMatch) {
-    const orderClause = orderMatch[1];
-    const baseQuery = sql.slice(0, sql.length - orderMatch[0].length).trimEnd();
-    sql = `SELECT * FROM (${baseQuery}) _typed WHERE ${ext} ${orderClause}`;
-  } else {
-    // Fallback: just wrap the whole thing
-    sql = `SELECT * FROM (${sql}) _typed_fb WHERE ${ext}`;
+  // Platform filter: replace ID-window with platform IN() directly in each subquery
+  if (needsPlatformFilter) {
+    const plats = platformFilter.platforms.map(p => `'${String(p).replace(/'/g, "''")}'`).join(',');
+    const platClause = `AND d.platform IN (${plats})`;
+    // Replace "AND d.id > (SELECT MAX(id) - N FROM downloads)" with platform filter
+    sql = sql.replace(/AND\s+d\.id\s*>\s*\(SELECT\s+MAX\(id\)\s*-\s*\d+\s+FROM\s+downloads\)/gi, platClause);
+    // Also filter the screenshots subquery (uses s. prefix)
+    sql = sql.replace(/(FROM\s+screenshots\s+s\s+WHERE)/gi, `$1 s.platform IN (${plats}) AND`);
   }
+
+  // Type filter: wrap as outer subquery (this is fine since it's a simple extension filter)
+  if (needsTypeFilter) {
+    const ext = typeFilter === 'video_only'
+      ? "(filepath ILIKE '%.mp4' OR filepath ILIKE '%.webm' OR filepath ILIKE '%.mov' OR filepath ILIKE '%.mkv' OR filepath ILIKE '%.MP4' OR filepath ILIKE '%.MOV')"
+      : "(filepath ILIKE '%.jpg' OR filepath ILIKE '%.jpeg' OR filepath ILIKE '%.png' OR filepath ILIKE '%.gif' OR filepath ILIKE '%.webp' OR filepath ILIKE '%.avif')";
+
+    const orderMatch = sql.match(/(ORDER\s+BY\s+ts\s+(?:DESC|ASC)\s*(?:NULLS\s+(?:FIRST|LAST)\s*)?LIMIT\s+\?\s*OFFSET\s+\?)\s*$/is);
+    if (orderMatch) {
+      const orderClause = orderMatch[1];
+      const baseQuery = sql.slice(0, sql.length - orderMatch[0].length).trimEnd();
+      sql = `SELECT * FROM (${baseQuery}) _typed WHERE ${ext} ${orderClause}`;
+    } else {
+      sql = `SELECT * FROM (${sql}) _typed_fb WHERE ${ext}`;
+    }
+  }
+
   const dynamicStmt = db.prepare(sql);
   return await dynamicStmt.all(...args);
 }
@@ -15805,13 +15822,27 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
     const nextActiveOffset = -1;
     let rowOffset = cur.rowOffset;
     const hasDirectoryFilter = enabledDirs && enabledDirs.length > 0 && enabledDirs.length < 10;
-    const maxRowsPerCall = hasDirectoryFilter ? 800 : 260;
+    const maxRowsPerCall = hasDirectoryFilter ? 2000 : 260;
     const getBatch = (sort === 'rating_asc') ? getRecentHybridMediaByRatingAsc : (sort === 'rating_desc') ? getRecentHybridMediaByRatingDesc : (sort === 'oldest') ? getRecentHybridMediaByOldest : (sort === 'name_asc') ? getRecentHybridMediaByNameAsc : (sort === 'name_desc') ? getRecentHybridMediaByNameDesc : (includeActiveFiles ? getRecentHybridMediaWithActiveFiles : getRecentHybridMedia);
+    
+    // Build SQL-level platform filter when enabledDirs contains platform objects
+    let sqlPlatformFilter = null;
+    if (hasDirectoryFilter && enabledDirs.some(d => d && typeof d === 'object' && d.platform)) {
+      const platforms = enabledDirs.filter(d => d && typeof d === 'object' && d.platform).map(d => String(d.platform).toLowerCase().trim());
+      if (platforms.length > 0 && platforms.length <= 10) {
+        sqlPlatformFilter = { _platformFilter: true, platforms };
+      }
+    }
+    
     let loopDone = false;
     let safetyLimit = 0;
-    while (items.length < limit && !loopDone && safetyLimit < 15) {
+    const maxSafety = hasDirectoryFilter ? 60 : 15;
+    while (items.length < limit && !loopDone && safetyLimit < maxSafety) {
       safetyLimit++;
-      const batch = await getDynamicHybridBatch(getBatch, type, maxRowsPerCall, rowOffset);
+      const batchArgs = sqlPlatformFilter 
+        ? [maxRowsPerCall, rowOffset, sqlPlatformFilter]
+        : [maxRowsPerCall, rowOffset];
+      const batch = await getDynamicHybridBatch(getBatch, type, ...batchArgs);
       if (!batch || batch.length === 0) {
         loopDone = true;
         break;
