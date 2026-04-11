@@ -2472,7 +2472,7 @@
         const ptit = document.createElement('strong');
         ptit.style.color = '#fff';
         ptit.style.cursor = 'pointer';
-        const totalFilesP = (platInfo.fileCount || 0) + (platInfo.screenshotCount || 0);
+        const totalFilesP = (platInfo.count || 0) + (platInfo.fileCount || 0) + (platInfo.screenshotCount || 0);
         ptit.textContent = '▶ ' + plat + ' (' + totalFilesP + ' files)';
         
         pheader.appendChild(pcheck);
@@ -2508,7 +2508,7 @@
            ctit.style.fontSize = '12px';
            ctit.style.color = '#ccc';
            const dName = ch.displayName || (ch.name.startsWith('thread_') ? 'Thread ' + ch.name.substring(7) : ch.name);
-           const totalFilesC = (ch.fileCount || 0) + (ch.screenshotCount || 0);
+           const totalFilesC = (ch.count || 0) + (ch.fileCount || 0) + (ch.screenshotCount || 0);
            ctit.textContent = dName + ' (' + totalFilesC + ')';
 
            clabel.appendChild(ccheck);
