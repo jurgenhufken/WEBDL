@@ -756,6 +756,38 @@
       if (cleanedTitle) meta.title = cleanedTitle;
     }
 
+    // Pornpics
+    else if (/pornpics\.com/i.test(url)) {
+      meta.platform = 'pornpics';
+      // Gallery page: pornpics.com/galleries/slug-12345/
+      const gm = url.match(/pornpics\.com\/galleries\/([^\/?#]+)/i);
+      if (gm) {
+        let slug = String(gm[1] || '');
+        slug = slug.replace(/-\d{6,}$/, '');
+        let name = slug.replace(/[-_]+/g, ' ').trim();
+        name = name.split(/\s+/g).filter(Boolean).map(w => w ? (w[0].toUpperCase() + w.slice(1)) : w).join(' ');
+        if (name) meta.channel = name;
+        // Clean title
+        const rawTitle = (document.title || '').replace(/\s*[-–—|]\s*PornPics\.com\s*$/i, '').trim();
+        if (rawTitle) meta.title = rawTitle;
+      }
+      // Pornstar page: pornpics.com/pornstars/name/
+      const pm = url.match(/pornpics\.com\/pornstars\/([^\/?#]+)/i);
+      if (pm) {
+        let name = String(pm[1] || '').replace(/[-_]+/g, ' ').trim();
+        name = name.split(/\s+/g).filter(Boolean).map(w => w ? (w[0].toUpperCase() + w.slice(1)) : w).join(' ');
+        if (name) meta.channel = name;
+      }
+      // CDN image URL: cdni.pornpics.com/1280/...
+      if (/cdni\.pornpics\.com/i.test(url)) {
+        // Try to find gallery link on the page to use as download URL instead
+        const galleryLink = document.querySelector('a[href*="pornpics.com/galleries/"]');
+        if (galleryLink) {
+          meta._pornpicsGalleryUrl = galleryLink.href;
+        }
+      }
+    }
+
     if (!meta.platform || meta.platform === 'unknown') {
       try {
         const host = String(window.location.hostname || '').toLowerCase();
@@ -2666,6 +2698,30 @@
       } catch (e) {
         showNotification(`AZNudeFeet fout: ${e.message}`, true);
         addLog(`AZNudeFeet fout: ${e.message}`, 'error');
+      }
+      return;
+    }
+
+    // Pornpics: if on a CDN image page, try to download the full gallery instead
+    if (meta.platform === 'pornpics' && meta._pornpicsGalleryUrl) {
+      const galleryUrl = meta._pornpicsGalleryUrl;
+      addLog(`Pornpics: CDN afbeelding → gallery download: ${galleryUrl}`);
+      try {
+        const result = await queueDownloadRequestWithOverride(meta, galleryUrl);
+        if (result && result.success) {
+          const id = result.downloadId;
+          const title = result.title || meta.title;
+          if (result.duplicate) {
+            showNotification(`Bestaat al: #${id} — ${title}`);
+          } else {
+            showNotification(`Gallery download #${id} gestart: ${title}`);
+            pollDownload(id);
+          }
+        } else {
+          showNotification(`Download fout: ${result && result.error ? result.error : 'unknown'}`, true);
+        }
+      } catch (e) {
+        showNotification(`Download fout: ${e.message}`, true);
       }
       return;
     }
