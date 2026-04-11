@@ -5514,7 +5514,7 @@ const getRecentHybridMedia = db.prepare(`
       FROM download_files f
       JOIN downloads d ON d.id = f.download_id
       WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
-        AND d.id > (SELECT MAX(id) - 50000 FROM downloads)
+        AND d.id > (SELECT MAX(id) - 10000 FROM downloads)
       ORDER BY f.relpath, (CASE WHEN lower(d.channel) = 'unknown' THEN 0 ELSE 1 END) DESC, d.id DESC
     ) deduped_files
 
@@ -5539,7 +5539,7 @@ const getRecentHybridMedia = db.prepare(`
     WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
       AND d.filepath IS NOT NULL
       AND d.filepath != ''
-      AND d.id > (SELECT MAX(id) - 50000 FROM downloads)
+      AND d.id > (SELECT MAX(id) - 20000 FROM downloads)
       AND NOT EXISTS (SELECT 1 FROM download_files f2 WHERE f2.download_id = d.id)
 
     UNION ALL
