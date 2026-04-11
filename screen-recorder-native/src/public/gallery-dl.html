@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Gallery-DL Front-end</title>
+  <style>
+    :root {
+      --bg: #0f111a; --surface: #1e2136; --surface-hover: #292d47;
+      --text: #e2e4f0; --text-muted: #8c92b3;
+      --primary: #00d4ff; --primary-hover: #00e5ff;
+      --accent: #ff2a6d; --success: #00ff88;
+      --border: rgba(255, 255, 255, 0.05);
+      --font: 'Inter', system-ui, -apple-system, sans-serif;
+    }
+    body {
+      background: var(--bg); color: var(--text); font-family: var(--font);
+      margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center;
+    }
+    h1 { margin-top: 0; color: var(--primary); }
+    .container {
+      width: 100%; max-width: 800px;
+      display: flex; flex-direction: column; gap: 20px;
+    }
+    .panel {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; padding: 20px; box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+    }
+    textarea {
+      width: 100%; height: 120px; background: rgba(0,0,0,0.3);
+      border: 1px solid var(--border); color: var(--text); padding: 12px;
+      font-family: monospace; font-size: 14px; border-radius: 8px; resize: vertical;
+      box-sizing: border-box;
+    }
+    button {
+      background: var(--primary); color: #000; font-weight: bold; font-size: 16px;
+      border: none; padding: 12px 24px; border-radius: 8px; cursor: pointer;
+      transition: all 0.2s; margin-top: 10px; width: 100%;
+    }
+    button:hover { background: var(--primary-hover); transform: translateY(-1px); }
+    button:disabled { background: var(--text-muted); cursor: not-allowed; }
+    
+    .status-msg { margin-top: 10px; padding: 10px; border-radius: 6px; display: none; }
+    .status-msg.error { background: rgba(255, 42, 109, 0.2); color: #ff85a2; display: block; }
+    .status-msg.success { background: rgba(0, 255, 136, 0.2); color: #85ffb2; display: block; }
+    .status-msg a { color: var(--primary); font-weight: bold; text-decoration: none; }
+
+    .help-text { color: var(--text-muted); font-size: 13px; margin: 10px 0; line-height: 1.5; }
+    .help-text strong { color: var(--text); }
+
+    .queue-container { margin-top: 20px; }
+    .queue-title { font-size: 14px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; }
+    .queue-list { display: flex; flex-direction: column; gap: 8px; }
+    .queue-item {
+      display: flex; align-items: center; gap: 12px; padding: 10px;
+      background: rgba(0,0,0,0.2); border: 1px solid var(--border); border-radius: 8px;
+    }
+    .q-thumb { width: 60px; height: 34px; object-fit: cover; border-radius: 4px; background: #000; }
+    .q-info { flex: 1; min-width: 0; }
+    .q-title { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+    .q-meta { font-size: 12px; color: var(--text-muted); display: block; }
+    .q-status {
+      padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; text-transform: uppercase;
+    }
+    .status-downloading { background: rgba(0, 212, 255, 0.2); color: #00d4ff; }
+    .status-queued { background: rgba(255, 255, 255, 0.1); color: #ccc; }
+    .status-pending { background: rgba(255, 165, 0, 0.2); color: #ffa500; }
+
+    nav { display: flex; justify-content: space-between; margin-bottom: 20px; width: 100%; max-width: 800px; }
+    nav a { color: var(--text-muted); text-decoration: none; font-weight: 500; padding: 5px 10px; border-radius: 6px; }
+    nav a:hover { background: var(--border); color: var(--text); }
+  </style>
+</head>
+<body>
+
+  <nav>
+    <a href="/gallery">← Terug naar Gallery</a>
+    <a href="/dashboard">Dashboard →</a>
+  </nav>
+
+  <div class="container">
+    <div class="panel">
+      <h1>🌍 Download Media</h1>
+      <p class="help-text">
+        Plak één of meerdere URLs (1 per regel). Wordt automatisch gedownload via <strong>gallery-dl</strong> of <strong>yt-dlp</strong> (afhankelijk van platform).
+        <br>Ondersteunt o.a. <strong>x.com (Twitter)</strong> threads, Instagram, Reddit, pornpics, kinky.nl en losse video/afbeelding URLs.
+      </p>
+      
+      <textarea id="urlInput" placeholder="https://x.com/gebruiker/status/123456...&#10;https://kinky.nl/profiel/voorbeeld..."></textarea>
+      
+      <div id="statusBox" class="status-msg"></div>
+      <button id="downloadBtn" onclick="startDownload()">Start Download</button>
+    </div>
+
+    <div class="queue-container">
+      <div class="queue-title">Actieve Wachtrij <span id="queueCount"></span></div>
+      <div class="queue-list" id="queueList">
+        <!-- Wachtrij items komen hier -->
+      </div>
+    </div>
+  </div>
+
+  <script>
+    async function startDownload() {
+      const btn = document.getElementById('downloadBtn');
+      const input = document.getElementById('urlInput');
+      const statusBox = document.getElementById('statusBox');
+      
+      const urls = input.value.split('\n').map(s => s.trim()).filter(s => s);
+      if (urls.length === 0) return;
+
+      btn.disabled = true;
+      statusBox.className = 'status-msg';
+      statusBox.innerHTML = 'Bezig met versturen...';
+
+      try {
+        const res = await fetch('/download/batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ urls, force: false })
+        });
+        const data = await res.json();
+        
+        if (data.success && data.downloads && data.downloads.length > 0) {
+          statusBox.className = 'status-msg success';
+          let msg = `✅ ${data.downloads.length} downloads verwerkt!<br>`;
+          let allDuplicates = true;
+          
+          data.downloads.forEach(dl => {
+            if (dl.status === 'completed') {
+              msg += `<br>Bestaat al: <a href="/gallery?highlight=d:${dl.downloadId}" target="_blank">🔗 Bekijk #${dl.downloadId} in gallery</a>`;
+            } else {
+              allDuplicates = false;
+              if (dl.status === 'already_running') {
+                msg += `<br>Staat al in de wachtrij: #${dl.downloadId}`;
+              } else {
+                msg += `<br>Gedownload start: #${dl.downloadId}`;
+              }
+            }
+          });
+          
+          statusBox.innerHTML = msg;
+          if (!allDuplicates) input.value = '';
+          fetchQueue(); // update direct
+        } else {
+          statusBox.className = 'status-msg error';
+          statusBox.innerHTML = 'Geen nieuwe urls gedownload (misschien bestaan ze al?).';
+        }
+      } catch (err) {
+        statusBox.className = 'status-msg error';
+        statusBox.innerHTML = 'Fout bij netwerk / server.';
+      }
+      btn.disabled = false;
+    }
+
+    async function fetchQueue() {
+      try {
+        const res = await fetch('/status');
+        const data = await res.json();
+        
+        const list = document.getElementById('queueList');
+        const items = data.active_items || [];
+        
+        document.getElementById('queueCount').innerText = `(${items.length})`;
+        list.innerHTML = '';
+        
+        if (items.length === 0) {
+          list.innerHTML = `<div class="help-text" style="text-align:center;">De wachtrij is momenteel leeg.</div>`;
+          return;
+        }
+
+        items.forEach(it => {
+          const el = document.createElement('div');
+          el.className = 'queue-item';
+          
+          const label = Object.keys(it).includes('progress') ? (it.status || 'queued') : 'downloading';
+          
+          el.innerHTML = `
+            <img src="${it.thumbnail || 'data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22><rect fill=%22%23333%22 width=%22100%25%22 height=%22100%25%22/></svg>'}" class="q-thumb" onerror="this.style.display='none'">
+            <div class="q-info">
+              <span class="q-title">${it.title || it.url || 'Bestand'}</span>
+              <span class="q-meta">${it.platform || 'onbekend'} • ${it.channel || 'unknown'}</span>
+            </div>
+            <div class="q-status status-${label.toLowerCase()}">${label} ${it.progress != null ? it.progress+'%' : ''}</div>
+          `;
+          list.appendChild(el);
+        });
+      } catch (e) {
+        console.warn('Queue fetch failed', e);
+      }
+    }
+
+    // Polling voor live wachtrij
+    fetchQueue();
+    setInterval(fetchQueue, 3000);
+  </script>
+</body>
+</html>

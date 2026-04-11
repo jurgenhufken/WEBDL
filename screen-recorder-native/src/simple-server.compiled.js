@@ -15197,7 +15197,7 @@ function makeMediaItem(row) {
     rating_kind: row.kind,
     rating_id: row.id,
     url: row.url || null,
-    source_url: row.source_url || null,
+    source_url: row.source_url || row.url || null,
     dedupe_key: dedupeKey || null,
     file_rel: fileRel || null,
     ready: true,
@@ -15423,7 +15423,7 @@ function dedupeVideoThumbnailPairs(files) {
   }
 }
 
-function makePathMediaItem({ relPath, platform, channel, title, created_at, thumbTs, url, source_url, rating, rating_kind, rating_id }) {
+function makePathMediaItem({ relPath, platform, channel, title, created_at, rowTs, thumbTs, url, source_url, rating, rating_kind, rating_id }) {
   const absPath = path.resolve(BASE_DIR, relPath);
   if (isAuxiliaryMediaPath(absPath)) return null;
   const type = inferMediaType(absPath);
@@ -15471,12 +15471,13 @@ function makePathMediaItem({ relPath, platform, channel, title, created_at, thum
     title: combinedTitle,
     title_display: titleDisplay,
     created_at,
+    ts: rowTs > 0 ? rowTs : (thumbTs > 0 ? thumbTs : (created_at ? new Date(created_at).getTime() : 0)),
     type,
     rating: (rating != null && rating !== '') ? Number(rating) : null,
     rating_kind: rating_kind || 'd',
     rating_id: rating_id != null ? rating_id : null,
     url: url || null,
-    source_url: source_url || null,
+    source_url: source_url || url || null,
     dedupe_key: dedupeKey,
     file_rel: relPath,
     src: `/media/path?path=${encodeURIComponent(relPath)}`,
@@ -15506,6 +15507,7 @@ function makeIndexedMediaItem(row) {
       channel: row.channel,
       title: row.title,
       created_at: row.created_at,
+      rowTs: row.ts,
       thumbTs,
       url: row.url,
       source_url: row.source_url,
@@ -16091,6 +16093,13 @@ expressApp.get('/viewer', (req, res) => {
   res.setHeader('Expires', '0');
   res.send(getViewerHTML());
 });
+expressApp.get('/gallery-dl', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  res.sendFile(require('path').join(__dirname, 'public', 'gallery-dl.html'));
+});
+
 
 expressApp.get('/gallery', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
