@@ -17090,6 +17090,35 @@ async function startServer() {
         console.warn(`⚠️ [4K-Watcher] Watch mislukt: ${watchDir}: ${e.message}`);
       }
     }
+    // Startup scan: index any existing unindexed files retroactively
+    setTimeout(async () => {
+      let startupIndexed = 0;
+      for (const watchDir of _4K_WATCH_DIRS) {
+        if (!fs.existsSync(watchDir)) continue;
+        try {
+          const scanDir = (dir, depth = 0) => {
+            if (depth > 4) return [];
+            const results = [];
+            const entries = fs.readdirSync(dir, { withFileTypes: true });
+            for (const e of entries) {
+              if (e.name.startsWith('.')) continue;
+              const full = path.join(dir, e.name);
+              if (e.isDirectory()) results.push(...scanDir(full, depth + 1));
+              else if (e.isFile() && _4K_VIDEO_EXTS.has(path.extname(e.name).toLowerCase())) {
+                results.push(full);
+              }
+            }
+            return results;
+          };
+          const allFiles = scanDir(watchDir);
+          for (const fp of allFiles) {
+            await index4kFile(fp);
+            startupIndexed++;
+          }
+        } catch (e) { }
+      }
+      if (startupIndexed > 0) console.log(`📥 [4K-Watcher] Startup scan: ${startupIndexed} bestanden gecontroleerd`);
+    }, 3000);
     // ── einde 4K Downloader watcher ───────────────────────────────────
 
   });
