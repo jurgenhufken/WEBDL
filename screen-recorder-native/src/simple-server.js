@@ -9904,6 +9904,7 @@ const KNOWN_PLATFORMS = new Set([
   'telegram',
   'tiktok',
   'pornpics',
+  '4kdownloader',
   'other']
 );
 
@@ -17039,7 +17040,7 @@ async function startServer() {
 
         await insertCompletedDownload.run(
           'file://' + absPath,  // url
-          'youtube',            // platform
+          '4kdownloader',       // platform
           channel,              // channel
           title,                // title
           path.basename(absPath), // filename
@@ -17048,7 +17049,7 @@ async function startServer() {
           ext.replace('.', ''), // format
           'completed',          // status
           100,                  // progress
-          JSON.stringify({ webdl_kind: 'imported_video', importer: '4k-watcher' }) // metadata
+          JSON.stringify({ webdl_kind: 'imported_video', importer: '4k-watcher', tags: ['youtube'] }) // metadata
         );
         console.log(`📥 [4K-Watcher] Geïndexeerd: ${channel}/${path.basename(absPath)}`);
         recentFilesTopCache.clear();
