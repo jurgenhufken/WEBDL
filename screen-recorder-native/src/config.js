@@ -133,7 +133,7 @@ const AUTO_IMPORT_POLL_MS = Math.max(0, parseInt(process.env.WEBDL_AUTO_IMPORT_P
 
 const STARTUP_REHYDRATE_DELAY_MS = Math.max(0, parseInt(process.env.WEBDL_STARTUP_REHYDRATE_DELAY_MS || '2500', 10));
 const STARTUP_REHYDRATE_MAX_ROWS = Math.max(0, parseInt(process.env.WEBDL_STARTUP_REHYDRATE_MAX_ROWS || '250', 10));
-const STARTUP_REHYDRATE_MODE = String(process.env.WEBDL_STARTUP_REHYDRATE_MODE || 'active').trim().toLowerCase();
+const STARTUP_REHYDRATE_MODE = String(process.env.WEBDL_STARTUP_REHYDRATE_MODE || 'all').trim().toLowerCase();
 
 const METADATA_BLOCKED_DOMAIN_SUFFIXES = [
   'motherless.com', 'pornzog.com', 'txxx.com', 'omegleporn.to',

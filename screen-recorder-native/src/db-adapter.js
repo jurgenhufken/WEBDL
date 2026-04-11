@@ -52,6 +52,7 @@ function createDb({ engine, sqlitePath, databaseUrl }) {
         }
 
         return {
+          source: rawSql,
           get: async (...args) => {
             const { pgSql, pgArgs } = buildExec(args);
             const res = await pool.query(pgSql, pgArgs.length ? pgArgs : undefined);

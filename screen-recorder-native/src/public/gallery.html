@@ -72,6 +72,13 @@
     .queue-grid::-webkit-scrollbar { height: 6px; }
     .queue-grid::-webkit-scrollbar-track { background: transparent; }
     .queue-grid::-webkit-scrollbar-thumb { background: #1f2a52; border-radius: 3px; }
+    #queue-bar-container { position: sticky; top: 54px; z-index: 1000; width: 100%; transition: top 0.3s ease; }
+    #queue-bar-container.not-sticky { position: relative !important; top: 0 !important; }
+    #queue-bar-container.collapsed .queue-bar { display: none !important; }
+    .queue-controls { display: flex; align-items: center; padding: 4px 14px; background: rgba(5,8,22,0.98); border-top: 1px solid #1f2a52; border-bottom: 1px solid #000; gap: 8px; }
+    .queue-controls-btn { background: #1f2a52; border: 1px solid #2a4a82; color: #9aa7d1; padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 6px; transition: all 0.2s; }
+    .queue-controls-btn:hover { background: #2a4a82; color: #fff; }
+    .queue-controls-btn.active { background: rgba(0, 212, 255, 0.15); color: #00d4ff; border-color: #00d4ff; }
     .queue-card { flex: 0 0 140px; background: #070b1a; border: 1px solid #1f2a52; border-radius: 6px; overflow: hidden; display: flex; flex-direction: column; }
     .queue-card:hover { border-color: #00d4ff; }
     .queue-thumb-box { width:100%; padding-top:56.25%; position:relative; overflow:hidden; background:#000; border-radius:8px 8px 0 0; }
@@ -144,13 +151,20 @@
       <div class="spacer"></div>
       <div class="hint" id="hint">-</div>
     </div>
-    <div id="queue-bar-fast" class="queue-bar" style="display: none; border-bottom: 1px solid #1f2a52;">
-      <div class="queue-title">⚡ Snelle Downloads / Wachtrij</div>
-      <div class="queue-grid" id="queue-grid-fast"></div>
-    </div>
-    <div id="queue-bar-heavy" class="queue-bar" style="display: none;">
-      <div class="queue-title">🔴 Momenteel bezig / Nabewerken (Processing)</div>
-      <div class="queue-grid" id="queue-grid-heavy"></div>
+    <div id="queue-bar-container" style="display:none;">
+      <div class="queue-controls" id="queue-controls">
+        <div style="flex:1; font-size:11px; font-weight:bold; color:#8795c7; text-transform:uppercase;">Actieve Taken / Wachtrij</div>
+        <button class="queue-controls-btn active" id="btn-toggle-pin" title="Pin of laat scrollen"><span>📌 Vastgezet</span></button>
+        <button class="queue-controls-btn" id="btn-toggle-collapse" title="Inklappen of Uitklappen"><span>➖ Verklein Balk</span></button>
+      </div>
+      <div id="queue-bar-fast" class="queue-bar" style="display:none; border-bottom: 1px solid #1f2a52;">
+        <div class="queue-title">⚡ Snelle Downloads / Wachtrij</div>
+        <div class="queue-grid" id="queue-grid-fast"></div>
+      </div>
+      <div id="queue-bar-heavy" class="queue-bar" style="display:none;">
+        <div class="queue-title">🔴 Momenteel bezig / Nabewerken (Processing)</div>
+        <div class="queue-grid" id="queue-grid-heavy"></div>
+      </div>
     </div>
   </div>
 
@@ -340,6 +354,62 @@
     const elMSlideshowSec = document.getElementById('mSlideshowSec');
     const elMBtnRandom = document.getElementById('mBtnRandom');
     const elMBtnVideoWait = document.getElementById('mBtnVideoWait');
+
+    const queueContainer = document.getElementById('queue-bar-container');
+    const btnPinQueue = document.getElementById('btn-toggle-pin');
+    const btnCollapseQueue = document.getElementById('btn-toggle-collapse');
+    
+    let isQueuePinned = localStorage.getItem('webdl_queue_pinned') !== 'false';
+    let isQueueCollapsed = localStorage.getItem('webdl_queue_collapsed') === 'true';
+
+    function updateQueueBarUI() {
+      if (!queueContainer) return;
+      if (isQueuePinned) {
+        queueContainer.classList.remove('not-sticky');
+        if (btnPinQueue) {
+          btnPinQueue.classList.add('active');
+          btnPinQueue.querySelector('span').textContent = '📌 Vastgezet';
+        }
+      } else {
+        queueContainer.classList.add('not-sticky');
+        if (btnPinQueue) {
+          btnPinQueue.classList.remove('active');
+          btnPinQueue.querySelector('span').textContent = '📌 Scrollt mee';
+        }
+      }
+      
+      if (isQueueCollapsed) {
+        queueContainer.classList.add('collapsed');
+        if (btnCollapseQueue) {
+          btnCollapseQueue.classList.add('active');
+          btnCollapseQueue.querySelector('span').textContent = '➕ Uitklappen';
+        }
+      } else {
+        queueContainer.classList.remove('collapsed');
+        if (btnCollapseQueue) {
+          btnCollapseQueue.classList.remove('active');
+          btnCollapseQueue.querySelector('span').textContent = '➖ Verklein Balk';
+        }
+      }
+    }
+
+    if (btnPinQueue) {
+      btnPinQueue.addEventListener('click', () => {
+        isQueuePinned = !isQueuePinned;
+        localStorage.setItem('webdl_queue_pinned', isQueuePinned ? 'true' : 'false');
+        updateQueueBarUI();
+      });
+    }
+    
+    if (btnCollapseQueue) {
+      btnCollapseQueue.addEventListener('click', () => {
+        isQueueCollapsed = !isQueueCollapsed;
+        localStorage.setItem('webdl_queue_collapsed', isQueueCollapsed ? 'true' : 'false');
+        updateQueueBarUI();
+      });
+    }
+    
+    updateQueueBarUI();
 
     const state = {
       search: '', 
@@ -630,6 +700,10 @@
           if (vid) return 'https://i.ytimg.com/vi/' + vid + '/mqdefault.jpg';
         } catch(e) {}
       }
+      // For platforms where the URL is the direct media (attachments, image hosts)
+      if (a.url && /footfetishforum|aznudefeet|imagetwist|pixhost|postimg|bunkr/i.test(String(a.url))) {
+        return a.url;
+      }
       return '/media/pending-thumb.svg?v=' + Date.now() + '&text=' + encodeURIComponent(a.title || 'Downloading...');
     }
 
@@ -669,8 +743,12 @@
           const fastItems = [];
           const heavyItems = [];
           
+          const lightPlatforms = ['instagram','wikifeet','wikifeetx','kinky','reddit','aznudefeet','telegram','amateurvoyeurforum','tiktok','footfetishforum','forum-area','imagetwist','pixhost','postimg','bunkr','jpg'];
           for (const a of s.active_items) {
-            if (a.lane === 'light' && a.status !== 'postprocessing') {
+            const isLight = a.lane === 'light' || (!a.lane && lightPlatforms.includes(String(a.platform || '').toLowerCase()));
+            if (a.status === 'postprocessing') {
+              heavyItems.push(a);
+            } else if (isLight) {
               fastItems.push(a);
             } else {
               heavyItems.push(a);
@@ -690,13 +768,16 @@
                 const rawPct = typeof a.progress === 'number' ? a.progress : 0;
                 const pct = Math.max(0, Math.min(100, Math.round(rawPct)));
                 const isPost = a.status === 'postprocessing';
-                const isQueued = a.status === 'queued';
-                const pctText = isPost ? 'NABEWERKEN' : (isQueued ? 'WACHTRIJ' : (pct + '%'));
+                const isQueued = a.status === 'queued' || a.status === 'pending';
+                let pctText = pct + '%';
+                if (a.error && typeof a.error === 'string' && a.error.startsWith('Playlist:')) {
+                  pctText = a.error;
+                }
+                if (isPost) pctText = 'NABEWERKEN';
+                if (isQueued) pctText = 'WACHTRIJ';
                 const ppClass = isPost ? ' postprocessing' : (isQueued ? ' queued' : '');
                 
-                const fallbackCall = thumbUrl.includes('ytimg') 
-                  ? `this.onerror=null;this.src='/media/pending-thumb.svg?v=${Date.now()}&text=' + encodeURIComponent('${String(a.title || 'Downloading...').replace(/'/g, "\\'")}');`
-                  : `this.onerror=null;this.src=FALLBACK_THUMB;`;
+                const fallbackCall = `this.onerror=null;this.src='/media/pending-thumb.svg?v=${Date.now()}&text=' + encodeURIComponent('${String(a.title || 'Downloading...').replace(/'/g, "\\'")}');`;
                 
                 card.innerHTML = `
                   <div class="queue-thumb-box">
@@ -723,11 +804,22 @@
           renderGrid(fastItems, elQueueGridFast, elQueueBarFast);
           renderGrid(heavyItems, elQueueGridHeavy, elQueueBarHeavy);
 
+          const hc = document.getElementById('queue-bar-container');
+          if (hc) {
+            hc.style.display = (fastItems.length > 0 || heavyItems.length > 0) ? 'block' : 'none';
+          }
+          const qc = document.getElementById('queue-controls');
+          if (qc) {
+            qc.style.display = (fastItems.length > 0 || heavyItems.length > 0) ? 'flex' : 'none';
+          }
+
         } else {
           elQueueBarFast.style.display = 'none';
           elQueueGridFast.innerHTML = '';
           elQueueBarHeavy.style.display = 'none';
           elQueueGridHeavy.innerHTML = '';
+          const hc = document.getElementById('queue-bar-container');
+          if (hc) hc.style.display = 'none';
         }
       }
     }
