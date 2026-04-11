@@ -220,8 +220,40 @@ function shouldIncludePath(relPath, enabledDirs) {
   const p = String(relPath || '').trim();
   if (!p) return true;
   for (const dir of enabledDirs) {
-    if (p === dir || p.startsWith(dir + '/') || p.includes('/' + dir + '/') || p.endsWith('/' + dir)) {
-      return true;
+    if (typeof dir === 'string') {
+      if (p === dir || p.startsWith(dir + '/') || p.includes('/' + dir + '/') || p.endsWith('/' + dir)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// Platform/channel-aware filter for the mappen dialog
+function shouldIncludeRow(row, enabledDirs) {
+  if (!enabledDirs || enabledDirs.length === 0) return true;
+  if (!row) return true;
+  const rowPlatform = String(row.platform || '').toLowerCase().trim();
+  const rowChannel = String(row.channel || '').toLowerCase().trim();
+  if (!rowPlatform) return true;
+
+  // Check if enabledDirs contains objects (new format) or strings (legacy)
+  const hasObjects = enabledDirs.some(d => d && typeof d === 'object' && d.platform);
+  if (!hasObjects) {
+    // Legacy string-based filter
+    const relPath = row.filepath ? path.relative(BASE_DIR, row.filepath) : (rowPlatform + '/' + (row.id || ''));
+    return shouldIncludePath(relPath, enabledDirs);
+  }
+
+  // New object-based filter: [{platform: 'x', channels: ['a','b']}]
+  for (const dir of enabledDirs) {
+    if (!dir || typeof dir !== 'object') continue;
+    const dirPlat = String(dir.platform || '').toLowerCase().trim();
+    if (dirPlat !== rowPlatform) continue;
+    // Platform matches - check channels
+    if (!dir.channels || dir.channels.length === 0) return true; // whole platform selected
+    for (const ch of dir.channels) {
+      if (String(ch || '').toLowerCase().trim() === rowChannel) return true;
     }
   }
   return false;
@@ -15793,14 +15825,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
         if (!row) { rowOffset += 1; continue; }
 
         // Apply directory filter
-        let relPath;
-        if (row.kind === 'p') {
-          // For download_files items: build path from platform so dir filter matches (e.g. 'kinky/palmy_1.webp')
-          relPath = (row.platform ? row.platform + '/' : '') + (row.id || '');
-        } else {
-          relPath = row.filepath ? path.relative(BASE_DIR, row.filepath) : '';
-        }
-        if (enabledDirs && relPath && !shouldIncludePath(relPath, enabledDirs)) {
+        if (enabledDirs && !shouldIncludeRow(row, enabledDirs)) {
           rowOffset += 1;
           continue;
         }
@@ -15949,8 +15974,7 @@ expressApp.get('/api/media/channel-files', async (req, res) => {
 
         if (!row) { rowOffset += 1; continue; }
 
-        const relPath = row.kind === 'p' ? row.id : (row.filepath ? path.relative(BASE_DIR, row.filepath) : '');
-        if (enabledDirs && relPath && !shouldIncludePath(relPath, enabledDirs)) {
+        if (enabledDirs && !shouldIncludeRow(row, enabledDirs)) {
           rowOffset += 1;
           continue;
         }
@@ -16224,7 +16248,7 @@ expressApp.post('/api/viewer/navigate', async (req, res) => {
 
       if (!row) continue;
       const relPath = row.kind === 'p' ? row.id : (row.filepath ? path.relative(BASE_DIR, row.filepath) : '');
-      if (enabledDirs && relPath && !shouldIncludePath(relPath, enabledDirs)) continue;
+      if (enabledDirs && !shouldIncludeRow(row, enabledDirs)) continue;
 
       const filterType = row.kind === 'p' ? 'active' : (row.filepath && /\.(mp4|webm|mov|avi|mkv)$/i.test(row.filepath)) ? 'video' : 'image';
       if (filter === 'video' && filterType !== 'video') continue;
