@@ -11193,9 +11193,8 @@ expressApp.post('/start-recording', async (req, res) => {
   '-i', inputDevice];
 
 
-  if (inputPixelFormat && inputPixelFormat.toLowerCase() !== 'auto') {
-    args.splice(args.indexOf('-capture_cursor'), 0, '-pixel_format', inputPixelFormat);
-  }
+  const effectivePixelFormat = (inputPixelFormat && inputPixelFormat.toLowerCase() !== 'auto') ? inputPixelFormat : 'nv12';
+  args.splice(args.indexOf('-capture_cursor'), 0, '-pixel_format', effectivePixelFormat);
 
   const cropOk = !!(crop && Number.isFinite(crop.x) && Number.isFinite(crop.y) && Number.isFinite(crop.width) && Number.isFinite(crop.height));
   const lockMode = lockEnabled && cropOk;
@@ -11396,18 +11395,41 @@ expressApp.post('/stop-recording', (req, res) => {
     broadcastRecordingState();
   };
 
-  const softTimeout = setTimeout(() => {
-    if (recordingProcess) {recordingProcess.kill('SIGINT');}
-  }, 20000);
+  // Guard against duplicate stop handling
+  if (session._stopHandled) {
+    return res.json({ success: false, error: 'Stop al in uitvoering' });
+  }
+  session._stopHandled = true;
 
-  const hardTimeout = setTimeout(() => {
-    if (recordingProcess) {
-      console.warn('ffmpeg stop timeout, force kill');
-      recordingProcess.kill('SIGKILL');
-      cleanup();
-      finish(false, 'Opname stop timeout');
+  // Immediately try graceful stop: write 'q' to ffmpeg stdin
+  try {
+    if (recordingProcess && recordingProcess.stdin && !recordingProcess.stdin.destroyed) {
+      recordingProcess.stdin.write('q');
+      console.log('📝 Sent "q" to ffmpeg stdin');
     }
-  }, 40000);
+  } catch (e) {}
+
+  // Fallback: SIGINT after 3 seconds if still running
+  const softTimeout = setTimeout(() => {
+    try {
+      if (recordingProcess && !recordingProcess.killed) {
+        recordingProcess.kill('SIGINT');
+        console.log('⚠️ Sent SIGINT to ffmpeg (3s fallback)');
+      }
+    } catch (e) {}
+  }, 3000);
+
+  // Hard kill after 8 seconds
+  const hardTimeout = setTimeout(() => {
+    try {
+      if (recordingProcess && !recordingProcess.killed) {
+        console.warn('ffmpeg stop timeout, force kill');
+        recordingProcess.kill('SIGKILL');
+        cleanup();
+        finish(false, 'Opname stop timeout');
+      }
+    } catch (e) {}
+  }, 8000);
 
   proc.once('close', async () => {
     clearTimeout(softTimeout);
@@ -14845,7 +14867,7 @@ function makeMediaItem(row) {
 
   const src = `/media/file?kind=${encodeURIComponent(row.kind)}&id=${encodeURIComponent(row.id)}`;
   const preferredThumbFinal = preferredThumb ? (preferredThumb.includes('?') ? `${preferredThumb}&v=6` : `${preferredThumb}?v=6`) : '';
-  const thumb = t === 'image' && src ?
+  const thumb = row.kind === 's' && t === 'image' && src ?
   src :
   preferredThumbFinal || `/media/thumb?kind=${encodeURIComponent(row.kind)}&id=${encodeURIComponent(row.id)}&v=6`;
 
