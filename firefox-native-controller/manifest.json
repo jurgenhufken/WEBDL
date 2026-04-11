@@ -1,8 +1,14 @@
 {
   "manifest_version": 2,
   "name": "Screen Recorder Controller",
-  "version": "1.0.16",
+  "version": "1.0.17",
   "description": "Besturingsinterface voor de native Screen Recorder applicatie",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "webdl-screen-recorder@local.webdl",
+      "strict_min_version": "109.0"
+    }
+  },
   "icons": {
     "48": "icons/icon-48.svg",
     "96": "icons/icon-96.svg"

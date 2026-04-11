@@ -1982,11 +1982,24 @@
   // ========================
   const logEntries = [];
 
+  async function persistExtensionLog(msg, type = 'info') {
+    try {
+      await postServerJson('api/extension-log', {
+        source: 'debug-toolbar',
+        level: String(type || 'info'),
+        message: String(msg || ''),
+        area: 'content',
+        page: location.href
+      }, 4000);
+    } catch (e) {}
+  }
+
   function addLog(msg, type = 'info') {
     const ts = new Date().toLocaleTimeString();
     logEntries.push({ ts, msg, type });
     if (logEntries.length > 30) logEntries.shift();
     if (logContainer.style.maxHeight !== '0px') renderLog();
+    persistExtensionLog(msg, type).catch(() => {});
   }
 
   function renderLog() {
@@ -2302,19 +2315,41 @@
   }
 
   async function startRecordingRequest(payload) {
-    const viaBg = await sendBackgroundAction('startRecording', payload, 20000);
+    const START_REC_TIMEOUT = 20000; // Direct device, no probing
+    const viaBg = await sendBackgroundAction('startRecording', payload, START_REC_TIMEOUT);
     if (viaBg && viaBg.success) return viaBg;
-    const viaHttp = await postServerJson('start-recording', payload, 20000);
+    const viaHttp = await postServerJson('start-recording', payload, START_REC_TIMEOUT);
     if (viaHttp && viaHttp.success) return viaHttp;
     return viaBg && viaBg.error ? viaBg : viaHttp;
   }
 
   async function stopRecordingRequest(payload) {
-    const viaBg = await sendBackgroundAction('stopRecording', payload, 20000);
+    const viaBg = await sendBackgroundAction('stopRecording', payload, 70000);
     if (viaBg && viaBg.success) return viaBg;
-    const viaHttp = await postServerJson('stop-recording', payload, 20000);
+    const viaHttp = await postServerJson('stop-recording', payload, 70000);
     if (viaHttp && viaHttp.success) return viaHttp;
     return viaBg && viaBg.error ? viaBg : viaHttp;
+  }
+
+  async function pollRecordingFinalize(filePath, timeoutMs = 120000) {
+    const started = Date.now();
+    const target = String(filePath || '').trim();
+    if (!target) return { success: false, error: 'Geen opnamebestand om te volgen' };
+
+    while ((Date.now() - started) < timeoutMs) {
+      try {
+        const out = await getServerJson(`api/recording-stop-status?file=${encodeURIComponent(target)}`, 6000);
+        if (!out || out.success === false) {
+          await delay(1200);
+          continue;
+        }
+        const st = String(out.status || '').toLowerCase();
+        if (st === 'completed' || st === 'completed_file_only') return { success: true, status: st, file: out.finalFile || out.file || target };
+        if (st === 'error') return { success: false, status: st, error: out.error || 'Opname mislukt', file: out.file || target };
+      } catch (e) {}
+      await delay(1500);
+    }
+    return { success: false, status: 'timeout', error: 'Opname afronden duurde te lang', file: target };
   }
 
   function syncStatusSnapshot(data) {
@@ -3381,10 +3416,21 @@
   // SCREEN RECORDING (server ffmpeg - OBS-stijl)
   // ========================
   let isRecording = false;
+  let localBrowserRecording = false;
+  let localMediaRecorder = null;
+  let localRecordChunks = [];
+  let localRecordCanvas = null;
+  let localRecordStream = null;
+  let localDrawTimer = null;
+  let localRecordMeta = null;
   let cropUpdateTimer = null;
   let frameUpdateTimer = null;
 
   function updateRecUI(recording, activeUrls) {
+    if (localBrowserRecording && !recording) {
+      recording = true;
+      activeUrls = [window.location.href];
+    }
     // Per-tab check: is THIS tab's URL in the activeRecordingUrls array?
     const myUrl = window.location.href;
     const myRecording = Array.isArray(activeUrls) && activeUrls.length
@@ -3409,6 +3455,184 @@
       recStopBtn.style.opacity = '0.5'; recStopBtn.style.cursor = 'not-allowed';
       recStopBtn.style.backgroundColor = '#555';
     }
+  }
+
+  function stopLocalDrawLoop() {
+    if (localDrawTimer) {
+      try { cancelAnimationFrame(localDrawTimer); } catch (e) {}
+      localDrawTimer = null;
+    }
+  }
+
+  function startLocalDrawLoop(video, ctx, canvas) {
+    const draw = () => {
+      if (!localBrowserRecording) return;
+      try {
+        if (video && video.readyState >= 2) {
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        }
+      } catch (e) {}
+      localDrawTimer = requestAnimationFrame(draw);
+    };
+    localDrawTimer = requestAnimationFrame(draw);
+  }
+
+  async function uploadLocalRecordingBlob(blob, meta) {
+    const fd = new FormData();
+    fd.append('video', blob, `recording_${Date.now()}.webm`);
+    fd.append('metadata', JSON.stringify(meta || {}));
+    const resp = await fetch(`${SERVER}/upload-recording`, { method: 'POST', body: fd });
+    const out = await resp.json().catch(() => ({}));
+    if (!resp.ok || !out || !out.success) {
+      throw new Error((out && out.error) ? out.error : `HTTP ${resp.status}`);
+    }
+    return out;
+  }
+
+  async function startLocalBrowserRecording(meta) {
+    const target = pickBestVideoTarget();
+    const video = target && target.video ? target.video : null;
+    
+    // Als geen video gevonden: capture de gehele viewport/scherm
+    if (!video) {
+      addLog('Geen video element gevonden, capture hele browser window...');
+      // We zoeken naar de grootste zichtbare div/iframe als fallback
+      const elements = Array.from(document.querySelectorAll('div, main, section, article, .container, [data-video], [role="main"]'))
+        .filter(el => {
+          try {
+            const r = el.getBoundingClientRect();
+            return r.width > 200 && r.height > 200;
+          } catch (e) { return false; }
+        })
+        .sort((a, b) => {
+          try {
+            const rA = a.getBoundingClientRect();
+            const rB = b.getBoundingClientRect();
+            return (rB.width * rB.height) - (rA.width * rA.height);
+          } catch (e) { return 0; }
+        });
+      
+      if (elements.length === 0) {
+        // Fallback naar window dimensions
+        const width = Math.max(640, Math.round(window.innerWidth / 2) * 2);
+        const height = Math.max(360, Math.round(window.innerHeight / 2) * 2);
+        addLog(`Geen HTML element gevonden, capture ${width}x${height} (window)`);
+        return startCanvasRecording(width, height, meta);
+      }
+      
+      const rect = elements[0].getBoundingClientRect();
+      if (rect.width < 80 || rect.height < 60) {
+        const width = Math.max(640, Math.round(window.innerWidth / 2) * 2);
+        const height = Math.max(360, Math.round(window.innerHeight / 2) * 2);
+        return startCanvasRecording(width, height, meta);
+      }
+      
+      const width = Math.max(2, Math.floor(rect.width / 2) * 2);
+      const height = Math.max(2, Math.floor(rect.height / 2) * 2);
+      addLog(`Capturing element ${width}x${height}`);
+      return startCanvasRecording(width, height, meta, elements[0]);
+    }
+
+    const width = Math.max(2, Math.floor((video.videoWidth || video.clientWidth || 640) / 2) * 2);
+    const height = Math.max(2, Math.floor((video.videoHeight || video.clientHeight || 360) / 2) * 2);
+    
+    return startCanvasRecording(width, height, meta, video);
+  }
+
+  async function startCanvasRecording(width, height, meta, sourceElement = null) {
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d', { alpha: false });
+    if (!ctx) throw new Error('Canvas context niet beschikbaar');
+
+    const stream = canvas.captureStream(30);
+    let mimeType = 'video/webm;codecs=vp9';
+    if (typeof MediaRecorder !== 'undefined' && !MediaRecorder.isTypeSupported(mimeType)) {
+      mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp8') ? 'video/webm;codecs=vp8' : 'video/webm';
+    }
+
+    const rec = new MediaRecorder(stream, { mimeType });
+    localRecordChunks = [];
+    rec.ondataavailable = (ev) => {
+      if (ev && ev.data && ev.data.size > 0) localRecordChunks.push(ev.data);
+    };
+
+    localRecordCanvas = canvas;
+    localRecordStream = stream;
+    localMediaRecorder = rec;
+    localRecordMeta = meta || {};
+    localBrowserRecording = true;
+    updateRecUI(true, [window.location.href]);
+    
+    // Start drawing loop
+    const draw = () => {
+      if (!localBrowserRecording) return;
+      try {
+        if (sourceElement && sourceElement.tagName === 'VIDEO') {
+          ctx.drawImage(sourceElement, 0, 0, canvas.width, canvas.height);
+        } else if (sourceElement && sourceElement.getContext) {
+          ctx.drawImage(sourceElement, 0, 0, canvas.width, canvas.height);
+        } else if (sourceElement) {
+          // For generic HTML elements, use drawImage of canvas/image
+          try { ctx.drawImage(sourceElement, 0, 0, canvas.width, canvas.height); }
+          catch (e) { ctx.fillStyle = '#222'; ctx.fillRect(0, 0, canvas.width, canvas.height); }
+        } else {
+          // No source, fill with black
+          ctx.fillStyle = '#222';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+      } catch (e) {
+        ctx.fillStyle = '#222';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+      localDrawTimer = requestAnimationFrame(draw);
+    };
+    localDrawTimer = requestAnimationFrame(draw);
+    rec.start(1000);
+  }
+
+  async function stopLocalBrowserRecording() {
+    if (!localBrowserRecording || !localMediaRecorder) {
+      return { success: false, error: 'Geen lokale opname actief' };
+    }
+    const rec = localMediaRecorder;
+    const meta = localRecordMeta || {};
+    return await new Promise((resolve) => {
+      let settled = false;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        resolve(result);
+      };
+
+      rec.onstop = async () => {
+        try {
+          const blob = new Blob(localRecordChunks, { type: rec.mimeType || 'video/webm' });
+          if (!blob || blob.size < 2048) throw new Error(`Lokale opname te klein (${blob ? blob.size : 0} bytes)`);
+          const uploaded = await uploadLocalRecordingBlob(blob, meta);
+          finish({ success: true, uploaded });
+        } catch (e) {
+          finish({ success: false, error: e && e.message ? e.message : String(e) });
+        } finally {
+          localBrowserRecording = false;
+          stopLocalDrawLoop();
+          try { if (localRecordStream) localRecordStream.getTracks().forEach((t) => t.stop()); } catch (e) {}
+          localMediaRecorder = null;
+          localRecordStream = null;
+          localRecordCanvas = null;
+          localRecordChunks = [];
+          localRecordMeta = null;
+          updateRecUI(false, []);
+        }
+      };
+
+      try {
+        rec.stop();
+      } catch (e) {
+        finish({ success: false, error: e && e.message ? e.message : String(e) });
+      }
+    });
   }
 
   function getVideoCropRect() {
@@ -3493,22 +3717,33 @@
     if (isRecording) return;
     const meta = scrapeMetadata();
     const crop = getVideoCropRect();
+    const useLockRecording = true;
+    
+    // Indien geen video, waarschuw maar ga door
     if (crop.error) {
-      showNotification(crop.error, true);
-      addLog(crop.error, 'error');
-      return;
+      addLog(`Waarschuwing: ${crop.error} - server capture zonder video wordt geprobeerd`, 'info');
+    } else {
+      addLog(`Opname starten (blauw frame lock-crop) (crop ${crop.width}x${crop.height} @ ${crop.x},${crop.y})`);
     }
-
-    addLog(`Opname starten (crop ${crop.width}x${crop.height} @ ${crop.x},${crop.y})`);
+    
+    const originalText = recStartBtn.textContent;
+    recStartBtn.textContent = '⏳ STARTING...';
+    recStartBtn.style.opacity = '0.6';
+    
     try {
-      const result = await startRecordingRequest({ metadata: meta, crop, lock: true });
+      // Stuur crop alleen als het valide is
+      const payload = { metadata: meta, lock: useLockRecording };
+      if (!crop.error) {
+        payload.crop = crop;
+      }
+      const result = await startRecordingRequest(payload);
       if (result.success) {
         applyConnectionState(true);
         updateRecUI(true);
         showNotification(`Opname gestart: ${result.file}`);
         addLog(`REC gestart: ${result.file}`);
 
-        if (!cropUpdateTimer) {
+        if (useLockRecording && !cropUpdateTimer) {
           cropUpdateTimer = setInterval(() => {
             if (!isRecording) return;
             const next = getVideoCropRect();
@@ -3528,13 +3763,13 @@
         }
       } else if (result && result.needsForce) {
         if (confirm("Er loopt al een opname op de achtergrond. Wil je deze geforceerd beëindigen en een nieuwe starten?")) {
-          const forceResult = await startRecordingRequest({ metadata: meta, crop, lock: true, force: true });
+          const forceResult = await startRecordingRequest({ metadata: meta, crop, lock: useLockRecording, force: true });
           if (forceResult.success) {
             applyConnectionState(true);
             updateRecUI(true);
             showNotification(`Opname geforceerd herstart: ${forceResult.file}`);
             addLog(`REC geforceerd herstart: ${forceResult.file}`);
-            if (!cropUpdateTimer) {
+            if (useLockRecording && !cropUpdateTimer) {
               cropUpdateTimer = setInterval(() => {
                 if (!isRecording) return;
                 const next = getVideoCropRect();
@@ -3545,13 +3780,29 @@
             showNotification(forceResult.error, true);
           }
         }
+      } else if (result && result.error && String(result.error).includes('Geen werkende Screen Recording input')) {
+        try {
+          addLog('Server capture niet beschikbaar, lokale video-opname fallback gestart (blauw frame).');
+          await startLocalBrowserRecording(meta);
+          showNotification('Server capture niet beschikbaar, lokale video-opname gestart (blauw frame).');
+        } catch (fallbackErr) {
+          const msg = fallbackErr && fallbackErr.message ? fallbackErr.message : String(fallbackErr);
+          showNotification(`Lokale opname fallback mislukt: ${msg}`, true);
+          addLog(`Lokale opname fallback mislukt: ${msg}`, 'error');
+          recStartBtn.textContent = originalText;
+          recStartBtn.style.opacity = '1';
+        }
       } else {
         if (result && result.error) addLog(`REC start geweigerd: ${result.error}`, 'error');
         showNotification(result.error, true);
+        recStartBtn.textContent = originalText;
+        recStartBtn.style.opacity = '1';
       }
     } catch (e) {
       showNotification(`REC fout: ${e.message}`, true);
       addLog(`REC fout: ${e.message}`, 'error');
+      recStartBtn.textContent = originalText;
+      recStartBtn.style.opacity = '1';
     }
   });
 
@@ -3559,13 +3810,53 @@
     if (!isRecording) return;
     addLog('Opname stoppen...');
     const meta = scrapeMetadata();
+    
+    const originalText = recStopBtn.textContent;
+    recStopBtn.textContent = '⏳ STOPPING...';
+    recStopBtn.style.opacity = '0.6';
+
     try {
+      if (localBrowserRecording) {
+        const localResult = await stopLocalBrowserRecording();
+        if (localResult && localResult.success) {
+          const up = localResult.uploaded || {};
+          showNotification(`Opname opgeslagen: ${up.path || up.file || 'lokaal upload'}`);
+          addLog(`REC lokaal voltooid: ${up.path || up.file || ''}`);
+        } else {
+          const msg = localResult && localResult.error ? localResult.error : 'Lokale opname mislukt';
+          showNotification(`Opname mislukt: ${msg}`, true);
+          addLog(`REC lokale fout: ${msg}`, 'error');
+        }
+        recStopBtn.textContent = originalText;
+        recStopBtn.style.opacity = '1';
+        return;
+      }
+
       const result = await stopRecordingRequest({ metadata: meta });
       if (result.success) {
         applyConnectionState(true);
         updateRecUI(false);
         ensureFrameUpdatesRunning();
-        if (result.processing) {
+        if (result.stopping) {
+          const f = result.file ? String(result.file).split('/').pop() : '';
+          showNotification(`Opname stop aangevraagd${f ? `: ${f}` : ''}. Even wachten op afronding...`);
+          addLog(`REC stop aangevraagd. file=${result.file || ''} log=${result.logFile || ''}`);
+          try {
+            const finalRes = await pollRecordingFinalize(result.file, 120000);
+            if (finalRes && finalRes.success) {
+              showNotification(`Opname opgeslagen: ${finalRes.file}`);
+              addLog(`REC voltooid: ${finalRes.file}`);
+            } else {
+              const msg = finalRes && finalRes.error ? finalRes.error : 'Opname mislukt';
+              showNotification(`Opname mislukt: ${msg}`, true);
+              addLog(`REC fout na stop: ${msg}`, 'error');
+            }
+          } catch (e) {
+            const msg = e && e.message ? e.message : String(e);
+            showNotification(`Opname status check fout: ${msg}`, true);
+            addLog(`REC status check fout: ${msg}`, 'error');
+          }
+        } else if (result.processing) {
           const rawName = result.rawFile ? String(result.rawFile).split('/').pop() : (result.file ? String(result.file).split('/').pop() : '');
           const finalName = result.finalFile ? String(result.finalFile).split('/').pop() : '';
           showNotification(`Opname gestopt. Afwerken bezig... (raw: ${rawName}${finalName ? `, final: ${finalName}` : ''})`);
@@ -3574,13 +3865,19 @@
           showNotification(`Opname opgeslagen: ${result.file}`);
           addLog(`REC gestopt: ${result.file}`);
         }
+        recStopBtn.textContent = originalText;
+        recStopBtn.style.opacity = '1';
       } else {
         if (result && result.error) addLog(`REC stop geweigerd: ${result.error}`, 'error');
         showNotification(result.error, true);
+        recStopBtn.textContent = originalText;
+        recStopBtn.style.opacity = '1';
       }
     } catch (e) {
       showNotification(`Stop fout: ${e.message}`, true);
       addLog(`Stop fout: ${e.message}`, 'error');
+      recStopBtn.textContent = originalText;
+      recStopBtn.style.opacity = '1';
     }
   });
 

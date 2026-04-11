@@ -5237,7 +5237,7 @@ const getRecentIndexedMedia = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
       CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
       d.url AS url,
@@ -5277,7 +5277,7 @@ const getRecentIndexedMedia = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(f.created_at, d.created_at) AS created_at,
       COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       d.url AS url,
@@ -5363,7 +5363,7 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
       CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
       NULL AS thumbnail,
@@ -5430,7 +5430,7 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(f.created_at, d.created_at) AS created_at,
       COALESCE(NULLIF(CAST(f.mtime_ms AS INTEGER), 0), COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0)) AS ts,
       NULL AS thumbnail,
@@ -5499,7 +5499,7 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
       CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
       NULL AS thumbnail,
@@ -5566,7 +5566,7 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(f.created_at, d.created_at) AS created_at,
       COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       NULL AS thumbnail,
@@ -5636,7 +5636,7 @@ const getHybridMediaByChannel = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
       CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
       NULL AS thumbnail,
@@ -5706,7 +5706,7 @@ const getHybridMediaByChannel = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(f.created_at, d.created_at) AS created_at,
       COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       NULL AS thumbnail,
@@ -5778,7 +5778,7 @@ const getRecentHybridMediaByOldest = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
       CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
       NULL AS thumbnail,
@@ -5845,7 +5845,7 @@ const getRecentHybridMediaByOldest = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(f.created_at, d.created_at) AS created_at,
       COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       NULL AS thumbnail,
@@ -5915,7 +5915,7 @@ const getRecentHybridMediaByNameAsc = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
       CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
       NULL AS thumbnail,
@@ -5983,7 +5983,7 @@ const getRecentHybridMediaByNameAsc = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(f.created_at, d.created_at) AS created_at,
       COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       NULL AS thumbnail,
@@ -6053,7 +6053,7 @@ const getRecentHybridMediaByNameDesc = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
       CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
       NULL AS thumbnail,
@@ -6121,7 +6121,7 @@ const getRecentHybridMediaByNameDesc = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(f.created_at, d.created_at) AS created_at,
       COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       NULL AS thumbnail,
@@ -6191,7 +6191,7 @@ const getHybridMediaByChannelByOldest = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
       CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
       NULL AS thumbnail,
@@ -6261,7 +6261,7 @@ const getHybridMediaByChannelByOldest = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(f.created_at, d.created_at) AS created_at,
       COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       NULL AS thumbnail,
@@ -6333,7 +6333,7 @@ const getHybridMediaByChannelByNameAsc = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
       CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
       NULL AS thumbnail,
@@ -6404,7 +6404,7 @@ const getHybridMediaByChannelByNameAsc = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(f.created_at, d.created_at) AS created_at,
       COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       NULL AS thumbnail,
@@ -6477,7 +6477,7 @@ const getHybridMediaByChannelByNameDesc = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
       CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
       NULL AS thumbnail,
@@ -6548,7 +6548,7 @@ const getHybridMediaByChannelByNameDesc = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(f.created_at, d.created_at) AS created_at,
       COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       NULL AS thumbnail,
@@ -6621,7 +6621,7 @@ const getHybridMediaByChannelWithActiveFiles = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
       COALESCE(NULLIF(CAST(f.mtime_ms AS BIGINT), 0), CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT)) AS ts,
       NULL AS thumbnail,
@@ -6691,7 +6691,7 @@ const getHybridMediaByChannelWithActiveFiles = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(f.created_at, d.created_at) AS created_at,
       COALESCE(NULLIF(CAST(f.mtime_ms AS INTEGER), 0), COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0)) AS ts,
       NULL AS thumbnail,
@@ -6764,7 +6764,7 @@ const getRecentHybridMediaByRatingDesc = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
       CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
       NULL AS thumbnail,
@@ -6832,7 +6832,7 @@ const getRecentHybridMediaByRatingDesc = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(f.created_at, d.created_at) AS created_at,
       COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       NULL AS thumbnail,
@@ -6902,7 +6902,7 @@ const getRecentHybridMediaByRatingAsc = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
       CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
       NULL AS thumbnail,
@@ -6970,7 +6970,7 @@ const getRecentHybridMediaByRatingAsc = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(f.created_at, d.created_at) AS created_at,
       COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       NULL AS thumbnail,
@@ -7040,7 +7040,7 @@ const getHybridMediaByChannelByRatingDesc = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
       CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
       NULL AS thumbnail,
@@ -7111,7 +7111,7 @@ const getHybridMediaByChannelByRatingDesc = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(f.created_at, d.created_at) AS created_at,
       COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       NULL AS thumbnail,
@@ -7184,7 +7184,7 @@ const getHybridMediaByChannelByRatingAsc = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
       CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
       NULL AS thumbnail,
@@ -7255,7 +7255,7 @@ const getHybridMediaByChannelByRatingAsc = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(f.created_at, d.created_at) AS created_at,
       COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       NULL AS thumbnail,
@@ -7328,7 +7328,7 @@ const getIndexedMediaByChannel = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
       CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
       d.url AS url,
@@ -7370,7 +7370,7 @@ const getIndexedMediaByChannel = db.prepare(db.isPostgres ? `
       d.platform AS platform,
       d.channel AS channel,
       d.title AS title,
-      NULL AS filepath,
+      f.relpath AS filepath,
       COALESCE(f.created_at, d.created_at) AS created_at,
       COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       d.url AS url,
@@ -9342,15 +9342,52 @@ async function autoEnqueueMissingThumbs() {
   try {
     // Only fetch a small batch to keep it fast and iterative
     const limit = Math.max(5, THUMB_GEN_MAX_QUEUE - thumbGenQueue.length);
-    const rows = await db.prepare("SELECT filepath FROM downloads WHERE status = 'completed' AND is_thumb_ready = false AND filepath IS NOT NULL AND filepath != '' ORDER BY id DESC LIMIT ?").all(limit);
+    const rows = await db.prepare("SELECT id, filepath FROM downloads WHERE status = 'completed' AND filepath IS NOT NULL AND filepath != '' ORDER BY id DESC LIMIT ?").all(limit * 2);
     if (rows && rows.length > 0) {
       let enqueued = 0;
       for (const row of rows) {
         if (!row.filepath) continue;
-        const res = scheduleThumbGeneration(row.filepath);
-        if (res === 'enqueued') enqueued++;
+        try {
+          // Check if thumbnail already exists
+          const dir = path.dirname(row.filepath);
+          const base = path.basename(row.filepath, path.extname(row.filepath));
+          let hasThumb = false;
+          
+          // Check sidecar files
+          const sidecarExts = ['.webp', '.jpg', '.jpeg', '.png'];
+          for (const ext of sidecarExts) {
+            const cand = path.join(dir, base + ext);
+            if (safeIsInsideBaseDir(cand) && fs.existsSync(cand)) {
+              const st = fs.statSync(cand);
+              if (st && (st.size || 0) >= 8000) {
+                hasThumb = true;
+                break;
+              }
+            }
+          }
+          
+          // Check generated thumbnail
+          if (!hasThumb) {
+            const genThumbPath = path.join(dir, `${base}_thumb_v3.jpg`);
+            if (safeIsInsideBaseDir(genThumbPath) && fs.existsSync(genThumbPath)) {
+              const st = fs.statSync(genThumbPath);
+              hasThumb = st && (st.size || 0) >= 8000;
+            }
+          }
+          
+          if (!hasThumb) {
+            const res = scheduleThumbGeneration(row.filepath);
+            if (res === 'enqueued') enqueued++;
+            if (enqueued >= limit) break;
+          }
+        } catch (e) {
+          // Skip on error
+        }
       }
-      if (enqueued > 0) drainThumbGenQueueSoon();
+      if (enqueued > 0) {
+        console.log(`[AUTO-THUMB] Enqueued ${enqueued} missing thumbnails`);
+        drainThumbGenQueueSoon();
+      }
     }
   } catch (e) {
     // Ignore DB errors during background scan
@@ -14849,6 +14886,43 @@ function makeMediaItem(row) {
   src :
   preferredThumbFinal || `/media/thumb?kind=${encodeURIComponent(row.kind)}&id=${encodeURIComponent(row.id)}&v=6`;
 
+  // Check if thumbnail is ready for non-image media
+  let isThumbReady = true;
+  if (t !== 'image' && !preferredThumbFinal && row.kind === 'd') {
+    try {
+      // Check for existing thumbnail files
+      const dir = path.dirname(fp);
+      const base = path.basename(fp, path.extname(fp));
+      const sidecarExts = ['.webp', '.jpg', '.jpeg', '.png'];
+      let hasThumb = false;
+      
+      // Check sidecar files
+      for (const ext of sidecarExts) {
+        const cand = path.join(dir, base + ext);
+        if (safeIsInsideBaseDir(cand) && fs.existsSync(cand)) {
+          const st = fs.statSync(cand);
+          if (st && (st.size || 0) >= 8000) {
+            hasThumb = true;
+            break;
+          }
+        }
+      }
+      
+      // Check generated thumbnail
+      if (!hasThumb) {
+        const thumbPath = path.join(dir, `${base}_thumb_v3.jpg`);
+        if (safeIsInsideBaseDir(thumbPath) && fs.existsSync(thumbPath)) {
+          const st = fs.statSync(thumbPath);
+          hasThumb = st && (st.size || 0) >= 8000;
+        }
+      }
+      
+      isThumbReady = hasThumb;
+    } catch (e) {
+      isThumbReady = false;
+    }
+  }
+
   return {
     kind: row.kind,
     id: row.id,
@@ -14867,7 +14941,7 @@ function makeMediaItem(row) {
     source_url: row.source_url || null,
     dedupe_key: dedupeKey || null,
     file_rel: fileRel || null,
-    ready: true,
+    ready: isThumbReady,
     src,
     thumb,
     open: { kind: row.kind, id: row.id }
@@ -15212,6 +15286,8 @@ function makeIndexedMediaItem(row) {
     typeFilter
   }) {
     if (!item || !bucket || !seen) return false;
+    // Only include items that are ready (have thumbnails)
+    if (item.ready !== true) return false;
     const type = String(typeFilter || 'all');
     const isMedia = item.type === 'video' || item.type === 'image';
     if (type === 'media' && !isMedia) return false;

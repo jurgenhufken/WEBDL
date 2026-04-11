@@ -31,6 +31,37 @@ const {
   METADATA_BLOCKED_DOMAIN_SUFFIXES, getAutoImportMaxDepth
 } = config;
 
+const EXTENSION_LOG_FILE = path.join(BASE_DIR, '.webdl-extension.log');
+const EXTENSION_LOG_MAX = 600;
+const extensionLogEntries = [];
+let cachedWorkingVideoDevice = null; // Cache voor werkende video device (skip probing next time)
+let cachedWorkingVideoDeviceTime = 0;
+const DEVICE_CACHE_TTL_MS = 3600000; // 1 uur
+
+function pushExtensionLogEntry(entry) {
+  try {
+    const nowIso = new Date().toISOString();
+    const row = {
+      ts: nowIso,
+      source: String(entry && entry.source ? entry.source : 'extension').slice(0, 120),
+      level: String(entry && entry.level ? entry.level : 'info').slice(0, 20),
+      area: String(entry && entry.area ? entry.area : '').slice(0, 60),
+      message: String(entry && entry.message ? entry.message : '').slice(0, 2000),
+      page: String(entry && entry.page ? entry.page : '').slice(0, 500),
+      details: entry && entry.details && typeof entry.details === 'object' ? entry.details : null,
+      ip: String(entry && entry.ip ? entry.ip : '').slice(0, 120)
+    };
+    if (!row.message) return;
+    extensionLogEntries.push(row);
+    if (extensionLogEntries.length > EXTENSION_LOG_MAX) {
+      extensionLogEntries.splice(0, extensionLogEntries.length - EXTENSION_LOG_MAX);
+    }
+    try {
+      fs.appendFileSync(EXTENSION_LOG_FILE, JSON.stringify(row) + '\n');
+    } catch (e) {}
+  } catch (e) {}
+}
+
 function tailTextFile(filePath, maxLines, maxBytes) {
   try {
     const lines = Math.max(1, Math.min(10000, parseInt(String(maxLines || '400'), 10) || 400));
@@ -895,6 +926,52 @@ function pickAvfoundationDefaultAudioDevice(devices) {
   }
 }
 
+function probeAvfoundationVideoDevice(device, pixelFormat = 'nv12', timeoutMs = 7000) {
+  return new Promise((resolve) => {
+    try {
+      const dev = String(device || '').trim();
+      if (!dev) return resolve(false);
+
+      const args = [
+        '-hide_banner',
+        '-loglevel', 'error',
+        '-f', 'avfoundation',
+        '-framerate', '5',
+        '-pixel_format', String(pixelFormat || 'nv12'),
+        '-i', `${dev}:none`,
+        '-t', '0.8',
+        '-frames:v', '1',
+        '-f', 'null',
+        '-'
+      ];
+
+      const proc = spawn(FFMPEG, args);
+      let settled = false;
+      const done = (ok) => {
+        if (settled) return;
+        settled = true;
+        resolve(!!ok);
+      };
+
+      const timer = setTimeout(() => {
+        try { proc.kill('SIGKILL'); } catch (e) {}
+        done(false);
+      }, Math.max(1500, Number(timeoutMs) || 7000));
+
+      proc.on('close', (code) => {
+        try { clearTimeout(timer); } catch (e) {}
+        done(code === 0);
+      });
+      proc.on('error', () => {
+        try { clearTimeout(timer); } catch (e) {}
+        done(false);
+      });
+    } catch (e) {
+      resolve(false);
+    }
+  });
+}
+
 function resolveAddonSourceDir() {
   const candidates = [];
 
@@ -1533,7 +1610,7 @@ function getViewerHTML() {
       state.loadingMore = true;
       try {
         if (state.mode === 'recent') {
-          const data = await api('/api/media/recent-files?include_active=0&include_active_files=0&include_downloads=0&limit=200&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&sort=' + encodeURIComponent(state.sort || 'recent'));
+          const data = await api('/api/media/recent-files?include_active=1&include_active_files=1&include_downloads=0&limit=200&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&sort=' + encodeURIComponent(state.sort || 'recent'));
           if (!data.success) throw new Error(data.error || 'recent failed');
           const newItems = data.items || [];
           state.items = state.items.concat(newItems);
@@ -1594,7 +1671,7 @@ function getViewerHTML() {
         state.cursor = '';
         state.done = false;
         const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
-        const data = await api('/api/media/recent-files?include_active=0&include_active_files=0&limit=200&cursor=&type=' + encodeURIComponent(state.filter) + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam);
+        const data = await api('/api/media/recent-files?include_active=1&include_active_files=1&limit=200&cursor=&type=' + encodeURIComponent(state.filter) + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam);
         if (!data.success) throw new Error(data.error || 'recent failed');
         state.items = data.items || [];
         state.cursor = data.next_cursor || '';
@@ -1653,7 +1730,7 @@ function getViewerHTML() {
       state.cursor = '';
       state.done = false;
       const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
-      const data = await api('/api/media/channel-files?include_active=0&include_active_files=0&platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=300&cursor=&type=' + encodeURIComponent(state.filter) + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam);
+      const data = await api('/api/media/channel-files?include_active=1&include_active_files=1&platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=300&cursor=&type=' + encodeURIComponent(state.filter) + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam);
       if (!data.success) throw new Error(data.error || 'channel failed');
       state.items = data.items || [];
       state.cursor = data.next_cursor || '';
@@ -3656,11 +3733,11 @@ function getGalleryHTML() {
         let path = '';
         const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
         if (state.mode === 'recent') {
-          path = '/api/media/recent-files?limit=60&cursor=&type=' + encodeURIComponent(state.filter) + '&include_active=0' + dirsParam ;
+          path = '/api/media/recent-files?limit=60&cursor=&type=' + encodeURIComponent(state.filter) + '&include_active=1' + dirsParam ;
         } else {
           const ch = state.channel;
           if (!ch) return;
-          path = '/api/media/channel-files?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=60&cursor=&type=' + encodeURIComponent(state.filter) + '&include_active=0' + dirsParam ;
+          path = '/api/media/channel-files?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=60&cursor=&type=' + encodeURIComponent(state.filter) + '&include_active=1' + dirsParam ;
         }
         const data = await api(path);
         if (!data || !data.success) return;
@@ -3738,11 +3815,11 @@ function getGalleryHTML() {
         const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
         elSentinel.textContent = '📡 Aanvraag verzenden (limit=' + state.limit + ', filters=' + (state.enabledDirs ? state.enabledDirs.length : 'none') + ')...';
         if (state.mode === 'recent') {
-          path = '/api/media/recent-files?limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0' + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam;
+          path = '/api/media/recent-files?limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=1&include_active_files=1' + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam;
         } else {
           const ch = state.channel;
           if (!ch) { state.done = true; return; }
-          path = '/api/media/channel-files?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0' + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam;
+          path = '/api/media/channel-files?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=1&include_active_files=1' + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam;
         }
         const data = await api(path);
         const fetchTime = Date.now() - startTime;
@@ -5040,7 +5117,7 @@ const getReadyDownloadsForFileIndex = db.prepare(`
   FROM downloads
   WHERE filepath IS NOT NULL
     AND TRIM(filepath) != ''
-    AND status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
+    AND status = 'completed'
   ORDER BY COALESCE(finished_at, updated_at, created_at) DESC, id DESC
   LIMIT ?
 `);
@@ -5239,7 +5316,7 @@ const getRecentIndexedMedia = db.prepare(db.isPostgres ? `
       d.title AS title,
       f.relpath AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
+      CAST(EXTRACT(EPOCH FROM COALESCE(d.updated_at, d.finished_at, d.created_at)) * 1000 AS BIGINT) AS ts,
       d.url AS url,
       d.source_url AS source_url,
       d.rating AS rating,
@@ -5365,7 +5442,7 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
       d.title AS title,
       f.relpath AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
+      CAST(EXTRACT(EPOCH FROM COALESCE(d.updated_at, d.finished_at, d.created_at)) * 1000 AS BIGINT) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -5374,7 +5451,7 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
       d.id AS rating_id
     FROM download_files f
     JOIN downloads d ON d.id = f.download_id
-    WHERE d.status NOT IN ('pending', 'queued')
+    WHERE d.status = 'completed'
 
     UNION ALL
 
@@ -5394,7 +5471,7 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
       'd' AS rating_kind,
       d.id AS rating_id
     FROM downloads d
-    WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
+    WHERE d.status = 'completed'
       AND d.filepath IS NOT NULL
       AND TRIM(d.filepath) != ''
 
@@ -5432,7 +5509,7 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
       d.title AS title,
       f.relpath AS filepath,
       COALESCE(f.created_at, d.created_at) AS created_at,
-      COALESCE(NULLIF(CAST(f.mtime_ms AS INTEGER), 0), COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0)) AS ts,
+      COALESCE(NULLIF(CAST(f.mtime_ms AS INTEGER), 0), COALESCE(CAST(strftime('%s', COALESCE(d.updated_at, d.finished_at, d.created_at)) AS INTEGER) * 1000, 0)) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -5441,7 +5518,7 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
       d.id AS rating_id
     FROM download_files f
     JOIN downloads d ON d.id = f.download_id
-    WHERE d.status NOT IN ('pending', 'queued')
+    WHERE d.status = 'completed'
 
     UNION ALL
 
@@ -5453,7 +5530,7 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
       d.title AS title,
       d.filepath AS filepath,
       d.created_at AS created_at,
-      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
+      COALESCE(CAST(strftime('%s', COALESCE(d.updated_at, d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       d.thumbnail AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -5461,7 +5538,7 @@ const getRecentHybridMediaWithActiveFiles = db.prepare(db.isPostgres ? `
       'd' AS rating_kind,
       d.id AS rating_id
     FROM downloads d
-    WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
+    WHERE d.status = 'completed'
       AND d.filepath IS NOT NULL
       AND TRIM(d.filepath) != ''
 
@@ -5501,7 +5578,7 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
       d.title AS title,
       f.relpath AS filepath,
       COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
-      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
+      CAST(EXTRACT(EPOCH FROM COALESCE(d.updated_at, d.finished_at, d.created_at)) * 1000 AS BIGINT) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -5510,7 +5587,7 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
       d.id AS rating_id
     FROM download_files f
     JOIN downloads d ON d.id = f.download_id
-    WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
+    WHERE d.status = 'completed'
 
     UNION ALL
 
@@ -5522,7 +5599,7 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
       d.title AS title,
       d.filepath AS filepath,
       d.created_at::text AS created_at,
-      CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
+      CAST(EXTRACT(EPOCH FROM COALESCE(d.updated_at, d.finished_at, d.created_at)) * 1000 AS BIGINT) AS ts,
       d.thumbnail AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -5530,7 +5607,7 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
       'd' AS rating_kind,
       d.id AS rating_id
     FROM downloads d
-    WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
+    WHERE d.status = 'completed'
       AND d.filepath IS NOT NULL
       AND TRIM(d.filepath) != ''
 
@@ -5568,7 +5645,7 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
       d.title AS title,
       f.relpath AS filepath,
       COALESCE(f.created_at, d.created_at) AS created_at,
-      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
+      COALESCE(CAST(strftime('%s', COALESCE(d.updated_at, d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       NULL AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -5577,7 +5654,7 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
       d.id AS rating_id
     FROM download_files f
     JOIN downloads d ON d.id = f.download_id
-    WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
+    WHERE d.status = 'completed'
 
     UNION ALL
 
@@ -5589,7 +5666,7 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
       d.title AS title,
       d.filepath AS filepath,
       d.created_at AS created_at,
-      COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
+      COALESCE(CAST(strftime('%s', COALESCE(d.updated_at, d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
       d.thumbnail AS thumbnail,
       d.url AS url,
       d.source_url AS source_url,
@@ -5597,7 +5674,7 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
       'd' AS rating_kind,
       d.id AS rating_id
     FROM downloads d
-    WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
+    WHERE d.status = 'completed'
       AND d.filepath IS NOT NULL
       AND TRIM(d.filepath) != ''
       AND NOT EXISTS (SELECT 1 FROM download_files f2 WHERE f2.download_id = d.id)
@@ -5624,6 +5701,56 @@ const getRecentHybridMedia = db.prepare(db.isPostgres ? `
       AND TRIM(s.filepath) != ''
   )
   ORDER BY ts DESC
+  LIMIT ? OFFSET ?
+`);
+
+const getRecentDownloadsTimeline = db.prepare(db.isPostgres ? `
+  SELECT
+    'd' AS kind,
+    CAST(d.id AS TEXT) AS id,
+    d.platform AS platform,
+    d.channel AS channel,
+    d.title AS title,
+    d.filepath AS filepath,
+    d.created_at::text AS created_at,
+    CAST(EXTRACT(EPOCH FROM COALESCE(d.updated_at, d.finished_at, d.created_at)) * 1000 AS BIGINT) AS ts,
+    d.thumbnail AS thumbnail,
+    d.url AS url,
+    d.source_url AS source_url,
+    d.rating AS rating,
+    d.updated_at::text AS updated_at,
+    d.status AS status,
+    d.progress AS progress,
+    d.error AS error,
+    d.metadata AS metadata,
+    'd' AS rating_kind,
+    d.id AS rating_id
+  FROM downloads d
+  ORDER BY d.updated_at DESC, d.created_at DESC, d.id DESC
+  LIMIT ? OFFSET ?
+` : `
+  SELECT
+    'd' AS kind,
+    CAST(d.id AS TEXT) AS id,
+    d.platform AS platform,
+    d.channel AS channel,
+    d.title AS title,
+    d.filepath AS filepath,
+    d.created_at AS created_at,
+    COALESCE(CAST(strftime('%s', COALESCE(d.updated_at, d.finished_at, d.created_at)) AS INTEGER) * 1000, 0) AS ts,
+    d.thumbnail AS thumbnail,
+    d.url AS url,
+    d.source_url AS source_url,
+    d.rating AS rating,
+    d.updated_at AS updated_at,
+    d.status AS status,
+    d.progress AS progress,
+    d.error AS error,
+    d.metadata AS metadata,
+    'd' AS rating_kind,
+    d.id AS rating_id
+  FROM downloads d
+  ORDER BY COALESCE(d.updated_at, d.created_at) DESC, d.created_at DESC, d.id DESC
   LIMIT ? OFFSET ?
 `);
 
@@ -7679,6 +7806,8 @@ const SMALL_DURATION_SECONDS = parseInt(process.env.WEBDL_SMALL_DURATION_SECONDS
 const METADATA_PROBE_CONCURRENCY = parseInt(process.env.WEBDL_METADATA_PROBE_CONCURRENCY || '1', 10);
 const METADATA_PROBE_ENABLED = String(process.env.WEBDL_METADATA_PROBE_ENABLED || '1').trim() !== '0';
 const STARTUP_METADATA_PROBE_ENABLED = String(process.env.WEBDL_STARTUP_METADATA_PROBE || '0').trim() !== '0';
+const STALE_QUEUE_CLEANUP_MS = Math.max(5 * 60 * 1000, parseInt(process.env.WEBDL_STALE_QUEUE_CLEANUP_MS || String(60 * 60 * 1000), 10) || (60 * 60 * 1000));
+const STALE_QUEUE_CLEANUP_INTERVAL_MS = Math.max(60 * 1000, parseInt(process.env.WEBDL_STALE_QUEUE_CLEANUP_INTERVAL_MS || String(5 * 60 * 1000), 10) || (5 * 60 * 1000));
 
 let lastYoutubeStartMs = 0;
 
@@ -7964,7 +8093,7 @@ async function runDownloadScheduler() {
     
     // PUSH PROGRESS!
     const earlyThumb = job.metadata?.thumbnail || deriveEarlyThumbnail(job.url, job.platform);
-    setDownloadActivityContext(id, { url: job.url, platform: job.platform, channel: job.channel, title: job.title, lane: 'heavy', thumbnail: earlyThumb, progress: job.progress || 0 });
+    setDownloadActivityContext(id, { url: job.url, platform: job.platform, channel: job.channel, title: job.title, lane: 'heavy', thumbnail: earlyThumb, progress: job.progress || 0, status: 'downloading' });
 
     try {
       startDownload(job.downloadId, job.url, job.platform, job.channel, job.title, job.metadata)
@@ -7991,7 +8120,7 @@ async function runDownloadScheduler() {
     
     // PUSH PROGRESS!
     const earlyThumb = job.metadata?.thumbnail || deriveEarlyThumbnail(job.url, job.platform);
-    setDownloadActivityContext(id, { url: job.url, platform: job.platform, channel: job.channel, title: job.title, lane: 'light', thumbnail: earlyThumb, progress: job.progress || 0 });
+    setDownloadActivityContext(id, { url: job.url, platform: job.platform, channel: job.channel, title: job.title, lane: 'light', thumbnail: earlyThumb, progress: job.progress || 0, status: 'downloading' });
 
     try {
       startDownload(job.downloadId, job.url, job.platform, job.channel, job.title, job.metadata)
@@ -8023,6 +8152,11 @@ function enqueuePostprocessJob(downloadId, job) {
     postprocessJobs.set(downloadId, { ...job, resolve, reject });
     if (!queuedPostprocess.includes(downloadId)) queuedPostprocess.push(downloadId);
     const queuedStatus = String(job.queuedStatus || '').trim().toLowerCase();
+    setDownloadActivityContext(downloadId, {
+      lane: 'medium',
+      status: queuedStatus || 'queued',
+      progress: Number.isFinite(job.queuedProgress) ? job.queuedProgress : 0
+    });
     Promise.resolve().then(async () => {
       if (queuedStatus) {
         try {
@@ -8056,6 +8190,11 @@ async function runPostprocessScheduler() {
     Promise.resolve().then(async () => {
       try {
         const startStatus = String(job.startStatus || '').trim().toLowerCase();
+        setDownloadActivityContext(downloadId, {
+          lane: 'medium',
+          status: startStatus || 'postprocessing',
+          progress: Number.isFinite(job.startProgress) ? job.startProgress : 0
+        });
         if (startStatus) {
           await updateDownloadStatus.run(startStatus, Number.isFinite(job.startProgress) ? job.startProgress : 0, null, downloadId);
         }
@@ -8077,6 +8216,42 @@ async function runPostprocessScheduler() {
         try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
       }
     }).catch(() => {});
+  }
+}
+
+async function cleanupStaleQueuedDownloads() {
+  try {
+    const rows = await getActiveDownloads.all();
+    if (!Array.isArray(rows) || rows.length === 0) return { checked: 0, cleaned: 0 };
+
+    const now = Date.now();
+    const staleIds = [];
+    for (const row of rows) {
+      if (!row) continue;
+      const id = Number(row.id);
+      if (!Number.isFinite(id)) continue;
+      const status = String(row.status || '').toLowerCase();
+      if (status !== 'pending' && status !== 'queued') continue;
+      if (activeProcesses.has(id) || startingJobs.has(id) || queuedJobs.has(id) || activePostprocessJobs.has(id) || postprocessJobs.has(id)) continue;
+
+      const updatedMs = parseSqliteDateMs(row.updated_at) || parseSqliteDateMs(row.created_at) || 0;
+      if (!updatedMs || (now - updatedMs) < STALE_QUEUE_CLEANUP_MS) continue;
+      staleIds.push(id);
+    }
+
+    for (const id of staleIds) {
+      await updateDownloadStatus.run('on_hold', 0, null, id);
+      console.log(`🧹 Stale queue cleanup: download #${id} -> on_hold`);
+    }
+
+    if (staleIds.length > 0) {
+      recentFilesTopCache.clear();
+      try { syncRuntimeActiveState().catch(() => {}); } catch (e) {}
+    }
+    return { checked: rows.length, cleaned: staleIds.length, ids: staleIds };
+  } catch (e) {
+    console.warn(`⚠️ Stale queue cleanup mislukt: ${e && e.message ? e.message : e}`);
+    return { checked: 0, cleaned: 0, error: e && e.message ? e.message : String(e) };
   }
 }
 
@@ -8344,6 +8519,28 @@ async function rehydrateDownloadQueue() {
 let activeRecordings = new Map();
 Object.defineProperty(global, 'isRecording', { get: () => activeRecordings.size > 0 });
 
+const recordingStopStatusByFile = new Map();
+
+function setRecordingStopStatus(filePath, status, error = null, extra = {}) {
+  try {
+    const key = String(filePath || '').trim();
+    if (!key) return;
+    const entry = {
+      file: key,
+      status: String(status || 'unknown').trim().toLowerCase() || 'unknown',
+      error: error ? String(error) : null,
+      ts: new Date().toISOString(),
+      ...(extra && typeof extra === 'object' ? extra : {})
+    };
+    recordingStopStatusByFile.set(key, entry);
+    while (recordingStopStatusByFile.size > 600) {
+      const first = recordingStopStatusByFile.keys().next();
+      if (!first || !first.value) break;
+      recordingStopStatusByFile.delete(first.value);
+    }
+  } catch (e) {}
+}
+
 let avfoundationDeviceListCache = null;
 
 // ========================
@@ -8385,6 +8582,48 @@ expressApp.get('/debug/logs', (req, res) => {
   } catch (e) {
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     return res.status(200).send('');
+  }
+});
+
+expressApp.post('/api/extension-log', (req, res) => {
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    pushExtensionLogEntry({
+      source: body.source,
+      level: body.level,
+      area: body.area,
+      message: body.message,
+      page: body.page,
+      details: body.details,
+      ip: req.ip
+    });
+    return res.json({ success: true });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e && e.message ? e.message : String(e) });
+  }
+});
+
+expressApp.get('/api/extension-logs', (req, res) => {
+  try {
+    const limit = Math.max(1, Math.min(1000, parseInt(String(req.query.limit || '200'), 10) || 200));
+    const inMem = extensionLogEntries.slice(-limit);
+    if (inMem.length > 0) {
+      return res.json({ success: true, items: inMem, source: 'memory' });
+    }
+
+    // Fallback to file history after restart.
+    const text = tailTextFile(EXTENSION_LOG_FILE, limit, 1024 * 1024);
+    const rows = String(text || '').split(/\r?\n/).filter(Boolean);
+    const parsed = [];
+    for (const line of rows) {
+      try {
+        const obj = JSON.parse(line);
+        if (obj && obj.message) parsed.push(obj);
+      } catch (e) {}
+    }
+    return res.json({ success: true, items: parsed.slice(-limit), source: 'file' });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e && e.message ? e.message : String(e) });
   }
 });
 
@@ -9342,15 +9581,52 @@ async function autoEnqueueMissingThumbs() {
   try {
     // Only fetch a small batch to keep it fast and iterative
     const limit = Math.max(5, THUMB_GEN_MAX_QUEUE - thumbGenQueue.length);
-    const rows = await db.prepare("SELECT filepath FROM downloads WHERE status = 'completed' AND is_thumb_ready = false AND filepath IS NOT NULL AND filepath != '' ORDER BY id DESC LIMIT ?").all(limit);
+    const rows = await db.prepare("SELECT id, filepath FROM downloads WHERE status = 'completed' AND filepath IS NOT NULL AND filepath != '' ORDER BY id DESC LIMIT ?").all(limit * 2);
     if (rows && rows.length > 0) {
       let enqueued = 0;
       for (const row of rows) {
         if (!row.filepath) continue;
-        const res = scheduleThumbGeneration(row.filepath);
-        if (res === 'enqueued') enqueued++;
+        try {
+          // Check if thumbnail already exists
+          const dir = path.dirname(row.filepath);
+          const base = path.basename(row.filepath, path.extname(row.filepath));
+          let hasThumb = false;
+          
+          // Check sidecar files
+          const sidecarExts = ['.webp', '.jpg', '.jpeg', '.png'];
+          for (const ext of sidecarExts) {
+            const cand = path.join(dir, base + ext);
+            if (safeIsInsideBaseDir(cand) && fs.existsSync(cand)) {
+              const st = fs.statSync(cand);
+              if (st && (st.size || 0) >= 8000) {
+                hasThumb = true;
+                break;
+              }
+            }
+          }
+          
+          // Check generated thumbnail
+          if (!hasThumb) {
+            const genThumbPath = path.join(dir, `${base}_thumb_v3.jpg`);
+            if (safeIsInsideBaseDir(genThumbPath) && fs.existsSync(genThumbPath)) {
+              const st = fs.statSync(genThumbPath);
+              hasThumb = st && (st.size || 0) >= 8000;
+            }
+          }
+          
+          if (!hasThumb) {
+            const res = scheduleThumbGeneration(row.filepath);
+            if (res === 'enqueued') enqueued++;
+            if (enqueued >= limit) break;
+          }
+        } catch (e) {
+          // Skip on error
+        }
       }
-      if (enqueued > 0) drainThumbGenQueueSoon();
+      if (enqueued > 0) {
+        console.log(`[AUTO-THUMB] Enqueued ${enqueued} missing thumbnails`);
+        drainThumbGenQueueSoon();
+      }
     }
   } catch (e) {
     // Ignore DB errors during background scan
@@ -10341,6 +10617,47 @@ expressApp.get('/health', (req, res) => {
   });
 });
 
+expressApp.get('/api/recording-stop-status', async (req, res) => {
+  try {
+    const file = String(req.query && req.query.file ? req.query.file : '').trim();
+    if (!file) return res.status(400).json({ success: false, error: 'file query vereist' });
+
+    const cached = recordingStopStatusByFile.get(file);
+    if (cached) return res.json({ success: true, ...cached, source: 'memory' });
+
+    const byPath = await getDownloadIdByFilepath.get(file);
+    const id = Number(byPath && byPath.id != null ? byPath.id : NaN);
+    if (Number.isFinite(id) && id > 0) {
+      const row = await rawGetDownload.get(id);
+      if (row) {
+        const st = String(row.status || '').toLowerCase();
+        const out = {
+          success: true,
+          file,
+          status: st || 'unknown',
+          error: row.error || null,
+          downloadId: id,
+          source: 'db'
+        };
+        return res.json(out);
+      }
+    }
+
+    const exists = fs.existsSync(file);
+    if (exists) {
+      let size = 0;
+      try { size = fs.statSync(file).size || 0; } catch (e) { size = 0; }
+      const status = size >= 1024 ? 'completed_file_only' : 'error';
+      const error = size >= 1024 ? null : `Opnamebestand ontbreekt of is te klein (${size} bytes)`;
+      return res.json({ success: true, file, status, error, size, source: 'fs' });
+    }
+
+    return res.json({ success: true, file, status: 'unknown', error: null, source: 'none' });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e && e.message ? e.message : String(e) });
+  }
+});
+
 // Status
 expressApp.get('/status', async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -10388,52 +10705,87 @@ expressApp.get('/status', async (req, res) => {
   } catch (e) {
     dbStatusError = (e && e.message) ? e.message : String(e);
   }
-  // Build active_items for the gallery's queue bar using real-time context
-  const activeDownloadsList = [];
-  try {
-    for (const [id, ctx] of downloadActivityContextById.entries()) {
+  async function buildStatusCard(id, patch = {}) {
+    try {
       const numId = Number(id);
-      if (activeProcIds.has(id) || activeProcIds.has(numId) || startingJobs.has(id) || startingJobs.has(numId) || activePostprocessJobs.has(id) || activePostprocessJobs.has(numId)) {
-        activeDownloadsList.push({ id: numId, ...ctx });
+      if (!Number.isFinite(numId)) return null;
+      const ctx = downloadActivityContextById.get(numId) || downloadActivityContextById.get(String(numId)) || {};
+      let row = null;
+      if (!ctx.url || !ctx.platform || !ctx.title || !ctx.channel || !ctx.thumbnail) {
+        try { row = await rawGetDownload.get(numId); } catch (e) { row = null; }
       }
+      const url = patch.url != null ? patch.url : (ctx.url || (row && row.url) || '');
+      const platform = patch.platform != null ? patch.platform : (ctx.platform || (row && row.platform) || 'unknown');
+      const channel = patch.channel != null ? patch.channel : (ctx.channel || (row && row.channel) || 'unknown');
+      const title = patch.title != null ? patch.title : (ctx.title || (row && row.title) || '(download)');
+      const filepath = patch.filepath != null ? patch.filepath : (ctx.filepath || (row && row.filepath) || '');
+      const thumbnail = patch.thumbnail != null ? patch.thumbnail : (ctx.thumbnail || (row && row.thumbnail) || deriveEarlyThumbnail(url, platform) || '');
+      const status = patch.status != null ? patch.status : (ctx.status || (row && row.status) || 'queued');
+      const progressRaw = patch.progress != null ? patch.progress : (ctx.progress != null ? ctx.progress : (row && row.progress != null ? row.progress : 0));
+      const progress = Number.isFinite(Number(progressRaw)) ? Number(progressRaw) : 0;
+      const lane = patch.lane != null ? patch.lane : (ctx.lane || detectLane(platform, url));
+      return {
+        id: numId,
+        url,
+        platform,
+        channel,
+        title,
+        filepath,
+        thumbnail,
+        status,
+        progress,
+        lane,
+        updated_at: (row && row.updated_at) || '',
+        error: (row && row.error) || null
+      };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  const activeDownloadsList = [];
+  const queueItems = [];
+  const postprocessItems = [];
+  try {
+    const activeIds = new Set();
+    for (const id of activeProcesses.keys()) activeIds.add(Number(id));
+    for (const id of startingJobs) activeIds.add(Number(id));
+    for (const id of activeIds) {
+      const item = await buildStatusCard(id, { status: 'downloading', lane: jobLane.get(id) || undefined });
+      if (item) activeDownloadsList.push(item);
+    }
+
+    const queueIds = [];
+    for (const id of queuedLight) queueIds.push(Number(id));
+    for (const id of queuedHeavy) queueIds.push(Number(id));
+    const seenQueueIds = new Set();
+    for (const id of queueIds) {
+      if (!Number.isFinite(id) || seenQueueIds.has(id)) continue;
+      seenQueueIds.add(id);
+      const item = await buildStatusCard(id, { status: 'queued', lane: jobLane.get(id) || undefined });
+      if (item) queueItems.push(item);
+    }
+
+    const postIds = [];
+    for (const id of activePostprocessJobs) postIds.push(Number(id));
+    for (const id of queuedPostprocess) postIds.push(Number(id));
+    const seenPostIds = new Set();
+    for (const id of postIds) {
+      if (!Number.isFinite(id) || seenPostIds.has(id)) continue;
+      seenPostIds.add(id);
+      const item = await buildStatusCard(id, { status: activePostprocessJobs.has(id) ? 'postprocessing' : 'queued', lane: 'medium' });
+      if (item) postprocessItems.push(item);
     }
   } catch (e) {}
 
-  // Pad with queued AND pending downloads if we have room (skip recordings)
-  try {
-    if (activeDownloadsList.length < 24 && (dbQueuedCount > 0 || dbPendingCount > 0)) {
-      const qrows = await db.prepare("SELECT id, url, thumbnail, platform, channel, title, status FROM downloads WHERE status IN ('queued', 'pending') AND url NOT LIKE 'recording:%' ORDER BY CASE status WHEN 'queued' THEN 0 WHEN 'pending' THEN 1 END, created_at ASC LIMIT 100").all();
-      const existingIds = new Set(activeDownloadsList.map(a => Number(a.id)));
-      let heavyPad = 0, lightPad = 0;
-      for (const qr of qrows || []) {
-        if (heavyPad >= 12 && lightPad >= 12) break;
-        if (!existingIds.has(Number(qr.id)) && !activeProcIds.has(qr.id) && !startingJobs.has(qr.id)) {
-          const lane = detectLane(qr.platform, qr.url);
-          if (lane === 'heavy' && heavyPad >= 12) continue;
-          if (lane === 'light' && lightPad >= 12) continue;
-          if (lane === 'heavy') heavyPad++; else lightPad++;
-          
-          activeDownloadsList.push({
-            id: qr.id,
-            progress: 0,
-            status: qr.status || 'queued',
-            url: qr.url || '',
-            thumbnail: qr.thumbnail || '',
-            platform: qr.platform,
-            channel: qr.channel,
-            title: qr.title,
-            lane
-          });
-        }
-      }
-    }
-  } catch (e) {}
   res.json({
     status: 'running',
     isRecording,
     activeRecordingUrls: Array.from(activeRecordings.keys()),
     activeDownloads: runtimeActive.length,
     active_items: activeDownloadsList,
+    queue_items: queueItems,
+    postprocess_items: postprocessItems,
     queuedDownloads: dbQueuedCount,
     pendingDownloads: dbPendingCount,
     totalActiveDownloads: dbActiveCount,
@@ -10466,6 +10818,7 @@ expressApp.get('/status', async (req, res) => {
     },
     queues: {
       heavy: { active: heavyActive, limit: heavyLimit, queued: queuedHeavy.length },
+      medium: { active: activePostprocessJobs.size, limit: POSTPROCESS_CONCURRENCY, queued: queuedPostprocess.length },
       light: { active: lightActive, limit: lightLimit, queued: queuedLight.length }
     },
     queue_ids: {
@@ -11163,7 +11516,59 @@ expressApp.post('/start-recording', async (req, res) => {
           hint: 'Ga naar macOS Instellingen → Privacy en beveiliging → Schermopname en zet Terminal/iTerm aan. Sluit Terminal volledig en start opnieuw. Je kan ook /avfoundation-devices openen voor debug output. NB: ffmpeg -list_devices eindigt vaak met "Input/output error"; dat is normaal en betekent niet per se dat permissions fout zijn.'
         });
       }
-      resolvedVideoDevice = String(picked.index);
+      const allVideo = devices && Array.isArray(devices.video) ? devices.video : [];
+      const screenCandidates = allVideo.filter((d) => /screen|display|capture\s*screen/i.test(String(d && d.name || '')));
+      const uniqueCandidates = [];
+      const seenCand = new Set();
+      const pushCand = (value) => {
+        const v = String(value || '').trim();
+        if (!v || seenCand.has(v)) return;
+        seenCand.add(v);
+        uniqueCandidates.push(v);
+      };
+
+      // Prefer picked screen first, then remaining screen names/indexes.
+      pushCand(String(picked.name || ''));
+      pushCand(String(picked.index != null ? picked.index : ''));
+      for (const d of screenCandidates) {
+        pushCand(String(d && d.name || ''));
+        pushCand(String(d && d.index != null ? d.index : ''));
+      }
+
+      let workingDevice = null;
+      
+      // Controleer eerst cache
+      if (cachedWorkingVideoDevice && (Date.now() - cachedWorkingVideoDeviceTime) < DEVICE_CACHE_TTL_MS) {
+        const testOk = await probeAvfoundationVideoDevice(cachedWorkingVideoDevice, 'nv12', 2000);
+        if (testOk) {
+          workingDevice = cachedWorkingVideoDevice;
+        }
+      }
+      
+      // Als cache mislukt of niet beschikbaar, probe alle devices
+      if (!workingDevice) {
+        for (const cand of uniqueCandidates) {
+          const ok = await probeAvfoundationVideoDevice(cand, 'nv12', 7000);
+          if (ok) {
+            workingDevice = cand;
+            cachedWorkingVideoDevice = cand; // Cache de werkende device
+            cachedWorkingVideoDeviceTime = Date.now();
+            break;
+          }
+        }
+      }
+
+      if (!workingDevice) {
+        return res.status(500).json({
+          success: false,
+          error: 'Geen werkende Screen Recording input gevonden (avfoundation geeft 0 frames).',
+          hint: 'Controleer macOS Schermopname permissie voor Terminal/iTerm/Code, en test opnieuw. Probeer ook de browser op het hoofdscherm te zetten.',
+          devices: allVideo,
+          tried: uniqueCandidates.slice(0, 12)
+        });
+      }
+
+      resolvedVideoDevice = workingDevice;
       resolvedVideoName = picked.name;
     }
     if (wantsAudio && resolvedAudioDevice === 'auto') {
@@ -11192,9 +11597,9 @@ expressApp.post('/start-recording', async (req, res) => {
   '-drop_late_frames', '0',
   '-i', inputDevice];
 
-
-  if (inputPixelFormat && inputPixelFormat.toLowerCase() !== 'auto') {
-    args.splice(args.indexOf('-capture_cursor'), 0, '-pixel_format', inputPixelFormat);
+  const recordingInputPixelFormat = (inputPixelFormat && inputPixelFormat.toLowerCase() !== 'auto') ? inputPixelFormat : 'nv12';
+  if (recordingInputPixelFormat) {
+    args.splice(args.indexOf('-capture_cursor'), 0, '-pixel_format', recordingInputPixelFormat);
   }
 
   const cropOk = !!(crop && Number.isFinite(crop.x) && Number.isFinite(crop.y) && Number.isFinite(crop.width) && Number.isFinite(crop.height));
@@ -11326,7 +11731,7 @@ expressApp.post('/start-recording', async (req, res) => {
   });
   broadcastRecordingState();
   console.log(`🔴 Opname gestart: ${recordingFilePath}`);
-  res.json({ success: true, action: 'start-recording', file: filename, dir, meta: resolved, lock: lockMode, rawFile: lockMode ? path.basename(rawFilePath) : undefined, finalFile: path.basename(finalFilePath), input: { device: inputDevice, video_name: resolvedVideoName, audio_name: resolvedAudioName, pixel_format: inputPixelFormat } });
+  res.json({ success: true, action: 'start-recording', file: filename, dir, meta: resolved, lock: lockMode, rawFile: lockMode ? path.basename(rawFilePath) : undefined, finalFile: path.basename(finalFilePath), input: { device: inputDevice, video_name: resolvedVideoName, audio_name: resolvedAudioName, pixel_format: recordingInputPixelFormat } });
 });
 
 expressApp.post('/recording/crop-update', (req, res) => {
@@ -11382,6 +11787,7 @@ expressApp.post('/stop-recording', (req, res) => {
   } : null;
 
   const file = lockJob ? lockJob.rawFilePath : currentRecordingFile;
+  const stopLogFile = currentRecordingMeta && currentRecordingMeta.logFile ? currentRecordingMeta.logFile : null;
   let responded = false;
 
   const finish = (success, error, extra = {}) => {
@@ -11400,18 +11806,29 @@ expressApp.post('/stop-recording', (req, res) => {
     if (recordingProcess) {recordingProcess.kill('SIGINT');}
   }, 20000);
 
+  let postKillFinalizeTimer = null;
+
   const hardTimeout = setTimeout(() => {
     if (recordingProcess) {
       console.warn('ffmpeg stop timeout, force kill');
       recordingProcess.kill('SIGKILL');
-      cleanup();
-      finish(false, 'Opname stop timeout');
+      setRecordingStopStatus(file, 'stopping', 'Force stop (SIGKILL) uitgevoerd', { logFile: stopLogFile });
+      // Give the close handler a chance to finalize DB/file state after SIGKILL.
+      postKillFinalizeTimer = setTimeout(() => {
+        setRecordingStopStatus(file, 'error', 'Opname stop timeout', { logFile: stopLogFile });
+        cleanup();
+        if (!responded) finish(false, 'Opname stop timeout');
+      }, 6000);
     }
   }, 40000);
 
   proc.once('close', async () => {
     clearTimeout(softTimeout);
     clearTimeout(hardTimeout);
+    if (postKillFinalizeTimer) {
+      clearTimeout(postKillFinalizeTimer);
+      postKillFinalizeTimer = null;
+    }
     cleanup();
 
     const meta = lockJob && lockJob.meta ? lockJob.meta : currentRecordingMeta;
@@ -11421,11 +11838,12 @@ expressApp.post('/stop-recording', (req, res) => {
         runRecordingDiagnosticsToLog(lockJob.rawFilePath, lockJob.logFile).catch(() => {});
       } catch (e) {}
 
+      const rawFp = String(lockJob.rawFilePath || '');
+      const rawExists = rawFp && fs.existsSync(rawFp);
+      const rawSize = rawExists ? fs.statSync(rawFp).size : 0;
+
       let dbId = null;
       try {
-        const fp = String(lockJob.rawFilePath || '');
-        const exists = fp && fs.existsSync(fp);
-        const size = exists ? fs.statSync(fp).size : 0;
         const recordMeta = {
           webdl_kind: 'recording',
           webdl_recording: { lock: true, raw: lockJob.rawFilePath, final: lockJob.finalFilePath, log: lockJob.logFile, page_url: meta && meta.pageUrl ? meta.pageUrl : null }
@@ -11435,17 +11853,41 @@ expressApp.post('/stop-recording', (req, res) => {
           String(meta && meta.platform ? meta.platform : 'other'),
           String(meta && meta.channel ? meta.channel : 'unknown'),
           String(meta && meta.title ? meta.title : 'recording'),
-          path.basename(fp || lockJob.finalFilePath || ''),
-          fp,
-          size,
+          path.basename(rawFp || lockJob.finalFilePath || ''),
+          rawFp,
+          rawSize,
           'mp4',
           'queued',
           50,
           JSON.stringify(recordMeta)
         );
-        dbId = ins && ins.lastInsertRowid ? ins.lastInsertRowid : null;
-      } catch (e) {}
+        const directInsertId = Number(ins && ins.lastInsertRowid != null ? ins.lastInsertRowid : NaN);
+        if (Number.isFinite(directInsertId) && directInsertId > 0) {
+          dbId = directInsertId;
+        } else {
+          // Postgres adapters often do not expose lastInsertRowid.
+          const byPath = await getDownloadIdByFilepath.get(rawFp);
+          const fallbackId = Number(byPath && byPath.id != null ? byPath.id : NaN);
+          if (Number.isFinite(fallbackId) && fallbackId > 0) dbId = fallbackId;
+        }
+      } catch (e) {
+        console.error(`⚠️ Lock recording DB insert mislukt: ${e && e.message ? e.message : e}`);
+      }
 
+      if (!rawExists || rawSize < 1024) {
+        const msg = `Opnamebestand ontbreekt of is te klein (${rawSize} bytes)`;
+        if (dbId) {
+          try { await updateDownloadStatus.run('error', 0, msg, dbId); } catch (e) {}
+        }
+        try {
+          fs.appendFileSync(lockJob.logFile, `\n[WEBDL] LOCK CROP aborted: ${msg}\n`);
+        } catch (e) {}
+        setRecordingStopStatus(file, 'error', msg, { logFile: lockJob.logFile, rawFile: lockJob.rawFilePath, finalFile: lockJob.finalFilePath });
+        finish(false, msg, { rawFile: lockJob.rawFilePath, finalFile: lockJob.finalFilePath, logFile: lockJob.logFile });
+        return;
+      }
+
+      setRecordingStopStatus(file, 'processing', null, { logFile: lockJob.logFile, rawFile: lockJob.rawFilePath, finalFile: lockJob.finalFilePath, downloadId: dbId });
       finish(true, null, { processing: true, rawFile: lockJob.rawFilePath, finalFile: lockJob.finalFilePath, logFile: lockJob.logFile });
       enqueuePostprocessJob(dbId, {
         queuedStatus: 'queued',
@@ -11500,6 +11942,7 @@ expressApp.post('/stop-recording', (req, res) => {
                 webdl_recording: { lock: true, raw: lockJob.rawFilePath, final: lockJob.finalFilePath, log: lockJob.logFile, page_url: meta && meta.pageUrl ? meta.pageUrl : null }
               };
               await updateDownload.run('completed', 100, fp, path.basename(fp), finalSize, 'mp4', JSON.stringify(recordMeta), null, dbId);
+              setRecordingStopStatus(file, 'completed', null, { logFile: lockJob.logFile, rawFile: lockJob.rawFilePath, finalFile: fp, downloadId: dbId });
             } catch (e) {}
           }
 
@@ -11507,10 +11950,39 @@ expressApp.post('/stop-recording', (req, res) => {
             fs.appendFileSync(lockJob.logFile, `\n[WEBDL] LOCK CROP done: ${lockJob.finalFilePath}\n`);
           } catch (e) {}
         }
+      }).then(async (queued) => {
+        if (queued) return;
+        try {
+          const fp = String(lockJob.rawFilePath || '');
+          const exists = fp && fs.existsSync(fp);
+          const rawSize = exists ? fs.statSync(fp).size : 0;
+          if (dbId) {
+            const fallbackMeta = {
+              webdl_kind: 'recording',
+              webdl_recording: {
+                lock: true,
+                lock_postprocess_failed: true,
+                raw: lockJob.rawFilePath,
+                final: lockJob.finalFilePath,
+                log: lockJob.logFile,
+                page_url: meta && meta.pageUrl ? meta.pageUrl : null
+              }
+            };
+            await updateDownload.run('completed', 100, fp, path.basename(fp || lockJob.finalFilePath || ''), rawSize, 'mp4', JSON.stringify(fallbackMeta), null, dbId);
+          }
+          fs.appendFileSync(lockJob.logFile, `\n[WEBDL] LOCK CROP queue skipped (missing downloadId) -> saved raw as completed\n`);
+          console.warn(`⚠️ Lock recording postprocess overgeslagen: downloadId ontbreekt (saved raw: ${fp})`);
+          setRecordingStopStatus(file, 'completed', null, { logFile: lockJob.logFile, rawFile: fp, finalFile: lockJob.finalFilePath || fp, downloadId: dbId });
+        } catch (e) {
+          console.warn(`⚠️ Lock recording fallback mislukt: ${e && e.message ? e.message : e}`);
+          setRecordingStopStatus(file, 'error', e && e.message ? e.message : String(e), { logFile: lockJob.logFile, rawFile: lockJob.rawFilePath, finalFile: lockJob.finalFilePath, downloadId: dbId });
+        }
       }).catch(async (e) => {
         try {
           fs.appendFileSync(lockJob.logFile, `\n[WEBDL] LOCK CROP queue error: ${e.message}\n`);
         } catch (err) {}
+        console.error(`⚠️ Lock recording postprocess queue error: ${e && e.message ? e.message : e}`);
+        setRecordingStopStatus(file, 'error', e && e.message ? e.message : String(e), { logFile: lockJob.logFile, rawFile: lockJob.rawFilePath, finalFile: lockJob.finalFilePath, downloadId: dbId });
       });
       return;
     }
@@ -11519,6 +11991,15 @@ expressApp.post('/stop-recording', (req, res) => {
       const fp = String(file || '');
       const exists = fp && fs.existsSync(fp);
       const size = exists ? fs.statSync(fp).size : 0;
+      if (!exists || size < 1024) {
+        const msg = `Opnamebestand ontbreekt of is te klein (${size} bytes)`;
+        try {
+          const lf = meta && meta.logFile ? meta.logFile : null;
+          if (lf) fs.appendFileSync(lf, `\n[WEBDL] RECORDING save aborted: ${msg}\n`);
+        } catch (e) {}
+        setRecordingStopStatus(file, 'error', msg, { logFile: meta && meta.logFile ? meta.logFile : null });
+        return finish(false, msg, { logFile: meta && meta.logFile ? meta.logFile : null });
+      }
       const recordMeta = {
         webdl_kind: 'recording',
         webdl_recording: { lock: false, file: fp, log: meta && meta.logFile ? meta.logFile : null, page_url: meta && meta.pageUrl ? meta.pageUrl : null }
@@ -11536,7 +12017,10 @@ expressApp.post('/stop-recording', (req, res) => {
         100,
         JSON.stringify(recordMeta)
       );
-    } catch (e) {}
+      setRecordingStopStatus(file, 'completed', null, { logFile: meta && meta.logFile ? meta.logFile : null });
+    } catch (e) {
+      setRecordingStopStatus(file, 'error', e && e.message ? e.message : String(e), { logFile: meta && meta.logFile ? meta.logFile : null });
+    }
 
     try {
       const lf = meta && meta.logFile ? meta.logFile : null;
@@ -11550,16 +12034,33 @@ expressApp.post('/stop-recording', (req, res) => {
   proc.once('error', (err) => {
     clearTimeout(softTimeout);
     clearTimeout(hardTimeout);
+    if (postKillFinalizeTimer) {
+      clearTimeout(postKillFinalizeTimer);
+      postKillFinalizeTimer = null;
+    }
     cleanup();
+    setRecordingStopStatus(file, 'error', err && err.message ? err.message : String(err), { logFile: stopLogFile });
     finish(false, err.message);
   });
 
   try {
+    setRecordingStopStatus(file, 'stopping', null, { logFile: stopLogFile });
     proc.stdin.write('q\n');
     proc.stdin.end();
+    finish(true, null, {
+      stopping: true,
+      file,
+      logFile: stopLogFile
+    });
   } catch (e) {
     console.warn(`ffmpeg stdin stop faalde: ${e.message}`);
+    setRecordingStopStatus(file, 'stopping', null, { logFile: stopLogFile });
     proc.kill('SIGINT');
+    finish(true, null, {
+      stopping: true,
+      file,
+      logFile: stopLogFile
+    });
   }
 });
 
@@ -14742,10 +15243,10 @@ function inferMediaType(fp) {
     if (safeIsAllowedExistingPath(abs)) {
       const st = fs.statSync(abs);
       if (st && st.isDirectory && st.isDirectory()) {
-        const img = pickThumbnailFile(abs);
-        if (img) return 'image';
         const v = findFirstVideoInDirDeep(abs) || findFirstVideoInDir(abs);
         if (v) return 'video';
+        const img = pickThumbnailFile(abs);
+        if (img) return 'image';
         return 'file';
       }
       if (st && st.isFile && st.isFile()) {
@@ -14849,6 +15350,43 @@ function makeMediaItem(row) {
   src :
   preferredThumbFinal || `/media/thumb?kind=${encodeURIComponent(row.kind)}&id=${encodeURIComponent(row.id)}&v=6`;
 
+  // Check if thumbnail is ready for non-image media
+  let isThumbReady = true;
+  if (t !== 'image' && !preferredThumbFinal && row.kind === 'd') {
+    try {
+      // Check for existing thumbnail files
+      const dir = path.dirname(fp);
+      const base = path.basename(fp, path.extname(fp));
+      const sidecarExts = ['.webp', '.jpg', '.jpeg', '.png'];
+      let hasThumb = false;
+      
+      // Check sidecar files
+      for (const ext of sidecarExts) {
+        const cand = path.join(dir, base + ext);
+        if (safeIsInsideBaseDir(cand) && fs.existsSync(cand)) {
+          const st = fs.statSync(cand);
+          if (st && (st.size || 0) >= 8000) {
+            hasThumb = true;
+            break;
+          }
+        }
+      }
+      
+      // Check generated thumbnail
+      if (!hasThumb) {
+        const thumbPath = path.join(dir, `${base}_thumb_v3.jpg`);
+        if (safeIsInsideBaseDir(thumbPath) && fs.existsSync(thumbPath)) {
+          const st = fs.statSync(thumbPath);
+          hasThumb = st && (st.size || 0) >= 8000;
+        }
+      }
+      
+      isThumbReady = hasThumb;
+    } catch (e) {
+      isThumbReady = false;
+    }
+  }
+
   return {
     kind: row.kind,
     id: row.id,
@@ -14867,7 +15405,7 @@ function makeMediaItem(row) {
     source_url: row.source_url || null,
     dedupe_key: dedupeKey || null,
     file_rel: fileRel || null,
-    ready: true,
+    ready: isThumbReady,
     src,
     thumb,
     open: { kind: row.kind, id: row.id }
@@ -15366,6 +15904,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
   const type = String(req.query.type || 'all').toLowerCase();
   const tagFilter = String(req.query.tag || '').trim();
   const sort = String(req.query.sort || 'recent').toLowerCase();
+  const syncDownloads = String(req.query.sync_downloads || '0') !== '0';
   const cursorRaw = String(req.query.cursor || '').trim();
   const cur = decodeCursor(cursorRaw);
   const includeActive = String(req.query.include_active || '0') !== '0';
@@ -15375,7 +15914,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
     const dirsParam = String(req.query.dirs || '').trim();
     if (dirsParam) enabledDirs = JSON.parse(dirsParam);
   } catch (e) {}
-  if (!enabledDirs) enabledDirs = loadDirectoryFilter();
+  if (!enabledDirs) enabledDirs = [];
 
   try {
     const isTopCursor = !cursorRaw ||
@@ -15403,7 +15942,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
     const seenKeys = new Map();
 
     const isTopRequest = !cursorRaw || (cur && cur.activeOffset === 0 && cur.rowOffset === 0 && !cur.dir && cur.fileIndex === 0);
-    if (includeActive && isTopRequest) {
+    if (!syncDownloads && includeActive && isTopRequest) {
       try {
         const cap = Math.min(28, Math.max(8, Math.floor(limit / 2)));
         const rows = runtimeActiveRows;
@@ -15418,8 +15957,8 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
     const nextActiveOffset = -1;
     let rowOffset = cur.rowOffset;
     const hasDirectoryFilter = enabledDirs && enabledDirs.length > 0 && enabledDirs.length < 10;
-    const maxRowsPerCall = hasDirectoryFilter ? 800 : 260;
-    const getBatch = (sort === 'rating_asc') ? getRecentHybridMediaByRatingAsc : (sort === 'rating_desc') ? getRecentHybridMediaByRatingDesc : (sort === 'oldest') ? getRecentHybridMediaByOldest : (sort === 'name_asc') ? getRecentHybridMediaByNameAsc : (sort === 'name_desc') ? getRecentHybridMediaByNameDesc : (includeActiveFiles ? getRecentHybridMediaWithActiveFiles : getRecentHybridMedia);
+    const maxRowsPerCall = hasDirectoryFilter ? 1200 : 600;
+    const getBatch = syncDownloads ? getRecentDownloadsTimeline : (sort === 'rating_asc') ? getRecentHybridMediaByRatingAsc : (sort === 'rating_desc') ? getRecentHybridMediaByRatingDesc : (sort === 'oldest') ? getRecentHybridMediaByOldest : (sort === 'name_asc') ? getRecentHybridMediaByNameAsc : (sort === 'name_desc') ? getRecentHybridMediaByNameDesc : (includeActiveFiles ? getRecentHybridMediaWithActiveFiles : getRecentHybridMedia);
     let loopDone = false;
     let safetyLimit = 0;
     while (items.length < limit && !loopDone && safetyLimit < 15) {
@@ -15436,6 +15975,26 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
         }
 
         if (!row) {rowOffset += 1;continue;}
+
+        if (syncDownloads) {
+          const relPathSync = row.filepath ? path.relative(BASE_DIR, row.filepath) : '';
+          if (enabledDirs && relPathSync && !shouldIncludePath(relPathSync, enabledDirs)) {
+            rowOffset += 1;
+            continue;
+          }
+
+          const fpSync = String(row.filepath || '').trim();
+          const itSync = fpSync ? makeIndexedMediaItem(row) : makeActiveDownloadItem(row);
+          if (itSync) {
+            const typeSync = String(type || 'all');
+            const isMediaSync = itSync.type === 'video' || itSync.type === 'image';
+            const blockedSync = typeSync === 'media' && !isMediaSync || typeSync !== 'all' && typeSync !== 'media' && itSync.type !== typeSync;
+            if (!blockedSync) items.push(itSync);
+          }
+          rowOffset += 1;
+          if (items.length >= limit) break;
+          continue;
+        }
         
         // Apply directory filter
         const relPath = row.kind === 'p' ? row.id : (row.filepath ? path.relative(BASE_DIR, row.filepath) : '');
@@ -15513,7 +16072,7 @@ expressApp.get('/api/media/channel-files', async (req, res) => {
     const dirsParam = String(req.query.dirs || '').trim();
     if (dirsParam) enabledDirs = JSON.parse(dirsParam);
   } catch (e) {}
-  if (!enabledDirs) enabledDirs = loadDirectoryFilter();
+  if (!enabledDirs) enabledDirs = [];
 
   if (!platform || !channel) return res.status(400).json({ success: false, error: 'platform en channel zijn vereist' });
 
@@ -16475,20 +17034,7 @@ async function scanExistingTagsOnStartup() {
 async function startServer() {
   try {
     await ensurePostgresSchemaReady();
-    await scanExistingTagsOnStartup();
   } catch (e) {}
-
-  // Clean up thumbnail files from download_files
-  try {
-    const result = await deleteThumbnailFiles.run();
-    const deleted = result && result.changes ? result.changes : 0;
-    if (deleted > 0) {
-      console.log(`🧹 Verwijderd: ${deleted} thumbnail entries uit gallery`);
-      recentFilesTopCache.clear();
-    }
-  } catch (e) {
-    console.log(`⚠️  Thumbnail cleanup fout: ${e.message}`);
-  }
 
   server.listen(PORT, () => {
     console.log(`\n🟢 WEBDL Server draait op http://localhost:${PORT}`);
@@ -16508,6 +17054,26 @@ async function startServer() {
     console.log(`\n🌐 Dashboard: http://localhost:${PORT}/dashboard`);
     console.log(`\nKlaar voor gebruik!\n`);
 
+    // Run heavy startup maintenance after bind, so API becomes available immediately.
+    (async () => {
+      try {
+        await scanExistingTagsOnStartup();
+      } catch (e) {
+        console.error(`⚠️ Startup tag-scan fout: ${e && e.message ? e.message : e}`);
+      }
+
+      try {
+        const result = await deleteThumbnailFiles.run();
+        const deleted = result && result.changes ? result.changes : 0;
+        if (deleted > 0) {
+          console.log(`🧹 Verwijderd: ${deleted} thumbnail entries uit gallery`);
+          recentFilesTopCache.clear();
+        }
+      } catch (e) {
+        console.log(`⚠️  Thumbnail cleanup fout: ${e && e.message ? e.message : e}`);
+      }
+    })().catch(() => {});
+
     setTimeout(() => {
       try {
         rehydrateDownloadQueue();
@@ -16515,6 +17081,13 @@ async function startServer() {
         syncRuntimeActiveState().catch(() => {});
         console.log('🔁 Queue rehydrate gestart na startup');
         recentFilesTopCache.clear();
+        setTimeout(() => {
+          cleanupStaleQueuedDownloads().then((result) => {
+            if (result && result.cleaned) {
+              console.log(`🧹 Startup stale queue cleanup: ${result.cleaned} rows`);
+            }
+          }).catch(() => {});
+        }, 5000);
       } catch (e) {
         console.warn(`⚠️ Queue rehydrate mislukt: ${e && e.message ? e.message : e}`);
       }
@@ -16523,6 +17096,10 @@ async function startServer() {
     setInterval(() => {
       syncRuntimeActiveState().catch(() => {});
     }, 2500);
+
+    setInterval(() => {
+      cleanupStaleQueuedDownloads().catch(() => {});
+    }, STALE_QUEUE_CLEANUP_INTERVAL_MS);
 
   if (ADDON_AUTO_BUILD_ON_START || ADDON_FORCE_REBUILD_ON_START) {
     ensureFirefoxAddonBuilt({ force: ADDON_FORCE_REBUILD_ON_START }).

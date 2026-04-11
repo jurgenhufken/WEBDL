@@ -9,6 +9,8 @@ const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 const HTTP_STATUS_PROBE_INTERVAL_MS = 4000;
 const HTTP_TIMEOUT_MS = 6000;
+const START_RECORDING_TIMEOUT_MS = 15000; // Direct to configured device, no probing
+const STOP_RECORDING_TIMEOUT_MS = 70000;
 const PROBE_FAILURES_BEFORE_DISCONNECT = 3;
 const PROBE_DISCONNECT_GRACE_MS = 90000;
 const SOCKET_ENABLED = false;
@@ -42,17 +44,20 @@ function getServerCandidates() {
 }
 
 async function postJson(endpoint, body) {
+  const timeoutMs = Math.max(500, Number((body && body.__timeoutMs) || HTTP_TIMEOUT_MS) || HTTP_TIMEOUT_MS);
+  const payload = body && typeof body === 'object' ? { ...body } : {};
+  delete payload.__timeoutMs;
   const candidates = getServerCandidates();
   let lastError = null;
   for (const base of candidates) {
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
       const response = await fetch(`${base}/${endpoint}`, {
         method: 'POST',
         mode: 'cors',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body || {}),
+        body: JSON.stringify(payload),
         signal: controller.signal
       });
       clearTimeout(timeout);
@@ -67,6 +72,20 @@ async function postJson(endpoint, body) {
     }
   }
   return { success: false, error: lastError || 'Server niet bereikbaar' };
+}
+
+function sendExtensionLog(source, level, message, details = null) {
+  const src = String(source || 'extension').slice(0, 120);
+  const lvl = String(level || 'info').slice(0, 20);
+  const msg = String(message || '').slice(0, 2000);
+  if (!msg) return;
+  postJson('api/extension-log', {
+    source: src,
+    level: lvl,
+    message: msg,
+    details: details && typeof details === 'object' ? details : null,
+    area: 'background'
+  }).catch(() => {});
 }
 
 async function getJson(endpoint) {
@@ -307,12 +326,23 @@ async function sendSocketRequest(action, payload, timeoutMs = SOCKET_ACK_TIMEOUT
 }
 
 async function sendCommand(action, payload, fallbackEndpoint = null) {
+  const timeoutMs = action === 'stop-recording' ? STOP_RECORDING_TIMEOUT_MS : (action === 'start-recording' ? START_RECORDING_TIMEOUT_MS : HTTP_TIMEOUT_MS);
   if (!SOCKET_ENABLED && fallbackEndpoint) {
-    return postJson(fallbackEndpoint, payload);
+    const out = await postJson(fallbackEndpoint, { ...(payload || {}), __timeoutMs: timeoutMs });
+    if (!out || out.success === false) {
+      sendExtensionLog('sendCommand:http', 'error', `actie=${action} fout=${out && out.error ? out.error : 'onbekend'}`);
+    }
+    return out;
   }
   const viaSocket = await sendSocketRequest(action, payload);
   if (viaSocket && viaSocket.success) return viaSocket;
-  if (fallbackEndpoint) return postJson(fallbackEndpoint, payload);
+  if (fallbackEndpoint) {
+    const out = await postJson(fallbackEndpoint, { ...(payload || {}), __timeoutMs: timeoutMs });
+    if (!out || out.success === false) {
+      sendExtensionLog('sendCommand:fallback', 'error', `actie=${action} fout=${out && out.error ? out.error : 'onbekend'}`);
+    }
+    return out;
+  }
   return viaSocket;
 }
 
@@ -532,7 +562,7 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (action === 'stopRecording') {
-    sendCommand('stop-recording', (message && message.payload) || {}, 'stop-recording')
+    sendCommand('stop-recording', { ...((message && message.payload) || {}), __timeoutMs: STOP_RECORDING_TIMEOUT_MS }, 'stop-recording')
       .then((result) => sendResponse(result))
       .catch((error) => sendResponse({ success: false, error: error.message }));
     return true;
