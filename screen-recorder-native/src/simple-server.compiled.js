@@ -4865,7 +4865,7 @@ const updateDownloadStatus = {
     // Auto-tagging hook when a download completes
     if (status === 'completed') {
       try {
-        const d = db.prepare('SELECT title, filename, filepath FROM downloads WHERE id = ' + (db.isPostgres ? '$1' : '?')).get(id);
+        const d = await db.prepare('SELECT title, filename, filepath FROM downloads WHERE id = ' + (db.isPostgres ? '$1' : '?')).get(id);
         if (d) {
           const text = (d.title || '') + ' ' + (d.filename || '') + ' ' + (d.filepath || '');
           extractAndSaveTags('d', String(id), text);
@@ -5317,7 +5317,7 @@ const getRecentDashboardBatchFiles = db.prepare(db.isPostgres ? `
     d.platform AS platform,
     d.channel AS channel,
     d.title AS title,
-    NULL AS filepath,
+    f.relpath AS filepath,
     COALESCE(NULLIF(f.created_at, ''), d.created_at::text) AS created_at,
     COALESCE(NULLIF(CAST(f.mtime_ms AS BIGINT), 0), CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT)) AS ts,
     NULL AS thumbnail,
@@ -5338,7 +5338,7 @@ const getRecentDashboardBatchFiles = db.prepare(db.isPostgres ? `
     d.platform AS platform,
     d.channel AS channel,
     d.title AS title,
-    NULL AS filepath,
+    f.relpath AS filepath,
     COALESCE(f.created_at, d.created_at) AS created_at,
     COALESCE(NULLIF(CAST(f.mtime_ms AS INTEGER), 0), COALESCE(CAST(strftime('%s', COALESCE(d.finished_at, d.created_at)) AS INTEGER) * 1000, 0)) AS ts,
     NULL AS thumbnail,
@@ -9342,52 +9342,15 @@ async function autoEnqueueMissingThumbs() {
   try {
     // Only fetch a small batch to keep it fast and iterative
     const limit = Math.max(5, THUMB_GEN_MAX_QUEUE - thumbGenQueue.length);
-    const rows = await db.prepare("SELECT id, filepath FROM downloads WHERE status = 'completed' AND filepath IS NOT NULL AND filepath != '' ORDER BY id DESC LIMIT ?").all(limit * 2);
+    const rows = await db.prepare("SELECT filepath FROM downloads WHERE status = 'completed' AND is_thumb_ready = false AND filepath IS NOT NULL AND filepath != '' ORDER BY id DESC LIMIT ?").all(limit);
     if (rows && rows.length > 0) {
       let enqueued = 0;
       for (const row of rows) {
         if (!row.filepath) continue;
-        try {
-          // Check if thumbnail already exists
-          const dir = path.dirname(row.filepath);
-          const base = path.basename(row.filepath, path.extname(row.filepath));
-          let hasThumb = false;
-          
-          // Check sidecar files
-          const sidecarExts = ['.webp', '.jpg', '.jpeg', '.png'];
-          for (const ext of sidecarExts) {
-            const cand = path.join(dir, base + ext);
-            if (safeIsInsideBaseDir(cand) && fs.existsSync(cand)) {
-              const st = fs.statSync(cand);
-              if (st && (st.size || 0) >= 8000) {
-                hasThumb = true;
-                break;
-              }
-            }
-          }
-          
-          // Check generated thumbnail
-          if (!hasThumb) {
-            const genThumbPath = path.join(dir, `${base}_thumb_v3.jpg`);
-            if (safeIsInsideBaseDir(genThumbPath) && fs.existsSync(genThumbPath)) {
-              const st = fs.statSync(genThumbPath);
-              hasThumb = st && (st.size || 0) >= 8000;
-            }
-          }
-          
-          if (!hasThumb) {
-            const res = scheduleThumbGeneration(row.filepath);
-            if (res === 'enqueued') enqueued++;
-            if (enqueued >= limit) break;
-          }
-        } catch (e) {
-          // Skip on error
-        }
+        const res = scheduleThumbGeneration(row.filepath);
+        if (res === 'enqueued') enqueued++;
       }
-      if (enqueued > 0) {
-        console.log(`[AUTO-THUMB] Enqueued ${enqueued} missing thumbnails`);
-        drainThumbGenQueueSoon();
-      }
+      if (enqueued > 0) drainThumbGenQueueSoon();
     }
   } catch (e) {
     // Ignore DB errors during background scan
@@ -14886,43 +14849,6 @@ function makeMediaItem(row) {
   src :
   preferredThumbFinal || `/media/thumb?kind=${encodeURIComponent(row.kind)}&id=${encodeURIComponent(row.id)}&v=6`;
 
-  // Check if thumbnail is ready for non-image media
-  let isThumbReady = true;
-  if (t !== 'image' && !preferredThumbFinal && row.kind === 'd') {
-    try {
-      // Check for existing thumbnail files
-      const dir = path.dirname(fp);
-      const base = path.basename(fp, path.extname(fp));
-      const sidecarExts = ['.webp', '.jpg', '.jpeg', '.png'];
-      let hasThumb = false;
-      
-      // Check sidecar files
-      for (const ext of sidecarExts) {
-        const cand = path.join(dir, base + ext);
-        if (safeIsInsideBaseDir(cand) && fs.existsSync(cand)) {
-          const st = fs.statSync(cand);
-          if (st && (st.size || 0) >= 8000) {
-            hasThumb = true;
-            break;
-          }
-        }
-      }
-      
-      // Check generated thumbnail
-      if (!hasThumb) {
-        const thumbPath = path.join(dir, `${base}_thumb_v3.jpg`);
-        if (safeIsInsideBaseDir(thumbPath) && fs.existsSync(thumbPath)) {
-          const st = fs.statSync(thumbPath);
-          hasThumb = st && (st.size || 0) >= 8000;
-        }
-      }
-      
-      isThumbReady = hasThumb;
-    } catch (e) {
-      isThumbReady = false;
-    }
-  }
-
   return {
     kind: row.kind,
     id: row.id,
@@ -14941,7 +14867,7 @@ function makeMediaItem(row) {
     source_url: row.source_url || null,
     dedupe_key: dedupeKey || null,
     file_rel: fileRel || null,
-    ready: isThumbReady,
+    ready: true,
     src,
     thumb,
     open: { kind: row.kind, id: row.id }
@@ -15286,8 +15212,6 @@ function makeIndexedMediaItem(row) {
     typeFilter
   }) {
     if (!item || !bucket || !seen) return false;
-    // Only include items that are ready (have thumbnails)
-    if (item.ready !== true) return false;
     const type = String(typeFilter || 'all');
     const isMedia = item.type === 'video' || item.type === 'image';
     if (type === 'media' && !isMedia) return false;
@@ -16566,6 +16490,23 @@ async function startServer() {
     console.log(`⚠️  Thumbnail cleanup fout: ${e.message}`);
   }
 
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.log(`⚠️  Poort ${PORT} is bezet, probeer oude server te stoppen...`);
+      try {
+        const { execSync } = require('child_process');
+        execSync(`lsof -ti :${PORT} | xargs kill -9 2>/dev/null || true`, { timeout: 5000 });
+      } catch (e) {}
+      setTimeout(() => {
+        server.listen(PORT, () => {
+          console.log(`\n🟢 WEBDL Server draait op http://localhost:${PORT} (na herstart)`);
+        });
+      }, 1500);
+    } else {
+      console.error('Server error:', err);
+    }
+  });
+
   server.listen(PORT, () => {
     console.log(`\n🟢 WEBDL Server draait op http://localhost:${PORT}`);
     console.log(`📁 Bestanden: ${BASE_DIR}`);
@@ -16744,63 +16685,63 @@ function shutdownGracefully(signal) {
 process.on('SIGINT', () => shutdownGracefully('SIGINT'));
 
 // Tags API
-expressApp.get('/api/tags', (req, res) => {
+expressApp.get('/api/tags', async (req, res) => {
   try {
-    const rows = db.prepare('SELECT * FROM tags ORDER BY name ASC').all();
+    const rows = await db.prepare('SELECT * FROM tags ORDER BY name ASC').all();
     res.json({ success: true, tags: rows });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }
 });
 
-expressApp.post('/api/tags', (req, res) => {
+expressApp.post('/api/tags', async (req, res) => {
   try {
     const name = String(req.body.name || '').trim().toLowerCase();
     if (!name) throw new Error('Name required');
-    if (db.isPostgres) db.prepare('INSERT INTO tags (name) VALUES ($1) ON CONFLICT (name) DO NOTHING').run(name); else db.prepare('INSERT OR IGNORE INTO tags (name) VALUES (?)').run(name);
-    const tag = db.prepare(db.isPostgres ? 'SELECT * FROM tags WHERE name = $1' : 'SELECT * FROM tags WHERE name = ?').get(name);
+    if (db.isPostgres) await db.prepare('INSERT INTO tags (name) VALUES ($1) ON CONFLICT (name) DO NOTHING').run(name); else await db.prepare('INSERT OR IGNORE INTO tags (name) VALUES (?)').run(name);
+    const tag = await db.prepare(db.isPostgres ? 'SELECT * FROM tags WHERE name = $1' : 'SELECT * FROM tags WHERE name = ?').get(name);
     res.json({ success: true, tag });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }
 });
 
-expressApp.delete('/api/tags/:id', (req, res) => {
+expressApp.delete('/api/tags/:id', async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
-    db.prepare(db.isPostgres ? 'DELETE FROM tags WHERE id = $1' : 'DELETE FROM tags WHERE id = ?').run(id);
+    await db.prepare(db.isPostgres ? 'DELETE FROM tags WHERE id = $1' : 'DELETE FROM tags WHERE id = ?').run(id);
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }
 });
 
-expressApp.get('/api/media/:kind/:id/tags', (req, res) => {
+expressApp.get('/api/media/:kind/:id/tags', async (req, res) => {
   try {
     const { kind, id } = req.params;
-    const rows = db.prepare(db.isPostgres ? 'SELECT t.* FROM tags t JOIN media_tags mt ON t.id = mt.tag_id WHERE mt.kind = $1 AND mt.media_id = $2' : 'SELECT t.* FROM tags t JOIN media_tags mt ON t.id = mt.tag_id WHERE mt.kind = ? AND mt.media_id = ?').all(kind, id);
+    const rows = await db.prepare(db.isPostgres ? 'SELECT t.* FROM tags t JOIN media_tags mt ON t.id = mt.tag_id WHERE mt.kind = $1 AND mt.media_id = $2' : 'SELECT t.* FROM tags t JOIN media_tags mt ON t.id = mt.tag_id WHERE mt.kind = ? AND mt.media_id = ?').all(kind, id);
     res.json({ success: true, tags: rows });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }
 });
 
-expressApp.post('/api/media/:kind/:id/tags', (req, res) => {
+expressApp.post('/api/media/:kind/:id/tags', async (req, res) => {
   try {
     const { kind, id } = req.params;
     const tagId = parseInt(req.body.tag_id, 10);
     if (!tagId) throw new Error('Tag ID required');
-    if (db.isPostgres) db.prepare('INSERT INTO media_tags (kind, media_id, tag_id) VALUES ($1, $2, $3) ON CONFLICT ON CONSTRAINT media_tags_pkey DO NOTHING').run(kind, id, tagId); else db.prepare('INSERT OR IGNORE INTO media_tags (kind, media_id, tag_id) VALUES (?, ?, ?)').run(kind, id, tagId);
+    if (db.isPostgres) await db.prepare('INSERT INTO media_tags (kind, media_id, tag_id) VALUES ($1, $2, $3) ON CONFLICT ON CONSTRAINT media_tags_pkey DO NOTHING').run(kind, id, tagId); else await db.prepare('INSERT OR IGNORE INTO media_tags (kind, media_id, tag_id) VALUES (?, ?, ?)').run(kind, id, tagId);
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }
 });
 
-expressApp.delete('/api/media/:kind/:id/tags/:tagId', (req, res) => {
+expressApp.delete('/api/media/:kind/:id/tags/:tagId', async (req, res) => {
   try {
     const { kind, id, tagId } = req.params;
-    db.prepare(db.isPostgres ? 'DELETE FROM media_tags WHERE kind = $1 AND media_id = $2 AND tag_id = $3' : 'DELETE FROM media_tags WHERE kind = ? AND media_id = ? AND tag_id = ?').run(kind, id, parseInt(tagId, 10));
+    await db.prepare(db.isPostgres ? 'DELETE FROM media_tags WHERE kind = $1 AND media_id = $2 AND tag_id = $3' : 'DELETE FROM media_tags WHERE kind = ? AND media_id = ? AND tag_id = ?').run(kind, id, parseInt(tagId, 10));
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
@@ -16808,7 +16749,7 @@ expressApp.delete('/api/media/:kind/:id/tags/:tagId', (req, res) => {
 });
 
 
-function extractAndSaveTags(kind, media_id, text) {
+async function extractAndSaveTags(kind, media_id, text) {
   if (!text) return;
   const tags = [];
   const hashMatches = text.match(/#([a-zA-Z0-9_]+)/g);
@@ -16821,16 +16762,16 @@ function extractAndSaveTags(kind, media_id, text) {
     if (!tag) continue;
     try {
       if (db.isPostgres) {
-        db.prepare('INSERT INTO tags (name) VALUES ($1) ON CONFLICT (name) DO NOTHING').run(tag);
-        const tagRow = db.prepare('SELECT id FROM tags WHERE name = $1').get(tag);
+        await db.prepare('INSERT INTO tags (name) VALUES ($1) ON CONFLICT (name) DO NOTHING').run(tag);
+        const tagRow = await db.prepare('SELECT id FROM tags WHERE name = $1').get(tag);
         if (tagRow) {
-          db.prepare('INSERT INTO media_tags (kind, media_id, tag_id) VALUES ($1, $2, $3) ON CONFLICT ON CONSTRAINT media_tags_pkey DO NOTHING').run(kind, media_id, tagRow.id);
+          await db.prepare('INSERT INTO media_tags (kind, media_id, tag_id) VALUES ($1, $2, $3) ON CONFLICT ON CONSTRAINT media_tags_pkey DO NOTHING').run(kind, media_id, tagRow.id);
         }
       } else {
-        db.prepare('INSERT OR IGNORE INTO tags (name) VALUES (?)').run(tag);
-        const tagRow = db.prepare('SELECT id FROM tags WHERE name = ?').get(tag);
+        await db.prepare('INSERT OR IGNORE INTO tags (name) VALUES (?)').run(tag);
+        const tagRow = await db.prepare('SELECT id FROM tags WHERE name = ?').get(tag);
         if (tagRow) {
-          db.prepare('INSERT OR IGNORE INTO media_tags (kind, media_id, tag_id) VALUES (?, ?, ?)').run(kind, media_id, tagRow.id);
+          await db.prepare('INSERT OR IGNORE INTO media_tags (kind, media_id, tag_id) VALUES (?, ?, ?)').run(kind, media_id, tagRow.id);
         }
       }
     } catch(e) { console.error('Error auto-tagging:', e); }

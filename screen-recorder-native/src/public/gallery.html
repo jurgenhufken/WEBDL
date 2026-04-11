@@ -22,9 +22,6 @@
     .yt-input { width: 52px; border-radius: 8px; border: 1px solid #1f2a52; background: #020614; color: #fff; padding: 6px; text-align: center; font-size: 12px; }
     .yt-status { font-size: 11px; color: #9aa7d1; min-height: 14px; }
     .hint { font-size: 11px; color: #9aa7d1; }
-    @keyframes recordPulse { 0%,100% { box-shadow: 0 0 0 0 rgba(220,50,50,0.7); } 50% { box-shadow: 0 0 0 6px rgba(220,50,50,0); } }
-    #btnRecord.recording { background: #8b0000; border-color: #cc2222; animation: recordPulse 1.2s ease-in-out infinite; }
-    #btnRecord.recording:hover { background: #cc2222; }
 
     .content { padding: 14px; }
     .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
@@ -139,8 +136,6 @@
       <button id="btnRandomGrid" class="btn" style="background:#2f4f4f; margin-left:8px;">🔀 Random Beeld</button>
       <button id="btnDups" class="btn" style="background:#4a2f2f;">🛡 Duplicaten Scanner</button>
       <button id="btnImportOpen" class="btn" style="background:#205295; margin-left:8px;">📥 Importeer Lokaal</button>
-      <button id="btnExtLogs" class="btn" style="background:#3a2f52; margin-left:8px;">🧾 Extension Logs</button>
-      <button id="btnRecord" class="btn" style="background:#2d0a0a; border-color:#662222; margin-left:8px;" title="Schermopname starten/stoppen">🔴 REC</button>
       <div class="yt-controls" id="ytControls" style="display:none;">
         <div class="yt-row">
           <span class="yt-tag">YT</span>
@@ -163,11 +158,11 @@
         <button class="queue-controls-btn" id="btn-toggle-collapse" title="Inklappen of Uitklappen"><span>➖ Verklein Balk</span></button>
       </div>
       <div id="queue-bar-fast" class="queue-bar" style="display:none; border-bottom: 1px solid #1f2a52;">
-        <div class="queue-title">⚡ Downloads / Wachtrij</div>
+        <div class="queue-title">⚡ Snelle Downloads / Wachtrij</div>
         <div class="queue-grid" id="queue-grid-fast"></div>
       </div>
       <div id="queue-bar-heavy" class="queue-bar" style="display:none;">
-        <div class="queue-title">🎬 Nabewerken (Processing)</div>
+        <div class="queue-title">🔴 Momenteel bezig / Nabewerken (Processing)</div>
         <div class="queue-grid" id="queue-grid-heavy"></div>
       </div>
     </div>
@@ -322,20 +317,6 @@
     </div>
   </div>
 
-  <div id="extLogsModal" class="modal" style="display:none;">
-    <div class="modal-content" style="max-width: 980px;">
-      <h3 style="margin-top:0;">🧾 Extension Meldingen</h3>
-      <div style="display:flex; gap:10px; margin-bottom:12px;">
-        <button id="btnExtLogsRefresh" class="btn">↻ Vernieuwen</button>
-        <button id="btnExtLogsCopy" class="btn">Kopieer</button>
-      </div>
-      <pre id="extLogsContent" style="max-height:60vh; overflow:auto; background:#101626; border:1px solid #2a3d66; border-radius:8px; padding:12px; white-space:pre-wrap; font-size:12px; line-height:1.45;">Laden...</pre>
-      <div class="modal-buttons" style="display:flex; justify-content:flex-end; margin-top:12px;">
-        <button id="btnExtLogsClose" class="btn">Sluiten</button>
-      </div>
-    </div>
-  </div>
-
   <script>
     const FALLBACK_THUMB = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="480" height="270"><rect width="100%" height="100%" fill="transparent"/></svg>');
     const elMode = document.getElementById('mode');
@@ -449,7 +430,6 @@
       currentIndex: -1,
       currentMediaEl: null,
       reloading: false,
-      refreshing: false,
       lastAutoLoadAt: 0,
       autoFillLoads: 0,
       hasUserScrolled: false,
@@ -758,42 +738,22 @@
       const elQueueBarHeavy = document.getElementById('queue-bar-heavy');
       const elQueueGridHeavy = document.getElementById('queue-grid-heavy');
 
-      const elBtnRec = document.getElementById('btnRecord');
-      if (elBtnRec && s) {
-        const rec = !!s.isRecording;
-        if (rec) {
-          elBtnRec.classList.add('recording');
-          elBtnRec.textContent = '⏹ STOP REC';
-        } else {
-          elBtnRec.classList.remove('recording');
-          elBtnRec.textContent = '🔴 REC';
-        }
-      }
-
       if (elQueueBarFast && elQueueGridFast && elQueueBarHeavy && elQueueGridHeavy) {
-        const statusActiveItems = (s && Array.isArray(s.active_items)) ? s.active_items : [];
-        const statusQueueItems = (s && Array.isArray(s.queue_items)) ? s.queue_items : [];
-        const statusPostprocessItems = (s && Array.isArray(s.postprocess_items)) ? s.postprocess_items : [];
-        if (statusActiveItems.length > 0 || statusQueueItems.length > 0 || statusPostprocessItems.length > 0) {
+        if (s && s.active_items && s.active_items.length > 0) {
           const fastItems = [];
           const heavyItems = [];
-          const seenFast = new Set();
-          const seenHeavy = new Set();
-
-          const addUnique = (arr, seen, item) => {
-            if (!item || item.id == null) return;
-            const key = String(item.id);
-            if (seen.has(key)) return;
-            seen.add(key);
-            arr.push(item);
-          };
-
-          for (const a of statusActiveItems) {
-            if (String(a && a.status || '').toLowerCase() === 'postprocessing') continue;
-            addUnique(fastItems, seenFast, a);
+          
+          const lightPlatforms = ['instagram','wikifeet','wikifeetx','kinky','reddit','aznudefeet','telegram','amateurvoyeurforum','tiktok','footfetishforum','forum-area','imagetwist','pixhost','postimg','bunkr','jpg'];
+          for (const a of s.active_items) {
+            const isLight = a.lane === 'light' || (!a.lane && lightPlatforms.includes(String(a.platform || '').toLowerCase()));
+            if (a.status === 'postprocessing') {
+              heavyItems.push(a);
+            } else if (isLight) {
+              fastItems.push(a);
+            } else {
+              heavyItems.push(a);
+            }
           }
-          for (const a of statusQueueItems) addUnique(fastItems, seenFast, a);
-          for (const a of statusPostprocessItems) addUnique(heavyItems, seenHeavy, a);
 
           const renderGrid = (items, gridEl, barEl) => {
             if (items.length > 0) {
@@ -1296,8 +1256,8 @@
 
         const b2 = document.createElement('div');
         b2.className = 'badge r';
-        if (it && it.ready === false && it.status) {
-          const st = String(it.status || '');
+        if (it && it.ready === false) {
+          const st = (it.status || 'queued');
           const pct = Number.isFinite(Number(it.progress)) ? Math.max(0, Math.min(100, Number(it.progress))) : 0;
           b2.textContent = st + ' ' + pct + '%';
         } else {
@@ -1311,8 +1271,8 @@
         l1.textContent = it.channel_display || it.channel || 'unknown';
         const l2 = document.createElement('div');
         l2.className = 'line2';
-        if (it && it.ready === false && it.status) {
-          const st = String(it.status || '');
+        if (it && it.ready === false) {
+          const st = (it.status || 'queued');
           const pct = Number.isFinite(Number(it.progress)) ? Math.max(0, Math.min(100, Number(it.progress))) : 0;
           l2.textContent = (it.title || '(download)') + ' • ' + st + ' ' + pct + '%';
         } else {
@@ -1407,8 +1367,8 @@
 
         const b2 = document.createElement('div');
         b2.className = 'badge r';
-        if (it && it.ready === false && it.status) {
-          const st = String(it.status || '');
+        if (it && it.ready === false) {
+          const st = (it.status || 'queued');
           const pct = Number.isFinite(Number(it.progress)) ? Math.max(0, Math.min(100, Number(it.progress))) : 0;
           b2.textContent = st + ' ' + pct + '%';
         } else {
@@ -1422,8 +1382,8 @@
         l1.textContent = it.channel_display || it.channel || 'unknown';
         const l2 = document.createElement('div');
         l2.className = 'line2';
-        if (it && it.ready === false && it.status) {
-          const st = String(it.status || '');
+        if (it && it.ready === false) {
+          const st = (it.status || 'queued');
           const pct = Number.isFinite(Number(it.progress)) ? Math.max(0, Math.min(100, Number(it.progress))) : 0;
           l2.textContent = (it.title || '(download)') + ' • ' + st + ' ' + pct + '%';
         } else {
@@ -1881,8 +1841,7 @@
              path = '/api/media/channel-files?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0&sort=' + encodeURIComponent(state.sort || 'recent') + searchParam + dirsParam;
           }
           
-          const resp = await fetch(path, { cache: 'no-store' });
-          if (!resp.ok) throw new Error('HTTP ' + resp.status);
+          const resp = await fetch(path);
           const data = await resp.json();
           if (!data || !data.success) throw new Error(data && data.error ? data.error : 'Geen data ontvangen');
           
@@ -1957,8 +1916,7 @@
     }
 
     async function softRefreshTop() {
-      if (state.loading || state.reloading || state.refreshing || state.items.length === 0) return;
-      state.refreshing = true;
+      if (state.loading || state.reloading || state.items.length === 0) return;
       const refreshStart = Date.now();
       try {
         // Fetch the NEWEST items from scratch (no cursor) so we catch new downloads
@@ -2007,8 +1965,6 @@
         }
       } catch (e) {
         console.warn('[softRefreshTop] Error:', e.message);
-      } finally {
-        state.refreshing = false;
       }
     }
 
@@ -2098,7 +2054,7 @@
           const now = Date.now();
           const scrollTop = (typeof window !== 'undefined') ? (window.scrollY || document.documentElement.scrollTop || 0) : 0;
           const nearTop = scrollTop < 160;
-          const canAutoReload = !modalOpen && nearTop && !state.loading && !state.reloading && !state.refreshing;
+          const canAutoReload = !modalOpen && nearTop && !state.loading && !state.reloading;
           const changed = !!(last && key !== last);
           if (canAutoReload && !changed && (now - lastPeriodicAt) >= (activeDl > 0 ? 12000 : 8000)) {
             lastPeriodicAt = now;
@@ -2176,12 +2132,6 @@
     }
     // --- Import Modal Logic ---
     const elBtnImportOpen = document.getElementById('btnImportOpen');
-    const elBtnExtLogs = document.getElementById('btnExtLogs');
-    const elExtLogsModal = document.getElementById('extLogsModal');
-    const elExtLogsContent = document.getElementById('extLogsContent');
-    const elBtnExtLogsRefresh = document.getElementById('btnExtLogsRefresh');
-    const elBtnExtLogsCopy = document.getElementById('btnExtLogsCopy');
-    const elBtnExtLogsClose = document.getElementById('btnExtLogsClose');
     const elImportModal = document.getElementById('importModal');
     const elBtnImportClose = document.getElementById('btnImportClose');
     const elImportDropzone = document.getElementById('importDropzone');
@@ -2237,86 +2187,6 @@
         elImportTags.value = '';
         await loadImportDatalists();
         elImportModal.style.display = 'flex';
-      });
-    }
-
-    async function loadExtensionLogs() {
-      try {
-        if (elExtLogsContent) elExtLogsContent.textContent = 'Laden...';
-        const out = await api('/api/extension-logs?limit=250');
-        const rows = out && Array.isArray(out.items) ? out.items : [];
-        if (!rows.length) {
-          if (elExtLogsContent) elExtLogsContent.textContent = 'Geen extension logs gevonden.';
-          return;
-        }
-        const lines = rows.map((r) => {
-          const ts = String(r && r.ts ? r.ts : '');
-          const level = String(r && r.level ? r.level : 'info').toUpperCase();
-          const source = String(r && r.source ? r.source : 'extension');
-          const msg = String(r && r.message ? r.message : '');
-          return `[${ts}] [${level}] [${source}] ${msg}`;
-        });
-        if (elExtLogsContent) elExtLogsContent.textContent = lines.join('\n');
-      } catch (e) {
-        if (elExtLogsContent) elExtLogsContent.textContent = 'Laden mislukt: ' + (e && e.message ? e.message : String(e));
-      }
-    }
-
-    if (elBtnExtLogs) {
-      elBtnExtLogs.addEventListener('click', async () => {
-        if (elExtLogsModal) elExtLogsModal.style.display = 'flex';
-        await loadExtensionLogs();
-      });
-    }
-
-    if (elBtnExtLogsRefresh) {
-      elBtnExtLogsRefresh.addEventListener('click', async () => {
-        await loadExtensionLogs();
-      });
-    }
-
-    if (elBtnExtLogsCopy) {
-      elBtnExtLogsCopy.addEventListener('click', async () => {
-        try {
-          const text = String(elExtLogsContent && elExtLogsContent.textContent ? elExtLogsContent.textContent : '');
-          if (!text || text === 'Laden...') return;
-          await navigator.clipboard.writeText(text);
-        } catch (e) {}
-      });
-    }
-
-    if (elBtnExtLogsClose) {
-      elBtnExtLogsClose.addEventListener('click', () => {
-        if (elExtLogsModal) elExtLogsModal.style.display = 'none';
-      });
-    }
-
-    if (elExtLogsModal) {
-      elExtLogsModal.addEventListener('click', (e) => {
-        if (e.target === elExtLogsModal) elExtLogsModal.style.display = 'none';
-      });
-    }
-
-    const elBtnRecord = document.getElementById('btnRecord');
-    if (elBtnRecord) {
-      elBtnRecord.addEventListener('click', async () => {
-        const isRec = elBtnRecord.classList.contains('recording');
-        try {
-          elBtnRecord.disabled = true;
-          if (isRec) {
-            await api('/stop-recording', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-          } else {
-            await api('/start-recording', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ metadata: { url: 'recording:gallery:' + Date.now(), platform: 'other', channel: 'screen', title: 'Schermopname' } })
-            });
-          }
-        } catch (e) {
-          console.warn('REC knop fout:', e);
-        } finally {
-          elBtnRecord.disabled = false;
-        }
       });
     }
 
