@@ -1455,7 +1455,7 @@
 
         elBtnOpen.disabled = !isReady;
         elBtnFinder.disabled = !isReady;
-        if (elBtnSource) { elBtnSource.style.display = it.source_url ? '' : 'none'; elBtnSource.onclick = () => window.open(it.source_url, '_blank'); }
+        if (elBtnSource) { const srcUrl = it.source_url || it.url || ''; elBtnSource.style.display = srcUrl ? '' : 'none'; elBtnSource.onclick = () => { if (srcUrl) window.open(srcUrl, '_blank'); }; }
 
         elMTitle.textContent = it.title_display || it.title || '(zonder titel)';
         elMSub.textContent = fmtItemSub(it);

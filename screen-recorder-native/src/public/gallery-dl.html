@@ -1,197 +1,316 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="nl">
 <head>
   <meta charset="UTF-8">
-  <title>Gallery-DL Front-end</title>
+  <title>WEBDL — Download Media</title>
   <style>
     :root {
-      --bg: #0f111a; --surface: #1e2136; --surface-hover: #292d47;
-      --text: #e2e4f0; --text-muted: #8c92b3;
-      --primary: #00d4ff; --primary-hover: #00e5ff;
-      --accent: #ff2a6d; --success: #00ff88;
-      --border: rgba(255, 255, 255, 0.05);
-      --font: 'Inter', system-ui, -apple-system, sans-serif;
+      --bg: #0b1020; --surface: #111830; --surface2: #1a2240;
+      --text: #e2e4f0; --muted: #8090b5;
+      --primary: #00d4ff; --primary-dim: rgba(0,212,255,0.15);
+      --success: #00ff88; --success-dim: rgba(0,255,136,0.15);
+      --error: #ff4466; --error-dim: rgba(255,68,102,0.15);
+      --warn: #ffaa00; --warn-dim: rgba(255,170,0,0.15);
+      --border: rgba(255,255,255,0.06);
+      --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     }
-    body {
-      background: var(--bg); color: var(--text); font-family: var(--font);
-      margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center;
-    }
-    h1 { margin-top: 0; color: var(--primary); }
-    .container {
-      width: 100%; max-width: 800px;
-      display: flex; flex-direction: column; gap: 20px;
-    }
-    .panel {
-      background: var(--surface); border: 1px solid var(--border);
-      border-radius: 12px; padding: 20px; box-shadow: 0 4px 20px rgba(0,0,0,0.3);
-    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: var(--bg); color: var(--text); font-family: var(--font); min-height: 100vh; }
+
+    .wrap { max-width: 860px; margin: 0 auto; padding: 16px; }
+
+    nav { display: flex; gap: 12px; margin-bottom: 16px; }
+    nav a { color: var(--muted); text-decoration: none; font-size: 13px; font-weight: 500; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border); transition: all 0.2s; }
+    nav a:hover { background: var(--surface); color: var(--text); border-color: var(--primary); }
+
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 16px; }
+    h1 { font-size: 18px; color: var(--primary); margin-bottom: 8px; }
+    .help { font-size: 12px; color: var(--muted); line-height: 1.6; margin-bottom: 14px; }
+    .help strong { color: var(--text); }
+
     textarea {
-      width: 100%; height: 120px; background: rgba(0,0,0,0.3);
-      border: 1px solid var(--border); color: var(--text); padding: 12px;
-      font-family: monospace; font-size: 14px; border-radius: 8px; resize: vertical;
-      box-sizing: border-box;
+      width: 100%; height: 100px; background: rgba(0,0,0,0.3); border: 1px solid var(--border);
+      color: var(--text); padding: 12px; font-family: monospace; font-size: 13px; border-radius: 8px;
+      resize: vertical; outline: none; transition: border-color 0.2s;
     }
+    textarea:focus { border-color: var(--primary); }
+
+    .actions { display: flex; gap: 10px; margin-top: 12px; }
     button {
-      background: var(--primary); color: #000; font-weight: bold; font-size: 16px;
-      border: none; padding: 12px 24px; border-radius: 8px; cursor: pointer;
-      transition: all 0.2s; margin-top: 10px; width: 100%;
+      background: var(--primary); color: #000; font-weight: 700; font-size: 14px;
+      border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; transition: all 0.2s;
     }
-    button:hover { background: var(--primary-hover); transform: translateY(-1px); }
-    button:disabled { background: var(--text-muted); cursor: not-allowed; }
-    
-    .status-msg { margin-top: 10px; padding: 10px; border-radius: 6px; display: none; }
-    .status-msg.error { background: rgba(255, 42, 109, 0.2); color: #ff85a2; display: block; }
-    .status-msg.success { background: rgba(0, 255, 136, 0.2); color: #85ffb2; display: block; }
-    .status-msg a { color: var(--primary); font-weight: bold; text-decoration: none; }
+    button:hover { filter: brightness(1.15); transform: translateY(-1px); }
+    button:disabled { background: var(--muted); cursor: not-allowed; transform: none; }
+    .btn-secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
 
-    .help-text { color: var(--text-muted); font-size: 13px; margin: 10px 0; line-height: 1.5; }
-    .help-text strong { color: var(--text); }
-
-    .queue-container { margin-top: 20px; }
-    .queue-title { font-size: 14px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; }
-    .queue-list { display: flex; flex-direction: column; gap: 8px; }
-    .queue-item {
-      display: flex; align-items: center; gap: 12px; padding: 10px;
-      background: rgba(0,0,0,0.2); border: 1px solid var(--border); border-radius: 8px;
+    /* === Tracking lijst === */
+    .track-title { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; }
+    .track-list { display: flex; flex-direction: column; gap: 6px; }
+    .track-item {
+      display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+      background: var(--surface2); border: 1px solid var(--border); border-radius: 8px;
+      transition: border-color 0.3s;
     }
-    .q-thumb { width: 60px; height: 34px; object-fit: cover; border-radius: 4px; background: #000; }
-    .q-info { flex: 1; min-width: 0; }
-    .q-title { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
-    .q-meta { font-size: 12px; color: var(--text-muted); display: block; }
-    .q-status {
-      padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; text-transform: uppercase;
-    }
-    .status-downloading { background: rgba(0, 212, 255, 0.2); color: #00d4ff; }
-    .status-queued { background: rgba(255, 255, 255, 0.1); color: #ccc; }
-    .status-pending { background: rgba(255, 165, 0, 0.2); color: #ffa500; }
+    .track-item.ok { border-color: rgba(0,255,136,0.3); }
+    .track-item.fail { border-color: rgba(255,68,102,0.3); }
+    .track-item.active { border-color: rgba(0,212,255,0.4); }
 
-    nav { display: flex; justify-content: space-between; margin-bottom: 20px; width: 100%; max-width: 800px; }
-    nav a { color: var(--text-muted); text-decoration: none; font-weight: 500; padding: 5px 10px; border-radius: 6px; }
-    nav a:hover { background: var(--border); color: var(--text); }
+    .t-icon { font-size: 18px; flex-shrink: 0; width: 24px; text-align: center; }
+    .t-body { flex: 1; min-width: 0; }
+    .t-url { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .t-status { font-size: 13px; font-weight: 500; margin-top: 2px; }
+    .t-status.st-ok { color: var(--success); }
+    .t-status.st-err { color: var(--error); }
+    .t-status.st-wait { color: var(--warn); }
+    .t-status.st-dl { color: var(--primary); }
+    .t-actions { flex-shrink: 0; }
+    .t-actions a {
+      font-size: 11px; font-weight: 700; color: var(--primary); text-decoration: none;
+      padding: 4px 10px; border: 1px solid rgba(0,212,255,0.3); border-radius: 4px;
+      transition: all 0.2s;
+    }
+    .t-actions a:hover { background: var(--primary-dim); }
+
+    .empty-msg { text-align: center; padding: 30px; color: var(--muted); font-size: 13px; }
+
+    /* === Queue === */
+    .q-section { margin-top: 16px; }
+    .q-title { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+    .q-grid { display: flex; gap: 8px; flex-wrap: wrap; }
+    .q-chip {
+      font-size: 11px; padding: 5px 10px; border-radius: 6px; border: 1px solid var(--border);
+      background: var(--surface2); color: var(--text); display: flex; align-items: center; gap: 6px;
+    }
+    .q-chip .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--primary); animation: pulse 1.5s infinite; }
+    @keyframes pulse { 0%,100% { opacity: 0.4; } 50% { opacity: 1; } }
+
+    .stat-bar { display: flex; gap: 16px; padding: 10px 0; font-size: 12px; color: var(--muted); }
+    .stat-bar strong { color: var(--text); }
   </style>
 </head>
 <body>
+<div class="wrap">
 
   <nav>
-    <a href="/gallery">← Terug naar Gallery</a>
+    <a href="/gallery">← Gallery</a>
     <a href="/dashboard">Dashboard →</a>
   </nav>
 
-  <div class="container">
-    <div class="panel">
-      <h1>🌍 Download Media</h1>
-      <p class="help-text">
-        Plak één of meerdere URLs (1 per regel). Wordt automatisch gedownload via <strong>gallery-dl</strong> of <strong>yt-dlp</strong> (afhankelijk van platform).
-        <br>Ondersteunt o.a. <strong>x.com (Twitter)</strong> threads, Instagram, Reddit, pornpics, kinky.nl en losse video/afbeelding URLs.
-      </p>
-      
-      <textarea id="urlInput" placeholder="https://x.com/gebruiker/status/123456...&#10;https://kinky.nl/profiel/voorbeeld..."></textarea>
-      
-      <div id="statusBox" class="status-msg"></div>
-      <button id="downloadBtn" onclick="startDownload()">Start Download</button>
-    </div>
-
-    <div class="queue-container">
-      <div class="queue-title">Actieve Wachtrij <span id="queueCount"></span></div>
-      <div class="queue-list" id="queueList">
-        <!-- Wachtrij items komen hier -->
-      </div>
+  <div class="card">
+    <h1>🌍 Download Media</h1>
+    <p class="help">
+      Plak URLs (1 per regel). Ondersteunt <strong>x.com, erome, reddit, xvideos, pornhub, redgifs, imgur, pornpics, kinky.nl, odysee</strong> en meer.
+      <br>CDN-links (bijv. <strong>v73.erome.com/...</strong>) worden automatisch omgezet naar de juiste pagina.
+    </p>
+    <textarea id="inp" placeholder="https://x.com/gebruiker&#10;https://www.erome.com/a/albumId&#10;https://www.reddit.com/r/..."></textarea>
+    <div class="actions">
+      <button id="btnGo" onclick="submit()">⬇ Start Download</button>
+      <button class="btn-secondary" onclick="document.getElementById('inp').value=''">Wis</button>
     </div>
   </div>
 
-  <script>
-    async function startDownload() {
-      const btn = document.getElementById('downloadBtn');
-      const input = document.getElementById('urlInput');
-      const statusBox = document.getElementById('statusBox');
-      
-      const urls = input.value.split('\n').map(s => s.trim()).filter(s => s);
-      if (urls.length === 0) return;
+  <div class="card" id="trackCard" style="display:none;">
+    <div class="track-title">Download Status</div>
+    <div class="track-list" id="trackList"></div>
+  </div>
 
-      btn.disabled = true;
-      statusBox.className = 'status-msg';
-      statusBox.innerHTML = 'Bezig met versturen...';
+  <div class="card">
+    <div class="q-title">Server Wachtrij <span id="qCount"></span></div>
+    <div class="stat-bar" id="stats"></div>
+    <div class="q-grid" id="qGrid">
+      <div class="empty-msg">Wachtrij is leeg.</div>
+    </div>
+  </div>
 
-      try {
-        const res = await fetch('/download/batch', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ urls, force: false })
-        });
-        const data = await res.json();
-        
-        if (data.success && data.downloads && data.downloads.length > 0) {
-          statusBox.className = 'status-msg success';
-          let msg = `✅ ${data.downloads.length} downloads verwerkt!<br>`;
-          let allDuplicates = true;
-          
-          data.downloads.forEach(dl => {
-            if (dl.status === 'completed') {
-              msg += `<br>Bestaat al: <a href="/gallery?highlight=d:${dl.downloadId}" target="_blank">🔗 Bekijk #${dl.downloadId} in gallery</a>`;
-            } else {
-              allDuplicates = false;
-              if (dl.status === 'already_running') {
-                msg += `<br>Staat al in de wachtrij: #${dl.downloadId}`;
-              } else {
-                msg += `<br>Gedownload start: #${dl.downloadId}`;
-              }
-            }
+</div>
+
+<script>
+  // === State ===
+  const tracked = []; // { id, url, status, detail, fileCount }
+  let pollTimer = null;
+
+  // === Submit ===
+  async function submit() {
+    const btn = document.getElementById('btnGo');
+    const inp = document.getElementById('inp');
+    const urls = inp.value.split('\n').map(s => s.trim()).filter(s => s && s.startsWith('http'));
+    if (!urls.length) return;
+
+    btn.disabled = true;
+    btn.textContent = '⏳ Verzenden...';
+
+    try {
+      const res = await fetch('/download/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ urls, force: false })
+      });
+      const data = await res.json();
+
+      if (data.success && data.downloads && data.downloads.length > 0) {
+        inp.value = '';
+        for (const dl of data.downloads) {
+          tracked.unshift({
+            id: dl.downloadId,
+            url: dl.url,
+            status: dl.duplicate ? (dl.status || 'duplicate') : 'queued',
+            detail: dl.duplicate ? 'Duplicaat — bestaat al' : 'In wachtrij geplaatst',
+            fileCount: null,
+            platform: dl.platform || '?'
           });
-          
-          statusBox.innerHTML = msg;
-          if (!allDuplicates) input.value = '';
-          fetchQueue(); // update direct
-        } else {
-          statusBox.className = 'status-msg error';
-          statusBox.innerHTML = 'Geen nieuwe urls gedownload (misschien bestaan ze al?).';
         }
-      } catch (err) {
-        statusBox.className = 'status-msg error';
-        statusBox.innerHTML = 'Fout bij netwerk / server.';
+        renderTracked();
+        startPolling();
+      } else {
+        alert('Geen downloads aangemaakt. Mogelijk bestaan alle URLs al.');
       }
-      btn.disabled = false;
+    } catch (e) {
+      alert('Netwerk fout: ' + e.message);
     }
 
-    async function fetchQueue() {
+    btn.disabled = false;
+    btn.textContent = '⬇ Start Download';
+  }
+
+  // === Polling ===
+  function startPolling() {
+    if (pollTimer) return;
+    pollTimer = setInterval(pollTracked, 2000);
+  }
+
+  function stopPolling() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+
+  async function pollTracked() {
+    const active = tracked.filter(t => !['completed','error','cancelled','duplicate'].includes(t.status));
+    if (active.length === 0) { stopPolling(); return; }
+
+    for (const t of active) {
       try {
-        const res = await fetch('/status');
+        const res = await fetch('/download/' + t.id);
         const data = await res.json();
-        
-        const list = document.getElementById('queueList');
-        const items = data.active_items || [];
-        
-        document.getElementById('queueCount').innerText = `(${items.length})`;
-        list.innerHTML = '';
-        
-        if (items.length === 0) {
-          list.innerHTML = `<div class="help-text" style="text-align:center;">De wachtrij is momenteel leeg.</div>`;
-          return;
+        if (!data.success || !data.download) continue;
+        const dl = data.download;
+        const oldStatus = t.status;
+        t.status = dl.status || 'unknown';
+
+        if (t.status === 'completed') {
+          t.detail = '✅ Download voltooid';
+        } else if (t.status === 'error') {
+          t.detail = '❌ ' + (dl.error || 'Onbekende fout').slice(0, 120);
+        } else if (t.status === 'downloading') {
+          const pct = dl.progress != null ? Math.round(dl.progress) + '%' : '';
+          t.detail = '🔄 Downloaden... ' + pct;
+        } else if (t.status === 'postprocessing') {
+          t.detail = '⚙️ Nabewerken...';
+        } else {
+          t.detail = '⏳ ' + t.status;
         }
 
-        items.forEach(it => {
-          const el = document.createElement('div');
-          el.className = 'queue-item';
-          
-          const label = Object.keys(it).includes('progress') ? (it.status || 'queued') : 'downloading';
-          
-          el.innerHTML = `
-            <img src="${it.thumbnail || 'data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22><rect fill=%22%23333%22 width=%22100%25%22 height=%22100%25%22/></svg>'}" class="q-thumb" onerror="this.style.display='none'">
-            <div class="q-info">
-              <span class="q-title">${it.title || it.url || 'Bestand'}</span>
-              <span class="q-meta">${it.platform || 'onbekend'} • ${it.channel || 'unknown'}</span>
-            </div>
-            <div class="q-status status-${label.toLowerCase()}">${label} ${it.progress != null ? it.progress+'%' : ''}</div>
-          `;
-          list.appendChild(el);
-        });
-      } catch (e) {
-        console.warn('Queue fetch failed', e);
-      }
+        if (oldStatus !== t.status) renderTracked();
+      } catch (e) {}
     }
+    renderTracked();
+  }
 
-    // Polling voor live wachtrij
-    fetchQueue();
-    setInterval(fetchQueue, 3000);
-  </script>
+  // === Render tracked downloads ===
+  function renderTracked() {
+    const card = document.getElementById('trackCard');
+    const list = document.getElementById('trackList');
+    if (!tracked.length) { card.style.display = 'none'; return; }
+    card.style.display = '';
+
+    list.innerHTML = '';
+    for (const t of tracked) {
+      const el = document.createElement('div');
+      el.className = 'track-item';
+      if (t.status === 'completed') el.classList.add('ok');
+      else if (t.status === 'error' || t.status === 'cancelled') el.classList.add('fail');
+      else if (t.status === 'downloading' || t.status === 'postprocessing') el.classList.add('active');
+
+      const icon = t.status === 'completed' ? '✅' :
+                   t.status === 'error' ? '❌' :
+                   t.status === 'cancelled' ? '🚫' :
+                   t.status === 'duplicate' ? '🔗' :
+                   t.status === 'downloading' ? '🔄' :
+                   t.status === 'postprocessing' ? '⚙️' : '⏳';
+
+      const stClass = t.status === 'completed' ? 'st-ok' :
+                      (t.status === 'error' || t.status === 'cancelled') ? 'st-err' :
+                      t.status === 'downloading' ? 'st-dl' : 'st-wait';
+
+      let actions = '';
+      if (t.status === 'completed' || t.status === 'duplicate') {
+        actions = `<a href="/gallery?highlight=d:${t.id}" target="_blank">🔗 Bekijk in Gallery</a>`;
+      }
+
+      el.innerHTML = `
+        <div class="t-icon">${icon}</div>
+        <div class="t-body">
+          <div class="t-url" title="${esc(t.url)}">[${esc(t.platform)}] ${esc(t.url)}</div>
+          <div class="t-status ${stClass}">${t.detail}</div>
+        </div>
+        <div class="t-actions">${actions}</div>
+      `;
+      list.appendChild(el);
+    }
+  }
+
+  function esc(s) {
+    const d = document.createElement('div');
+    d.textContent = s || '';
+    return d.innerHTML;
+  }
+
+  // === Queue polling ===
+  async function fetchQueue() {
+    try {
+      const res = await fetch('/status');
+      const data = await res.json();
+
+      // Stats
+      const stats = document.getElementById('stats');
+      const active = data.activeDownloads || 0;
+      const queued = (data.queuedDownloads || 0) + (data.pendingDownloads || 0);
+      const done = data.completedDownloads || 0;
+      stats.innerHTML = `Actief: <strong>${active}</strong> | Wachtrij: <strong>${queued}</strong> | Voltooid: <strong>${done.toLocaleString('nl-NL')}</strong>`;
+
+      // Queue count
+      const items = data.active_items || [];
+      document.getElementById('qCount').textContent = `(${items.length})`;
+
+      // Grid
+      const grid = document.getElementById('qGrid');
+      if (items.length === 0) {
+        grid.innerHTML = '<div class="empty-msg">Wachtrij is leeg.</div>';
+        return;
+      }
+
+      grid.innerHTML = '';
+      for (const it of items.slice(0, 20)) {
+        const chip = document.createElement('div');
+        chip.className = 'q-chip';
+        chip.innerHTML = `<span class="dot"></span> ${esc((it.platform || '?').toUpperCase())} • ${esc((it.title || it.url || '').slice(0, 40))}`;
+        grid.appendChild(chip);
+      }
+      if (items.length > 20) {
+        const more = document.createElement('div');
+        more.className = 'q-chip';
+        more.style.color = 'var(--muted)';
+        more.textContent = `+${items.length - 20} meer...`;
+        grid.appendChild(more);
+      }
+    } catch (e) {}
+  }
+
+  // Check if there are any file count endpoint
+  // Fallback: just show "completed" without count
+  
+  // === Init ===
+  fetchQueue();
+  setInterval(fetchQueue, 4000);
+</script>
 </body>
 </html>

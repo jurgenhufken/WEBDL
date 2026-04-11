@@ -8,7 +8,7 @@ const util = require('util');
 const { exec, spawn } = require('child_process');
 const { createDb } = require('./db-adapter');
 const multer = require('multer');
-const upload = multer({ dest: path.join(os.tmpdir(), 'webdl-uploads')   });
+const upload = multer({ dest: path.join(os.tmpdir(), 'webdl-uploads') });
 // ========================
 // CONFIGURATIE (GEEXTRAHEERD)
 // ========================
@@ -25,7 +25,7 @@ const {
   MIN_SCREENSHOT_BYTES, MIN_THUMB_BYTES,
   FINALCUT_ENABLED, FINALCUT_VIDEO_CODEC, FINALCUT_X264_PRESET, FINALCUT_X264_CRF, FINALCUT_AUDIO_BITRATE,
   ADDON_PACKAGE_PATH, LEGACY_ADDON_PACKAGE_PATH,
-  DEFAULT_VDH_IMPORT_DIR, ADDON_AUTO_BUILD_ON_START, ADDON_FORCE_REBUILD_ON_START, 
+  DEFAULT_VDH_IMPORT_DIR, ADDON_AUTO_BUILD_ON_START, ADDON_FORCE_REBUILD_ON_START,
   AUTO_IMPORT_ON_START, AUTO_IMPORT_ROOT_DIR, AUTO_IMPORT_MAX_DEPTH_RAW, AUTO_IMPORT_MIN_FILE_AGE_MS, AUTO_IMPORT_FLATTEN_TO_WEBDL, AUTO_IMPORT_MOVE_SOURCE, AUTO_IMPORT_POLL_MS,
   STARTUP_REHYDRATE_DELAY_MS, STARTUP_REHYDRATE_MAX_ROWS, STARTUP_REHYDRATE_MODE,
   METADATA_BLOCKED_DOMAIN_SUFFIXES, getAutoImportMaxDepth
@@ -48,7 +48,7 @@ function tailTextFile(filePath, maxLines, maxBytes) {
       const parts = text.split(/\r?\n/);
       return parts.slice(Math.max(0, parts.length - lines)).join('\n');
     } finally {
-      try { fs.closeSync(fd); } catch (e) {}
+      try { fs.closeSync(fd); } catch (e) { }
     }
   } catch (e) {
     return '';
@@ -63,15 +63,15 @@ function parseAvfoundationDeviceList(text) {
     let mode = '';
     for (const line of lines) {
       const l = String(line || '');
-      if (/AVFoundation video devices:/i.test(l)) {mode = 'video';continue;}
-      if (/AVFoundation audio devices:/i.test(l)) {mode = 'audio';continue;}
+      if (/AVFoundation video devices:/i.test(l)) { mode = 'video'; continue; }
+      if (/AVFoundation audio devices:/i.test(l)) { mode = 'audio'; continue; }
       const m = l.match(/\[(\d+)\]\s*(.+)\s*$/);
       if (!m) continue;
       const idx = parseInt(m[1], 10);
       const name = String(m[2] || '').trim();
       if (!Number.isFinite(idx) || !name) continue;
-      if (mode === 'video') out.video.push({ index: idx, name });else
-      if (mode === 'audio') out.audio.push({ index: idx, name });
+      if (mode === 'video') out.video.push({ index: idx, name }); else
+        if (mode === 'audio') out.audio.push({ index: idx, name });
     }
     return out;
   } catch (e) {
@@ -196,7 +196,7 @@ function stripAnsiCodes(input) {
 }
 
 const IMPORTABLE_VIDEO_EXTS = new Set([
-'.mp4', '.mov', '.m4v', '.webm', '.mkv', '.avi', '.wmv', '.flv', '.ts', '.m2ts']
+  '.mp4', '.mov', '.m4v', '.webm', '.mkv', '.avi', '.wmv', '.flv', '.ts', '.m2ts']
 );
 
 // Auto-import settings en Startup rehydrate settings worden nu beheerd in src/config.js.
@@ -243,10 +243,10 @@ function readImportSidecarMetadata(absVideoPath) {
     const ext = path.extname(p);
     const base = ext ? p.slice(0, -ext.length) : p;
     const candidates = [
-    `${base}.info.json`,
-    `${base}.json`,
-    `${base}.url`,
-    `${base}.txt`];
+      `${base}.info.json`,
+      `${base}.json`,
+      `${base}.url`,
+      `${base}.txt`];
 
 
     for (const c of candidates) {
@@ -275,7 +275,7 @@ function readImportSidecarMetadata(absVideoPath) {
             out.sidecarPath = c;
             return out;
           }
-        } catch (e) {}
+        } catch (e) { }
       }
 
       const sourceUrl = findFirstHttpUrl(raw);
@@ -285,7 +285,7 @@ function readImportSidecarMetadata(absVideoPath) {
         return out;
       }
     }
-  } catch (e) {}
+  } catch (e) { }
   return out;
 }
 
@@ -295,7 +295,7 @@ function inferPlatformFromImportedFile(absPath, sourceUrl) {
     try {
       const p = normalizePlatform(null, src);
       if (p && p !== 'unknown') return p;
-    } catch (e) {}
+    } catch (e) { }
   }
 
   const lower = String(absPath || '').toLowerCase();
@@ -319,7 +319,7 @@ function summarizeMediaDir(rootDir, maxScan = 12000) {
         const st = fs.statSync(abs);
         const n = Number(st && st.size);
         if (Number.isFinite(n) && n > 0) totalBytes += n;
-      } catch (e) {}
+      } catch (e) { }
     }
     return { count: files.length, totalBytes: Math.max(0, totalBytes) };
   } catch (e) {
@@ -480,7 +480,7 @@ function safeIsAllowedExistingPath(p) {
     try {
       const real = fs.realpathSync(abs);
       if (real && safeIsInsideBaseDir(real)) return true;
-    } catch (e) {}
+    } catch (e) { }
     return false;
   } catch (e) {
     return false;
@@ -521,15 +521,15 @@ function redditPermalinkFromPostData(data) {
 async function fetchJsonWithTimeout(url, timeoutMs = 20000, headers = {}) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => {
-    try {ctrl.abort();} catch (e) {}
+    try { ctrl.abort(); } catch (e) { }
   }, Math.max(1000, timeoutMs));
   try {
     const res = await fetch(url, {
       method: 'GET',
       headers: {
         'User-Agent': REDDIT_DL_USERNAME ?
-        `script:webdl-reddit-index:1.0 (by /u/${REDDIT_DL_USERNAME})` :
-        'script:webdl-reddit-index:1.0 (by /u/webdl)',
+          `script:webdl-reddit-index:1.0 (by /u/${REDDIT_DL_USERNAME})` :
+          'script:webdl-reddit-index:1.0 (by /u/webdl)',
         'Accept': 'application/json',
         ...headers
       },
@@ -572,7 +572,7 @@ async function getRedditOAuthAccessToken() {
 
   const ctrl = new AbortController();
   const timer = setTimeout(() => {
-    try {ctrl.abort();} catch (e) {}
+    try { ctrl.abort(); } catch (e) { }
   }, 15000);
   try {
     const res = await fetch('https://www.reddit.com/api/v1/access_token', {
@@ -615,7 +615,7 @@ async function fetchRedditListingJson(pathWithQuery, timeoutMs = 25000) {
         label: 'oauth'
       });
     }
-  } catch (e) {}
+  } catch (e) { }
 
   candidates.push(
     { url: `https://www.reddit.com/${tail}`, headers: {}, label: 'www' },
@@ -760,11 +760,11 @@ function pickPrimaryMediaFile(absDir, maxScan = 600) {
       if (cached && cached.dirMtimeMs === dirMtimeMs && Date.now() - (cached.at || 0) < 8000) {
         return cached.value || null;
       }
-    } catch (e) {}
+    } catch (e) { }
 
     const files = listMediaFilesInDir(dir, maxScan);
     if (!files.length) {
-      try {cache.set(dir, { at: Date.now(), dirMtimeMs, value: null });} catch (e) {}
+      try { cache.set(dir, { at: Date.now(), dirMtimeMs, value: null }); } catch (e) { }
       return null;
     }
 
@@ -778,16 +778,16 @@ function pickPrimaryMediaFile(absDir, maxScan = 600) {
       const name = path.basename(file).toLowerCase();
       const ext = path.extname(file).toLowerCase();
       let score = 0;
-      if (videoExts.has(ext)) score += 1000;else
-      if (imageExts.has(ext)) score += 300;else
-      score += 50;
+      if (videoExts.has(ext)) score += 1000; else
+        if (imageExts.has(ext)) score += 300; else
+          score += 50;
       if (!/_raw/i.test(name)) score += 120;
       if (/final|edited|merged/.test(name)) score += 40;
       if (/\.mp4$/.test(name)) score += 20;
       try {
         const st = fs.statSync(file);
         if (st && st.mtimeMs) score += st.mtimeMs / 1000000;
-      } catch (e) {}
+      } catch (e) { }
       if (score > bestScore) {
         bestScore = score;
         best = file;
@@ -795,7 +795,7 @@ function pickPrimaryMediaFile(absDir, maxScan = 600) {
     }
 
     if (!best) {
-      try {cache.set(dir, { at: Date.now(), dirMtimeMs, value: null });} catch (e) {}
+      try { cache.set(dir, { at: Date.now(), dirMtimeMs, value: null }); } catch (e) { }
       return null;
     }
 
@@ -803,7 +803,7 @@ function pickPrimaryMediaFile(absDir, maxScan = 600) {
     try {
       const st = fs.statSync(best);
       if (st && st.mtimeMs) mtime = st.mtimeMs;
-    } catch (e) {}
+    } catch (e) { }
 
     const out = { path: best, mtime };
     try {
@@ -817,7 +817,7 @@ function pickPrimaryMediaFile(absDir, maxScan = 600) {
           if (n >= overflow) break;
         }
       }
-    } catch (e) {}
+    } catch (e) { }
     return out;
   } catch (e) {
     return null;
@@ -838,17 +838,17 @@ function getAvfoundationDeviceListCached(maxAgeMs = 60 * 1000) {
       const timer = setTimeout(() => {
         if (done) return;
         done = true;
-        try {proc.kill('SIGKILL');} catch (e) {}
+        try { proc.kill('SIGKILL'); } catch (e) { }
         const data = parseAvfoundationDeviceList(stderr);
         avfoundationDeviceListCache = { ts: now, data };
         resolve(data);
       }, 12000);
 
-      proc.stderr.on('data', (d) => {stderr += d.toString();});
+      proc.stderr.on('data', (d) => { stderr += d.toString(); });
       proc.on('close', () => {
         if (done) return;
         done = true;
-        try {clearTimeout(timer);} catch (e) {}
+        try { clearTimeout(timer); } catch (e) { }
         const data = parseAvfoundationDeviceList(stderr);
         avfoundationDeviceListCache = { ts: now, data };
         resolve(data);
@@ -856,7 +856,7 @@ function getAvfoundationDeviceListCached(maxAgeMs = 60 * 1000) {
       proc.on('error', () => {
         if (done) return;
         done = true;
-        try {clearTimeout(timer);} catch (e) {}
+        try { clearTimeout(timer); } catch (e) { }
         const data = parseAvfoundationDeviceList(stderr);
         avfoundationDeviceListCache = { ts: now, data };
         resolve(data);
@@ -910,7 +910,7 @@ function resolveAddonSourceDir() {
     try {
       const manifestPath = path.join(dir, 'manifest.json');
       if (fs.existsSync(manifestPath)) return dir;
-    } catch (e) {}
+    } catch (e) { }
   }
 
   return candidates[0];
@@ -4311,7 +4311,7 @@ function getAddonBuildState() {
     const manifestRaw = fs.readFileSync(manifestPath, 'utf8');
     const manifest = JSON.parse(manifestRaw);
     state.sourceManifestVersion = manifest && manifest.version ? String(manifest.version) : null;
-  } catch (e) {}
+  } catch (e) { }
 
   const stack = [ADDON_SOURCE_DIR];
   while (stack.length > 0) {
@@ -4389,7 +4389,7 @@ function getYtDlpCookieArgs(purpose = 'download') {
     if (YTDLP_COOKIES_FILE) {
       try {
         if (fs.existsSync(YTDLP_COOKIES_FILE)) return ['--cookies', YTDLP_COOKIES_FILE];
-      } catch (e) {}
+      } catch (e) { }
     }
     return [];
   }
@@ -4429,19 +4429,19 @@ async function ensurePostgresSchemaReady() {
   if (!db.isPostgres) return;
   try {
     await db.prepare('ALTER TABLE downloads ADD COLUMN IF NOT EXISTS finished_at TIMESTAMP').run();
-  } catch (e) {}
+  } catch (e) { }
   try {
     await db.prepare('ALTER TABLE downloads ADD COLUMN IF NOT EXISTS rating DOUBLE PRECISION').run();
-  } catch (e) {}
+  } catch (e) { }
   try {
     await db.prepare('CREATE INDEX IF NOT EXISTS idx_downloads_finished_at ON downloads(finished_at DESC)').run();
-  } catch (e) {}
+  } catch (e) { }
   try {
     await db.prepare('ALTER TABLE screenshots ADD COLUMN IF NOT EXISTS rating DOUBLE PRECISION').run();
-  } catch (e) {}
+  } catch (e) { }
   try {
     await db.prepare('ALTER TABLE screenshots ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP').run();
-  } catch (e) {}
+  } catch (e) { }
 
   try {
     await db.prepare(`
@@ -4451,7 +4451,7 @@ async function ensurePostgresSchemaReady() {
       )
     `).run();
   } catch (e) { console.error('Error creating tags table:', e); }
-  
+
   try {
     await db.prepare(`
       CREATE TABLE IF NOT EXISTS media_tags (
@@ -4553,7 +4553,7 @@ try {
       if (db.isSqlite) db.exec('ALTER TABLE downloads ADD COLUMN rating REAL');
     }
   }
-} catch (e) {}
+} catch (e) { }
 
 try {
   if (db.isSqlite) {
@@ -4567,14 +4567,14 @@ try {
       if (db.isSqlite) db.exec('ALTER TABLE screenshots ADD COLUMN updated_at DATETIME');
       try {
         if (db.isSqlite) db.exec("UPDATE screenshots SET updated_at = COALESCE(updated_at, created_at) WHERE updated_at IS NULL OR TRIM(updated_at) = ''");
-      } catch (e) {}
+      } catch (e) { }
     }
   }
-} catch (e) {}
+} catch (e) { }
 
 try {
   if (db.isSqlite) db.exec('CREATE INDEX IF NOT EXISTS idx_downloads_finished_at ON downloads(finished_at DESC)');
-} catch (e) {}
+} catch (e) { }
 
 try {
   if (db.isSqlite) {
@@ -4588,17 +4588,17 @@ try {
     db.exec('CREATE INDEX IF NOT EXISTS idx_screenshots_filepath ON screenshots(filepath)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_screenshots_created ON screenshots(created_at DESC)');
   }
-} catch (e) {}
+} catch (e) { }
 
 try {
   if (db.isSqlite) {
     db.exec("UPDATE downloads SET finished_at = COALESCE(finished_at, updated_at) WHERE status IN ('completed','error','cancelled') AND (finished_at IS NULL OR TRIM(finished_at)='')");
     db.exec("UPDATE downloads SET status = 'pending' WHERE status IN ('downloading', 'postprocessing', 'queued')");
   } else if (db.isPostgres) {
-    db.query("UPDATE downloads SET finished_at = COALESCE(finished_at, updated_at) WHERE status IN ('completed','error','cancelled') AND finished_at IS NULL").catch(()=>{});
-    db.query("UPDATE downloads SET status = 'pending' WHERE status IN ('downloading', 'postprocessing', 'queued')").catch(()=>{});
+    db.query("UPDATE downloads SET finished_at = COALESCE(finished_at, updated_at) WHERE status IN ('completed','error','cancelled') AND finished_at IS NULL").catch(() => { });
+    db.query("UPDATE downloads SET status = 'pending' WHERE status IN ('downloading', 'postprocessing', 'queued')").catch(() => { });
   }
-} catch (e) {}
+} catch (e) { }
 
 try {
   if (db.isSqlite) db.exec(`
@@ -4611,7 +4611,7 @@ try {
       WHERE id = NEW.id;
     END;
   `);
-} catch (e) {}
+} catch (e) { }
 
 try {
   if (db.isSqlite) db.exec(`
@@ -4624,7 +4624,7 @@ try {
       WHERE id = NEW.id;
     END;
   `);
-} catch (e) {}
+} catch (e) { }
 
 try {
   if (db.isSqlite) db.exec(`
@@ -4637,7 +4637,7 @@ try {
       WHERE id = NEW.id;
     END;
   `);
-} catch (e) {}
+} catch (e) { }
 
 const insertDownload = db.prepare(`INSERT INTO downloads (url, platform, channel, title, status) VALUES (?, ?, ?, ?, 'pending')`);
 const rawUpdateDownload = db.prepare(`UPDATE downloads SET status=?, progress=?, filepath=?, filename=?, filesize=?, format=?, metadata=?, error=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`);
@@ -4723,7 +4723,7 @@ async function hydrateDownloadActivityContext(downloadId) {
     if (!row) return prev;
     return setDownloadActivityContext(id, {
       url: row.url || '',
-    sourceUrl: row.source_url || '',
+      sourceUrl: row.source_url || '',
       source_url: row.source_url || '',
       platform: row.platform || '',
       channel: row.channel || '',
@@ -4742,7 +4742,7 @@ function pushRecentDownloadActivity(entry) {
     if (recentDownloadActivity.length > DOWNLOAD_ACTIVITY_MAX) {
       recentDownloadActivity.splice(0, recentDownloadActivity.length - DOWNLOAD_ACTIVITY_MAX);
     }
-  } catch (e) {}
+  } catch (e) { }
 }
 
 function printRecentDownloadActivity(entry) {
@@ -4768,7 +4768,7 @@ function printRecentDownloadActivity(entry) {
     else if (entry.filepath && (entry.status === 'completed' || entry.event === 'completed')) tail.push(trimDownloadActivityString(path.basename(String(entry.filepath || '')), 80));
     const msg = parts.join(' ') + (tail.length ? ` | ${tail.join(' | ')}` : '');
     console.log(msg);
-  } catch (e) {}
+  } catch (e) { }
 }
 
 async function emitDownloadEventActivity(event, downloadId, extra = {}) {
@@ -4796,7 +4796,7 @@ async function emitDownloadEventActivity(event, downloadId, extra = {}) {
     };
     pushRecentDownloadActivity(entry);
     printRecentDownloadActivity(entry);
-  } catch (e) {}
+  } catch (e) { }
 }
 
 async function emitDownloadStatusActivity(downloadId, status, progress, error, extra = {}) {
@@ -4847,7 +4847,7 @@ async function emitDownloadStatusActivity(downloadId, status, progress, error, e
     };
     pushRecentDownloadActivity(entry);
     printRecentDownloadActivity(entry);
-  } catch (e) {}
+  } catch (e) { }
 }
 
 const updateDownload = {
@@ -4863,7 +4863,7 @@ const updateDownloadStatus = {
   run: async (status, progress, error, id) => {
     const out = await rawUpdateDownloadStatus.run(status, progress, error, id);
     await emitDownloadStatusActivity(id, status, progress, error);
-    
+
     // Auto-tagging hook when a download completes
     if (status === 'completed') {
       try {
@@ -5088,7 +5088,7 @@ function isMediaFilePath(absPath) {
     if (ext && ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.svg', '.avif', '.heic', '.heif'].includes(ext)) return true;
     const sn = sniffMediaKindByMagic(String(absPath || ''));
     if (sn === 'image' || sn === 'video') return true;
-  } catch (e) {}
+  } catch (e) { }
   return false;
 }
 
@@ -5129,12 +5129,12 @@ async function indexDownloadFilesForDownload(row) {
         if (allowNotReady && !isReadyDownloadStatus(status)) {
           const ageMs = mtime > 0 ? (Date.now() - mtime) : 0;
           if (!(mtime > 0 && ageMs >= DOWNLOAD_FILES_ACTIVE_FILE_STABLE_MS)) {
-            try {await deleteDownloadFile.run(downloadId, rel);} catch (e) {}
+            try { await deleteDownloadFile.run(downloadId, rel); } catch (e) { }
             return;
           }
         }
         await upsertDownloadFile.run(downloadId, rel, size, mtime, createdAt, createdAt);
-      } catch (e) {}
+      } catch (e) { }
     };
 
     if (st.isDirectory && st.isDirectory()) {
@@ -5173,7 +5173,7 @@ async function maybeAutoIndexDownloadFiles() {
         downloadFilesActiveIndexLastById.set(id, now);
         did++;
       }
-    } catch (e) {}
+    } catch (e) { }
 
     const rows = await getReadyDownloadsForFileIndex.all(Math.max(1, DOWNLOAD_FILES_AUTO_INDEX_MAX_DOWNLOADS * 6));
     let did = 0;
@@ -5211,17 +5211,17 @@ async function indexDownloadDirImmediately(downloadId) {
     if (!Number.isFinite(id)) return false;
     const row = await getDownload.get(id);
     if (!row) return false;
-    
+
     // We allowNotReady=true so that it indexes even if the DB says 'downloading'
     // This is run right before/after the status is set to 'completed'
     const r = { ...row, _allowNotReady: true, _maxFiles: DOWNLOAD_FILES_AUTO_INDEX_MAX_FILES };
     const res = await indexDownloadFilesForDownload(r);
-    
+
     if (res && res.ok) {
       const now = Date.now();
       downloadFilesAutoIndexLastById.set(id, now);
       downloadFilesActiveIndexLastById.set(id, now);
-      try { recentFilesTopCache.clear(); } catch(e) {}
+      try { recentFilesTopCache.clear(); } catch (e) { }
       return true;
     }
   } catch (e) {
@@ -7411,15 +7411,15 @@ function buildRecentFilesCacheMarker(stats) {
   try {
     const s = stats && typeof stats === 'object' ? stats : {};
     return [
-    s.downloads_count != null ? String(s.downloads_count) : '',
-    s.screenshots_count != null ? String(s.screenshots_count) : '',
-    s.download_files_count != null ? String(s.download_files_count) : '',
-    s.downloads_created_last ? String(s.downloads_created_last) : '',
-    s.downloads_finished_last ? String(s.downloads_finished_last) : '',
-    s.downloads_last ? String(s.downloads_last) : '',
-    s.screenshots_last ? String(s.screenshots_last) : '',
-    s.download_files_last ? String(s.download_files_last) : ''].
-    join('|');
+      s.downloads_count != null ? String(s.downloads_count) : '',
+      s.screenshots_count != null ? String(s.screenshots_count) : '',
+      s.download_files_count != null ? String(s.download_files_count) : '',
+      s.downloads_created_last ? String(s.downloads_created_last) : '',
+      s.downloads_finished_last ? String(s.downloads_finished_last) : '',
+      s.downloads_last ? String(s.downloads_last) : '',
+      s.screenshots_last ? String(s.screenshots_last) : '',
+      s.download_files_last ? String(s.download_files_last) : ''].
+      join('|');
   } catch (e) {
     return '';
   }
@@ -7698,8 +7698,8 @@ async function applyAbortStatus(id, kind) {
     if (postprocessJob) postprocessJob.aborted = kind;
     const proc = activeProcesses.get(id);
     if (proc) {
-      try {proc.kill('SIGTERM');} catch (e) {}
-      try {activeProcesses.delete(id);} catch (e) {}
+      try { proc.kill('SIGTERM'); } catch (e) { }
+      try { activeProcesses.delete(id); } catch (e) { }
     }
 
     if (kind === 'cancelled') {
@@ -7712,13 +7712,13 @@ async function applyAbortStatus(id, kind) {
       removeFromQueue(queuedPostprocess, id);
       if (!isActivePostprocess) {
         postprocessJobs.delete(id);
-        try {if (postprocessJob && typeof postprocessJob.resolve === 'function') postprocessJob.resolve(false);} catch (e) {}
+        try { if (postprocessJob && typeof postprocessJob.resolve === 'function') postprocessJob.resolve(false); } catch (e) { }
       }
       jobLane.delete(id);
       await updateDownloadStatus.run('cancelled', 0, null, id);
-      try {runDownloadSchedulerSoon();} catch (e) {}
-      try {runPostprocessSchedulerSoon();} catch (e) {}
-      try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
+      try { runDownloadSchedulerSoon(); } catch (e) { }
+      try { runPostprocessSchedulerSoon(); } catch (e) { }
+      try { syncRuntimeActiveState().catch(() => { }); } catch (e) { }
       return true;
     }
     if (kind === 'on_hold') {
@@ -7730,16 +7730,16 @@ async function applyAbortStatus(id, kind) {
       removeFromQueue(queuedPostprocess, id);
       if (!isActivePostprocess) {
         postprocessJobs.delete(id);
-        try {if (postprocessJob && typeof postprocessJob.resolve === 'function') postprocessJob.resolve(false);} catch (e) {}
+        try { if (postprocessJob && typeof postprocessJob.resolve === 'function') postprocessJob.resolve(false); } catch (e) { }
       }
       jobLane.delete(id);
       await updateDownloadStatus.run('on_hold', 0, null, id);
-      try {runDownloadSchedulerSoon();} catch (e) {}
-      try {runPostprocessSchedulerSoon();} catch (e) {}
-      try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
+      try { runDownloadSchedulerSoon(); } catch (e) { }
+      try { runPostprocessSchedulerSoon(); } catch (e) { }
+      try { syncRuntimeActiveState().catch(() => { }); } catch (e) { }
       return true;
     }
-  } catch (e) {}
+  } catch (e) { }
   return false;
 }
 
@@ -7773,7 +7773,7 @@ function detectLane(platform, url = '') {
 
   // If this is a live stream or explicitly a video, definitely heavy
   if (u.includes('is_live=true') || u.includes('/live/') || u.includes('tiktok.com/@') && !u.includes('/photo/')) {
-    return 'heavy'; 
+    return 'heavy';
   }
 
   // Only pure image/direct link platforms get the fast lane
@@ -7783,7 +7783,7 @@ function detectLane(platform, url = '') {
   ];
 
   if (lightPlatforms.includes(p)) return 'light';
-  
+
   // Everything else (youtube, onlyfans, tiktok videos, instagram zips, reddit videos, wikifeet galleries) is heavy
   return 'heavy';
 }
@@ -7800,14 +7800,14 @@ function deriveEarlyThumbnail(url, platform) {
         else if (u.hostname.includes('youtu.be')) vid = u.pathname.substring(1);
         else if (u.hostname.includes('youtube.com') && u.pathname.startsWith('/shorts/')) vid = u.pathname.split('/')[2];
         if (vid) return 'https://i.ytimg.com/vi/' + vid + '/mqdefault.jpg';
-      } catch (e) {}
+      } catch (e) { }
     }
     // Direct image URLs (any platform)
     if (/\.(jpg|jpeg|png|webp|gif|avif|bmp)(?:\?|$)/i.test(url)) return url;
     // For image-serving platforms, the URL itself IS the media — store it so gallery can attempt to load or proxy
     const imageHostPlatforms = ['footfetishforum', 'aznudefeet', 'imagetwist', 'pixhost', 'postimg', 'bunkr', 'jpg'];
     if (imageHostPlatforms.includes(platform)) return url;
-  } catch (e) {}
+  } catch (e) { }
   return '';
 }
 
@@ -7820,9 +7820,9 @@ async function enqueueDownloadJob(downloadId, url, platform, channel, title, met
   jobPlatform.set(downloadId, platform);
   await updateDownloadStatus.run('queued', 0, null, downloadId);
 
-  if (lane === 'batch') queuedBatch.push(downloadId);else
-  if (lane === 'light') queuedLight.unshift(downloadId);else
-  queuedHeavy.unshift(downloadId);
+  if (lane === 'batch') queuedBatch.push(downloadId); else
+    if (lane === 'light') queuedLight.unshift(downloadId); else
+      queuedHeavy.unshift(downloadId);
 
   if (METADATA_PROBE_ENABLED && METADATA_PROBE_CONCURRENCY > 0 && platform !== 'onlyfans' && platform !== 'instagram' && platform !== 'wikifeet' && platform !== 'kinky' && platform !== 'tiktok' && platform !== 'reddit' && platform !== 'aznudefeet' && platform !== 'amateurvoyeurforum' && platform !== 'pornpics') {
     metadataProbeQueue.push({ downloadId, url });
@@ -7838,14 +7838,14 @@ function runDownloadSchedulerSoon() {
   schedulerTimer = setTimeout(() => {
     schedulerTimer = null;
     runDownloadScheduler();
-    syncRuntimeActiveState().catch(() => {});
+    syncRuntimeActiveState().catch(() => { });
   }, 120);
 }
 
 async function runDownloadScheduler() {
   const heavyLimit = Math.max(0, HEAVY_DOWNLOAD_CONCURRENCY);
   const lightLimit = Math.max(0, LIGHT_DOWNLOAD_CONCURRENCY);
-  
+
   // YouTube settings
   const youtubeSettings = getYoutubeRuntimeConfig();
   const youtubeLimit = Math.max(0, youtubeSettings.concurrency);
@@ -7905,19 +7905,19 @@ async function runDownloadScheduler() {
     queuedJobs.delete(id);
     heavyActive++;
     startingJobs.add(id);
-    try { jobPlatform.set(id, job.platform); } catch (e) {}
+    try { jobPlatform.set(id, job.platform); } catch (e) { }
     if (String(job.platform || '').toLowerCase() === 'youtube') markYoutubeStarted();
-    
+
     // PUSH PROGRESS!
     const earlyThumb = job.metadata?.thumbnail || deriveEarlyThumbnail(job.url, job.platform);
     setDownloadActivityContext(id, { url: job.url, platform: job.platform, channel: job.channel, title: job.title, lane: 'heavy', thumbnail: earlyThumb, progress: job.progress || 0 });
 
     try {
       startDownload(job.downloadId, job.url, job.platform, job.channel, job.title, job.metadata)
-      .catch(() => {}).finally(() => {
-        startingJobs.delete(id);
-        runDownloadSchedulerSoon();
-      });
+        .catch(() => { }).finally(() => {
+          startingJobs.delete(id);
+          runDownloadSchedulerSoon();
+        });
     } catch (e) {
       await updateDownloadStatus.run('error', 0, e.message, job.downloadId);
       jobLane.delete(job.downloadId);
@@ -7932,19 +7932,19 @@ async function runDownloadScheduler() {
     queuedJobs.delete(id);
     lightActive++;
     startingJobs.add(id);
-    try { jobPlatform.set(id, job.platform); } catch (e) {}
+    try { jobPlatform.set(id, job.platform); } catch (e) { }
     if (String(job.platform || '').toLowerCase() === 'youtube') markYoutubeStarted();
-    
+
     // PUSH PROGRESS!
     const earlyThumb = job.metadata?.thumbnail || deriveEarlyThumbnail(job.url, job.platform);
     setDownloadActivityContext(id, { url: job.url, platform: job.platform, channel: job.channel, title: job.title, lane: 'light', thumbnail: earlyThumb, progress: job.progress || 0 });
 
     try {
       startDownload(job.downloadId, job.url, job.platform, job.channel, job.title, job.metadata)
-      .catch(() => {}).finally(() => {
-        startingJobs.delete(id);
-        runDownloadSchedulerSoon();
-      });
+        .catch(() => { }).finally(() => {
+          startingJobs.delete(id);
+          runDownloadSchedulerSoon();
+        });
     } catch (e) {
       await updateDownloadStatus.run('error', 0, e.message, job.downloadId);
       jobLane.delete(job.downloadId);
@@ -7963,17 +7963,17 @@ async function runDownloadScheduler() {
     queuedJobs.delete(id);
     batchActive++;
     startingJobs.add(id);
-    try { jobPlatform.set(id, job.platform); } catch (e) {}
+    try { jobPlatform.set(id, job.platform); } catch (e) { }
 
     const earlyThumb = job.metadata?.thumbnail || deriveEarlyThumbnail(job.url, job.platform);
     setDownloadActivityContext(id, { url: job.url, platform: job.platform, channel: job.channel, title: job.title, lane: 'batch', thumbnail: earlyThumb, progress: job.progress || 0 });
 
     try {
       startDownload(job.downloadId, job.url, job.platform, job.channel, job.title, job.metadata)
-      .catch(() => {}).finally(() => {
-        startingJobs.delete(id);
-        runDownloadSchedulerSoon();
-      });
+        .catch(() => { }).finally(() => {
+          startingJobs.delete(id);
+          runDownloadSchedulerSoon();
+        });
     } catch (e) {
       await updateDownloadStatus.run('error', 0, e.message, job.downloadId);
       jobLane.delete(job.downloadId);
@@ -7988,7 +7988,7 @@ function runPostprocessSchedulerSoon() {
   postprocessSchedulerTimer = setTimeout(() => {
     postprocessSchedulerTimer = null;
     runPostprocessScheduler();
-    syncRuntimeActiveState().catch(() => {});
+    syncRuntimeActiveState().catch(() => { });
   }, 120);
 }
 
@@ -8002,7 +8002,7 @@ function enqueuePostprocessJob(downloadId, job) {
       if (queuedStatus) {
         try {
           await updateDownloadStatus.run(queuedStatus, Number.isFinite(job.queuedProgress) ? job.queuedProgress : 0, null, downloadId);
-        } catch (e) {}
+        } catch (e) { }
       }
       runPostprocessSchedulerSoon();
     }).catch((e) => {
@@ -8023,7 +8023,7 @@ async function runPostprocessScheduler() {
     if (queuedAbort) {
       await applyAbortStatus(downloadId, queuedAbort);
       postprocessJobs.delete(downloadId);
-      try {if (typeof job.resolve === 'function') job.resolve(false);} catch (e) {}
+      try { if (typeof job.resolve === 'function') job.resolve(false); } catch (e) { }
       continue;
     }
 
@@ -8035,23 +8035,23 @@ async function runPostprocessScheduler() {
           await updateDownloadStatus.run(startStatus, Number.isFinite(job.startProgress) ? job.startProgress : 0, null, downloadId);
         }
         await job.run();
-        try {if (typeof job.resolve === 'function') job.resolve(true);} catch (e) {}
+        try { if (typeof job.resolve === 'function') job.resolve(true); } catch (e) { }
       } catch (e) {
         const aborted = job.aborted || abortKind(downloadId);
         if (aborted) {
           if (!job.aborted) await applyAbortStatus(downloadId, aborted);
-          try {if (typeof job.resolve === 'function') job.resolve(false);} catch (err) {}
+          try { if (typeof job.resolve === 'function') job.resolve(false); } catch (err) { }
         } else {
           await updateDownloadStatus.run('error', 0, e && e.message ? e.message : String(e), downloadId);
-          try {if (typeof job.reject === 'function') job.reject(e);} catch (err) {}
+          try { if (typeof job.reject === 'function') job.reject(e); } catch (err) { }
         }
       } finally {
         activePostprocessJobs.delete(downloadId);
         postprocessJobs.delete(downloadId);
         runPostprocessSchedulerSoon();
-        try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
+        try { syncRuntimeActiveState().catch(() => { }); } catch (e) { }
       }
-    }).catch(() => {});
+    }).catch(() => { });
   }
 }
 
@@ -8084,7 +8084,7 @@ function runMetadataProbeScheduler() {
           queuedLight.push(downloadId);
         }
       }
-    }).catch(() => {}).finally(() => {
+    }).catch(() => { }).finally(() => {
       metadataProbeActive--;
       runMetadataProbeSchedulerSoon();
       runDownloadSchedulerSoon();
@@ -8138,12 +8138,12 @@ async function rehydrateDownloadQueueWithMode(modeRaw, maxRowsRaw) {
     }
     const maxRows = Math.max(0, parseInt(String(maxRowsRaw == null ? STARTUP_REHYDRATE_MAX_ROWS : maxRowsRaw), 10) || STARTUP_REHYDRATE_MAX_ROWS);
     const statusList = (mode === 'all' || mode === 'missing') ?
-    "('pending', 'queued', 'downloading', 'postprocessing')" :
-    mode === 'queued' || mode === 'pending' ?
-    "('pending', 'queued')" :
-    mode === 'post' || mode === 'postprocessing' || mode === 'postproc' ?
-    "('postprocessing')" :
-    "('downloading', 'postprocessing')";
+      "('pending', 'queued', 'downloading', 'postprocessing')" :
+      mode === 'queued' || mode === 'pending' ?
+        "('pending', 'queued')" :
+        mode === 'post' || mode === 'postprocessing' || mode === 'postproc' ?
+          "('postprocessing')" :
+          "('downloading', 'postprocessing')";
     const rows = await db.prepare(
       `SELECT id, url, platform, channel, title, metadata, status
        FROM downloads
@@ -8172,7 +8172,7 @@ async function rehydrateDownloadQueueWithMode(modeRaw, maxRowsRaw) {
 
       let parsedMeta = null;
       if (typeof row.metadata === 'string' && row.metadata.trim()) {
-        try {parsedMeta = JSON.parse(row.metadata);} catch (e) {parsedMeta = null;}
+        try { parsedMeta = JSON.parse(row.metadata); } catch (e) { parsedMeta = null; }
       }
       if (url.startsWith('recording:') || parsedMeta && parsedMeta.webdl_kind === 'recording') continue;
 
@@ -8201,8 +8201,8 @@ async function rehydrateDownloadQueueWithMode(modeRaw, maxRowsRaw) {
       queuedJobs.set(id, { downloadId: id, url, platform, channel, title, metadata, progress: initialProgress });
       jobLane.set(id, lane);
       jobPlatform.set(id, platform);
-      if (lane === 'light') queuedLight.push(id);else
-      queuedHeavy.push(id);
+      if (lane === 'light') queuedLight.push(id); else
+        queuedHeavy.push(id);
       queued++;
     }
 
@@ -8220,12 +8220,12 @@ async function rehydrateDownloadQueue() {
       return;
     }
     const statusList = (mode === 'all' || mode === 'missing') ?
-    "('pending', 'queued', 'downloading', 'postprocessing')" :
-    mode === 'queued' || mode === 'pending' ?
-    "('pending', 'queued')" :
-    mode === 'post' || mode === 'postprocessing' || mode === 'postproc' ?
-    "('postprocessing')" :
-    "('downloading', 'postprocessing')";
+      "('pending', 'queued', 'downloading', 'postprocessing')" :
+      mode === 'queued' || mode === 'pending' ?
+        "('pending', 'queued')" :
+        mode === 'post' || mode === 'postprocessing' || mode === 'postproc' ?
+          "('postprocessing')" :
+          "('downloading', 'postprocessing')";
     const rows = await db.prepare(
       `SELECT id, url, platform, channel, title, metadata, status
        FROM downloads
@@ -8291,8 +8291,8 @@ async function rehydrateDownloadQueue() {
       queuedJobs.set(id, { downloadId: id, url, platform, channel, title, metadata, progress: initialProgress });
       jobLane.set(id, lane);
       jobPlatform.set(id, platform);
-      if (lane === 'light') queuedLight.push(id);else
-      queuedHeavy.push(id);
+      if (lane === 'light') queuedLight.push(id); else
+        queuedHeavy.push(id);
 
       // Vermijd zware DB writes tijdens startup; scheduler pakt queue direct op.
 
@@ -8409,7 +8409,7 @@ async function relaySocketCommandToHttp(endpoint, payload) {
 function broadcastRecordingState() {
   try {
     io.emit('recording-status-changed', { isRecording });
-  } catch (e) {}
+  } catch (e) { }
 }
 
 io.on('connection', (socket) => {
@@ -8424,14 +8424,14 @@ io.on('connection', (socket) => {
   socket.on('webdl:request', async (message, ack) => {
     const reply = (payload) => {
       if (typeof ack === 'function') {
-        try {ack(payload);} catch (e) {}
+        try { ack(payload); } catch (e) { }
       }
     };
 
     const action = String(message && message.action ? message.action : '').trim().toLowerCase();
     const payload = message && message.payload && typeof message.payload === 'object' ?
-    message.payload :
-    {};
+      message.payload :
+      {};
 
     if (!action) {
       reply({ success: false, error: 'Action ontbreekt' });
@@ -8492,9 +8492,9 @@ expressApp.post('/media/open', async (req, res) => {
     } else {
       if (!Number.isFinite(id)) return res.status(400).json({ success: false, error: 'id is vereist' });
       let row = null;
-      if (kind === 'd') row = await getDownload.get(id);else
-      if (kind === 's') row = await db.prepare(`SELECT * FROM screenshots WHERE id=?`).get(id);else
-      return res.status(400).json({ success: false, error: 'kind moet d of s zijn' });
+      if (kind === 'd') row = await getDownload.get(id); else
+        if (kind === 's') row = await db.prepare(`SELECT * FROM screenshots WHERE id=?`).get(id); else
+          return res.status(400).json({ success: false, error: 'kind moet d of s zijn' });
       if (!row) return res.status(404).json({ success: false, error: 'niet gevonden' });
 
       fp = String(row.filepath || '').trim();
@@ -8531,16 +8531,16 @@ function safeResolveMediaRelPath(relPath) {
     const candidates = [];
     try {
       if (path.isAbsolute(raw)) candidates.push(path.resolve(raw));
-    } catch (e) {}
+    } catch (e) { }
     try {
       const rel = raw.replace(/^\/+/, '');
       if (rel) candidates.push(path.resolve(BASE_DIR, rel));
-    } catch (e) {}
+    } catch (e) { }
 
     for (const abs of candidates) {
       try {
         if (safeIsAllowedExistingPath(abs)) return abs;
-      } catch (e) {}
+      } catch (e) { }
     }
     return null;
   } catch (e) {
@@ -8566,7 +8566,7 @@ expressApp.get('/media/path', (req, res) => {
       const mime = sniffMediaMimeByMagic(abs);
       if (mime) res.setHeader('Content-Type', mime);
     }
-  } catch (e) {}
+  } catch (e) { }
   return res.sendFile(abs, (err) => {
     if (!err) return;
     if (res.headersSent) return;
@@ -8587,7 +8587,7 @@ expressApp.get('/media/path-thumb', (req, res) => {
       const thumbPath = await pickOrCreateThumbPath(abs, { allowGenerate: false });
       if (!thumbPath || !fs.existsSync(thumbPath)) {
         let sched = 'error';
-        try {sched = scheduleThumbGeneration(abs) || 'error';} catch (e) {}
+        try { sched = scheduleThumbGeneration(abs) || 'error'; } catch (e) { }
         logMissingThumbOnce('path-thumb', rel, sched);
         return res.redirect(302, `/media/pending-thumb.svg?kind=path&id=${encodeURIComponent(rel.slice(0, 120))}`);
       }
@@ -8599,7 +8599,7 @@ expressApp.get('/media/path-thumb', (req, res) => {
           const mime = sniffMediaMimeByMagic(thumbPath);
           if (mime) res.setHeader('Content-Type', mime);
         }
-      } catch (e) {}
+      } catch (e) { }
       return res.sendFile(thumbPath, (err) => {
         if (!err) return;
         if (err && (err.code === 'ECONNABORTED' || /aborted/i.test(String(err.message || '')))) return;
@@ -8641,7 +8641,7 @@ expressApp.get('/api/proxy-thumb', async (req, res) => {
         const cookieStr = await loadCookiesForDomain(hostname);
         if (cookieStr) headers['Cookie'] = cookieStr;
       }
-    } catch (e) {}
+    } catch (e) { }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 8000);
     const resp = await fetch(url, { headers, signal: controller.signal, redirect: 'follow' });
@@ -8686,8 +8686,8 @@ expressApp.post('/media/open-path', (req, res) => {
   try {
     const stat = fs.statSync(abs);
     if (action === 'finder') {
-      if (stat.isDirectory && stat.isDirectory()) spawn('/usr/bin/open', [abs]);else
-      spawn('/usr/bin/open', ['-R', abs]);
+      if (stat.isDirectory && stat.isDirectory()) spawn('/usr/bin/open', [abs]); else
+        spawn('/usr/bin/open', ['-R', abs]);
       return res.json({ success: true });
     }
     spawn('/usr/bin/open', [abs]);
@@ -8780,7 +8780,7 @@ function logMissingThumbOnce(tag, key, extra) {
       thumbMissingLogged.clear();
       for (const x of arr.slice(-6000)) thumbMissingLogged.add(x);
     }
-  } catch (e) {}
+  } catch (e) { }
 }
 
 function convertToJpg(inputPath, outputPath) {
@@ -8810,14 +8810,14 @@ function probeVideoDurationSeconds(filePath) {
     const proc = spawn(FFPROBE, args);
     let out = '';
     let err = '';
-    proc.stdout.on('data', (d) => {out += d.toString();});
-    proc.stderr.on('data', (d) => {err += d.toString();});
+    proc.stdout.on('data', (d) => { out += d.toString(); });
+    proc.stderr.on('data', (d) => { err += d.toString(); });
     proc.on('close', () => {
       try {
         const raw = String(out || '').trim();
         const n = parseFloat(raw);
         if (Number.isFinite(n) && n > 0) return resolve(n);
-      } catch (e) {}
+      } catch (e) { }
       reject(new Error(String(err || out || 'ffprobe duration failed').trim()));
     });
     proc.on('error', reject);
@@ -8830,7 +8830,7 @@ function moveFileSync(srcPath, destPath) {
   } catch (e) {
     if (e && e.code === 'EXDEV') {
       fs.copyFileSync(srcPath, destPath);
-      try {fs.unlinkSync(srcPath);} catch (e2) {}
+      try { fs.unlinkSync(srcPath); } catch (e2) { }
       return;
     }
     throw e;
@@ -8862,7 +8862,7 @@ function getBaseDirInfo() {
           rr = r;
         }
         extra.push({ resolved: r, real: rr });
-      } catch (e) {}
+      } catch (e) { }
     }
   }
   baseDirInfoCache = { resolved, real, extra };
@@ -8876,10 +8876,10 @@ function safeIsInsideBaseDir(p) {
     const baseReal = b.real;
     const abs = path.resolve(String(p || ''));
     const inBase =
-    abs === baseResolved ||
-    abs.startsWith(baseResolved + path.sep) ||
-    abs === baseReal ||
-    abs.startsWith(baseReal + path.sep);
+      abs === baseResolved ||
+      abs.startsWith(baseResolved + path.sep) ||
+      abs === baseReal ||
+      abs.startsWith(baseReal + path.sep);
 
     if (inBase) return true;
     const extra = Array.isArray(b.extra) ? b.extra : [];
@@ -9041,7 +9041,7 @@ function sniffMediaKindByMagic(absPath) {
       if (buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3) return 'video';
       return null;
     } finally {
-      try { fs.closeSync(fd); } catch (e) {}
+      try { fs.closeSync(fd); } catch (e) { }
     }
   } catch (e) {
     return null;
@@ -9075,9 +9075,9 @@ function sniffMediaMimeByMagic(absPath) {
       }
       if (buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3) return 'video/webm';
     } finally {
-      try { fs.closeSync(fd); } catch (e) {}
+      try { fs.closeSync(fd); } catch (e) { }
     }
-  } catch (e) {}
+  } catch (e) { }
   return '';
 }
 
@@ -9226,20 +9226,20 @@ async function extractVideoThumbnail(videoPath, outJpgPath) {
       await new Promise((resolve, reject) => {
         const vf = `thumbnail=240,${vfBase}`;
         const args = [
-        '-y',
-        '-hide_banner',
-        '-loglevel', 'error',
-        '-ss', ss,
-        '-i', videoPath,
-        '-frames:v', '1',
-        '-an',
-        '-vf', vf,
-        '-q:v', '3',
-        outJpgPath];
+          '-y',
+          '-hide_banner',
+          '-loglevel', 'error',
+          '-ss', ss,
+          '-i', videoPath,
+          '-frames:v', '1',
+          '-an',
+          '-vf', vf,
+          '-q:v', '3',
+          outJpgPath];
 
         const proc = spawn(FFMPEG, args);
         let stderr = '';
-        proc.stderr.on('data', (d) => {stderr += d.toString();});
+        proc.stderr.on('data', (d) => { stderr += d.toString(); });
         proc.on('close', (code) => {
           let outSize = 0;
           try {
@@ -9248,8 +9248,8 @@ async function extractVideoThumbnail(videoPath, outJpgPath) {
               outSize = st && st.size ? st.size : 0;
               if (outSize >= MIN_THUMB_BYTES) return resolve();
             }
-          } catch (e) {}
-          try {if (outJpgPath) fs.rmSync(outJpgPath, { force: true });} catch (e) {}
+          } catch (e) { }
+          try { if (outJpgPath) fs.rmSync(outJpgPath, { force: true }); } catch (e) { }
           reject(new Error(stderr || `ffmpeg exit code ${code}${outSize ? ` (thumb ${outSize} bytes)` : ''}`));
         });
         proc.on('error', reject);
@@ -9294,10 +9294,10 @@ function logThumbGenFailureOnce(abs, err) {
     if (thumbGenFailOnce.has(key)) return;
     thumbGenFailOnce.add(key);
     if (thumbGenFailOnce.size > 400) {
-      try { thumbGenFailOnce.clear(); } catch (e) {}
+      try { thumbGenFailOnce.clear(); } catch (e) { }
     }
     console.warn(`⚠️ thumb gen failed: ${abs} :: ${msg}`);
-  } catch (e) {}
+  } catch (e) { }
 }
 
 function drainThumbGenQueueSoon() {
@@ -9334,7 +9334,7 @@ async function autoEnqueueMissingThumbs() {
   }
 }
 // Run thumb scanner every 15 seconds
-setInterval(() => { autoEnqueueMissingThumbs().catch(()=>{}); }, 15000);
+setInterval(() => { autoEnqueueMissingThumbs().catch(() => { }); }, 15000);
 
 function scheduleThumbGeneration(targetPath) {
   try {
@@ -9358,7 +9358,7 @@ function scheduleThumbGeneration(targetPath) {
         thumbGenScheduleDenied.cooldown++;
         return 'cooldown';
       }
-    } catch (e) {}
+    } catch (e) { }
     if (thumbGenInflight.has(abs) || thumbGenQueued.has(abs)) {
       thumbGenScheduleDenied.dup++;
       return 'dup';
@@ -9372,7 +9372,7 @@ function scheduleThumbGeneration(targetPath) {
     thumbGenScheduleEnqueued++;
     drainThumbGenQueueSoon();
     return 'enqueued';
-  } catch (e) {}
+  } catch (e) { }
   return 'error';
 }
 
@@ -9386,48 +9386,48 @@ function drainThumbGenQueue() {
       thumbGenInflight.add(abs);
       thumbGenActive++;
       pickOrCreateThumbPath(abs, { allowGenerate: true, throwOnError: true }).
-      then(async (out) => {
-        if (out) {
-          // Successfully generated or found: update DB to stop auto-enqueue from picking it up
-          try {
-            console.log(`✅ Thumb success for ${abs}, updating DB... (out=${out})`);
-            await db.prepare("UPDATE downloads SET is_thumb_ready = true WHERE is_thumb_ready = false AND filepath = ?").run(abs);
-            console.log(`✅ DB updated for ${abs}`);
-          } catch (e) {
-            console.error(`❌ DB thumb update failed for ${abs}: ${e && e.message ? e.message : e}`);
-          }
-          return;
-        }
-        try {
-          const st = fs.existsSync(abs) ? fs.statSync(abs) : null;
-          const ageMs = st ? (Date.now() - (st.mtimeMs || 0)) : 0;
-          if (ageMs > 15000) {
-            logThumbGenFailureOnce(abs, new Error('thumb gen returned null'));
+        then(async (out) => {
+          if (out) {
+            // Successfully generated or found: update DB to stop auto-enqueue from picking it up
             try {
-              thumbGenCooldownUntil.set(abs, Date.now() + THUMB_GEN_COOLDOWN_MS);
-              if (thumbGenCooldownUntil.size > 12000) {
-                const keys = Array.from(thumbGenCooldownUntil.keys()).slice(0, Math.max(1, thumbGenCooldownUntil.size - 9000));
-                for (const k of keys) thumbGenCooldownUntil.delete(k);
-              }
-            } catch (e) {}
+              console.log(`✅ Thumb success for ${abs}, updating DB... (out=${out})`);
+              await db.prepare("UPDATE downloads SET is_thumb_ready = true WHERE is_thumb_ready = false AND filepath = ?").run(abs);
+              console.log(`✅ DB updated for ${abs}`);
+            } catch (e) {
+              console.error(`❌ DB thumb update failed for ${abs}: ${e && e.message ? e.message : e}`);
+            }
+            return;
           }
-        } catch (e) {}
-      }).
-      catch((e) => {
-        try { logThumbGenFailureOnce(abs, e); } catch (e2) {}
-        try {
-          const st = fs.existsSync(abs) ? fs.statSync(abs) : null;
-          const ageMs = st ? (Date.now() - (st.mtimeMs || 0)) : 0;
-          if (ageMs > 15000) thumbGenCooldownUntil.set(abs, Date.now() + THUMB_GEN_COOLDOWN_MS);
-        } catch (e2) {}
-      }).
-      finally(() => {
-        thumbGenActive = Math.max(0, thumbGenActive - 1);
-        thumbGenInflight.delete(abs);
-        drainThumbGenQueueSoon();
-      });
+          try {
+            const st = fs.existsSync(abs) ? fs.statSync(abs) : null;
+            const ageMs = st ? (Date.now() - (st.mtimeMs || 0)) : 0;
+            if (ageMs > 15000) {
+              logThumbGenFailureOnce(abs, new Error('thumb gen returned null'));
+              try {
+                thumbGenCooldownUntil.set(abs, Date.now() + THUMB_GEN_COOLDOWN_MS);
+                if (thumbGenCooldownUntil.size > 12000) {
+                  const keys = Array.from(thumbGenCooldownUntil.keys()).slice(0, Math.max(1, thumbGenCooldownUntil.size - 9000));
+                  for (const k of keys) thumbGenCooldownUntil.delete(k);
+                }
+              } catch (e) { }
+            }
+          } catch (e) { }
+        }).
+        catch((e) => {
+          try { logThumbGenFailureOnce(abs, e); } catch (e2) { }
+          try {
+            const st = fs.existsSync(abs) ? fs.statSync(abs) : null;
+            const ageMs = st ? (Date.now() - (st.mtimeMs || 0)) : 0;
+            if (ageMs > 15000) thumbGenCooldownUntil.set(abs, Date.now() + THUMB_GEN_COOLDOWN_MS);
+          } catch (e2) { }
+        }).
+        finally(() => {
+          thumbGenActive = Math.max(0, thumbGenActive - 1);
+          thumbGenInflight.delete(abs);
+          drainThumbGenQueueSoon();
+        });
     }
-  } catch (e) {}
+  } catch (e) { }
 }
 
 async function pickOrCreateThumbPath(targetPath, opts) {
@@ -9440,7 +9440,7 @@ async function pickOrCreateThumbPath(targetPath, opts) {
     const inflight = pickOrCreateThumbPath._inflight;
     const cache = pickOrCreateThumbPath._cache;
     if (inflight && inflight.has(abs)) {
-      try {return await inflight.get(abs);} catch (e) {return null;}
+      try { return await inflight.get(abs); } catch (e) { return null; }
     }
 
     const p = (async () => {
@@ -9451,7 +9451,7 @@ async function pickOrCreateThumbPath(targetPath, opts) {
         if (cached && cached.srcMtimeMs === srcMtimeMs && cached.thumbPath && fs.existsSync(cached.thumbPath)) {
           return cached.thumbPath;
         }
-      } catch (e) {}
+      } catch (e) { }
 
       const sniff = (() => {
         try { return sniffMediaKindByMagic(abs); } catch (e) { return null; }
@@ -9469,7 +9469,7 @@ async function pickOrCreateThumbPath(targetPath, opts) {
             const st = fs.statSync(cand);
             if (st && (st.size || 0) >= 8000) return cand;
           }
-        } catch (e) {}
+        } catch (e) { }
 
         const out = makeVideoThumbPath(abs);
         if (!out || !safeIsInsideBaseDir(out)) return null;
@@ -9477,8 +9477,8 @@ async function pickOrCreateThumbPath(targetPath, opts) {
           try {
             const st2 = fs.statSync(out);
             if (st2 && (st2.size || 0) >= MIN_THUMB_BYTES) return out;
-            try {fs.rmSync(out, { force: true });} catch (e) {}
-          } catch (e) {}
+            try { fs.rmSync(out, { force: true }); } catch (e) { }
+          } catch (e) { }
         }
         if (!isStableEnoughForVideoThumb(abs)) return null;
         if (!allowGenerate) return null;
@@ -9511,8 +9511,8 @@ async function pickOrCreateThumbPath(targetPath, opts) {
             try {
               const st2 = fs.statSync(out);
               if (st2 && (st2.size || 0) >= MIN_THUMB_BYTES) return out;
-              try {fs.rmSync(out, { force: true });} catch (e) {}
-            } catch (e) {}
+              try { fs.rmSync(out, { force: true }); } catch (e) { }
+            } catch (e) { }
           }
           return await extractVideoThumbnail(firstVideo, out);
         }
@@ -9535,10 +9535,10 @@ async function pickOrCreateThumbPath(targetPath, opts) {
         const st = fs.statSync(abs);
         const srcMtimeMs2 = Number.isFinite(st.mtimeMs) ? st.mtimeMs : 0;
         if (cache && cache.set && outPath) cache.set(abs, { srcMtimeMs: srcMtimeMs2, thumbPath: outPath });
-      } catch (e) {}
+      } catch (e) { }
       return outPath;
     } finally {
-      try {if (inflight && inflight.delete) inflight.delete(abs);} catch (e) {}
+      try { if (inflight && inflight.delete) inflight.delete(abs); } catch (e) { }
     }
   } catch (e) {
     if (opts && opts.throwOnError) throw e;
@@ -9603,17 +9603,17 @@ function applyRecordingLockCrop({ rawFilePath, finalFilePath, cmdText, cropWidth
     const filterGraph = `[0:v]setpts=PTS-STARTPTS,sendcmd=f=${cmdFile},crop@lock=w=${safeW}:h=${safeH}:x=0:y=0[v]`;
 
     const args = [
-    '-y',
-    '-i', rawFilePath,
-    '-filter_complex', filterGraph,
-    '-map', '[v]',
-    '-map', '0:a?',
-    '-c:v', VIDEO_CODEC,
-    '-b:v', VIDEO_BITRATE,
-    '-c:a', 'copy',
-    '-pix_fmt', VIDEO_CODEC === 'h264_videotoolbox' ? 'nv12' : 'yuv420p',
-    '-movflags', '+faststart',
-    finalFilePath];
+      '-y',
+      '-i', rawFilePath,
+      '-filter_complex', filterGraph,
+      '-map', '[v]',
+      '-map', '0:a?',
+      '-c:v', VIDEO_CODEC,
+      '-b:v', VIDEO_BITRATE,
+      '-c:a', 'copy',
+      '-pix_fmt', VIDEO_CODEC === 'h264_videotoolbox' ? 'nv12' : 'yuv420p',
+      '-movflags', '+faststart',
+      finalFilePath];
 
 
     if (POSTPROCESS_THREADS) {
@@ -9626,26 +9626,26 @@ function applyRecordingLockCrop({ rawFilePath, finalFilePath, cmdText, cropWidth
 
     const proc = spawnNice(FFMPEG, args);
     if (Number.isFinite(Number(downloadId)) && Number(downloadId) > 0) {
-      try {activeProcesses.set(downloadId, proc);} catch (e) {}
+      try { activeProcesses.set(downloadId, proc); } catch (e) { }
     }
 
     let stderr = '';
-    proc.stderr.on('data', (d) => {stderr += d.toString();});
+    proc.stderr.on('data', (d) => { stderr += d.toString(); });
 
     proc.on('close', (code) => {
       if (Number.isFinite(Number(downloadId)) && Number(downloadId) > 0) {
-        try {activeProcesses.delete(downloadId);} catch (e) {}
+        try { activeProcesses.delete(downloadId); } catch (e) { }
       }
-      try {fs.unlinkSync(cmdFile);} catch (e) {}
+      try { fs.unlinkSync(cmdFile); } catch (e) { }
       if (code === 0) return resolve();
       reject(new Error(stderr || `ffmpeg exit code ${code}`));
     });
 
     proc.on('error', (err) => {
       if (Number.isFinite(Number(downloadId)) && Number(downloadId) > 0) {
-        try {activeProcesses.delete(downloadId);} catch (e) {}
+        try { activeProcesses.delete(downloadId); } catch (e) { }
       }
-      try {fs.unlinkSync(cmdFile);} catch (e) {}
+      try { fs.unlinkSync(cmdFile); } catch (e) { }
       reject(err);
     });
   });
@@ -9657,7 +9657,7 @@ function probeVideoSize(filePath) {
     const proc = spawn(FFPROBE, args);
     let out = '';
 
-    proc.stdout.on('data', (d) => {out += d.toString();});
+    proc.stdout.on('data', (d) => { out += d.toString(); });
 
     proc.on('close', () => {
       try {
@@ -9682,15 +9682,15 @@ function probeFrameGrayStats(filePath, ssSeconds = 0.5) {
       if (!fp) return resolve(null);
       const ss = Math.max(0, Number(ssSeconds) || 0);
       const args = [
-      '-hide_banner',
-      '-loglevel', 'error',
-      '-ss', String(ss),
-      '-i', fp,
-      '-frames:v', '1',
-      '-an',
-      '-vf', 'scale=16:16:flags=bilinear,format=gray',
-      '-f', 'rawvideo',
-      'pipe:1'];
+        '-hide_banner',
+        '-loglevel', 'error',
+        '-ss', String(ss),
+        '-i', fp,
+        '-frames:v', '1',
+        '-an',
+        '-vf', 'scale=16:16:flags=bilinear,format=gray',
+        '-f', 'rawvideo',
+        'pipe:1'];
 
       const proc = spawn(FFMPEG, args);
       const chunks = [];
@@ -9700,7 +9700,7 @@ function probeFrameGrayStats(filePath, ssSeconds = 0.5) {
       const timer = setTimeout(() => {
         if (done) return;
         done = true;
-        try {proc.kill('SIGKILL');} catch (e) {}
+        try { proc.kill('SIGKILL'); } catch (e) { }
         resolve(null);
       }, 7000);
 
@@ -9708,14 +9708,14 @@ function probeFrameGrayStats(filePath, ssSeconds = 0.5) {
         chunks.push(d);
         bytes += d.length;
         if (bytes >= 16 * 16) {
-          try {proc.kill('SIGKILL');} catch (e) {}
+          try { proc.kill('SIGKILL'); } catch (e) { }
         }
       });
 
       proc.on('close', () => {
         if (done) return;
         done = true;
-        try {clearTimeout(timer);} catch (e) {}
+        try { clearTimeout(timer); } catch (e) { }
         const buf = Buffer.concat(chunks);
         if (!buf || buf.length < 16 * 16) return resolve(null);
         let sum = 0;
@@ -9733,7 +9733,7 @@ function probeFrameGrayStats(filePath, ssSeconds = 0.5) {
       proc.on('error', () => {
         if (done) return;
         done = true;
-        try {clearTimeout(timer);} catch (e) {}
+        try { clearTimeout(timer); } catch (e) { }
         resolve(null);
       });
     } catch (e) {
@@ -9747,15 +9747,15 @@ async function diagnoseRecordingVideo(filePath) {
   if (!fp) return { ok: false, reason: 'no file' };
   if (!fs.existsSync(fp)) return { ok: false, exists: false };
   let sizeBytes = 0;
-  try {sizeBytes = fs.statSync(fp).size || 0;} catch (e) {sizeBytes = 0;}
+  try { sizeBytes = fs.statSync(fp).size || 0; } catch (e) { sizeBytes = 0; }
   let durationSec = null;
-  try {durationSec = await probeVideoDurationSeconds(fp);} catch (e) {durationSec = null;}
+  try { durationSec = await probeVideoDurationSeconds(fp); } catch (e) { durationSec = null; }
   const dims = await probeVideoSize(fp);
   const s1 = await probeFrameGrayStats(fp, 0.7);
   const s2 = await probeFrameGrayStats(fp, Number.isFinite(durationSec) && durationSec > 6 ? 3 : 0.7);
   const blackLikely = !!(
-  (Number.isFinite(durationSec) ? durationSec > 1 : true) && (
-  s1 && s1.max <= 8 && s1.avg <= 4 || s2 && s2.max <= 8 && s2.avg <= 4));
+    (Number.isFinite(durationSec) ? durationSec > 1 : true) && (
+      s1 && s1.max <= 8 && s1.avg <= 4 || s2 && s2.max <= 8 && s2.avg <= 4));
 
   return {
     ok: true,
@@ -9779,22 +9779,22 @@ async function runRecordingDiagnosticsToLog(filePath, logFile) {
         fs.appendFileSync(lf, `[WEBDL] HINT: video is waarschijnlijk zwart. Check macOS Screen Recording permissie voor Terminal/Node, of probeer WEBDL_RECORDING_INPUT_PIXEL_FORMAT=0rgb / nv12 en WEBDL_VIDEO_DEVICE handmatig via /avfoundation-devices.\n`);
       }
     }
-  } catch (e) {}
+  } catch (e) { }
   try {
     if (diag && diag.black_likely) console.warn('Recording diagnostic: black video likely', { file: String(filePath || '') });
-  } catch (e) {}
+  } catch (e) { }
   return diag;
 }
 
 function transcodeToFinalCutMov(inputPath, outputPath, downloadId = null) {
   return new Promise((resolve, reject) => {
     const args = [
-    '-y',
-    '-i', inputPath,
-    '-map', '0:v:0',
-    '-map', '0:a?',
-    '-c:v', FINALCUT_VIDEO_CODEC,
-    '-pix_fmt', 'yuv420p'];
+      '-y',
+      '-i', inputPath,
+      '-map', '0:v:0',
+      '-map', '0:a?',
+      '-c:v', FINALCUT_VIDEO_CODEC,
+      '-pix_fmt', 'yuv420p'];
 
     if (POSTPROCESS_THREADS) {
       args.splice(args.indexOf('-i') + 2, 0, '-threads', POSTPROCESS_THREADS);
@@ -9815,20 +9815,20 @@ function transcodeToFinalCutMov(inputPath, outputPath, downloadId = null) {
 
     const proc = spawnNice(FFMPEG, args);
     if (Number.isFinite(Number(downloadId)) && Number(downloadId) > 0) {
-      try {activeProcesses.set(downloadId, proc);} catch (e) {}
+      try { activeProcesses.set(downloadId, proc); } catch (e) { }
     }
     let stderr = '';
-    proc.stderr.on('data', (d) => {stderr += d.toString();});
+    proc.stderr.on('data', (d) => { stderr += d.toString(); });
     proc.on('close', (code) => {
       if (Number.isFinite(Number(downloadId)) && Number(downloadId) > 0) {
-        try {activeProcesses.delete(downloadId);} catch (e) {}
+        try { activeProcesses.delete(downloadId); } catch (e) { }
       }
       if (code === 0) return resolve();
       reject(new Error(stderr || `ffmpeg exit code ${code}`));
     });
     proc.on('error', (err) => {
       if (Number.isFinite(Number(downloadId)) && Number(downloadId) > 0) {
-        try {activeProcesses.delete(downloadId);} catch (e) {}
+        try { activeProcesses.delete(downloadId); } catch (e) { }
       }
       reject(err);
     });
@@ -9854,16 +9854,16 @@ function detectPlatform(url) {
   if (/aznudefeet\.com/i.test(u)) return 'aznudefeet';
   if (/amateurvoyeurforum\.com/i.test(u)) return 'amateurvoyeurforum';
   if (((/t\.me|telegram\.me/i.test(u)) || (/web\.telegram\.org/i.test(u) && /#-?\d+/.test(u))) && !/web\.telegram\.org.*#@/i.test(u)) return 'telegram';
-    if (/patreon\.com/i.test(u)) return 'patreon';
+  if (/patreon\.com/i.test(u)) return 'patreon';
   if (/tiktok\.com|tiktokv\.com/i.test(u)) return 'tiktok';
   if (/pornpics\.com/i.test(u)) return 'pornpics';
 
   try {
     const host = new URL(u).hostname.toLowerCase();
     const cleaned = host.
-    replace(/^www\./, '').
-    replace(/^m\./, '').
-    replace(/^mobile\./, '');
+      replace(/^www\./, '').
+      replace(/^m\./, '').
+      replace(/^mobile\./, '');
     const parts = cleaned.split('.').filter(Boolean);
     if (parts.length === 0) return 'other';
     if (parts.length === 1) {
@@ -9875,8 +9875,8 @@ function detectPlatform(url) {
     const sld = parts[parts.length - 2];
     const secondLevelTlds = new Set(['co', 'com', 'net', 'org', 'gov', 'edu']);
     const base = tld.length === 2 && secondLevelTlds.has(sld) && parts.length >= 3 ?
-    parts[parts.length - 3] :
-    sld;
+      parts[parts.length - 3] :
+      sld;
     const tag = String(base || '').toLowerCase().replace(/[^a-z0-9_-]+/g, '').slice(0, 30);
     return tag || 'other';
   } catch (e) {
@@ -9885,26 +9885,26 @@ function detectPlatform(url) {
 }
 
 const KNOWN_PLATFORMS = new Set([
-'youtube',
-'vimeo',
-'twitch',
-'dailymotion',
-'facebook',
-'twitter',
-'instagram',
-'reddit',
-'footfetishforum',
-'onlyfans',
-'rutube',
-'wikifeet',
-'wikifeetx',
-'kinky',
-'aznudefeet',
-'amateurvoyeurforum',
-'telegram',
-'tiktok',
-'pornpics',
-'other']
+  'youtube',
+  'vimeo',
+  'twitch',
+  'dailymotion',
+  'facebook',
+  'twitter',
+  'instagram',
+  'reddit',
+  'footfetishforum',
+  'onlyfans',
+  'rutube',
+  'wikifeet',
+  'wikifeetx',
+  'kinky',
+  'aznudefeet',
+  'amateurvoyeurforum',
+  'telegram',
+  'tiktok',
+  'pornpics',
+  'other']
 );
 
 function normalizePlatform(platform, url) {
@@ -9970,7 +9970,7 @@ function deriveChannelFromUrl(platform, url) {
     }
   }
 
-  
+
   if (platform === 'patreon') {
     const m = u.match(/patreon\.com\/([^\/\?#]+)/i);
     if (m && m[1] && m[1].toLowerCase() !== 'posts') return m[1];
@@ -10019,7 +10019,7 @@ function deriveChannelFromUrl(platform, url) {
       if (parts[0] === 'c' && parts[1]) return `chat_${parts[1]}`;
       if (parts[0].startsWith('+')) return parts[0].slice(1) || 'telegram';
       return parts[0] || 'telegram';
-    } catch (e) {}
+    } catch (e) { }
   }
 
   if (platform === 'tiktok') {
@@ -10130,17 +10130,17 @@ function fetchMetadata(url) {
   return new Promise((resolve, reject) => {
     const cookieArgs = getYtDlpCookieArgs('metadata');
     const args = [
-    ...cookieArgs,
-    '--dump-json',
-    '--no-download',
-    String(url || '')];
+      ...cookieArgs,
+      '--dump-json',
+      '--no-download',
+      String(url || '')];
 
     const proc = spawnNice(YT_DLP, args);
     let stdoutAll = '';
     let stderrAll = '';
 
-    proc.stdout.on('data', (d) => {stdoutAll += d.toString();});
-    proc.stderr.on('data', (d) => {stderrAll += d.toString();});
+    proc.stdout.on('data', (d) => { stdoutAll += d.toString(); });
+    proc.stderr.on('data', (d) => { stderrAll += d.toString(); });
 
     proc.on('close', (code) => {
       if (code !== 0) {
@@ -10174,11 +10174,11 @@ function fetchMetadataWithTimeout(url, timeoutMs = 20000) {
   return new Promise((resolve, reject) => {
     const cookieArgs = getYtDlpCookieArgs('metadata');
     const args = [
-    ...cookieArgs,
-    ...(noCheckCertificates ? ['--no-check-certificates'] : []),
-    '--dump-json',
-    '--no-download',
-    String(url || '')];
+      ...cookieArgs,
+      ...(noCheckCertificates ? ['--no-check-certificates'] : []),
+      '--dump-json',
+      '--no-download',
+      String(url || '')];
 
     const proc = spawnNice(YT_DLP, args);
     let stdoutAll = '';
@@ -10188,18 +10188,18 @@ function fetchMetadataWithTimeout(url, timeoutMs = 20000) {
     const timer = setTimeout(() => {
       if (done) return;
       done = true;
-      try {proc.kill('SIGTERM');} catch (e) {}
-      setTimeout(() => {try {proc.kill('SIGKILL');} catch (e) {}}, 2500);
+      try { proc.kill('SIGTERM'); } catch (e) { }
+      setTimeout(() => { try { proc.kill('SIGKILL'); } catch (e) { } }, 2500);
       reject(new Error(`yt-dlp metadata timeout after ${timeoutMs}ms`));
     }, Math.max(1000, Number(timeoutMs) || 20000));
 
-    proc.stdout.on('data', (d) => {stdoutAll += d.toString();});
-    proc.stderr.on('data', (d) => {stderrAll += d.toString();});
+    proc.stdout.on('data', (d) => { stdoutAll += d.toString(); });
+    proc.stderr.on('data', (d) => { stderrAll += d.toString(); });
 
     const finish = (fn) => {
       if (done) return;
       done = true;
-      try {clearTimeout(timer);} catch (e) {}
+      try { clearTimeout(timer); } catch (e) { }
       fn();
     };
 
@@ -10209,8 +10209,8 @@ function fetchMetadataWithTimeout(url, timeoutMs = 20000) {
         const certFailed = /CERTIFICATE_VERIFY_FAILED|certificate\s+verify\s+failed/i.test(errMsg);
         if (!noCheckCertificates && allowRetryNoCheckCertificates && certFailed) {
           return fetchMetadataWithTimeout(url, timeoutMs, { ...opt, noCheckCertificates: true, allowRetryNoCheckCertificates: false }).
-          then(resolve).
-          catch(reject);
+            then(resolve).
+            catch(reject);
         }
         return reject(new Error(errMsg));
       }
@@ -10325,8 +10325,8 @@ async function resolveMetadata(url, metadata = {}) {
   resolved.platform = normalizePlatform(resolved.platform, resolvedUrl);
 
   const needsFetch = resolvedUrl && (
-  !resolved.title || resolved.title === 'untitled' ||
-  !resolved.channel || resolved.channel === 'unknown');
+    !resolved.title || resolved.title === 'untitled' ||
+    !resolved.channel || resolved.channel === 'unknown');
 
 
   if (needsFetch) {
@@ -10339,7 +10339,8 @@ async function resolveMetadata(url, metadata = {}) {
     } catch (e) {
 
       // ignore, fallback below
-    }}
+    }
+  }
 
   if (!resolved.channel || resolved.channel === 'unknown') {
     resolved.channel = extractYoutubeChannel(resolvedUrl) || resolved.channel || 'unknown';
@@ -10400,7 +10401,7 @@ expressApp.get('/status', async (req, res) => {
         const k = String(r && r.status ? r.status : '');
         if (!k) continue;
         m[k] = Number.isFinite(Number(r && r.n != null ? r.n : 0)) ? Number(r.n) : 0;
-      } catch (e) {}
+      } catch (e) { }
     }
     dbActiveByStatus = m;
     dbQueuedCount = (m && Number.isFinite(Number(m.queued))) ? Number(m.queued) : 0;
@@ -10409,7 +10410,7 @@ expressApp.get('/status', async (req, res) => {
     dbPostprocessingCount = (m && Number.isFinite(Number(m.postprocessing))) ? Number(m.postprocessing) : 0;
     const ip = await getInProgressDownloadCount.get();
     dbInProgressCount = ip && Number.isFinite(Number(ip.n)) ? Number(ip.n) : 0;
-    
+
     const cp = await db.prepare("SELECT COUNT(*) as c FROM downloads WHERE status = 'completed' AND url NOT LIKE 'recording:%'").get();
     dbCompletedCount = cp && Number.isFinite(Number(cp.c)) ? Number(cp.c) : 0;
   } catch (e) {
@@ -10424,7 +10425,7 @@ expressApp.get('/status', async (req, res) => {
         activeDownloadsList.push({ id: numId, ...ctx });
       }
     }
-  } catch (e) {}
+  } catch (e) { }
 
   // Pad with queued AND pending downloads if we have room (skip recordings)
   try {
@@ -10439,7 +10440,7 @@ expressApp.get('/status', async (req, res) => {
           if (lane === 'heavy' && heavyPad >= 12) continue;
           if (lane === 'light' && lightPad >= 12) continue;
           if (lane === 'heavy') heavyPad++; else lightPad++;
-          
+
           activeDownloadsList.push({
             id: qr.id,
             progress: 0,
@@ -10454,7 +10455,7 @@ expressApp.get('/status', async (req, res) => {
         }
       }
     }
-  } catch (e) {}
+  } catch (e) { }
   res.json({
     status: 'running',
     isRecording,
@@ -10615,8 +10616,8 @@ async function computeStuckDownloadRepairReport({ minAgeMinutes = 30, max = 400,
   const allRows = await getActiveDownloads.all();
   const wantInProgress = String(mode || '').toLowerCase() !== 'all';
   const rows = wantInProgress ?
-  allRows.filter((r) => String(r && r.status ? r.status : '') === 'downloading' || String(r && r.status ? r.status : '') === 'postprocessing') :
-  allRows;
+    allRows.filter((r) => String(r && r.status ? r.status : '') === 'downloading' || String(r && r.status ? r.status : '') === 'postprocessing') :
+    allRows;
   const dbActiveByStatus = { pending: 0, queued: 0, downloading: 0, postprocessing: 0 };
   for (const r of allRows) {
     const st = String(r && r.status ? r.status : '');
@@ -10709,7 +10710,7 @@ function cleanupSchedulerForId(id) {
     postprocessJobs.delete(id);
     activePostprocessJobs.delete(id);
     jobLane.delete(id);
-  } catch (e) {}
+  } catch (e) { }
 }
 
 expressApp.get('/api/repair/stuck-downloads', (req, res) => {
@@ -10748,14 +10749,14 @@ expressApp.post('/api/repair/stuck-downloads', async (req, res) => {
   const applied = [];
   for (const a of actions) {
     try {
-      if (a.to === 'completed') await updateDownloadStatus.run('completed', 100, null, a.id);else
-      if (a.to === 'error') await updateDownloadStatus.run('error', 0, String(a.reason || 'stuck'), a.id);
+      if (a.to === 'completed') await updateDownloadStatus.run('completed', 100, null, a.id); else
+        if (a.to === 'error') await updateDownloadStatus.run('error', 0, String(a.reason || 'stuck'), a.id);
       cleanupSchedulerForId(a.id);
       applied.push(a);
-    } catch (e) {}
+    } catch (e) { }
   }
 
-  try {runDownloadSchedulerSoon();} catch (e) {}
+  try { runDownloadSchedulerSoon(); } catch (e) { }
   return res.json({ success: true, dry_run: false, count: applied.length, applied });
 });
 
@@ -10965,21 +10966,21 @@ function ensureFirefoxAddonBuilt(options = {}) {
       if (!force && outStat && outMtime >= newest) return resolve();
 
       const tmpOut = path.join(os.tmpdir(), `webdl-addon-${Date.now()}-${Math.random().toString(36).slice(2)}.xpi`);
-      try {fs.rmSync(tmpOut, { force: true });} catch (e) {}
+      try { fs.rmSync(tmpOut, { force: true }); } catch (e) { }
 
       const zipProc = spawn('/usr/bin/zip', ['-r', '-q', tmpOut, '.', '-x', '*.DS_Store', '__MACOSX/*'], {
         cwd: ADDON_SOURCE_DIR
       });
       const buildTimeout = setTimeout(() => {
-        try {zipProc.kill('SIGKILL');} catch (e) {}
+        try { zipProc.kill('SIGKILL'); } catch (e) { }
       }, buildTimeoutMs);
       let stderr = '';
-      zipProc.stderr.on('data', (d) => {stderr += d.toString();});
+      zipProc.stderr.on('data', (d) => { stderr += d.toString(); });
       zipProc.on('error', (err) => reject(err));
       zipProc.on('close', (code) => {
         clearTimeout(buildTimeout);
         if (code !== 0) {
-          try {fs.rmSync(tmpOut, { force: true });} catch (e) {}
+          try { fs.rmSync(tmpOut, { force: true }); } catch (e) { }
           return reject(new Error(stderr || `zip exit code ${code}`));
         }
         try {
@@ -10996,7 +10997,7 @@ function ensureFirefoxAddonBuilt(options = {}) {
           }
           resolve();
         } catch (e) {
-          try {fs.rmSync(tmpOut, { force: true });} catch (e2) {}
+          try { fs.rmSync(tmpOut, { force: true }); } catch (e2) { }
           reject(e);
         }
       });
@@ -11114,7 +11115,7 @@ expressApp.post('/start-recording', async (req, res) => {
     const body = req.body || {};
     const meta = body && typeof body.metadata === 'object' && body.metadata ? body.metadata : {};
     console.log(`[INGRESS] POST /start-recording url=${String(meta.url || '').slice(0, 200)} platform=${String(meta.platform || '')} channel=${String(meta.channel || '')}`);
-  } catch (e) {}
+  } catch (e) { }
 
   const { metadata = {}, crop, lock } = req.body || {};
   const recId = String((metadata && metadata.url) || req.body.url || 'default_rec').trim();
@@ -11127,7 +11128,7 @@ expressApp.post('/start-recording', async (req, res) => {
       // Wait for previous to die if any
       const existing = activeRecordings.get(recId);
       if (existing && existing.recordingProcess) {
-        try { existing.recordingProcess.kill('SIGINT'); } catch (e) {}
+        try { existing.recordingProcess.kill('SIGINT'); } catch (e) { }
       }
       activeRecordings.delete(recId);
       broadcastRecordingState();
@@ -11148,7 +11149,7 @@ expressApp.post('/start-recording', async (req, res) => {
   } catch (e) {
 
     // fallback blijft metadata
-  }const platform = resolved.platform || 'other';
+  } const platform = resolved.platform || 'other';
   const channel = resolved.channel || 'unknown';
   const title = resolved.title || 'untitled';
   const dir = getDownloadDir(platform, channel, title);
@@ -11210,16 +11211,16 @@ expressApp.post('/start-recording', async (req, res) => {
 
   const inputDevice = `${resolvedVideoDevice}:${hasAudio ? resolvedAudioDevice : 'none'}`;
   const args = [
-  '-fflags', '+genpts',
-  '-thread_queue_size', FFMPEG_THREAD_QUEUE_SIZE,
-  '-rtbufsize', FFMPEG_RTBUFSIZE,
-  '-probesize', FFMPEG_PROBESIZE,
-  '-analyzeduration', FFMPEG_ANALYZEDURATION,
-  '-f', 'avfoundation',
-  '-framerate', RECORDING_FPS,
-  '-capture_cursor', '0',
-  '-drop_late_frames', '0',
-  '-i', inputDevice];
+    '-fflags', '+genpts',
+    '-thread_queue_size', FFMPEG_THREAD_QUEUE_SIZE,
+    '-rtbufsize', FFMPEG_RTBUFSIZE,
+    '-probesize', FFMPEG_PROBESIZE,
+    '-analyzeduration', FFMPEG_ANALYZEDURATION,
+    '-f', 'avfoundation',
+    '-framerate', RECORDING_FPS,
+    '-capture_cursor', '0',
+    '-drop_late_frames', '0',
+    '-i', inputDevice];
 
 
   const effectivePixelFormat = (inputPixelFormat && inputPixelFormat.toLowerCase() !== 'auto') ? inputPixelFormat : 'nv12';
@@ -11327,7 +11328,7 @@ expressApp.post('/start-recording', async (req, res) => {
 
   recordingProcess.on('close', (code) => {
     console.log(`ffmpeg beëindigd (code ${code})`);
-    try { logStream.end(); } catch (e) {}
+    try { logStream.end(); } catch (e) { }
     const active = activeRecordings.get(recId);
     if (active && active.recordingProcess === recordingProcess) {
       activeRecordings.delete(recId);
@@ -11337,7 +11338,7 @@ expressApp.post('/start-recording', async (req, res) => {
 
   recordingProcess.on('error', (err) => {
     console.error(`ffmpeg fout: ${err.message}`);
-    try { logStream.end(); } catch (e) {}
+    try { logStream.end(); } catch (e) { }
     const active = activeRecordings.get(recId);
     if (active && active.recordingProcess === recordingProcess) {
       activeRecordings.delete(recId);
@@ -11436,7 +11437,7 @@ expressApp.post('/stop-recording', (req, res) => {
       recordingProcess.stdin.write('q');
       console.log('📝 Sent "q" to ffmpeg stdin');
     }
-  } catch (e) {}
+  } catch (e) { }
 
   // Fallback: SIGINT after 3 seconds if still running
   const softTimeout = setTimeout(() => {
@@ -11445,7 +11446,7 @@ expressApp.post('/stop-recording', (req, res) => {
         recordingProcess.kill('SIGINT');
         console.log('⚠️ Sent SIGINT to ffmpeg (3s fallback)');
       }
-    } catch (e) {}
+    } catch (e) { }
   }, 3000);
 
   // Hard kill after 8 seconds
@@ -11457,7 +11458,7 @@ expressApp.post('/stop-recording', (req, res) => {
         cleanup();
         finish(false, 'Opname stop timeout');
       }
-    } catch (e) {}
+    } catch (e) { }
   }, 8000);
 
   proc.once('close', async () => {
@@ -11469,8 +11470,8 @@ expressApp.post('/stop-recording', (req, res) => {
 
     if (lockJob) {
       try {
-        runRecordingDiagnosticsToLog(lockJob.rawFilePath, lockJob.logFile).catch(() => {});
-      } catch (e) {}
+        runRecordingDiagnosticsToLog(lockJob.rawFilePath, lockJob.logFile).catch(() => { });
+      } catch (e) { }
 
       let dbId = null;
       try {
@@ -11495,7 +11496,7 @@ expressApp.post('/stop-recording', (req, res) => {
           JSON.stringify(recordMeta)
         );
         dbId = ins && ins.lastInsertRowid ? ins.lastInsertRowid : null;
-      } catch (e) {}
+      } catch (e) { }
 
       finish(true, null, { processing: true, rawFile: lockJob.rawFilePath, finalFile: lockJob.finalFilePath, logFile: lockJob.logFile });
       enqueuePostprocessJob(dbId, {
@@ -11530,7 +11531,7 @@ expressApp.post('/stop-recording', (req, res) => {
           const cmdText = makeRecordingLockCmdFile(updates, safeW, safeH);
           try {
             fs.appendFileSync(lockJob.logFile, `\n[WEBDL] LOCK CROP updates: ${updates.length}\n`);
-          } catch (e) {}
+          } catch (e) { }
 
           await applyRecordingLockCrop({
             rawFilePath: lockJob.rawFilePath,
@@ -11551,17 +11552,17 @@ expressApp.post('/stop-recording', (req, res) => {
                 webdl_recording: { lock: true, raw: lockJob.rawFilePath, final: lockJob.finalFilePath, log: lockJob.logFile, page_url: meta && meta.pageUrl ? meta.pageUrl : null }
               };
               await updateDownload.run('completed', 100, fp, path.basename(fp), finalSize, 'mp4', JSON.stringify(recordMeta), null, dbId);
-            } catch (e) {}
+            } catch (e) { }
           }
 
           try {
             fs.appendFileSync(lockJob.logFile, `\n[WEBDL] LOCK CROP done: ${lockJob.finalFilePath}\n`);
-          } catch (e) {}
+          } catch (e) { }
         }
       }).catch(async (e) => {
         try {
           fs.appendFileSync(lockJob.logFile, `\n[WEBDL] LOCK CROP queue error: ${e.message}\n`);
-        } catch (err) {}
+        } catch (err) { }
       });
       return;
     }
@@ -11587,11 +11588,11 @@ expressApp.post('/stop-recording', (req, res) => {
         100,
         JSON.stringify(recordMeta)
       );
-    } catch (e) {}
+    } catch (e) { }
 
     try {
       const lf = meta && meta.logFile ? meta.logFile : null;
-      runRecordingDiagnosticsToLog(file, lf).catch(() => {});
+      runRecordingDiagnosticsToLog(file, lf).catch(() => { });
       finish(true, null, { logFile: lf });
     } catch (e) {
       finish(true);
@@ -11619,7 +11620,7 @@ expressApp.post('/download', async (req, res) => {
   const { url, metadata, force, lane } = req.body || {};
   try {
     console.log(`[INGRESS] POST /download url=${String(url || '').slice(0, 200)} page=${String(metadata && metadata.url || '').slice(0, 200)} force=${force === true ? '1' : '0'}`);
-  } catch (e) {}
+  } catch (e) { }
   if (!url) return res.status(400).json({ success: false, error: 'URL is vereist' });
   const forceDuplicates = force === true;
 
@@ -11627,16 +11628,16 @@ expressApp.post('/download', async (req, res) => {
   const effectiveUrl = String(url || '');
   const isOnlyFansProfileUrl = /onlyfans\.com\//i.test(effectiveUrl) && !/onlyfans\.com\/[^\/\?#]+\/posts\//i.test(effectiveUrl);
 
-    const isProfileUrl = (u) => {
-      if (u.includes('patreon.com/c/') || u.match(/patreon\.com\/.*\/posts/)) return true;
-      if (u.includes('youtube.com/@') || u.includes('youtube.com/channel/') || u.includes('youtube.com/c/')) return true;
-      if (u.includes('reddit.com/user/') || u.includes('reddit.com/r/') && !u.includes('/comments/')) return true;
-      if (u.includes('onlyfans.com/') && !u.includes('/posts/')) return true;
-      return false;
-    };
-    if (isProfileUrl(effectiveUrl) && !isOnlyFansProfileUrl) {
-      return res.status(400).json({ success: false, error: 'Dit is een profiel/kanaal link. Gebruik de BATCH knop in de extensie om het hele kanaal te downloaden.' });
-    }
+  const isProfileUrl = (u) => {
+    if (u.includes('patreon.com/c/') || u.match(/patreon\.com\/.*\/posts/)) return true;
+    if (u.includes('youtube.com/@') || u.includes('youtube.com/channel/') || u.includes('youtube.com/c/')) return true;
+    if (u.includes('reddit.com/user/') || u.includes('reddit.com/r/') && !u.includes('/comments/')) return true;
+    if (u.includes('onlyfans.com/') && !u.includes('/posts/')) return true;
+    return false;
+  };
+  if (isProfileUrl(effectiveUrl) && !isOnlyFansProfileUrl) {
+    return res.status(400).json({ success: false, error: 'Dit is een profiel/kanaal link. Gebruik de BATCH knop in de extensie om het hele kanaal te downloaden.' });
+  }
 
 
   const pageUrl = metadata && typeof metadata.url === 'string' ? metadata.url.trim() : '';
@@ -11655,20 +11656,20 @@ expressApp.post('/download', async (req, res) => {
   const preferDetectedPlatform = !!(pinFffOrigin && detectedPlatform && detectedPlatform !== 'other' && detectedPlatform !== originPlatform);
   const platform = pinToOrigin ? originPlatform : (preferDetectedPlatform ? detectedPlatform : normalizePlatform(metaPlatform, effectiveUrl));
   const channel = pinToOrigin ?
-  originChannel :
-  preferDetectedPlatform ?
-  deriveChannelFromUrl(platform, effectiveUrl) || originChannel :
-  metadata && metadata.channel && metadata.channel !== 'unknown' ? metadata.channel : deriveChannelFromUrl(platform, effectiveUrl) || 'unknown';
+    originChannel :
+    preferDetectedPlatform ?
+      deriveChannelFromUrl(platform, effectiveUrl) || originChannel :
+      metadata && metadata.channel && metadata.channel !== 'unknown' ? metadata.channel : deriveChannelFromUrl(platform, effectiveUrl) || 'unknown';
   const title = pinToOrigin ?
-  originTitle :
-  preferDetectedPlatform ?
-  deriveTitleFromUrl(effectiveUrl) :
-  metadata && metadata.title ? metadata.title : deriveTitleFromUrl(effectiveUrl);
+    originTitle :
+    preferDetectedPlatform ?
+      deriveTitleFromUrl(effectiveUrl) :
+      metadata && metadata.title ? metadata.title : deriveTitleFromUrl(effectiveUrl);
 
   const allowRedditRerun = platform === 'reddit' && isRedditRollingTargetUrl(effectiveUrl);
   const allowPatreonRerun = platform === 'patreon' && (effectiveUrl.includes('/posts') || effectiveUrl.includes('patreon.com/c/'));
   const allowRerun = allowRedditRerun || allowPatreonRerun;
-  
+
   let lookupUrl = effectiveUrl;
   if (platform === 'youtube' || /youtube\.com|youtu\.be/i.test(effectiveUrl)) {
     try {
@@ -11679,9 +11680,9 @@ expressApp.post('/download', async (req, res) => {
       } else if (videoId && parsed.hostname.includes('youtu.be')) {
         lookupUrl = `https://www.youtube.com/watch?v=${videoId}`;
       }
-    } catch (e) {}
+    } catch (e) { }
   }
-  
+
   const existing = await findReusableDownloadByUrl.get(lookupUrl);
   let isMissingFile = false;
   if (existing && existing.status === 'completed') {
@@ -11730,12 +11731,12 @@ expressApp.post('/download', async (req, res) => {
     if (pageUrl && pageUrl !== effectiveUrl) {
       await updateDownloadSourceUrl.run(pageUrl, downloadId);
     }
-  } catch (e) {}
+  } catch (e) { }
 
   try {
     const thumb = metadata && typeof metadata.thumbnail === 'string' ? metadata.thumbnail.trim() : '';
     if (thumb) await updateDownloadThumbnail.run(thumb, downloadId);
-  } catch (e) {}
+  } catch (e) { }
 
   console.log(`\n📥 Download gestart #${downloadId}: ${effectiveUrl}`);
   console.log(`   Platform: ${platform} | Kanaal: ${channel} | Titel: ${title}`);
@@ -11764,7 +11765,7 @@ expressApp.post('/reddit/index', async (req, res) => {
     const seedUrl = String(body.url || '').trim();
     try {
       console.log(`[INGRESS] POST /reddit/index url=${seedUrl.slice(0, 200)} maxItems=${String(body.maxItems || '')} maxPages=${String(body.maxPages || '')}`);
-    } catch (e) {}
+    } catch (e) { }
     if (!seedUrl) return res.status(400).json({ success: false, error: 'url is vereist' });
     if (!isRedditFamilyUrl(seedUrl)) return res.status(400).json({ success: false, error: 'Geen Reddit URL' });
 
@@ -11798,7 +11799,7 @@ expressApp.post('/download/batch', async (req, res) => {
   try {
     const n = Array.isArray(urls) ? urls.length : 0;
     console.log(`[INGRESS] POST /download/batch count=${n} page=${String(metadata && metadata.url || '').slice(0, 200)} force=${force === true ? '1' : '0'}`);
-  } catch (e) {}
+  } catch (e) { }
   if (!Array.isArray(urls) || urls.length === 0) {
     return res.status(400).json({ success: false, error: 'urls is vereist' });
   }
@@ -11864,23 +11865,23 @@ expressApp.post('/download/batch', async (req, res) => {
       if (pageUrl && pageUrl !== u) {
         await updateDownloadSourceUrl.run(pageUrl, downloadId);
       }
-    } catch (e) {}
+    } catch (e) { }
 
-  created.push({ downloadId, url: u, platform, channel, title });
-  const jobMetadata = metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? { ...metadata } : {};
-  if (force === true) jobMetadata.webdl_force = true;
-  if (!jobMetadata.webdl_direct_hint && jobMetadata.webdl_direct_hints && typeof jobMetadata.webdl_direct_hints === 'object') {
-    const directHint = pickDirectHintForUrl(u, jobMetadata.webdl_direct_hints);
-    if (typeof directHint === 'string' && directHint.trim()) jobMetadata.webdl_direct_hint = directHint.trim();
+    created.push({ downloadId, url: u, platform, channel, title });
+    const jobMetadata = metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? { ...metadata } : {};
+    if (force === true) jobMetadata.webdl_force = true;
+    if (!jobMetadata.webdl_direct_hint && jobMetadata.webdl_direct_hints && typeof jobMetadata.webdl_direct_hints === 'object') {
+      const directHint = pickDirectHintForUrl(u, jobMetadata.webdl_direct_hints);
+      if (typeof directHint === 'string' && directHint.trim()) jobMetadata.webdl_direct_hint = directHint.trim();
+    }
+    if (pinToOrigin) {
+      jobMetadata.webdl_pin_context = true;
+      jobMetadata.origin_thread = { url: pageUrl, platform: originPlatform, channel: originChannel, title: originTitle };
+      jobMetadata.webdl_media_url = u;
+      jobMetadata.webdl_detected_platform = detectedPlatform;
+    }
+    enqueueDownloadJob(downloadId, u, platform, channel, title, jobMetadata);
   }
-  if (pinToOrigin) {
-    jobMetadata.webdl_pin_context = true;
-    jobMetadata.origin_thread = { url: pageUrl, platform: originPlatform, channel: originChannel, title: originTitle };
-    jobMetadata.webdl_media_url = u;
-    jobMetadata.webdl_detected_platform = detectedPlatform;
-  }
-  enqueueDownloadJob(downloadId, u, platform, channel, title, jobMetadata);
-}
 
   res.json({ success: true, downloads: created });
 });
@@ -11894,21 +11895,21 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
 
   let driver = 'yt-dlp';
   if (platform === 'onlyfans') driver = 'ofscraper'; else
-  if (platform === 'instagram') driver = 'instaloader'; else
-  if (platform === 'reddit') driver = 'reddit-dl'; else
-  if (platform === 'telegram') driver = 'tdl'; else
-  if (
-    platform === 'wikifeet' ||
-    platform === 'wikifeetx' ||
-    platform === 'kinky' ||
-    platform === 'pornpics' ||
-    platform === 'twitter' ||
-    platform === 'aznudefeet' && !looksLikeDirectFileUrl(url) ||
-    platform === 'tiktok' && isTikTokPhotoUrl(url)
-  ) driver = 'gallery-dl'; else
-  if (isKnownHtmlWrapperUrl(url) || looksLikeDirectFileUrl(url)) driver = 'direct';
+    if (platform === 'instagram') driver = 'instaloader'; else
+      if (platform === 'reddit') driver = 'reddit-dl'; else
+        if (platform === 'telegram') driver = 'tdl'; else
+          if (
+            platform === 'wikifeet' ||
+            platform === 'wikifeetx' ||
+            platform === 'kinky' ||
+            platform === 'pornpics' ||
+            platform === 'twitter' ||
+            platform === 'aznudefeet' && !looksLikeDirectFileUrl(url) ||
+            platform === 'tiktok' && isTikTokPhotoUrl(url)
+          ) driver = 'gallery-dl'; else
+            if (isKnownHtmlWrapperUrl(url) || looksLikeDirectFileUrl(url)) driver = 'direct';
   setDownloadActivityContext(downloadId, { url, platform, channel, title, lane: jobLane.get(downloadId) || '', driver });
-  emitDownloadEventActivity('dispatch', downloadId, { url, platform, channel, title, lane: jobLane.get(downloadId) || '', driver }).catch(() => {});
+  emitDownloadEventActivity('dispatch', downloadId, { url, platform, channel, title, lane: jobLane.get(downloadId) || '', driver }).catch(() => { });
 
   const forceDuplicates = !!(metadata && typeof metadata === 'object' && !Array.isArray(metadata) && (metadata.webdl_force === true || metadata.force === true));
 
@@ -11921,7 +11922,8 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
       if (allowRerun && String(reusable.status || '') === 'completed') {
 
         // Voor r/<subreddit> en u/<user> willen we herhaalde scans toestaan.
-      } else {if (reusable.status === 'completed' && reusable.filepath) {
+      } else {
+        if (reusable.status === 'completed' && reusable.filepath) {
           await updateDownload.run(
             'completed',
             100,
@@ -11939,7 +11941,7 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
         return;
       }
     }
-  } catch (e) {}
+  } catch (e) { }
 
   if (platform === 'onlyfans') {
     return startOfscraperDownload(downloadId, url, platform, channel, title, metadata);
@@ -11976,18 +11978,18 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
     try {
       const wrapperReferer = String(
         metadata && typeof metadata === 'object' && metadata.origin_thread && metadata.origin_thread.url ? metadata.origin_thread.url :
-        metadata && typeof metadata === 'object' && metadata.url && metadata.url !== url ? metadata.url :
-        ''
+          metadata && typeof metadata === 'object' && metadata.url && metadata.url !== url ? metadata.url :
+            ''
       ).trim();
       const resolved = await resolveHtmlWrapperToDirectMediaUrl(url, 15000, wrapperReferer);
       if (resolved && resolved !== url) {
-        try {await updateDownloadUrl.run(resolved, downloadId);} catch (e) {}
+        try { await updateDownloadUrl.run(resolved, downloadId); } catch (e) { }
         const nextMeta = metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? { ...metadata } : {};
         if (!nextMeta.webdl_input_url) nextMeta.webdl_input_url = url;
         nextMeta.webdl_resolved_url = resolved;
         return startDirectFileDownload(downloadId, resolved, platform, channel, title, nextMeta);
       }
-    } catch (e) {}
+    } catch (e) { }
     return startDirectFileDownload(downloadId, url, platform, channel, title, metadata);
   }
 
@@ -12020,7 +12022,7 @@ async function startRedditDlDownload(downloadId, url, platform, channel, title, 
 
     const outChannel = channel && channel !== 'unknown' ? channel : deriveChannelFromUrl('reddit', url) || 'unknown';
     const dir = getDownloadDirChannelOnly('reddit', outChannel);
-    try {await updateDownloadFilepath.run(dir, downloadId);} catch (e) {}
+    try { await updateDownloadFilepath.run(dir, downloadId); } catch (e) { }
     await updateDownloadStatus.run('downloading', 0, null, downloadId);
 
     let authFilePath = '';
@@ -12030,19 +12032,19 @@ async function startRedditDlDownload(downloadId, url, platform, channel, title, 
     } else if (REDDIT_DL_CLIENT_ID && REDDIT_DL_CLIENT_SECRET && REDDIT_DL_USERNAME && REDDIT_DL_PASSWORD) {
       authFilePath = path.join(os.tmpdir(), `webdl-reddit-auth-${process.pid}-${downloadId}.conf`);
       fs.writeFileSync(authFilePath, [
-      `client.id = ${REDDIT_DL_CLIENT_ID}`,
-      `client.secret = ${REDDIT_DL_CLIENT_SECRET}`,
-      `username = ${REDDIT_DL_USERNAME}`,
-      `password = ${REDDIT_DL_PASSWORD}`].
-      join('\n') + '\n', 'utf8');
+        `client.id = ${REDDIT_DL_CLIENT_ID}`,
+        `client.secret = ${REDDIT_DL_CLIENT_SECRET}`,
+        `username = ${REDDIT_DL_USERNAME}`,
+        `password = ${REDDIT_DL_PASSWORD}`].
+        join('\n') + '\n', 'utf8');
       createdAuthFile = true;
     }
 
     const args = [
-    '--no-prompt',
-    '--ffmpeg', resolveUsableFfmpegPath(),
-    '--log-level', 'warn',
-    '-o', dir];
+      '--no-prompt',
+      '--ffmpeg', resolveUsableFfmpegPath(),
+      '--log-level', 'warn',
+      '-o', dir];
 
     if (authFilePath) args.push('-x', authFilePath);
     args.push(target);
@@ -12050,15 +12052,15 @@ async function startRedditDlDownload(downloadId, url, platform, channel, title, 
     const result = await new Promise((resolve) => {
       const proc = spawnNice(REDDIT_DL, args);
       activeProcesses.set(downloadId, proc);
-      try {startingJobs.delete(downloadId);} catch (e) {}
+      try { startingJobs.delete(downloadId); } catch (e) { }
       let stderr = '';
       let stdout = '';
-      proc.stderr.on('data', (d) => {stderr += d.toString();});
-      proc.stdout.on('data', (d) => {stdout += d.toString();});
+      proc.stderr.on('data', (d) => { stderr += d.toString(); });
+      proc.stdout.on('data', (d) => { stdout += d.toString(); });
       const finish = (code) => {
         activeProcesses.delete(downloadId);
         if (createdAuthFile) {
-          try {fs.unlinkSync(authFilePath);} catch (e) {}
+          try { fs.unlinkSync(authFilePath); } catch (e) { }
         }
         resolve({ code, stderr, stdout });
       };
@@ -12139,11 +12141,11 @@ function looksLikeDirectFileUrl(url) {
     }
     const ext = m[1];
     const direct = new Set([
-    'zip', 'rar', '7z', 'tar', 'gz',
-    'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp',
-    'mp4', 'mov', 'm4v', 'webm', 'mkv',
-    'mp3', 'm4a', 'wav', 'flac',
-    'pdf']
+      'zip', 'rar', '7z', 'tar', 'gz',
+      'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp',
+      'mp4', 'mov', 'm4v', 'webm', 'mkv',
+      'mp3', 'm4a', 'wav', 'flac',
+      'pdf']
     );
     return direct.has(ext);
   } catch (e) {
@@ -12182,7 +12184,7 @@ function isKnownHtmlWrapperUrl(url) {
 async function fetchTextWithTimeout(url, timeoutMs = 15000, referer = '') {
   const ctrl = new AbortController();
   const timer = setTimeout(() => {
-    try {ctrl.abort();} catch (e) {}
+    try { ctrl.abort(); } catch (e) { }
   }, Math.max(1000, timeoutMs));
   try {
     const res = await fetch(String(url || ''), {
@@ -12223,7 +12225,7 @@ function buildUrlLookupVariants(rawUrl) {
         withoutSlash.pathname = withoutSlash.pathname.replace(/\/+$/, '') || '/';
         out.add(withoutSlash.toString());
       }
-    } catch (e) {}
+    } catch (e) { }
     return Array.from(out).filter(Boolean);
   } catch (e) {
     return [];
@@ -12276,10 +12278,10 @@ function extractOpenGraphMediaUrl(html, baseUrl) {
     const decodedHtml = decodeHtmlEscapedUrlText(h);
     const variants = decodedHtml && decodedHtml !== h ? [h, decodedHtml] : [h];
     const patterns = [
-    /<meta\s+[^>]*(?:property|name)=["']og:video:url["'][^>]*content=["']([^"']+)["'][^>]*>/i,
-    /<meta\s+[^>]*(?:property|name)=["']og:video["'][^>]*content=["']([^"']+)["'][^>]*>/i,
-    /<meta\s+[^>]*(?:property|name)=["']og:image["'][^>]*content=["']([^"']+)["'][^>]*>/i,
-    /<meta\s+[^>]*(?:property|name)=["']twitter:image["'][^>]*content=["']([^"']+)["'][^>]*>/i];
+      /<meta\s+[^>]*(?:property|name)=["']og:video:url["'][^>]*content=["']([^"']+)["'][^>]*>/i,
+      /<meta\s+[^>]*(?:property|name)=["']og:video["'][^>]*content=["']([^"']+)["'][^>]*>/i,
+      /<meta\s+[^>]*(?:property|name)=["']og:image["'][^>]*content=["']([^"']+)["'][^>]*>/i,
+      /<meta\s+[^>]*(?:property|name)=["']twitter:image["'][^>]*content=["']([^"']+)["'][^>]*>/i];
 
     for (const variant of variants) {
       for (const re of patterns) {
@@ -12328,7 +12330,7 @@ function upgradeKnownLowQualityMediaUrl(rawUrl) {
         u.pathname = p.replace(/\/thumbs\//i, '/images/');
         out = u.toString();
       }
-    } catch (e) {}
+    } catch (e) { }
     return out;
   } catch (e) {
     return String(rawUrl || '').trim();
@@ -12532,7 +12534,7 @@ function filenameFromContentDisposition(value) {
   if (match && match[1]) {
     try {
       return sanitizeName(path.basename(decodeURIComponent(String(match[1] || '').trim())));
-    } catch (e) {}
+    } catch (e) { }
   }
   match = raw.match(/filename="([^"]+)"/i);
   if (match && match[1]) return sanitizeName(path.basename(String(match[1] || '').trim()));
@@ -12573,23 +12575,23 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
     if (isKnownHtmlWrapperUrl(url)) {
       const directHint = upgradeKnownLowQualityMediaUrl(String(metadata && typeof metadata === 'object' && metadata.webdl_direct_hint ? metadata.webdl_direct_hint : '').trim());
       if (directHint && looksLikeDirectFileUrl(directHint) && directHint !== url) {
-        try {await updateDownloadUrl.run(directHint, downloadId);} catch (e) {}
+        try { await updateDownloadUrl.run(directHint, downloadId); } catch (e) { }
         url = directHint;
       }
     }
     if (isKnownHtmlWrapperUrl(url)) {
       const wrapperReferer = String(
         originThread && originThread.url ? originThread.url :
-        metadata && typeof metadata === 'object' && metadata.url && metadata.url !== url ? metadata.url :
-        ''
+          metadata && typeof metadata === 'object' && metadata.url && metadata.url !== url ? metadata.url :
+            ''
       ).trim();
       try {
         const resolved = await resolveHtmlWrapperToDirectMediaUrl(url, 15000, wrapperReferer);
         if (resolved && resolved !== url) {
-          try {await updateDownloadUrl.run(resolved, downloadId);} catch (e) {}
+          try { await updateDownloadUrl.run(resolved, downloadId); } catch (e) { }
           url = upgradeKnownLowQualityMediaUrl(resolved);
         }
-      } catch (e) {}
+      } catch (e) { }
       if (isKnownHtmlWrapperUrl(url)) {
         await updateDownloadStatus.run('error', 0, 'Kon wrapper media URL niet resolven naar een direct bestand', downloadId);
         return;
@@ -12619,7 +12621,7 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
     }
 
     dir = pinContext && pinnedPlatform === 'aznudefeet' ? getDownloadDirChannelOnly(platform, channel) : getDownloadDir(platform, channel, title);
-    try {await updateDownloadFilepath.run(dir, downloadId);} catch (e) {}
+    try { await updateDownloadFilepath.run(dir, downloadId); } catch (e) { }
 
     // Sla metadata op als JSON
     const metaFile = path.join(dir, 'metadata.json');
@@ -12652,8 +12654,8 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
     const headerFilepath = uniqueFilePath(path.join(dir, `${provisionalFilename}.headers.txt`), downloadId);
     const referer = String(
       originThread && originThread.url ? originThread.url :
-      metadata && typeof metadata === 'object' && metadata.url && metadata.url !== url ? metadata.url :
-      ''
+        metadata && typeof metadata === 'object' && metadata.url && metadata.url !== url ? metadata.url :
+          ''
     ).trim();
     const curlArgs = [
       '-L',
@@ -12668,10 +12670,10 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
     const proc = spawnNice('/usr/bin/curl', curlArgs);
 
     activeProcesses.set(downloadId, proc);
-    try {startingJobs.delete(downloadId);} catch (e) {}
+    try { startingJobs.delete(downloadId); } catch (e) { }
     let stderr = '';
-    proc.stderr.on('data', (d) => {stderr += d.toString();});
-    proc.stdout.on('data', () => {});
+    proc.stderr.on('data', (d) => { stderr += d.toString(); });
+    proc.stdout.on('data', () => { });
 
     proc.on('close', async (code) => {
       activeProcesses.delete(downloadId);
@@ -12682,7 +12684,7 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
           const filepath = uniqueFilePath(path.join(dir, filename), downloadId);
           try {
             if (fs.existsSync(filepath)) {
-              try {fs.rmSync(filepath, { force: true });} catch (e) {}
+              try { fs.rmSync(filepath, { force: true }); } catch (e) { }
             }
             fs.renameSync(tmpFilepath, filepath);
           } catch (e) {
@@ -12704,7 +12706,7 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
           if (isImage) {
             try {
               await updateDownloadThumbnail.run(`/download/${downloadId}/thumb`, downloadId);
-            } catch (e) {}
+            } catch (e) { }
           }
 
           try {
@@ -12713,17 +12715,17 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
               const indexedAt = new Date().toISOString();
               await upsertDownloadFile.run(downloadId, relPath, size, Math.floor(fs.statSync(filepath).mtimeMs), indexedAt, indexedAt);
             }
-          } catch (e) {}
+          } catch (e) { }
 
           await updateDownload.run('completed', 100, filepath, filename, size, ext || '', JSON.stringify(metaObj), null, downloadId);
         } else {
           await updateDownloadStatus.run('error', 0, stderr || `curl exit code: ${code}`, downloadId);
         }
       } finally {
-        try {if (fs.existsSync(headerFilepath)) fs.rmSync(headerFilepath, { force: true });} catch (e) {}
-        try {recentFilesTopCache.clear();} catch (e) {}
-        try {runDownloadSchedulerSoon();} catch (e) {}
-        try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
+        try { if (fs.existsSync(headerFilepath)) fs.rmSync(headerFilepath, { force: true }); } catch (e) { }
+        try { recentFilesTopCache.clear(); } catch (e) { }
+        try { runDownloadSchedulerSoon(); } catch (e) { }
+        try { syncRuntimeActiveState().catch(() => { }); } catch (e) { }
       }
     });
 
@@ -12732,8 +12734,8 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
       try {
         await updateDownloadStatus.run('error', 0, err.message, downloadId);
       } finally {
-        try {runDownloadSchedulerSoon();} catch (e) {}
-        try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
+        try { runDownloadSchedulerSoon(); } catch (e) { }
+        try { syncRuntimeActiveState().catch(() => { }); } catch (e) { }
       }
     });
   } catch (err) {
@@ -12751,7 +12753,7 @@ async function startTdlDownload(downloadId, url, platform, channel, title, metad
     }
     const outChannel = channel && channel !== 'unknown' ? channel : deriveChannelFromUrl('telegram', url) || 'telegram';
     const dir = getDownloadDirChannelOnly('telegram', outChannel);
-    try {await updateDownloadFilepath.run(dir, downloadId);} catch (e) {}
+    try { await updateDownloadFilepath.run(dir, downloadId); } catch (e) { }
     await updateDownloadStatus.run('downloading', 0, null, downloadId);
 
     if (isTelegramInviteUrl(url)) {
@@ -12771,7 +12773,7 @@ async function startTdlDownload(downloadId, url, platform, channel, title, metad
       if (match) {
         chatId = match[1] || match[2];
       }
-    } catch (e) {}
+    } catch (e) { }
 
     if (!chatId) {
       await updateDownloadStatus.run('error', 0, 'Kon chat ID niet afleiden uit URL. Gebruik t.me/c/123456 formaat of web.telegram.org/#-123456', downloadId);
@@ -12781,10 +12783,10 @@ async function startTdlDownload(downloadId, url, platform, channel, title, metad
     const args = [scriptPath, chatId, dir];
     const proc = spawn('python3', args, { env: { ...process.env, TELEGRAM_PHONE: process.env.TELEGRAM_PHONE || '' } });
     activeProcesses.set(downloadId, proc);
-    try {startingJobs.delete(downloadId);} catch (e) {}
+    try { startingJobs.delete(downloadId); } catch (e) { }
     let stderr = '';
     let stdout = '';
-    proc.stderr.on('data', (d) => {stderr = (stderr + d.toString()).slice(-200000);});
+    proc.stderr.on('data', (d) => { stderr = (stderr + d.toString()).slice(-200000); });
     proc.stdout.on('data', (d) => {
       stdout = (stdout + d.toString()).slice(-200000);
       const lines = d.toString().split('\n');
@@ -12793,7 +12795,7 @@ async function startTdlDownload(downloadId, url, platform, channel, title, metad
           const match = line.match(/\[(\d+)\]/);
           if (match) {
             const count = parseInt(match[1], 10);
-            updateDownloadStatus.run('downloading', Math.min(99, count * 5), null, downloadId).catch(() => {});
+            updateDownloadStatus.run('downloading', Math.min(99, count * 5), null, downloadId).catch(() => { });
           }
         }
       }
@@ -12806,7 +12808,7 @@ async function startTdlDownload(downloadId, url, platform, channel, title, metad
         const mediaSummary = summarizeMediaDir(dir, 12000);
         const safeCount = Number.isFinite(Number(mediaSummary && mediaSummary.count)) ? Math.max(0, Number(mediaSummary.count)) : 0;
         const safeBytes = Number.isFinite(Number(mediaSummary && mediaSummary.totalBytes)) ? Math.max(0, Number(mediaSummary.totalBytes)) : 0;
-        
+
         try {
           const files = fs.readdirSync(dir);
           for (const file of files) {
@@ -12822,13 +12824,13 @@ async function startTdlDownload(downloadId, url, platform, channel, title, metad
                   await upsertDownloadFile.run(downloadId, relPath, st.size, Math.floor(st.mtimeMs), indexedAt, indexedAt);
                 }
               }
-            } catch (e) {}
+            } catch (e) { }
           }
           console.log(`   📂 Geïndexeerd: ${safeCount} files voor download #${downloadId}`);
         } catch (e) {
           console.log(`   ⚠️  Indexing fout: ${e.message}`);
         }
-        
+
         const metaObj = {
           tool: 'telegram_telethon',
           platform: 'telegram',
@@ -12841,21 +12843,21 @@ async function startTdlDownload(downloadId, url, platform, channel, title, metad
         };
         await updateDownload.run('completed', 100, dir, safeCount > 1 ? `(multiple: ${safeCount} files)` : '(multiple)', safeBytes, '', JSON.stringify(metaObj), null, downloadId);
         recentFilesTopCache.clear();
-        try {runDownloadSchedulerSoon();} catch (e) {}
-        try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
+        try { runDownloadSchedulerSoon(); } catch (e) { }
+        try { syncRuntimeActiveState().catch(() => { }); } catch (e) { }
         return;
       }
       const msg = String(stderr || stdout || `telegram-channel-download exit code: ${code}`).trim();
       await updateDownloadStatus.run('error', 0, msg.slice(0, 4000), downloadId);
-      try {runDownloadSchedulerSoon();} catch (e) {}
-      try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
+      try { runDownloadSchedulerSoon(); } catch (e) { }
+      try { syncRuntimeActiveState().catch(() => { }); } catch (e) { }
     });
 
     proc.on('error', async (err) => {
       activeProcesses.delete(downloadId);
       await updateDownloadStatus.run('error', 0, err.message, downloadId);
-      try {runDownloadSchedulerSoon();} catch (e) {}
-      try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
+      try { runDownloadSchedulerSoon(); } catch (e) { }
+      try { syncRuntimeActiveState().catch(() => { }); } catch (e) { }
     });
   } catch (err) {
     await updateDownloadStatus.run('error', 0, err.message, downloadId);
@@ -12878,7 +12880,7 @@ async function startOfscraperDownload(downloadId, url, platform, channel, title,
     const outChannel = user || 'unknown';
     const dir = getDownloadDirChannelOnly('onlyfans', outChannel);
 
-    try {await updateDownloadFilepath.run(dir, downloadId);} catch (e) {}
+    try { await updateDownloadFilepath.run(dir, downloadId); } catch (e) { }
 
     await updateDownloadStatus.run('downloading', 0, null, downloadId);
 
@@ -12904,7 +12906,7 @@ async function startOfscraperDownload(downloadId, url, platform, channel, title,
           fs.cpSync(src, dst, { recursive: true, force: true });
         }
       }
-    } catch (e) {}
+    } catch (e) { }
 
     const normalizeAuthJsonInPlace = (authPath) => {
       try {
@@ -12915,7 +12917,7 @@ async function startOfscraperDownload(downloadId, url, platform, channel, title,
         try {
           JSON.parse(raw);
           return true;
-        } catch (e) {}
+        } catch (e) { }
 
         if (!raw.startsWith('{\\rtf')) return false;
 
@@ -12942,7 +12944,7 @@ async function startOfscraperDownload(downloadId, url, platform, channel, title,
         await updateDownloadStatus.run('error', 0, 'OnlyFans: ofscraper auth ontbreekt (auth.json). Run ofscraper één keer handmatig om auth aan te maken, of zet WEBDL_OFSCRAPER_CONFIG_DIR naar je ofscraper config map.', downloadId);
         try {
           if (fs.existsSync(cfgDir)) fs.rmSync(cfgDir, { recursive: true, force: true });
-        } catch (e) {}
+        } catch (e) { }
         return;
       }
 
@@ -12955,14 +12957,14 @@ async function startOfscraperDownload(downloadId, url, platform, channel, title,
           if (parsed && typeof parsed === 'object' && parsed.auth && typeof parsed.auth === 'object') {
             cookieStr = String(parsed.auth.cookie || '');
           }
-        } catch (e) {cookieStr = '';}
+        } catch (e) { cookieStr = ''; }
 
         const hasSess = /(?:^|;\s*)sess=([^;]+)/i.test(cookieStr);
         if (!hasSess) {
           await updateDownloadStatus.run('error', 0, 'OnlyFans: auth.json cookie export lijkt incompleet/verkeerd (sess ontbreekt). Exporteer cookies opnieuw (bijv. OnlyFans Cookie Helper) en zorg dat auth.json als *platte JSON* is opgeslagen (geen TextEdit/RTF).', downloadId);
           try {
             if (fs.existsSync(cfgDir)) fs.rmSync(cfgDir, { recursive: true, force: true });
-          } catch (e) {}
+          } catch (e) { }
           return;
         }
 
@@ -12970,15 +12972,15 @@ async function startOfscraperDownload(downloadId, url, platform, channel, title,
           const profileAuthPath = path.join(cfgDir, 'main_profile', 'auth.json');
           fs.mkdirSync(path.dirname(profileAuthPath), { recursive: true });
           fs.writeFileSync(profileAuthPath, JSON.stringify(parsed, null, 2));
-        } catch (e) {}
+        } catch (e) { }
       } catch (e) {
         await updateDownloadStatus.run('error', 0, 'OnlyFans: je ofscraper auth.json is geen geldige JSON (lijkt als RTF/TextEdit opgeslagen). Fix auth.json (exporteer opnieuw cookies) en probeer opnieuw.', downloadId);
         try {
           if (fs.existsSync(cfgDir)) fs.rmSync(cfgDir, { recursive: true, force: true });
-        } catch (e) {}
+        } catch (e) { }
         return;
       }
-    } catch (e) {}
+    } catch (e) { }
 
     try {
       let cfg = {};
@@ -12998,19 +13000,19 @@ async function startOfscraperDownload(downloadId, url, platform, channel, title,
       if (!cfg.performance_options || typeof cfg.performance_options !== 'object') cfg.performance_options = {};
       cfg.performance_options.download_sems = Number.isFinite(sems) && sems > 0 ? sems : 1;
       fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
-    } catch (e) {}
+    } catch (e) { }
 
     const proc = spawnNice(OFSCRAPER, [
-    '-cg', cfgDir,
-    '-p', 'stats',
-    '--action', 'download',
-    '--download-area', 'all',
-    '--usernames', user,
-    '--auth-quit']
+      '-cg', cfgDir,
+      '-p', 'stats',
+      '--action', 'download',
+      '--download-area', 'all',
+      '--usernames', user,
+      '--auth-quit']
     );
 
     activeProcesses.set(downloadId, proc);
-    try {startingJobs.delete(downloadId);} catch (e) {}
+    try { startingJobs.delete(downloadId); } catch (e) { }
 
     const CAPTURE_LIMIT = 200000;
     let stderr = '';
@@ -13046,7 +13048,7 @@ async function startOfscraperDownload(downloadId, url, platform, channel, title,
             if (!ent.isFile()) continue;
             if (!ent.name.endsWith('.log')) continue;
             let st = null;
-            try {st = fs.statSync(full);} catch (e) {st = null;}
+            try { st = fs.statSync(full); } catch (e) { st = null; }
             const m = st ? st.mtimeMs : 0;
             if (m >= newestMtime) {
               newestMtime = m;
@@ -13063,7 +13065,7 @@ async function startOfscraperDownload(downloadId, url, platform, channel, title,
           fs.readSync(fd, buf, 0, buf.length, start);
           return buf.toString('utf8');
         } finally {
-          try {fs.closeSync(fd);} catch (e) {}
+          try { fs.closeSync(fd); } catch (e) { }
         }
       } catch (e) {
         return '';
@@ -13127,27 +13129,27 @@ async function startOfscraperDownload(downloadId, url, platform, channel, title,
       try {
         proc.kill('SIGTERM');
         setTimeout(() => {
-          try {proc.kill('SIGKILL');} catch (e) {}
+          try { proc.kill('SIGKILL'); } catch (e) { }
         }, 5000);
-      } catch (e) {}
+      } catch (e) { }
 
       try {
         activeProcesses.delete(downloadId);
         jobLane.delete(downloadId);
         runDownloadSchedulerSoon();
-      } catch (e) {}
+      } catch (e) { }
     }, Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 20 * 60 * 1000);
 
     proc.on('close', async (code) => {
       activeProcesses.delete(downloadId);
 
-      try {clearTimeout(timeoutTimer);} catch (e) {}
+      try { clearTimeout(timeoutTimer); } catch (e) { }
       if (aborted) {
         try {
           if (fs.existsSync(cfgDir)) fs.rmSync(cfgDir, { recursive: true, force: true });
-        } catch (e) {}
-        try {runDownloadSchedulerSoon();} catch (e) {}
-        try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
+        } catch (e) { }
+        try { runDownloadSchedulerSoon(); } catch (e) { }
+        try { syncRuntimeActiveState().catch(() => { }); } catch (e) { }
         return;
       }
 
@@ -13182,14 +13184,14 @@ async function startOfscraperDownload(downloadId, url, platform, channel, title,
           const combined = `${stdout}\n${stderr}\n${internal}`.toLowerCase();
           const isAuthIssue = combined.includes('auth failed') || combined.includes('auth.json') || combined.includes('checking auth status');
           const msg = isAuthIssue ?
-          `OnlyFans: inloggen/auth mislukt (auth.json ontbreekt/ongeldig/verlopen of geen toegang). Log: ${logPath || '(kon log niet schrijven)'}${tail ? `\n\n${tail}` : ''}` :
-          `OnlyFans: ofscraper klaar maar output map is leeg. Oorzaken: geen toegang/subscription, geen media, alles locked, ofscraper config mismatch. Log: ${logPath || '(kon log niet schrijven)'}${tail ? `\n\n${tail}` : ''}`;
+            `OnlyFans: inloggen/auth mislukt (auth.json ontbreekt/ongeldig/verlopen of geen toegang). Log: ${logPath || '(kon log niet schrijven)'}${tail ? `\n\n${tail}` : ''}` :
+            `OnlyFans: ofscraper klaar maar output map is leeg. Oorzaken: geen toegang/subscription, geen media, alles locked, ofscraper config mismatch. Log: ${logPath || '(kon log niet schrijven)'}${tail ? `\n\n${tail}` : ''}`;
           await updateDownloadStatus.run('error', 0, msg, downloadId);
           try {
             if (fs.existsSync(cfgDir)) fs.rmSync(cfgDir, { recursive: true, force: true });
-          } catch (e) {}
-          try {runDownloadSchedulerSoon();} catch (e) {}
-          try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
+          } catch (e) { }
+          try { runDownloadSchedulerSoon(); } catch (e) { }
+          try { syncRuntimeActiveState().catch(() => { }); } catch (e) { }
           return;
         }
         const metaObj = { tool: 'ofscraper', platform: 'onlyfans', channel: outChannel, title, url, outputDir: dir };
@@ -13224,19 +13226,19 @@ async function startOfscraperDownload(downloadId, url, platform, channel, title,
 
       try {
         if (fs.existsSync(cfgDir)) fs.rmSync(cfgDir, { recursive: true, force: true });
-      } catch (e) {}
-      try {runDownloadSchedulerSoon();} catch (e) {}
-      try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
+      } catch (e) { }
+      try { runDownloadSchedulerSoon(); } catch (e) { }
+      try { syncRuntimeActiveState().catch(() => { }); } catch (e) { }
     });
 
     proc.on('error', async (err) => {
       activeProcesses.delete(downloadId);
       try {
         if (fs.existsSync(cfgDir)) fs.rmSync(cfgDir, { recursive: true, force: true });
-      } catch (e) {}
+      } catch (e) { }
       await updateDownloadStatus.run('error', 0, err.message, downloadId);
-      try {runDownloadSchedulerSoon();} catch (e) {}
-      try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
+      try { runDownloadSchedulerSoon(); } catch (e) { }
+      try { syncRuntimeActiveState().catch(() => { }); } catch (e) { }
     });
   } catch (err) {
     await updateDownloadStatus.run('error', 0, err.message, downloadId);
@@ -13256,7 +13258,7 @@ async function startGalleryDlDownload(downloadId, url, platform, channel, title,
     const outTitle = title && !title.startsWith('https_') && title !== 'untitled' ? title : deriveTitleFromUrl(url) || title;
     const dir = getDownloadDirChannelOnly(platform, outChannel);
 
-    try {await updateDownloadFilepath.run(dir, downloadId);} catch (e) {}
+    try { await updateDownloadFilepath.run(dir, downloadId); } catch (e) { }
     // Update channel + title in DB if we derived better values
     try {
       if (outChannel !== channel || outTitle !== title) {
@@ -13266,7 +13268,7 @@ async function startGalleryDlDownload(downloadId, url, platform, channel, title,
             : 'UPDATE downloads SET channel = ?, title = ? WHERE id = ?'
         ).run(outChannel, outTitle, downloadId);
       }
-    } catch (e) {}
+    } catch (e) { }
 
     await updateDownloadStatus.run('downloading', 0, null, downloadId);
 
@@ -13288,11 +13290,11 @@ async function startGalleryDlDownload(downloadId, url, platform, channel, title,
     }
     const proc = spawnNice(GALLERY_DL, gdlArgs, { cwd: dir });
     activeProcesses.set(downloadId, proc);
-    try {startingJobs.delete(downloadId);} catch (e) {}
+    try { startingJobs.delete(downloadId); } catch (e) { }
 
     let stderr = '';
-    proc.stderr.on('data', (d) => {stderr += d.toString();});
-    proc.stdout.on('data', () => {});
+    proc.stderr.on('data', (d) => { stderr += d.toString(); });
+    proc.stdout.on('data', () => { });
 
     proc.on('close', async (code) => {
       activeProcesses.delete(downloadId);
@@ -13315,7 +13317,7 @@ async function startGalleryDlDownload(downloadId, url, platform, channel, title,
                   indexed++;
                 }
               }
-            } catch (e) {}
+            } catch (e) { }
           }
           console.log(`   📂 Geïndexeerd: ${indexed} files voor download #${downloadId}`);
           recentFilesTopCache.clear();
@@ -13341,28 +13343,28 @@ async function startGalleryDlDownload(downloadId, url, platform, channel, title,
                 ).run(betterChannel, downloadId);
                 console.log(`   📝 Channel afgeleid: "${betterChannel}" voor download #${downloadId}`);
               }
-            } catch (e) {}
+            } catch (e) { }
           }
         } catch (e) {
           console.log(`   ⚠️  Indexing fout: ${e.message}`);
         }
-        
+
         const metaObj = { tool: 'gallery-dl', platform, channel: outChannel, title, url, outputDir: dir };
         await updateDownload.run('completed', 100, dir, '(multiple)', 0, '', JSON.stringify(metaObj), null, downloadId);
-        try {runDownloadSchedulerSoon();} catch (e) {}
-        try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
+        try { runDownloadSchedulerSoon(); } catch (e) { }
+        try { syncRuntimeActiveState().catch(() => { }); } catch (e) { }
       } else {
         await updateDownloadStatus.run('error', 0, stderr || `gallery-dl exit code: ${code}`, downloadId);
-        try {runDownloadSchedulerSoon();} catch (e) {}
-        try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
+        try { runDownloadSchedulerSoon(); } catch (e) { }
+        try { syncRuntimeActiveState().catch(() => { }); } catch (e) { }
       }
     });
 
     proc.on('error', async (err) => {
       activeProcesses.delete(downloadId);
       await updateDownloadStatus.run('error', 0, err.message, downloadId);
-      try {runDownloadSchedulerSoon();} catch (e) {}
-      try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
+      try { runDownloadSchedulerSoon(); } catch (e) { }
+      try { syncRuntimeActiveState().catch(() => { }); } catch (e) { }
     });
   } catch (err) {
     await updateDownloadStatus.run('error', 0, err.message, downloadId);
@@ -13385,14 +13387,14 @@ async function startKinkyNlDownload(downloadId, url, platform, channel, title, m
     const outChannel = modelName;
     const dir = getDownloadDirChannelOnly(platform, outChannel);
 
-    try {await updateDownloadFilepath.run(dir, downloadId);} catch (e) {}
+    try { await updateDownloadFilepath.run(dir, downloadId); } catch (e) { }
     try {
       await db.prepare(
         db.isPostgres
           ? 'UPDATE downloads SET channel = $1, title = $2 WHERE id = $3'
           : 'UPDATE downloads SET channel = ?, title = ? WHERE id = ?'
       ).run(outChannel, modelName, downloadId);
-    } catch (e) {}
+    } catch (e) { }
     await updateDownloadStatus.run('downloading', 0, null, downloadId);
 
     console.log(`[DL #${downloadId}] KINKY.NL scraper voor "${modelName}" → ${dir}`);
@@ -13421,7 +13423,7 @@ async function startKinkyNlDownload(downloadId, url, platform, channel, title, m
       html = await fetchPage(cleanUrl);
     } catch (e) {
       await updateDownloadStatus.run('error', 0, `Kon kinky.nl pagina niet laden: ${e.message}`, downloadId);
-      try {runDownloadSchedulerSoon();} catch (e) {}
+      try { runDownloadSchedulerSoon(); } catch (e) { }
       return;
     }
 
@@ -13429,7 +13431,7 @@ async function startKinkyNlDownload(downloadId, url, platform, channel, title, m
     const photosMatch = html.match(/profilePhotos\s*=\s*`(\[.*?\])`/s);
     if (!photosMatch) {
       await updateDownloadStatus.run('error', 0, 'Geen foto data gevonden op kinky.nl pagina', downloadId);
-      try {runDownloadSchedulerSoon();} catch (e) {}
+      try { runDownloadSchedulerSoon(); } catch (e) { }
       return;
     }
 
@@ -13438,13 +13440,13 @@ async function startKinkyNlDownload(downloadId, url, platform, channel, title, m
       photos = JSON.parse(photosMatch[1]);
     } catch (e) {
       await updateDownloadStatus.run('error', 0, `Foto JSON parse fout: ${e.message}`, downloadId);
-      try {runDownloadSchedulerSoon();} catch (e) {}
+      try { runDownloadSchedulerSoon(); } catch (e) { }
       return;
     }
 
     if (!photos.length) {
       await updateDownloadStatus.run('error', 0, 'Geen fotos gevonden', downloadId);
-      try {runDownloadSchedulerSoon();} catch (e) {}
+      try { runDownloadSchedulerSoon(); } catch (e) { }
       return;
     }
 
@@ -13453,7 +13455,7 @@ async function startKinkyNlDownload(downloadId, url, platform, channel, title, m
     const userId = uidMatch ? uidMatch[1] : null;
     if (!userId) {
       await updateDownloadStatus.run('error', 0, 'Kon userId niet bepalen', downloadId);
-      try {runDownloadSchedulerSoon();} catch (e) {}
+      try { runDownloadSchedulerSoon(); } catch (e) { }
       return;
     }
 
@@ -13516,7 +13518,7 @@ async function startKinkyNlDownload(downloadId, url, platform, channel, title, m
       if (fs.existsSync(dest)) {
         downloaded++;
         const pct = Math.round((downloaded / totalItems) * 100);
-        try {await updateDownloadStatus.run('downloading', pct, null, downloadId);} catch (e) {}
+        try { await updateDownloadStatus.run('downloading', pct, null, downloadId); } catch (e) { }
         continue;
       }
 
@@ -13524,7 +13526,7 @@ async function startKinkyNlDownload(downloadId, url, platform, channel, title, m
         await downloadFile(fullUrl, dest);
         downloaded++;
         const pct = Math.round((downloaded / totalItems) * 100);
-        try {await updateDownloadStatus.run('downloading', pct, null, downloadId);} catch (e) {}
+        try { await updateDownloadStatus.run('downloading', pct, null, downloadId); } catch (e) { }
         console.log(`   ✅ [${downloaded}/${totalItems}] ${filename}`);
       } catch (e) {
         errors++;
@@ -13545,7 +13547,7 @@ async function startKinkyNlDownload(downloadId, url, platform, channel, title, m
           const st = fs.statSync(fp);
           const relpath = path.relative(path.resolve(BASE_DIR), fp);
           await upsertDownloadFile.run(downloadId, relpath, st.size || 0, Math.round(st.mtimeMs || now), now, now);
-        } catch (e) {}
+        } catch (e) { }
       }
       console.log(`   📂 Geïndexeerd: ${entries.length} files voor download #${downloadId}`);
     } catch (e) {
@@ -13562,16 +13564,16 @@ async function startKinkyNlDownload(downloadId, url, platform, channel, title, m
             ? 'UPDATE downloads SET source_url = $1 WHERE id = $2'
             : 'UPDATE downloads SET source_url = ? WHERE id = ?'
         ).run(url, downloadId);
-      } catch (e) {}
+      } catch (e) { }
       console.log(`[DL #${downloadId}] COMPLETED kinky/${modelName} | ${downloaded} foto's | ${errors} fouten`);
     } else {
       await updateDownloadStatus.run('error', 0, `Geen fotos gedownload (${errors} fouten)`, downloadId);
     }
-    try {runDownloadSchedulerSoon();} catch (e) {}
-    try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
+    try { runDownloadSchedulerSoon(); } catch (e) { }
+    try { syncRuntimeActiveState().catch(() => { }); } catch (e) { }
   } catch (err) {
     await updateDownloadStatus.run('error', 0, err.message, downloadId);
-    try {runDownloadSchedulerSoon();} catch (e) {}
+    try { runDownloadSchedulerSoon(); } catch (e) { }
   }
 }
 
@@ -13586,7 +13588,7 @@ async function startInstaloaderDownload(downloadId, url, platform, channel, titl
 
     const outChannel = channel && channel !== 'unknown' ? channel : deriveChannelFromUrl('instagram', url) || 'unknown';
     const dir = getDownloadDirChannelOnly('instagram', outChannel);
-    try {await updateDownloadFilepath.run(dir, downloadId);} catch (e) {}
+    try { await updateDownloadFilepath.run(dir, downloadId); } catch (e) { }
     await updateDownloadStatus.run('downloading', 0, null, downloadId);
 
     try {
@@ -13601,10 +13603,10 @@ async function startInstaloaderDownload(downloadId, url, platform, channel, titl
 
     const igTarget = normalizeInstagramTarget(url, outChannel) || url;
     const baseArgs = [
-    '--dirname-pattern', dir,
-    '--filename-pattern', '{profile}_{shortcode}_{date_utc:%Y-%m-%d_%H-%M-%S}',
-    '--no-compress-json',
-    '--no-profile-pic'];
+      '--dirname-pattern', dir,
+      '--filename-pattern', '{profile}_{shortcode}_{date_utc:%Y-%m-%d_%H-%M-%S}',
+      '--no-compress-json',
+      '--no-profile-pic'];
 
     const argCandidates = [];
     argCandidates.push([...baseArgs, '--', igTarget]);
@@ -13613,12 +13615,12 @@ async function startInstaloaderDownload(downloadId, url, platform, channel, titl
     const runAttempt = (args) => new Promise((resolve) => {
       const proc = spawnNice(INSTALOADER, args);
       activeProcesses.set(downloadId, proc);
-      try {startingJobs.delete(downloadId);} catch (e) {}
+      try { startingJobs.delete(downloadId); } catch (e) { }
 
       let stderr = '';
       let stdout = '';
-      proc.stderr.on('data', (d) => {stderr += d.toString();});
-      proc.stdout.on('data', (d) => {stdout += d.toString();});
+      proc.stderr.on('data', (d) => { stderr += d.toString(); });
+      proc.stdout.on('data', (d) => { stdout += d.toString(); });
       proc.on('close', (code) => {
         activeProcesses.delete(downloadId);
         resolve({ code, stderr, stdout, args });
@@ -13684,7 +13686,7 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
     }
 
     const dir = getDownloadDir(platform, channel, title);
-    try {await updateDownloadFilepath.run(dir, downloadId);} catch (e) {}
+    try { await updateDownloadFilepath.run(dir, downloadId); } catch (e) { }
 
     // Sla metadata op als JSON
     const metaFile = path.join(dir, 'metadata.json');
@@ -13716,12 +13718,12 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
     const forceOverwrite = !!(metadata && typeof metadata === 'object' && !Array.isArray(metadata) && metadata.webdl_force === true);
     const outputTemplate = path.join(dir, '%(title).120B [%(id)s].%(ext)s');
     const baseArgs = [
-    '--concurrent-fragments', YTDLP_CONCURRENT_FRAGMENTS,
-    '--socket-timeout', '30',
-    '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-    '--merge-output-format', 'mp4',
-    '--write-thumbnail',
-    '--write-info-json'];
+      '--concurrent-fragments', YTDLP_CONCURRENT_FRAGMENTS,
+      '--socket-timeout', '30',
+      '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+      '--merge-output-format', 'mp4',
+      '--write-thumbnail',
+      '--write-info-json'];
     if (!forceOverwrite) {
       baseArgs.push('--no-overwrites');
     } else {
@@ -13756,7 +13758,7 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
 
     let cookieArgs = getYtDlpCookieArgs('download');
     if (platform === 'youtube' || platform === 'youtube-shorts') {
-        cookieArgs = [];
+      cookieArgs = [];
     }
 
     const runOnce = (attemptCookieArgs, allowRetryNoCookies, attemptExtraArgs = [], allowRetryNoCheckCertificates = true) => {
@@ -13764,7 +13766,7 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
         const extra = Array.isArray(attemptExtraArgs) ? attemptExtraArgs : [];
         const proc = spawnNice(YT_DLP, [...attemptCookieArgs, ...extra, ...baseArgs]);
         activeProcesses.set(downloadId, proc);
-        try {startingJobs.delete(downloadId);} catch (e) {}
+        try { startingJobs.delete(downloadId); } catch (e) { }
 
         let lastFile = '';
         let markedPostprocessing = false;
@@ -13774,7 +13776,7 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
 
         proc.stdout.on('data', async (data) => {
           const line = data.toString().trim();
-          
+
           if (line.includes('[download]') && line.includes('Downloading item')) {
             const m = line.match(/Downloading item (\d+) of (\d+)/);
             if (m) {
@@ -13782,7 +13784,7 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
               console.log(`   [#${downloadId}] ${playlistStr}`);
             }
           }
-          
+
           if (line.includes('[download]') && line.includes('%')) {
             const match = line.match(/([\d.]+)%/);
             if (match) {
@@ -13803,7 +13805,7 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
             }
             const mergeMatch = line.match(/Merging formats into "(.+)"/);
             if (mergeMatch) lastFile = mergeMatch[1].replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '');
-            
+
             if (line.includes('has already been downloaded')) {
               // Extract filename from: [download] /path/to/file has already been downloaded
               const alreadyMatch = line.match(/\[download\]\s+(.+?)\s+has already been downloaded/);
@@ -13846,17 +13848,17 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
             const retryResult = await runOnce([], false, extra, allowRetryNoCheckCertificates);
             return resolve(retryResult);
           }
-          
+
           if (lastFile) {
             const candidate = lastFile.startsWith('/') ? lastFile : path.join(dir, lastFile);
             if (fs.existsSync(candidate)) {
-               const ext = path.extname(candidate).toLowerCase();
-               const isImage = ext === '.jpg' || ext === '.jpeg' || ext === '.png' || ext === '.webp';
-               // Do NOT treat as success if it errored out and only managed to download the image thumbnail
-               if (!isImage || platform !== 'youtube') {
-                 console.log(`   [#${downloadId}] yt-dlp exited with code ${code}, but video file exists. Treating as success.`);
-                 return resolve({ success: true, code, lastFile, stderrAll });
-               }
+              const ext = path.extname(candidate).toLowerCase();
+              const isImage = ext === '.jpg' || ext === '.jpeg' || ext === '.png' || ext === '.webp';
+              // Do NOT treat as success if it errored out and only managed to download the image thumbnail
+              if (!isImage || platform !== 'youtube') {
+                console.log(`   [#${downloadId}] yt-dlp exited with code ${code}, but video file exists. Treating as success.`);
+                return resolve({ success: true, code, lastFile, stderrAll });
+              }
             }
           }
 
@@ -13894,7 +13896,7 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
         }
 
         if (!mainPath) {
-          const files = fs.readdirSync(dir).filter((f) => 
+          const files = fs.readdirSync(dir).filter((f) =>
             f.endsWith('.mp4') || f.endsWith('.mkv') || f.endsWith('.webm') ||
             f.endsWith('.jpg') || f.endsWith('.jpeg') || f.endsWith('.png') ||
             f.endsWith('.gif') || f.endsWith('.webp') || f.endsWith('.unknown_video')
@@ -13922,14 +13924,14 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
             else if (output.includes('gif image')) newExt = '.gif';
             else if (output.includes('webm')) newExt = '.webm';
             else if (output.includes('mp4') || output.includes('isom')) newExt = '.mp4';
-            
+
             if (newExt) {
               const newPath = mainPath.replace('.unknown_video', newExt);
               fs.renameSync(mainPath, newPath);
               mainPath = newPath;
               console.log(`   [#${downloadId}] Hernoemd unknown_video naar ${path.basename(mainPath)}`);
             }
-          } catch(e) {
+          } catch (e) {
             console.log(`   [#${downloadId}] Fout bij scannen unknown_video: ${e.message}`);
           }
         }
@@ -13992,13 +13994,13 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
               await upsertDownloadFile.run(downloadId, relPath, st.size, Math.floor(st.mtimeMs), indexedAt, indexedAt);
             }
           }
-        } catch (e) {}
+        } catch (e) { }
 
         await updateDownload.run('completed', 100, finalPath, finalFile, finalSize, finalFormat, JSON.stringify(metaObj), null, downloadId);
         try {
           const thumbPath = pickThumbnailFile(dir);
           if (thumbPath) await updateDownloadThumbnail.run(`/download/${downloadId}/thumb`, downloadId);
-        } catch (e) {}
+        } catch (e) { }
         console.log(`   ✅ Download voltooid: ${finalPath} (${(finalSize / 1024 / 1024).toFixed(1)} MB)`);
       })().catch(async (e) => {
         await updateDownloadStatus.run('error', 0, e.message, downloadId);
@@ -14008,7 +14010,7 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
       const msg = String(result && result.stderrAll ? result.stderrAll : '').trim();
       if (msg.includes('Unsupported URL') && looksLikeDirectFileUrl(url)) {
         console.log(`   ↩️ Fallback naar direct download (unsupported url)`);
-        startDirectFileDownload(downloadId, url, platform, channel, title, metadata).catch(() => {});
+        startDirectFileDownload(downloadId, url, platform, channel, title, metadata).catch(() => { });
         return;
       }
       await updateDownloadStatus.run('error', 0, msg || `yt-dlp exit code: ${result && result.code != null ? result.code : '?'}`, downloadId);
@@ -14026,7 +14028,7 @@ expressApp.post('/upload-recording', upload.single('video'), async (req, res) =>
   if (!req.file) return res.status(400).json({ success: false, error: 'Geen video bestand ontvangen' });
 
   let metadata = {};
-  try {metadata = JSON.parse(req.body.metadata || '{}');} catch (e) {}
+  try { metadata = JSON.parse(req.body.metadata || '{}'); } catch (e) { }
 
   let resolved = metadata;
   try {
@@ -14073,7 +14075,7 @@ expressApp.post('/upload-recording', upload.single('video'), async (req, res) =>
       100,
       JSON.stringify(recordMeta)
     );
-  } catch (e) {}
+  } catch (e) { }
   res.json({ success: true, file: filename, path: filepath, size, meta: resolved });
 });
 
@@ -14198,7 +14200,7 @@ async function importExistingVideosFromDisk(options = {}) {
             skipped.push({ file: fp, reason: 'too_new' });
             continue;
           }
-        } catch (e) {}
+        } catch (e) { }
         const existing = await getDownloadIdByFilepath.get(fp);
         if (existing && existing.id) {
           if (flattenToWebdl && moveSource && !dryRun) {
@@ -14210,12 +14212,12 @@ async function importExistingVideosFromDisk(options = {}) {
                 if (rowPath === fp) {
                   if (!fs.existsSync(relocatePath)) {
                     moveFileSyncWithFallback(fp, relocatePath);
-                    try {await updateDownloadFilepath.run(relocatePath, existing.id);} catch (e) {}
+                    try { await updateDownloadFilepath.run(relocatePath, existing.id); } catch (e) { }
                     relocated.push({ id: existing.id, from: fp, to: relocatePath });
                     continue;
                   }
                   fs.unlinkSync(fp);
-                  try {await updateDownloadFilepath.run(relocatePath, existing.id);} catch (e) {}
+                  try { await updateDownloadFilepath.run(relocatePath, existing.id); } catch (e) { }
                   relocated.push({ id: existing.id, from: fp, to: relocatePath, cleanupOnly: true, relinked: true });
                   continue;
                 }
@@ -14245,7 +14247,7 @@ async function importExistingVideosFromDisk(options = {}) {
                 relocated.push({ id: existingTarget.id, from: fp, to: targetPath, cleanupOnly: true });
               } else {
                 moveFileSyncWithFallback(fp, targetPath);
-                try {await updateDownloadFilepath.run(targetPath, existingTarget.id);} catch (e) {}
+                try { await updateDownloadFilepath.run(targetPath, existingTarget.id); } catch (e) { }
                 relocated.push({ id: existingTarget.id, from: fp, to: targetPath });
               }
               continue;
@@ -14338,7 +14340,7 @@ async function importExistingVideosFromDisk(options = {}) {
           );
           const newId = Number(info && info.lastInsertRowid);
           if (Number.isFinite(newId) && sourceUrl && sourceUrl !== canonicalSource) {
-            try {await updateDownloadSourceUrl.run(sourceUrl, newId);} catch (e) {}
+            try { await updateDownloadSourceUrl.run(sourceUrl, newId); } catch (e) { }
           }
         }
 
@@ -14382,7 +14384,7 @@ expressApp.post('/downloads/import', async (req, res) => {
 expressApp.post('/downloads/reindex-gallery', async (req, res) => {
   try {
     console.log('🔍 Re-indexing gallery-dl downloads...');
-    
+
     const downloads = await db.prepare(`
       SELECT id, filepath, platform, channel
       FROM downloads
@@ -14392,34 +14394,34 @@ expressApp.post('/downloads/reindex-gallery', async (req, res) => {
         AND filepath IS NOT NULL
       ORDER BY id DESC
     `).all();
-    
+
     let totalIndexed = 0;
     let processedDownloads = 0;
-    
+
     for (const download of downloads || []) {
       const { id, filepath, platform } = download;
-      
+
       if (!fs.existsSync(filepath)) continue;
-      
+
       // For AZNUDEFEET, scan parent directory since real files are there
       const scanDir = (platform === 'aznudefeet' || platform === 'wikifeet' || platform === 'wikifeetx' || platform === 'kinky') ? path.dirname(filepath) : filepath;
-      
+
       if (!fs.existsSync(scanDir)) continue;
-      
+
       const files = fs.readdirSync(scanDir);
       let indexed = 0;
-      
+
       for (const file of files) {
         try {
           const fullPath = path.join(scanDir, file);
           const st = fs.statSync(fullPath);
-          
+
           // Skip directories, gallery-dl thumbnails/logos, metadata
           if (st.isDirectory()) continue;
           if (file.endsWith('_thumb.jpg') || file.endsWith('_thumb.png')) continue;
           if (file.endsWith('_logo.jpg') || file.endsWith('_logo.png')) continue;
           if (file === 'metadata.json') continue;
-          
+
           if (st.isFile() && /\.(mp4|webm|mkv|avi|mov|jpg|jpeg|png|gif|webp)$/i.test(file)) {
             const relPath = path.relative(BASE_DIR, fullPath);
             if (relPath && !relPath.startsWith('..')) {
@@ -14428,16 +14430,16 @@ expressApp.post('/downloads/reindex-gallery', async (req, res) => {
               indexed++;
             }
           }
-        } catch (e) {}
+        } catch (e) { }
       }
-      
+
       if (indexed > 0) {
         processedDownloads++;
         totalIndexed += indexed;
         console.log(`   ✅ #${id}: ${indexed} files`);
       }
     }
-    
+
     // Cleanup gallery-dl thumbnails/logos (not server-generated ones in .thumbs/)
     const cleanup = await db.prepare(`
       DELETE FROM download_files
@@ -14447,16 +14449,16 @@ expressApp.post('/downloads/reindex-gallery', async (req, res) => {
          OR relpath LIKE '%_logo.png'
          OR filesize < 20000
     `).run();
-    
+
     const deleted = cleanup && cleanup.changes ? cleanup.changes : 0;
-    
+
     recentFilesTopCache.clear();
-    
+
     console.log(`✅ Re-indexed: ${totalIndexed} files in ${processedDownloads} downloads`);
     console.log(`🗑️  Deleted: ${deleted} thumbnail entries`);
-    
-    res.json({ 
-      success: true, 
+
+    res.json({
+      success: true,
       indexed: totalIndexed,
       downloads: processedDownloads,
       thumbnailsDeleted: deleted
@@ -14582,10 +14584,10 @@ expressApp.post('/screenshot', upload.single('image'), async (req, res) => {
   const { imageData, url, metadata } = req.body;
   try {
     console.log(`[INGRESS] POST /screenshot url=${String(url || (metadata && metadata.url) || '').slice(0, 200)} hasFile=${req && req.file ? '1' : '0'} hasImageData=${imageData ? '1' : '0'}`);
-  } catch (e) {}
+  } catch (e) { }
   let metaPayload = metadata || {};
   if (typeof metaPayload === 'string') {
-    try {metaPayload = JSON.parse(metaPayload);} catch (e) {metaPayload = {};}
+    try { metaPayload = JSON.parse(metaPayload); } catch (e) { metaPayload = {}; }
   }
 
   const resolvedUrl = typeof url === 'string' && url ? url : metaPayload.url || '';
@@ -14610,8 +14612,8 @@ expressApp.post('/screenshot', upload.single('image'), async (req, res) => {
       const mime = (req.file.mimetype || '').toLowerCase();
       let ext = path.extname(req.file.originalname || '').replace('.', '').toLowerCase();
       if (!ext) {
-        if (mime.includes('jpeg')) ext = 'jpg';else
-        if (mime.includes('png')) ext = 'png';
+        if (mime.includes('jpeg')) ext = 'jpg'; else
+          if (mime.includes('png')) ext = 'png';
       }
       if (ext === 'jpeg') ext = 'jpg';
 
@@ -14626,8 +14628,8 @@ expressApp.post('/screenshot', upload.single('image'), async (req, res) => {
       const mimeExt = match ? match[1].toLowerCase() : 'jpeg';
       const ext = mimeExt === 'jpeg' ? 'jpg' : mimeExt;
       const base64Data = match ?
-      imageData.replace(/^data:image\/[^;]+;base64,/i, '') :
-      imageData.replace(/^data:image\/.+;base64,/i, '');
+        imageData.replace(/^data:image\/[^;]+;base64,/i, '') :
+        imageData.replace(/^data:image\/.+;base64,/i, '');
 
       if (ext === 'jpg') {
         fs.writeFileSync(filepath, Buffer.from(base64Data, 'base64'));
@@ -14649,7 +14651,7 @@ expressApp.post('/screenshot', upload.single('image'), async (req, res) => {
   if (!size || size < MIN_SCREENSHOT_BYTES) {
     try {
       if (fs.existsSync(filepath)) fs.unlinkSync(filepath);
-    } catch (e) {}
+    } catch (e) { }
     return res.status(500).json({ success: false, error: `Screenshot te klein (${size} bytes)` });
   }
 
@@ -14703,7 +14705,7 @@ expressApp.get('/download/:id/thumb', async (req, res) => {
     const thumbPath = await pickOrCreateThumbPath(fp, { allowGenerate: false });
     if (!thumbPath) {
       let sched = 'error';
-      try {sched = scheduleThumbGeneration(fp) || 'error';} catch (e) {}
+      try { sched = scheduleThumbGeneration(fp) || 'error'; } catch (e) { }
       logMissingThumbOnce('download-thumb', id, sched);
       res.setHeader('Cache-Control', 'no-store');
       return res.redirect(302, `/media/pending-thumb.svg?kind=d&id=${encodeURIComponent(String(id))}`);
@@ -14748,7 +14750,7 @@ expressApp.get('/media/thumb', (req, res) => {
         const thumbPath = await pickOrCreateThumbPath(fp, { allowGenerate: false });
         if (!thumbPath) {
           let sched = 'error';
-          try {sched = scheduleThumbGeneration(fp) || 'error';} catch (e) {}
+          try { sched = scheduleThumbGeneration(fp) || 'error'; } catch (e) { }
           logMissingThumbOnce('media-thumb', id, sched);
           res.setHeader('Cache-Control', 'no-store');
           return res.redirect(302, `/media/pending-thumb.svg?kind=${encodeURIComponent(kind)}&id=${encodeURIComponent(String(id))}`);
@@ -14761,7 +14763,7 @@ expressApp.get('/media/thumb', (req, res) => {
             const mime = sniffMediaMimeByMagic(thumbPath);
             if (mime) res.setHeader('Content-Type', mime);
           }
-        } catch (e) {}
+        } catch (e) { }
         return res.sendFile(thumbPath, (err) => {
           if (!err) return;
           if (err && (err.code === 'ECONNABORTED' || /aborted/i.test(String(err.message || '')))) return;
@@ -14778,9 +14780,9 @@ expressApp.get('/media/thumb', (req, res) => {
         if (!row) return res.status(404).end();
         const fp = String(row.filepath || '').trim();
 
-    if (row.platform === 'patreon') {
-      console.log(`[DEBUG-PATREON-EXPAND] Processing id=${row.id}, fp=${fp}, isAllowed=${safeIsAllowedExistingPath(path.resolve(fp))}`);
-    }
+        if (row.platform === 'patreon') {
+          console.log(`[DEBUG-PATREON-EXPAND] Processing id=${row.id}, fp=${fp}, isAllowed=${safeIsAllowedExistingPath(path.resolve(fp))}`);
+        }
 
         if (!fp || !safeIsAllowedExistingPath(fp)) return res.status(404).end();
         res.setHeader('Cache-Control', 'no-store');
@@ -14808,7 +14810,7 @@ expressApp.post('/download/:id/cancel', async (req, res) => {
   const proc = activeProcesses.get(id);
   if (proc) {
     cancelledJobs.add(id);
-    try {proc.kill('SIGTERM');} catch (e) {}
+    try { proc.kill('SIGTERM'); } catch (e) { }
     activeProcesses.delete(id);
     jobLane.delete(id);
     await updateDownloadStatus.run('cancelled', 0, null, id);
@@ -14869,22 +14871,22 @@ expressApp.post('/download/:id/retry', async (req, res) => {
   const id = parseInt(req.params.id);
   const proc = activeProcesses.get(id);
   if (proc) {
-    try {proc.kill('SIGTERM');} catch (e) {}
+    try { proc.kill('SIGTERM'); } catch (e) { }
     activeProcesses.delete(id);
   }
   if (startingJobs.has(id)) startingJobs.delete(id);
-  
+
   jobLane.delete(id);
   queuedJobs.delete(id);
   removeFromQueue(queuedHeavy, id);
   removeFromQueue(queuedLight, id);
   removeFromQueue(queuedBatch, id);
-  
+
   // Set back to pending in DB so it rehydrates automatically
   await updateDownloadStatus.run('pending', 0, null, id);
   console.log(`🔄 Download #${id} herstart via retry`);
-  try { await rehydrateDownloadQueueWithMode('all', 0); } catch(e){}
-  
+  try { await rehydrateDownloadQueueWithMode('all', 0); } catch (e) { }
+
   return res.json({ success: true });
 });
 
@@ -14926,7 +14928,7 @@ expressApp.get('/api/media/directories/tree', async (req, res) => {
       const d_count = parseInt(row.download_count, 10) || 0;
       const f_count = parseInt(row.file_count, 10) || 0;
       const s_count = parseInt(row.screenshot_count, 10) || 0;
-      
+
       let d_name = c;
       if (/^thread_\\d+$/i.test(c)) {
         const info = parseFootFetishForumThreadInfo(row.sample_source_url || row.sample_url || '');
@@ -14943,7 +14945,7 @@ expressApp.get('/api/media/directories/tree', async (req, res) => {
     _directoryTreeCache = result.tree;
     _directoryTreeCacheTime = now;
     res.json({ success: true, tree: result.tree });
-  } catch(e) {
+  } catch (e) {
     res.status(500).json({ success: false, error: String(e.message || e) });
   }
 });
@@ -14955,7 +14957,7 @@ expressApp.get('/dashboard', async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
-  
+
   const runtimeActiveRows = await getRuntimeActiveDownloadRows();
   const runtimeActiveIds = new Set((runtimeActiveRows || []).map((row) => Number(row && row.id)).filter((id) => Number.isFinite(id)));
   const queuedRows = (await db.prepare(`
@@ -14978,7 +14980,7 @@ expressApp.get('/dashboard', async (req, res) => {
     ORDER BY COALESCE(finished_at, updated_at) DESC, created_at DESC 
     LIMIT 350
   `).all();
-  
+
   const allDownloads = [...runtimeActiveRows, ...queuedRows, ...completedRows];
   const seen = new Set();
   const uniqueDownloads = [];
@@ -14988,7 +14990,7 @@ expressApp.get('/dashboard', async (req, res) => {
     seen.add(d.id);
     uniqueDownloads.push(d);
   }
-  
+
   const screenshots = await db.prepare(`SELECT * FROM screenshots ORDER BY created_at DESC LIMIT 200`).all();
   const recentBatchFiles = await getRecentDashboardBatchFiles.all(240);
   res.send(getDashboardHTML(uniqueDownloads, screenshots, recentBatchFiles));
@@ -14999,14 +15001,14 @@ expressApp.get('/media/file', async (req, res) => {
   const id = parseInt(req.query.id, 10);
   try {
     console.log(`[GET /media/file] kind=${kind} id=${id} ua=${String(req.headers['user-agent'] || '').slice(0, 60)}`);
-  } catch (e) {}
+  } catch (e) { }
   if (!Number.isFinite(id)) return res.status(400).end();
 
   try {
     let row = null;
-    if (kind === 'd') row = await getDownload.get(id);else
-    if (kind === 's') row = await db.prepare(`SELECT * FROM screenshots WHERE id=?`).get(id);else
-    return res.status(400).end();
+    if (kind === 'd') row = await getDownload.get(id); else
+      if (kind === 's') row = await db.prepare(`SELECT * FROM screenshots WHERE id=?`).get(id); else
+        return res.status(400).end();
 
     if (!row) return res.status(404).end();
     const fp = String(row.filepath || '').trim();
@@ -15050,7 +15052,7 @@ expressApp.get('/media/file', async (req, res) => {
 
         return res.status(404).end();
       }
-    } catch (e) {}
+    } catch (e) { }
 
     res.sendFile(fp, (err) => {
       if (!err) return;
@@ -15092,7 +15094,7 @@ function inferMediaType(fp) {
         if (sn === 'video') return 'video';
       }
     }
-  } catch (e) {}
+  } catch (e) { }
 
   return 'file';
 }
@@ -15105,9 +15107,9 @@ function normalizeThumbValue(v) {
     if (s.startsWith('http://') || s.startsWith('https://')) return s;
     if (s.startsWith('/')) {
       const ok =
-      s.startsWith('/download/') ||
-      s.startsWith('/media/') ||
-      s.startsWith('/addon/');
+        s.startsWith('/download/') ||
+        s.startsWith('/media/') ||
+        s.startsWith('/addon/');
 
       return ok ? s : '';
     }
@@ -15121,9 +15123,9 @@ function makeMediaItem(row) {
   const sourceUrl = row.source_url || '';
   const fp = String(row.filepath || '').trim();
 
-    if (row.platform === 'patreon') {
-      console.log(`[DEBUG-PATREON-EXPAND] Processing id=${row.id}, fp=${fp}, isAllowed=${safeIsAllowedExistingPath(path.resolve(fp))}`);
-    }
+  if (row.platform === 'patreon') {
+    console.log(`[DEBUG-PATREON-EXPAND] Processing id=${row.id}, fp=${fp}, isAllowed=${safeIsAllowedExistingPath(path.resolve(fp))}`);
+  }
 
   if (fp && isAuxiliaryMediaPath(fp)) return null;
   const t = inferMediaType(fp);
@@ -15172,15 +15174,15 @@ function makeMediaItem(row) {
       else if (/^thread_\d+$/i.test(channel)) channelDisplay = 'Thread ' + channel.replace(/^thread_/i, '');
       if (info && info.name && (!title || title === 'untitled')) title = info.name;
     }
-  } catch (e) {}
+  } catch (e) { }
   if (!channelDisplay) channelDisplay = channel;
   if (channelDisplay) titleDisplay = title ? `${channelDisplay} • ${title}` : channelDisplay;
 
   const src = `/media/file?kind=${encodeURIComponent(row.kind)}&id=${encodeURIComponent(row.id)}`;
   const preferredThumbFinal = preferredThumb ? (preferredThumb.includes('?') ? `${preferredThumb}&v=6` : `${preferredThumb}?v=6`) : '';
   const thumb = row.kind === 's' && t === 'image' && src ?
-  src :
-  preferredThumbFinal || `/media/thumb?kind=${encodeURIComponent(row.kind)}&id=${encodeURIComponent(row.id)}&v=6`;
+    src :
+    preferredThumbFinal || `/media/thumb?kind=${encodeURIComponent(row.kind)}&id=${encodeURIComponent(row.id)}&v=6`;
 
   return {
     kind: row.kind,
@@ -15197,7 +15199,7 @@ function makeMediaItem(row) {
     rating_kind: row.kind,
     rating_id: row.id,
     url: row.url || null,
-    source_url: row.source_url || row.url || null,
+    source_url: row.source_url || null,
     dedupe_key: dedupeKey || null,
     file_rel: fileRel || null,
     ready: true,
@@ -15221,7 +15223,7 @@ function makeActiveDownloadItem(row) {
   try {
     const fp = String(row && row.filepath ? row.filepath : '').trim();
     if (fp && isAuxiliaryMediaPath(fp)) return null;
-  } catch (e) {}
+  } catch (e) { }
   const safeDecode = (v) => {
     try {
       const s = String(v == null ? '' : v);
@@ -15244,7 +15246,7 @@ function makeActiveDownloadItem(row) {
         const parsed = new URL(rawUrl);
         type = inferMediaType(parsed.pathname || rawUrl);
       }
-    } catch (e) {}
+    } catch (e) { }
   }
   if (type !== 'image' && type !== 'video') type = 'file';
   let thumb = preferredThumb;
@@ -15311,7 +15313,7 @@ function isAuxiliaryMediaPath(inputPath) {
     if (/_thumb_v[0-9]+\.(jpe?g|png|gif)$/i.test(base)) return true;
     if (/[_\-.](?:thumb|thumbnail|logo|poster|preview|cover)(?:[_\-.][a-z0-9]+)?\.(?:jpe?g|png|gif|webp|bmp|svg|avif|heic|heif)$/i.test(base)) return true;
     if (/(?:^|[_\-.])(?:thumb|thumbnail|logo|poster|preview|cover)(?:[_\-.][a-z0-9]+)?$/i.test(path.basename(base, path.extname(base)))) return true;
-  } catch (e) {}
+  } catch (e) { }
   return false;
 }
 
@@ -15369,7 +15371,7 @@ function listMediaFilesInDir(rootDirAbs, maxFiles = 8000) {
 
       if (out.length >= MAX_FILES) break;
     }
-  } catch (e) {}
+  } catch (e) { }
 
   out.sort((a, b) => a.localeCompare(b));
   return dedupeVideoThumbnailPairs(out);
@@ -15391,8 +15393,8 @@ function dedupeVideoThumbnailPairs(files) {
         entry = { videos: [], images: [] };
         groups.set(baseKey, entry);
       }
-      if (videoExts.has(ext)) entry.videos.push(file);else
-      entry.images.push(file);
+      if (videoExts.has(ext)) entry.videos.push(file); else
+        entry.images.push(file);
     }
 
     const emittedGroups = new Set();
@@ -15423,12 +15425,12 @@ function dedupeVideoThumbnailPairs(files) {
   }
 }
 
-function makePathMediaItem({ relPath, platform, channel, title, created_at, rowTs, thumbTs, url, source_url, rating, rating_kind, rating_id }) {
+function makePathMediaItem({ relPath, platform, channel, title, created_at, thumbTs, url, source_url, rating, rating_kind, rating_id }) {
   const absPath = path.resolve(BASE_DIR, relPath);
   if (isAuxiliaryMediaPath(absPath)) return null;
   const type = inferMediaType(absPath);
   const base = path.basename(relPath);
-  
+
   let channelDisplay = channel || '';
   try {
     const plat = String(platform || '').toLowerCase();
@@ -15454,7 +15456,7 @@ function makePathMediaItem({ relPath, platform, channel, title, created_at, rowT
     if (channelDisplay && /^\d{6,}\s+/.test(channelDisplay)) {
       channelDisplay = channelDisplay.replace(/^\d+\s+/, '');
     }
-  } catch (e) {}
+  } catch (e) { }
 
   // For individual files, show just the filename — not the parent download's title
   const isUnknown = !channelDisplay || channelDisplay.toLowerCase() === 'unknown';
@@ -15471,13 +15473,13 @@ function makePathMediaItem({ relPath, platform, channel, title, created_at, rowT
     title: combinedTitle,
     title_display: titleDisplay,
     created_at,
-    ts: rowTs > 0 ? rowTs : (thumbTs > 0 ? thumbTs : (created_at ? new Date(created_at).getTime() : 0)),
+    ts: thumbTs > 0 ? thumbTs : (created_at ? new Date(created_at).getTime() : 0),
     type,
     rating: (rating != null && rating !== '') ? Number(rating) : null,
     rating_kind: rating_kind || 'd',
     rating_id: rating_id != null ? rating_id : null,
     url: url || null,
-    source_url: source_url || url || null,
+    source_url: source_url || null,
     dedupe_key: dedupeKey,
     file_rel: relPath,
     src: `/media/path?path=${encodeURIComponent(relPath)}`,
@@ -15500,14 +15502,13 @@ function makeIndexedMediaItem(row) {
         const st = fs.statSync(absPath);
         thumbTs = st && st.mtimeMs ? st.mtimeMs : 0;
       }
-    } catch (e) {}
+    } catch (e) { }
     return makePathMediaItem({
       relPath,
       platform: row.platform,
       channel: row.channel,
       title: row.title,
       created_at: row.created_at,
-      rowTs: row.ts,
       thumbTs,
       url: row.url,
       source_url: row.source_url,
@@ -15519,75 +15520,77 @@ function makeIndexedMediaItem(row) {
   return makeMediaItem(row);
 }
 
-  function mediaItemKey(item) {
-    if (!item || typeof item !== 'object') return null;
-    try {
-      const dk = item.dedupe_key ? String(item.dedupe_key) : '';
-      if (dk) {
-        const abs = path.resolve(dk);
-        return `dedupe:${abs}`;
-      }
-    } catch (e) {}
-    try {
-      const rel = item.file_rel ? String(item.file_rel) : '';
-      if (rel) {
-        const abs = path.resolve(BASE_DIR, rel);
-        return `dedupe:${abs}`;
-      }
-    } catch (e) {}
-    if (item.kind && item.id != null) {
-      return `${item.kind}:${item.id}`;
+function mediaItemKey(item) {
+  if (!item || typeof item !== 'object') return null;
+  try {
+    const dk = item.dedupe_key ? String(item.dedupe_key) : '';
+    if (dk) {
+      const abs = path.resolve(dk);
+      return `dedupe:${abs}`;
     }
-    if (item.open && item.open.path) {
-      return `path:${item.open.path}`;
+  } catch (e) { }
+  try {
+    const rel = item.file_rel ? String(item.file_rel) : '';
+    if (rel) {
+      const abs = path.resolve(BASE_DIR, rel);
+      return `dedupe:${abs}`;
     }
-    if (item.src) {
-      return `src:${item.src}`;
-    }
-    return null;
+  } catch (e) { }
+  if (item.kind && item.id != null) {
+    return `${item.kind}:${item.id}`;
   }
-
-  function mediaItemPriority(item) {
-    if (!item || typeof item !== 'object') return 0;
-    const kind = String(item.kind || '').toLowerCase();
-    if (kind === 'd') return 3;
-    if (kind === 's') return 2;
-    if (kind === 'p') return 1;
-    return 0;
+  if (item.open && item.open.path) {
+    return `path:${item.open.path}`;
   }
+  if (item.src) {
+    return `src:${item.src}`;
+  }
+  return null;
+}
 
-  function pushUniqueMediaItem({
-    bucket,
-    item,
-    seen,
-    typeFilter
-  }) {
-    if (!item || !bucket || !seen) return false;
-    const type = String(typeFilter || 'all');
-    const isMedia = item.type === 'video' || item.type === 'image';
-    if (type === 'media' && !isMedia) return false;
-    if (type !== 'all' && type !== 'media' && item.type !== type) return false;
-    const key = mediaItemKey(item);
-    if (key && seen.has(key)) {
-      const prevIndex = Number(seen.get(key));
-      if (!Number.isFinite(prevIndex) || prevIndex < 0 || prevIndex >= bucket.length) return false;
-      const prevItem = bucket[prevIndex];
-      if (mediaItemPriority(item) <= mediaItemPriority(prevItem)) return false;
-      bucket[prevIndex] = item;
-      return true;
-    }
-    bucket.push(item);
-    if (key) seen.set(key, bucket.length - 1);
+function mediaItemPriority(item) {
+  if (!item || typeof item !== 'object') return 0;
+  const kind = String(item.kind || '').toLowerCase();
+  if (kind === 'd') return 3;
+  if (kind === 's') return 2;
+  if (kind === 'p') return 1;
+  return 0;
+}
+
+function pushUniqueMediaItem({
+  bucket,
+  item,
+  seen,
+  typeFilter
+}) {
+  if (!item || !bucket || !seen) return false;
+  const type = String(typeFilter || 'all');
+  const isMedia = item.type === 'video' || item.type === 'image';
+  if (type === 'media' && !isMedia) return false;
+  if (type === 'video_only' && item.type !== 'video') return false;
+  if (type === 'image_only' && item.type !== 'image') return false;
+  if (type !== 'all' && type !== 'media' && type !== 'video_only' && type !== 'image_only' && item.type !== type) return false;
+  const key = mediaItemKey(item);
+  if (key && seen.has(key)) {
+    const prevIndex = Number(seen.get(key));
+    if (!Number.isFinite(prevIndex) || prevIndex < 0 || prevIndex >= bucket.length) return false;
+    const prevItem = bucket[prevIndex];
+    if (mediaItemPriority(item) <= mediaItemPriority(prevItem)) return false;
+    bucket[prevIndex] = item;
     return true;
   }
+  bucket.push(item);
+  if (key) seen.set(key, bucket.length - 1);
+  return true;
+}
 
-  function expandRowToMediaItems(row, cursorFileIndex = 0, maxItems = 500) {
-    const items = [];
-    const fp = String(row.filepath || '').trim();
+function expandRowToMediaItems(row, cursorFileIndex = 0, maxItems = 500) {
+  const items = [];
+  const fp = String(row.filepath || '').trim();
 
-    if (row.platform === 'patreon') {
-      console.log(`[DEBUG-PATREON-EXPAND] Processing id=${row.id}, fp=${fp}, isAllowed=${safeIsAllowedExistingPath(path.resolve(fp))}`);
-    }
+  if (row.platform === 'patreon') {
+    console.log(`[DEBUG-PATREON-EXPAND] Processing id=${row.id}, fp=${fp}, isAllowed=${safeIsAllowedExistingPath(path.resolve(fp))}`);
+  }
 
   if (!fp) return { items, nextFileIndex: 0, done: true };
 
@@ -15622,7 +15625,7 @@ function makeIndexedMediaItem(row) {
         try {
           const st2 = fs.statSync(absFile);
           thumbTs = st2 && st2.mtimeMs ? st2.mtimeMs : 0;
-        } catch (e) {}
+        } catch (e) { }
         const it = makePathMediaItem({
           relPath: rel,
           platform: row.platform,
@@ -15662,7 +15665,7 @@ function makeIndexedMediaItem(row) {
           try {
             const preferred = row && row.kind === 'd' ? normalizeThumbValue(row.thumbnail) : '';
             if (preferred) it.thumb = preferred;
-          } catch (e) {}
+          } catch (e) { }
           if (it.type === 'image' || it.type === 'video') items.push(it);
         }
       } else {
@@ -15683,28 +15686,32 @@ async function getDynamicHybridBatch(stmt, typeFilter, ...args) {
   let sql = stmt.source || '';
   if (!sql) return await stmt.all(...args);
 
-  // Apply type filter by wrapping the entire query in an outer WHERE on filepath
+  // Apply type filter by wrapping the entire query
   const ext = typeFilter === 'video_only'
-    ? "(filepath ILIKE '%.mp4' OR filepath ILIKE '%.webm' OR filepath ILIKE '%.mov' OR filepath ILIKE '%.mkv')"
-    : "(filepath ILIKE '%.jpg' OR filepath ILIKE '%.jpeg' OR filepath ILIKE '%.png' OR filepath ILIKE '%.gif' OR filepath ILIKE '%.webp')";
+    ? "(filepath ILIKE '%.mp4' OR filepath ILIKE '%.webm' OR filepath ILIKE '%.mov' OR filepath ILIKE '%.mkv' OR filepath ILIKE '%.MP4' OR filepath ILIKE '%.MOV')"
+    : "(filepath ILIKE '%.jpg' OR filepath ILIKE '%.jpeg' OR filepath ILIKE '%.png' OR filepath ILIKE '%.gif' OR filepath ILIKE '%.webp' OR filepath ILIKE '%.avif')";
+
+  // Simple robust approach: wrap the entire query as subquery and add WHERE filter
+  // The original query ends with ORDER BY ts DESC LIMIT ? OFFSET ?
+  // We wrap it: SELECT * FROM (SELECT * FROM (original_without_order_limit) _inner WHERE ext) _typed ORDER BY ts DESC LIMIT ? OFFSET ?
   
-  // The query is: SELECT ... FROM (...) ORDER BY ts DESC LIMIT ? OFFSET ?
-  // Wrap it: SELECT * FROM (original) outer_wrap WHERE ext ORDER BY ts DESC LIMIT ? OFFSET ?
-  // Remove the trailing ORDER BY/LIMIT/OFFSET, wrap, re-add
-  const orderMatch = sql.match(/\n\s*(ORDER BY\s+ts\s+(?:DESC|ASC)\s*\n\s*LIMIT\s+\?\s+OFFSET\s+\?)\s*$/i);
+  // Find and strip trailing ORDER BY ... LIMIT ... OFFSET ... (flexible whitespace/newline matching)
+  const orderMatch = sql.match(/(ORDER\s+BY\s+ts\s+(?:DESC|ASC)\s*(?:NULLS\s+(?:FIRST|LAST)\s*)?LIMIT\s+\?\s*OFFSET\s+\?)\s*$/is);
   if (orderMatch) {
     const orderClause = orderMatch[1];
-    const baseQuery = sql.slice(0, sql.length - orderMatch[0].length);
-    sql = `SELECT * FROM (${baseQuery}) _typed WHERE ${ext}\n  ${orderClause}`;
+    const baseQuery = sql.slice(0, sql.length - orderMatch[0].length).trimEnd();
+    sql = `SELECT * FROM (${baseQuery}) _typed WHERE ${ext} ${orderClause}`;
+  } else {
+    // Fallback: just wrap the whole thing
+    sql = `SELECT * FROM (${sql}) _typed_fb WHERE ${ext}`;
   }
-
   const dynamicStmt = db.prepare(sql);
   return await dynamicStmt.all(...args);
 }
 
 expressApp.get('/api/media/recent-files', async (req, res) => {
   const reqStartTime = Date.now();
-  console.log(`📥 [${new Date().toISOString().substr(11,8)}] GET /api/media/recent-files - limit=${req.query.limit || '120'}, type=${req.query.type || 'all'}, cursor=${req.query.cursor ? 'yes' : 'no'}, dirs=${req.query.dirs ? 'yes' : 'no'}`);
+  console.log(`📥 [${new Date().toISOString().substr(11, 8)}] GET /api/media/recent-files - limit=${req.query.limit || '120'}, type=${req.query.type || 'all'}, cursor=${req.query.cursor ? 'yes' : 'no'}, dirs=${req.query.dirs ? 'yes' : 'no'}`);
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
@@ -15721,12 +15728,12 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
   try {
     const dirsParam = String(req.query.dirs || '').trim();
     if (dirsParam) enabledDirs = JSON.parse(dirsParam);
-  } catch (e) {}
+  } catch (e) { }
   if (!enabledDirs) enabledDirs = loadDirectoryFilter();
 
   try {
     const isTopCursor = !cursorRaw ||
-    cur && cur.activeOffset === 0 && cur.rowOffset === 0 && !cur.dir && cur.fileIndex === 0;
+      cur && cur.activeOffset === 0 && cur.rowOffset === 0 && !cur.dir && cur.fileIndex === 0;
 
     if (!includeActive && !includeActiveFiles && isTopCursor) {
       try {
@@ -15743,7 +15750,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
           recentFilesTopCacheAt = now;
           recentFilesTopCache = new Map();
         }
-      } catch (e) {}
+      } catch (e) { }
     }
 
     const items = [];
@@ -15760,7 +15767,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
           pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
           if (items.length >= limit || items.length >= cap) break;
         }
-      } catch (e) {}
+      } catch (e) { }
     }
     const nextActiveOffset = -1;
     let rowOffset = cur.rowOffset;
@@ -15782,8 +15789,8 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
           console.log(`[DEBUG-PATREON-API] Found DB row: id=${row.id}, kind=${row.kind}, filepath=${row.filepath}, includeActiveFiles=${includeActiveFiles}`);
         }
 
-        if (!row) {rowOffset += 1;continue;}
-        
+        if (!row) { rowOffset += 1; continue; }
+
         // Apply directory filter
         let relPath;
         if (row.kind === 'p') {
@@ -15816,16 +15823,16 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
                 rowOffset += 1;
                 continue;
               }
-            } catch (e) {}
+            } catch (e) { }
           }
         }
-        
+
         const it = makeIndexedMediaItem(row);
         pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
         rowOffset += 1;
         if (items.length >= limit) break;
       }
-      
+
       if (batch.length < maxRowsPerCall) {
         loopDone = true;
       }
@@ -15835,7 +15842,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
     const done = loopDone;
     const payload = { success: true, items, next_cursor: nextCursor, done };
     const reqTime = Date.now() - reqStartTime;
-    console.log(`📤 [${new Date().toISOString().substr(11,8)}] Response /api/media/recent-files - ${items.length} items in ${reqTime}ms`);
+    console.log(`📤 [${new Date().toISOString().substr(11, 8)}] Response /api/media/recent-files - ${items.length} items in ${reqTime}ms`);
 
     if (!includeActive && !includeActiveFiles && (!cursorRaw || cur && cur.activeOffset === 0 && cur.rowOffset === 0 && !cur.dir && cur.fileIndex === 0)) {
       try {
@@ -15848,7 +15855,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
           const keys = Array.from(recentFilesTopCache.keys()).slice(0, Math.max(1, recentFilesTopCache.size - 60));
           for (const k of keys) recentFilesTopCache.delete(k);
         }
-      } catch (e) {}
+      } catch (e) { }
     }
 
     return res.json(payload);
@@ -15874,14 +15881,14 @@ expressApp.get('/api/media/channel-files', async (req, res) => {
   try {
     const dirsParam = String(req.query.dirs || '').trim();
     if (dirsParam) enabledDirs = JSON.parse(dirsParam);
-  } catch (e) {}
+  } catch (e) { }
   if (!enabledDirs) enabledDirs = loadDirectoryFilter();
 
   if (!platform || !channel) return res.status(400).json({ success: false, error: 'platform en channel zijn vereist' });
 
   try {
     const isTopCursor = !cursorRaw ||
-    cur && cur.activeOffset === 0 && cur.rowOffset === 0 && !cur.dir && cur.fileIndex === 0;
+      cur && cur.activeOffset === 0 && cur.rowOffset === 0 && !cur.dir && cur.fileIndex === 0;
 
     if (!includeActive && !includeActiveFiles && isTopCursor) {
       try {
@@ -15898,7 +15905,7 @@ expressApp.get('/api/media/channel-files', async (req, res) => {
           recentFilesTopCacheAt = now;
           recentFilesTopCache = new Map();
         }
-      } catch (e) {}
+      } catch (e) { }
     }
 
     const items = [];
@@ -15917,7 +15924,7 @@ expressApp.get('/api/media/channel-files', async (req, res) => {
           pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
           if (items.length >= limit || items.length >= cap) break;
         }
-      } catch (e) {}
+      } catch (e) { }
     }
     const nextActiveOffset = -1;
     let rowOffset = cur.rowOffset;
@@ -15939,14 +15946,14 @@ expressApp.get('/api/media/channel-files', async (req, res) => {
           console.log(`[DEBUG-PATREON-API] Found DB row: id=${row.id}, kind=${row.kind}, filepath=${row.filepath}, includeActiveFiles=${includeActiveFiles}`);
         }
 
-        if (!row) {rowOffset += 1;continue;}
+        if (!row) { rowOffset += 1; continue; }
 
         const relPath = row.kind === 'p' ? row.id : (row.filepath ? path.relative(BASE_DIR, row.filepath) : '');
         if (enabledDirs && relPath && !shouldIncludePath(relPath, enabledDirs)) {
           rowOffset += 1;
           continue;
         }
-        
+
         if (includeActiveFiles && String(row.kind || '') === 'p' && row.rating_kind === 'd' && row.rating_id != null) {
           const idNum = Number(row.rating_id);
           if (Number.isFinite(idNum) && !runtimeActiveIdSet.has(idNum)) {
@@ -15957,7 +15964,7 @@ expressApp.get('/api/media/channel-files', async (req, res) => {
                 rowOffset += 1;
                 continue;
               }
-            } catch (e) {}
+            } catch (e) { }
           }
         }
         const it = makeIndexedMediaItem(row);
@@ -15965,7 +15972,7 @@ expressApp.get('/api/media/channel-files', async (req, res) => {
         rowOffset += 1;
         if (items.length >= limit) break;
       }
-      
+
       if (batch.length < maxRowsPerCall) {
         loopDone = true;
       }
@@ -15986,7 +15993,7 @@ expressApp.get('/api/media/channel-files', async (req, res) => {
           const keys = Array.from(recentFilesTopCache.keys()).slice(0, Math.max(1, recentFilesTopCache.size - 60));
           for (const k of keys) recentFilesTopCache.delete(k);
         }
-      } catch (e) {}
+      } catch (e) { }
     }
 
     return res.json(payload);
@@ -16120,15 +16127,15 @@ expressApp.get('/api/directories', async (req, res) => {
   try {
     const directories = [];
     const entries = await fs.promises.readdir(BASE_DIR, { withFileTypes: true });
-    
+
     for (const entry of entries) {
       if (entry.isDirectory() && !entry.name.startsWith('.')) {
         directories.push(entry.name);
       }
     }
-    
+
     directories.sort();
-    
+
     const directoriesInfo = [];
     try {
       if (typeof db !== 'undefined' && db && db.isPostgres) {
@@ -16154,12 +16161,12 @@ expressApp.get('/api/directories', async (req, res) => {
           directoriesInfo.push({ path: row.dir, count: parseInt(row.c, 10) });
         }
       }
-    } catch(e) { console.error('Error fetching directory counts:', e); }
+    } catch (e) { console.error('Error fetching directory counts:', e); }
 
     const enabledDirs = loadDirectoryFilter() || directories.slice();
-    
-    res.json({ 
-      success: true, 
+
+    res.json({
+      success: true,
       directories: directories,
       directoriesInfo: directoriesInfo,
       enabled: enabledDirs,
@@ -16182,21 +16189,21 @@ expressApp.post('/api/viewer/navigate', async (req, res) => {
     const sort = String(body.sort || 'recent');
     const platform = String(body.platform || '');
     const channel = String(body.channel || '');
-    
+
     let enabledDirs = null;
     if (body.dirs) {
       try {
         enabledDirs = body.dirs;
         if (typeof enabledDirs === 'string') enabledDirs = JSON.parse(enabledDirs);
-      } catch (e) {}
+      } catch (e) { }
     }
     if (!enabledDirs) enabledDirs = loadDirectoryFilter();
 
     const includeActiveFiles = filter === 'all';
-    
+
     let query;
     let params;
-    
+
     if (mode === 'channel' && platform && channel) {
       query = (sort === 'rating_asc') ? getHybridMediaByChannelByRatingAsc : (sort === 'rating_desc') ? getHybridMediaByChannelByRatingDesc : (sort === 'oldest') ? getHybridMediaByChannelByOldest : (sort === 'name_asc') ? getHybridMediaByChannelByNameAsc : (sort === 'name_desc') ? getHybridMediaByChannelByNameDesc : (includeActiveFiles ? getHybridMediaByChannelWithActiveFiles : getHybridMediaByChannel);
       params = [platform, channel, platform, channel, platform, channel, 200, 0];
@@ -16204,11 +16211,11 @@ expressApp.post('/api/viewer/navigate', async (req, res) => {
       query = (sort === 'rating_asc') ? getRecentHybridMediaByRatingAsc : (sort === 'rating_desc') ? getRecentHybridMediaByRatingDesc : (sort === 'oldest') ? getRecentHybridMediaByOldest : (sort === 'name_asc') ? getRecentHybridMediaByNameAsc : (sort === 'name_desc') ? getRecentHybridMediaByNameDesc : (includeActiveFiles ? getRecentHybridMediaWithActiveFiles : getRecentHybridMedia);
       params = [200, 0];
     }
-    
+
     const dynamicFilter = filter === 'video' ? 'video_only' : filter === 'image' ? 'image_only' : filter;
     const batch = await getDynamicHybridBatch(query, dynamicFilter, ...params);
     const items = [];
-    
+
     for (const row of batch || []) {
       if (row && row.platform === 'patreon') {
         console.log(`[DEBUG-PATREON-API] Found DB row: id=${row.id}, kind=${row.kind}, filepath=${row.filepath}, includeActiveFiles=${includeActiveFiles}`);
@@ -16217,26 +16224,26 @@ expressApp.post('/api/viewer/navigate', async (req, res) => {
       if (!row) continue;
       const relPath = row.kind === 'p' ? row.id : (row.filepath ? path.relative(BASE_DIR, row.filepath) : '');
       if (enabledDirs && relPath && !shouldIncludePath(relPath, enabledDirs)) continue;
-      
+
       const filterType = row.kind === 'p' ? 'active' : (row.filepath && /\.(mp4|webm|mov|avi|mkv)$/i.test(row.filepath)) ? 'video' : 'image';
       if (filter === 'video' && filterType !== 'video') continue;
       if (filter === 'image' && filterType !== 'image') continue;
       if (filter === 'media' && filterType !== 'video' && filterType !== 'image') continue;
-      
+
       items.push(row);
     }
-    
+
     let currentIndex = -1;
     if (Number.isFinite(currentId) && currentKind) {
       currentIndex = items.findIndex(it => it.kind === currentKind && it.id === currentId);
     }
-    
+
     const targetIndex = direction === 'next' ? currentIndex + 1 : currentIndex - 1;
-    
+
     if (targetIndex >= 0 && targetIndex < items.length) {
       const item = items[targetIndex];
-      return res.json({ 
-        success: true, 
+      return res.json({
+        success: true,
         item: {
           kind: item.kind,
           id: item.id,
@@ -16251,7 +16258,7 @@ expressApp.post('/api/viewer/navigate', async (req, res) => {
         hasPrev: targetIndex > 0
       });
     }
-    
+
     res.json({ success: false, error: 'no more items' });
   } catch (e) {
     res.status(500).json({ success: false, error: String(e.message || e) });
@@ -16271,24 +16278,24 @@ expressApp.get('/api/check-cam-girls', async (req, res) => {
       'xvideos',
       '_Downloads te importeren'
     ];
-    
+
     const result = {
       withPrefix: 0,
       withoutPrefix: {},
       total: 0,
       totalDownloads: 0
     };
-    
+
     // Total downloads in database
     const totalResult = await db.query(`SELECT COUNT(*) as count FROM downloads`);
     result.totalDownloads = parseInt(totalResult.rows?.[0]?.count || 0);
-    
+
     // Count items WITH CAM-GIRLS prefix
     const withPrefixResult = await db.query(
       `SELECT COUNT(*) as count FROM downloads WHERE filepath LIKE 'CAM-GIRLS/%'`
     );
     result.withPrefix = parseInt(withPrefixResult.rows?.[0]?.count || 0);
-    
+
     // Count items WITHOUT CAM-GIRLS prefix per directory
     for (const dir of movedDirs) {
       const withoutPrefixResult = await db.query(
@@ -16301,12 +16308,12 @@ expressApp.get('/api/check-cam-girls', async (req, res) => {
       result.withoutPrefix[dir] = count;
       result.total += count;
     }
-    
+
     // Sample paths with CAM-GIRLS
     const sampleWithPrefix = await db.query(
       `SELECT filepath, platform, channel FROM downloads WHERE filepath LIKE 'CAM-GIRLS/%' LIMIT 5`
     );
-    
+
     // Sample paths without CAM-GIRLS  
     const sampleWithoutPrefix = await db.query(
       `SELECT filepath, platform, channel FROM downloads 
@@ -16314,7 +16321,7 @@ expressApp.get('/api/check-cam-girls', async (req, res) => {
          AND filepath NOT LIKE 'CAM-GIRLS/%' 
        LIMIT 5`
     );
-    
+
     // Get recent imports
     const recentImports = await db.query(
       `SELECT filepath, platform, channel, created_at 
@@ -16322,11 +16329,11 @@ expressApp.get('/api/check-cam-girls', async (req, res) => {
        ORDER BY created_at DESC 
        LIMIT 10`
     );
-    
+
     result.samplesWithPrefix = (sampleWithPrefix.rows || []);
     result.samplesWithoutPrefix = (sampleWithoutPrefix.rows || []);
     result.recentImports = (recentImports.rows || []);
-    
+
     res.json({ success: true, result });
   } catch (e) {
     console.error('❌ Check error:', e);
@@ -16338,7 +16345,7 @@ expressApp.post('/api/migrate-cam-girls', async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   try {
     console.log('🔄 Starting CAM-GIRLS migration...');
-    
+
     const movedDirs = [
       'Chatroulette',
       'motherless',
@@ -16349,10 +16356,10 @@ expressApp.post('/api/migrate-cam-girls', async (req, res) => {
       'xvideos',
       '_Downloads te importeren'
     ];
-    
+
     let totalDownloads = 0;
     let totalScreenshots = 0;
-    
+
     for (const dir of movedDirs) {
       const downloadResult = await db.query(
         `UPDATE downloads 
@@ -16363,7 +16370,7 @@ expressApp.post('/api/migrate-cam-girls', async (req, res) => {
       );
       totalDownloads += downloadResult.rowCount;
       console.log(`  Downloads ${dir}: ${downloadResult.rowCount} rows updated`);
-      
+
       const screenshotResult = await db.query(
         `UPDATE screenshots
          SET filepath = 'CAM-GIRLS/' || filepath
@@ -16374,12 +16381,12 @@ expressApp.post('/api/migrate-cam-girls', async (req, res) => {
       totalScreenshots += screenshotResult.rowCount;
       console.log(`  Screenshots ${dir}: ${screenshotResult.rowCount} rows updated`);
     }
-    
+
     console.log(`✅ Migration complete: ${totalDownloads} downloads, ${totalScreenshots} screenshots`);
-    
-    res.json({ 
-      success: true, 
-      downloads: totalDownloads, 
+
+    res.json({
+      success: true,
+      downloads: totalDownloads,
       screenshots: totalScreenshots,
       message: `Updated ${totalDownloads} downloads and ${totalScreenshots} screenshots`
     });
@@ -16429,7 +16436,7 @@ function getDashboardHTML(downloads, screenshots, batchFiles) {
         if (m && m.webdl_kind === 'recording') return 'recording';
         if (m && m.tool === 'gallery-dl') return 'gallery';
       }
-    } catch (e) {}
+    } catch (e) { }
     if (String(d && d.filename ? d.filename : '') === '(multiple)') return 'gallery';
     return 'download';
   }
@@ -16488,11 +16495,11 @@ function getDashboardHTML(downloads, screenshots, batchFiles) {
     const rep = items[0] || {};
     const statuses = new Set(items.map((x) => String(x && x.status ? x.status : '')));
     let aggStatus = String(rep.status || '');
-    if (statuses.has('downloading') || statuses.has('postprocessing')) aggStatus = 'downloading';else
-    if (statuses.has('queued') || statuses.has('pending')) aggStatus = 'queued';else
-    if (statuses.has('error')) aggStatus = 'error';else
-    if (statuses.has('cancelled')) aggStatus = 'cancelled';else
-    if (statuses.has('completed')) aggStatus = 'completed';
+    if (statuses.has('downloading') || statuses.has('postprocessing')) aggStatus = 'downloading'; else
+      if (statuses.has('queued') || statuses.has('pending')) aggStatus = 'queued'; else
+        if (statuses.has('error')) aggStatus = 'error'; else
+          if (statuses.has('cancelled')) aggStatus = 'cancelled'; else
+            if (statuses.has('completed')) aggStatus = 'completed';
 
     const aggProgress = (() => {
       let p = 0;
@@ -16543,17 +16550,17 @@ function getDashboardHTML(downloads, screenshots, batchFiles) {
     const stopBtn = (() => {
       if (!isGroup) {
         return status === 'queued' || status === 'downloading' || status === 'postprocessing' ?
-        `<button onclick="cancelDownload(${d.id})" class="btn btn-sm btn-danger">Stop</button>` :
-        '';
+          `<button onclick="cancelDownload(${d.id})" class="btn btn-sm btn-danger">Stop</button>` :
+          '';
       }
       return status === 'queued' || status === 'downloading' || status === 'postprocessing' ?
-      `<button onclick='cancelDownloadGroup(${JSON.stringify(ids)})' class="btn btn-sm btn-danger">Stop</button>` :
-      '';
+        `<button onclick='cancelDownloadGroup(${JSON.stringify(ids)})' class="btn btn-sm btn-danger">Stop</button>` :
+        '';
     })();
 
     const title = isGroup ?
-    `Thread ${String(d._threadId || '')} (${Number(d._count || 0)}) — ${String(d.title || '')}` :
-    String(d.title || '');
+      `Thread ${String(d._threadId || '')} (${Number(d._count || 0)}) — ${String(d.title || '')}` :
+      String(d.title || '');
 
     const sizeCell = (() => {
       const sz = isGroup ? Number(d._totalSize || 0) : Number(d.filesize || 0);
@@ -16803,7 +16810,7 @@ async function scanExistingTagsOnStartup() {
       console.log('Scanning existing media for #tags in titles and filenames...');
       const limitScan = 5000;
       let scanned = 0;
-      
+
       const updateTags = async (kind, id, text) => {
         if (!text) return;
         const matches = [...(text.match(/#([a-zA-Z0-9_]+)/g) || []), ...(text.match(/\[([^\]]+)\]/g) || []).map(t => t.slice(1, -1).replace(/\s+/g, '_'))];
@@ -16820,18 +16827,18 @@ async function scanExistingTagsOnStartup() {
               const tagRow = db.prepare('SELECT id FROM tags WHERE name = ?').get(t);
               if (tagRow) db.prepare('INSERT OR IGNORE INTO media_tags (kind, media_id, tag_id) VALUES (?, ?, ?)').run(kind, String(id), tagRow.id);
             }
-          } catch(e){}
+          } catch (e) { }
         }
       };
 
       const dlRows = await db.prepare('SELECT id, title, filename, filepath FROM downloads ORDER BY id DESC LIMIT ' + limitScan).all();
       for (const r of dlRows) {
-        await updateTags('d', r.id, r.title + ' ' + (r.filename||'') + ' ' + (r.filepath||''));
+        await updateTags('d', r.id, r.title + ' ' + (r.filename || '') + ' ' + (r.filepath || ''));
         scanned++;
       }
       const scRows = await db.prepare('SELECT id, title, filename, filepath FROM screenshots ORDER BY id DESC LIMIT ' + limitScan).all();
       for (const r of scRows) {
-        await updateTags('s', r.id, r.title + ' ' + (r.filename||'') + ' ' + (r.filepath||''));
+        await updateTags('s', r.id, r.title + ' ' + (r.filename || '') + ' ' + (r.filepath || ''));
         scanned++;
       }
       console.log(`Finished scanning ${scanned} media items for tags.`);
@@ -16849,7 +16856,7 @@ async function startServer() {
     if (String(process.env.WEBDL_SCAN_EXISTING_TAGS || '0').trim() === '1') {
       await scanExistingTagsOnStartup();
     }
-  } catch (e) {}
+  } catch (e) { }
 
   // Clean up thumbnail files from download_files
   try {
@@ -16869,7 +16876,7 @@ async function startServer() {
       try {
         const { execSync } = require('child_process');
         execSync(`lsof -ti :${PORT} | xargs kill -9 2>/dev/null || true`, { timeout: 5000 });
-      } catch (e) {}
+      } catch (e) { }
       setTimeout(() => {
         server.listen(PORT, () => {
           console.log(`\n🟢 WEBDL Server draait op http://localhost:${PORT} (na herstart)`);
@@ -16902,7 +16909,7 @@ async function startServer() {
       try {
         rehydrateDownloadQueue();
         runDownloadSchedulerSoon();
-        syncRuntimeActiveState().catch(() => {});
+        syncRuntimeActiveState().catch(() => { });
         console.log('🔁 Queue rehydrate gestart na startup');
         recentFilesTopCache.clear();
       } catch (e) {
@@ -16911,62 +16918,30 @@ async function startServer() {
     }, STARTUP_REHYDRATE_DELAY_MS);
 
     setInterval(() => {
-      syncRuntimeActiveState().catch(() => {});
+      syncRuntimeActiveState().catch(() => { });
     }, 2500);
 
-  if (ADDON_AUTO_BUILD_ON_START || ADDON_FORCE_REBUILD_ON_START) {
-    ensureFirefoxAddonBuilt({ force: ADDON_FORCE_REBUILD_ON_START }).
-    then((result) => {
-      const st = result && result.state ? result.state : getAddonBuildState();
-      const marker = st && st.sourceBuildMarker ? st.sourceBuildMarker : 'unknown';
-      if (result && result.rebuilt) {
-        console.log(`🧩 Addon auto-build: rebuilt (${result.reason}) marker=${marker}`);
-      } else {
-        console.log(`🧩 Addon auto-build: up-to-date marker=${marker}`);
-      }
-    }).
-    catch((err) => {
-      console.warn(`⚠️ Addon auto-build mislukt: ${err && err.message ? err.message : err}`);
-    });
-  } else {
-    console.log('🧩 Addon auto-build bij startup uitgeschakeld (WEBDL_ADDON_AUTO_BUILD_ON_START=0 en WEBDL_ADDON_FORCE_REBUILD_ON_START=0)');
-  }
-
-  let autoImportInProgress = false;
-  if (AUTO_IMPORT_ON_START) {
-    setTimeout(async () => {
-      try {
-        if (autoImportInProgress) return;
-        autoImportInProgress = true;
-        const result = await importExistingVideosFromDisk({
-          rootDir: AUTO_IMPORT_ROOT_DIR,
-          maxDepth: getAutoImportMaxDepth(),
-          dryRun: false,
-          minFileAgeMs: AUTO_IMPORT_MIN_FILE_AGE_MS,
-          flattenToWebdl: AUTO_IMPORT_FLATTEN_TO_WEBDL,
-          moveSource: AUTO_IMPORT_MOVE_SOURCE,
-          maxInserts: 15
+    if (ADDON_AUTO_BUILD_ON_START || ADDON_FORCE_REBUILD_ON_START) {
+      ensureFirefoxAddonBuilt({ force: ADDON_FORCE_REBUILD_ON_START }).
+        then((result) => {
+          const st = result && result.state ? result.state : getAddonBuildState();
+          const marker = st && st.sourceBuildMarker ? st.sourceBuildMarker : 'unknown';
+          if (result && result.rebuilt) {
+            console.log(`🧩 Addon auto-build: rebuilt (${result.reason}) marker=${marker}`);
+          } else {
+            console.log(`🧩 Addon auto-build: up-to-date marker=${marker}`);
+          }
+        }).
+        catch((err) => {
+          console.warn(`⚠️ Addon auto-build mislukt: ${err && err.message ? err.message : err}`);
         });
-        if (result && result.success) {
-          console.log(`📥 Auto-import: inserted=${result.inserted} skipped=${result.skipped} errors=${Array.isArray(result.errors) ? result.errors.length : 0} root=${result.rootDir}`);
-        } else {
-          console.warn(`⚠️ Auto-import overgeslagen: ${result && result.error ? result.error : 'onbekende fout'}`);
-        }
-      } catch (e) {
-        console.warn(`⚠️ Auto-import mislukt: ${e && e.message ? e.message : e}`);
-      } finally {
-        autoImportInProgress = false;
-      }
-    }, 500);
-  }
+    } else {
+      console.log('🧩 Addon auto-build bij startup uitgeschakeld (WEBDL_ADDON_AUTO_BUILD_ON_START=0 en WEBDL_ADDON_FORCE_REBUILD_ON_START=0)');
+    }
 
-  if (AUTO_IMPORT_ON_START && AUTO_IMPORT_POLL_MS > 0) {
-    setTimeout(() => {
-      try {
-        console.log(`📥 Auto-import watcher: polling elke ${AUTO_IMPORT_POLL_MS}ms (root=${AUTO_IMPORT_ROOT_DIR})`);
-      } catch (e) {}
-
-      setInterval(async () => {
+    let autoImportInProgress = false;
+    if (AUTO_IMPORT_ON_START) {
+      setTimeout(async () => {
         try {
           if (autoImportInProgress) return;
           autoImportInProgress = true;
@@ -16980,24 +16955,56 @@ async function startServer() {
             maxInserts: 15
           });
           if (result && result.success) {
-            if (result.inserted > 0 || result.relocated > 0) {
-              console.log(`📥 Auto-import watcher: inserted=${result.inserted} relocated=${result.relocated} skipped=${result.skipped} root=${result.rootDir}`);
-            }
+            console.log(`📥 Auto-import: inserted=${result.inserted} skipped=${result.skipped} errors=${Array.isArray(result.errors) ? result.errors.length : 0} root=${result.rootDir}`);
+          } else {
+            console.warn(`⚠️ Auto-import overgeslagen: ${result && result.error ? result.error : 'onbekende fout'}`);
           }
         } catch (e) {
-          console.warn(`⚠️ Auto-import watcher fout: ${e && e.message ? e.message : e}`);
+          console.warn(`⚠️ Auto-import mislukt: ${e && e.message ? e.message : e}`);
         } finally {
           autoImportInProgress = false;
         }
-      }, AUTO_IMPORT_POLL_MS);
-    }, 1100);
-  }
+      }, 500);
+    }
 
-  try {
-    setTimeout(() => { maybeAutoIndexDownloadFiles().catch(() => {}); }, 1800);
-    setInterval(() => { maybeAutoIndexDownloadFiles().catch(() => {}); }, DOWNLOAD_FILES_AUTO_INDEX_MS);
-  } catch (e) {}
-});
+    if (AUTO_IMPORT_ON_START && AUTO_IMPORT_POLL_MS > 0) {
+      setTimeout(() => {
+        try {
+          console.log(`📥 Auto-import watcher: polling elke ${AUTO_IMPORT_POLL_MS}ms (root=${AUTO_IMPORT_ROOT_DIR})`);
+        } catch (e) { }
+
+        setInterval(async () => {
+          try {
+            if (autoImportInProgress) return;
+            autoImportInProgress = true;
+            const result = await importExistingVideosFromDisk({
+              rootDir: AUTO_IMPORT_ROOT_DIR,
+              maxDepth: getAutoImportMaxDepth(),
+              dryRun: false,
+              minFileAgeMs: AUTO_IMPORT_MIN_FILE_AGE_MS,
+              flattenToWebdl: AUTO_IMPORT_FLATTEN_TO_WEBDL,
+              moveSource: AUTO_IMPORT_MOVE_SOURCE,
+              maxInserts: 15
+            });
+            if (result && result.success) {
+              if (result.inserted > 0 || result.relocated > 0) {
+                console.log(`📥 Auto-import watcher: inserted=${result.inserted} relocated=${result.relocated} skipped=${result.skipped} root=${result.rootDir}`);
+              }
+            }
+          } catch (e) {
+            console.warn(`⚠️ Auto-import watcher fout: ${e && e.message ? e.message : e}`);
+          } finally {
+            autoImportInProgress = false;
+          }
+        }, AUTO_IMPORT_POLL_MS);
+      }, 1100);
+    }
+
+    try {
+      setTimeout(() => { maybeAutoIndexDownloadFiles().catch(() => { }); }, 1800);
+      setInterval(() => { maybeAutoIndexDownloadFiles().catch(() => { }); }, DOWNLOAD_FILES_AUTO_INDEX_MS);
+    } catch (e) { }
+  });
 
 }
 
@@ -17030,15 +17037,15 @@ function shutdownGracefully(signal) {
         proc.stdin.write('q\n');
         proc.stdin.end();
       } catch (e) {
-        try {proc.kill('SIGINT');} catch (err) {}
+        try { proc.kill('SIGINT'); } catch (err) { }
       }
 
       setTimeout(() => {
         if (done) return;
-        try {proc.kill('SIGINT');} catch (e) {}
+        try { proc.kill('SIGINT'); } catch (e) { }
         setTimeout(() => {
           if (done) return;
-          try {proc.kill('SIGKILL');} catch (e) {}
+          try { proc.kill('SIGKILL'); } catch (e) { }
           finish();
         }, 2500);
       }, 8000);
@@ -17049,10 +17056,10 @@ function shutdownGracefully(signal) {
 
   stopRecordingIfAny().finally(() => {
     for (const [id, proc] of activeProcesses) {
-      try {proc.kill('SIGTERM');} catch (e) {}
+      try { proc.kill('SIGTERM'); } catch (e) { }
       console.log(`  Download #${id} gestopt`);
     }
-    try {db.close();} catch (e) {}
+    try { db.close(); } catch (e) { }
     process.exit(0);
   });
 }
@@ -17129,7 +17136,7 @@ async function extractAndSaveTags(kind, media_id, text) {
   const tags = [];
   const hashMatches = text.match(/#([a-zA-Z0-9_]+)/g);
   if (hashMatches) tags.push(...hashMatches.map(t => t.slice(1).toLowerCase()));
-  
+
   const bracketMatches = text.match(/\[([^\]]+)\]/g);
   if (bracketMatches) tags.push(...bracketMatches.map(t => t.slice(1, -1).toLowerCase().replace(/\s+/g, '_')));
 
@@ -17149,7 +17156,7 @@ async function extractAndSaveTags(kind, media_id, text) {
           await db.prepare('INSERT OR IGNORE INTO media_tags (kind, media_id, tag_id) VALUES (?, ?, ?)').run(kind, media_id, tagRow.id);
         }
       }
-    } catch(e) { console.error('Error auto-tagging:', e); }
+    } catch (e) { console.error('Error auto-tagging:', e); }
   }
 }
 
@@ -17189,7 +17196,7 @@ async function scan4KDownloaderDir() {
             }
           }
         }
-      } catch (e) {}
+      } catch (e) { }
     }
     walkDir(FOURK_DOWNLOADER_DIR);
 
@@ -17214,7 +17221,7 @@ async function scan4KDownloaderDir() {
           fourKIndexedSet.add(filePath);
           continue;
         }
-      } catch (e) {}
+      } catch (e) { }
 
       // New file — index it
       try {
@@ -17245,7 +17252,7 @@ async function scan4KDownloaderDir() {
           // Queue thumbnail generation
           try {
             scheduleThumbGeneration(filePath);
-          } catch (e) {}
+          } catch (e) { }
         }
         fourKIndexedSet.add(filePath);
         newCount++;
@@ -17256,7 +17263,7 @@ async function scan4KDownloaderDir() {
 
     if (newCount > 0) {
       console.log(`[4K-SCAN] Indexed ${newCount} new files from 4K Video Downloader`);
-      try { recentFilesTopCache.clear(); } catch (e) {}
+      try { recentFilesTopCache.clear(); } catch (e) { }
     }
   } catch (e) {
     console.warn(`[4K-SCAN] Error: ${e.message}`);
@@ -17289,7 +17296,7 @@ expressApp.post('/api/4k-trigger', async (req, res) => {
       } else if (u.hostname.includes('youtube.com') && u.pathname.startsWith('/shorts/')) {
         videoId = u.pathname.split('/')[2];
       }
-    } catch (e) {}
+    } catch (e) { }
 
     if (!videoId) {
       return res.status(400).json({ success: false, error: 'Geen geldig YouTube URL' });
