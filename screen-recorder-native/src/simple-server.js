@@ -299,6 +299,8 @@ function inferPlatformFromImportedFile(absPath, sourceUrl) {
   }
 
   const lower = String(absPath || '').toLowerCase();
+  // 4K Downloader+ output → usually YouTube content
+  if (lower.includes('_4kdownloader')) return 'youtube';
   if (lower.includes('reddit')) return 'reddit';
   if (lower.includes('youtube') || lower.includes('youtu.be')) return 'youtube';
   if (lower.includes('tiktok')) return 'tiktok';
@@ -7776,7 +7778,8 @@ function detectLane(platform, url = '') {
 
   // Only pure image/direct link platforms get the fast lane
   const lightPlatforms = [
-    'footfetishforum', 'forum-area', 'imagetwist', 'pixhost', 'postimg', 'bunkr', 'jpg', 'aznudefeet', 'pornpics'
+    'footfetishforum', 'forum-area', 'imagetwist', 'pixhost', 'postimg', 'bunkr', 'jpg', 'aznudefeet', 'pornpics',
+    'kinky', 'wikifeet', 'wikifeetx'
   ];
 
   if (lightPlatforms.includes(p)) return 'light';
@@ -9994,8 +9997,11 @@ function deriveChannelFromUrl(platform, url) {
   }
 
   if (platform === 'kinky') {
-    const m = u.match(/kinky\.nl\/([^\/\?#]+)/i);
+    // /advertenties/1145607-palmy -> palmy
+    const m = u.match(/advertenties\/\d+-([\w][\w-]*)/i);
     if (m) return m[1];
+    const m2 = u.match(/kinky\.nl\/([^\/\?#]+)/i);
+    if (m2) return m2[1];
   }
 
   if (platform === 'aznudefeet') {
@@ -11873,7 +11879,7 @@ expressApp.post('/download/batch', async (req, res) => {
     jobMetadata.webdl_media_url = u;
     jobMetadata.webdl_detected_platform = detectedPlatform;
   }
-  enqueueDownloadJob(downloadId, u, platform, channel, title, jobMetadata, laneOverride);
+  enqueueDownloadJob(downloadId, u, platform, channel, title, jobMetadata);
 }
 
   res.json({ success: true, downloads: created });
@@ -11951,11 +11957,14 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
     return startTdlDownload(downloadId, url, platform, channel, title, metadata);
   }
 
+  if (platform === 'kinky') {
+    return startKinkyNlDownload(downloadId, url, platform, channel, title, metadata);
+  }
+
   if (
     platform === 'twitter' ||
     platform === 'wikifeet' ||
     platform === 'wikifeetx' ||
-    platform === 'kinky' ||
     platform === 'pornpics' ||
     (platform === 'aznudefeet' && !looksLikeDirectFileUrl(url)) ||
     platform === 'tiktok' && isTikTokPhotoUrl(url)
@@ -13360,6 +13369,212 @@ async function startGalleryDlDownload(downloadId, url, platform, channel, title,
   }
 }
 
+// ─── Kinky.nl custom scraper ────────────────────────────────────────────────
+async function startKinkyNlDownload(downloadId, url, platform, channel, title, metadata) {
+  try {
+    if (isCancelled(downloadId)) {
+      clearCancelled(downloadId);
+      jobLane.delete(downloadId);
+      await updateDownloadStatus.run('cancelled', 0, null, downloadId);
+      return;
+    }
+
+    // Derive model name from URL: /advertenties/1145607-palmy -> palmy
+    const urlMatch = String(url).match(/advertenties\/\d+-(\w[\w-]*)/i);
+    const modelName = urlMatch ? urlMatch[1] : (channel || 'unknown');
+    const outChannel = modelName;
+    const dir = getDownloadDirChannelOnly(platform, outChannel);
+
+    try {await updateDownloadFilepath.run(dir, downloadId);} catch (e) {}
+    try {
+      await db.prepare(
+        db.isPostgres
+          ? 'UPDATE downloads SET channel = $1, title = $2 WHERE id = $3'
+          : 'UPDATE downloads SET channel = ?, title = ? WHERE id = ?'
+      ).run(outChannel, modelName, downloadId);
+    } catch (e) {}
+    await updateDownloadStatus.run('downloading', 0, null, downloadId);
+
+    console.log(`[DL #${downloadId}] KINKY.NL scraper voor "${modelName}" → ${dir}`);
+
+    // Fetch the profile page HTML
+    const https = require('https');
+    const http = require('http');
+    const fetchPage = (pageUrl) => new Promise((resolve, reject) => {
+      const mod = pageUrl.startsWith('https') ? https : http;
+      const req = mod.get(pageUrl, { headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36' } }, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          return fetchPage(res.headers.location).then(resolve).catch(reject);
+        }
+        let body = '';
+        res.on('data', (c) => body += c);
+        res.on('end', () => resolve(body));
+      });
+      req.on('error', reject);
+      req.setTimeout(15000, () => { req.destroy(); reject(new Error('timeout')); });
+    });
+
+    // Clean URL: strip #photos fragment
+    const cleanUrl = String(url).replace(/#.*$/, '');
+    let html;
+    try {
+      html = await fetchPage(cleanUrl);
+    } catch (e) {
+      await updateDownloadStatus.run('error', 0, `Kon kinky.nl pagina niet laden: ${e.message}`, downloadId);
+      try {runDownloadSchedulerSoon();} catch (e) {}
+      return;
+    }
+
+    // Extract profilePhotos JSON from page
+    const photosMatch = html.match(/profilePhotos\s*=\s*`(\[.*?\])`/s);
+    if (!photosMatch) {
+      await updateDownloadStatus.run('error', 0, 'Geen foto data gevonden op kinky.nl pagina', downloadId);
+      try {runDownloadSchedulerSoon();} catch (e) {}
+      return;
+    }
+
+    let photos;
+    try {
+      photos = JSON.parse(photosMatch[1]);
+    } catch (e) {
+      await updateDownloadStatus.run('error', 0, `Foto JSON parse fout: ${e.message}`, downloadId);
+      try {runDownloadSchedulerSoon();} catch (e) {}
+      return;
+    }
+
+    if (!photos.length) {
+      await updateDownloadStatus.run('error', 0, 'Geen fotos gevonden', downloadId);
+      try {runDownloadSchedulerSoon();} catch (e) {}
+      return;
+    }
+
+    // Extract userId from photo source (e.g. /i/1827260/profile/...)
+    const uidMatch = photos[0].source.match(/\/i\/(\d+)\//);
+    const userId = uidMatch ? uidMatch[1] : null;
+    if (!userId) {
+      await updateDownloadStatus.run('error', 0, 'Kon userId niet bepalen', downloadId);
+      try {runDownloadSchedulerSoon();} catch (e) {}
+      return;
+    }
+
+    // Extract version param from source
+    const verMatch = photos[0].source.match(/[?&]v=([^&]+)/);
+    const version = verMatch ? verMatch[1] : '';
+
+    console.log(`   📸 ${photos.length} foto's gevonden voor ${modelName} (userId=${userId})`);
+
+    // Also check for video thumbnails
+    const videoHashes = [];
+    const videoThumbMatches = html.matchAll(/\/i\/\d+\/profile\/([a-f0-9-]+)_thumb60_01\.webp/g);
+    for (const vm of videoThumbMatches) {
+      if (!videoHashes.includes(vm[1])) videoHashes.push(vm[1]);
+    }
+    if (videoHashes.length) {
+      console.log(`   🎬 ${videoHashes.length} video thumbnail(s) gevonden`);
+    }
+
+    // Download all photos
+    const downloadFile = (fileUrl, dest) => new Promise((resolve, reject) => {
+      const mod = fileUrl.startsWith('https') ? https : http;
+      const req = mod.get(fileUrl, { headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': cleanUrl } }, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          return downloadFile(res.headers.location, dest).then(resolve).catch(reject);
+        }
+        if (res.statusCode !== 200) {
+          return reject(new Error(`HTTP ${res.statusCode}`));
+        }
+        const ws = fs.createWriteStream(dest);
+        res.pipe(ws);
+        ws.on('finish', () => resolve(dest));
+        ws.on('error', reject);
+      });
+      req.on('error', reject);
+      req.setTimeout(30000, () => { req.destroy(); reject(new Error('timeout')); });
+    });
+
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+    let downloaded = 0;
+    let errors = 0;
+    const totalItems = photos.length;
+
+    for (let i = 0; i < photos.length; i++) {
+      if (isCancelled(downloadId)) {
+        clearCancelled(downloadId);
+        await updateDownloadStatus.run('cancelled', 0, null, downloadId);
+        return;
+      }
+
+      const photo = photos[i];
+      const hash = photo.hash;
+      const baseUrl = `https://www.kinky.nl/i/${userId}/profile/${hash}`;
+      // Try _profile.webp first (full-size), fallback to _thumb_420.webp
+      const fullUrl = `${baseUrl}_profile.webp${version ? '?v=' + version : ''}`;
+      const filename = `${modelName}_${i + 1}_${hash}.webp`;
+      const dest = path.join(dir, filename);
+
+      if (fs.existsSync(dest)) {
+        downloaded++;
+        const pct = Math.round((downloaded / totalItems) * 100);
+        try {await updateDownloadStatus.run('downloading', pct, null, downloadId);} catch (e) {}
+        continue;
+      }
+
+      try {
+        await downloadFile(fullUrl, dest);
+        downloaded++;
+        const pct = Math.round((downloaded / totalItems) * 100);
+        try {await updateDownloadStatus.run('downloading', pct, null, downloadId);} catch (e) {}
+        console.log(`   ✅ [${downloaded}/${totalItems}] ${filename}`);
+      } catch (e) {
+        errors++;
+        console.log(`   ❌ [${i + 1}/${totalItems}] ${filename}: ${e.message}`);
+      }
+
+      // Small delay to be polite
+      await new Promise(r => setTimeout(r, 200));
+    }
+
+    // Index downloaded files
+    try {
+      const entries = fs.readdirSync(dir).filter(f => /\.(webp|jpg|jpeg|png|gif|mp4|mkv)$/i.test(f));
+      const now = Date.now();
+      for (const entry of entries) {
+        const fp = path.join(dir, entry);
+        try {
+          const st = fs.statSync(fp);
+          const relpath = path.relative(path.resolve(BASE_DIR), fp);
+          await upsertDownloadFile.run(downloadId, relpath, st.size || 0, Math.round(st.mtimeMs || now), now, now);
+        } catch (e) {}
+      }
+      console.log(`   📂 Geïndexeerd: ${entries.length} files voor download #${downloadId}`);
+    } catch (e) {
+      console.log(`   ⚠️  Indexing fout: ${e.message}`);
+    }
+
+    if (downloaded > 0) {
+      const metaObj = { tool: 'kinky-scraper', platform, channel: outChannel, modelName, title, url, photoCount: photos.length, downloaded, errors, outputDir: dir };
+      await updateDownload.run('completed', 100, dir, '(multiple)', 0, '', JSON.stringify(metaObj), null, downloadId);
+      // Set source_url so SOURCE button appears in gallery
+      try {
+        await db.prepare(
+          db.isPostgres
+            ? 'UPDATE downloads SET source_url = $1 WHERE id = $2'
+            : 'UPDATE downloads SET source_url = ? WHERE id = ?'
+        ).run(url, downloadId);
+      } catch (e) {}
+      console.log(`[DL #${downloadId}] COMPLETED kinky/${modelName} | ${downloaded} foto's | ${errors} fouten`);
+    } else {
+      await updateDownloadStatus.run('error', 0, `Geen fotos gedownload (${errors} fouten)`, downloadId);
+    }
+    try {runDownloadSchedulerSoon();} catch (e) {}
+    try {syncRuntimeActiveState().catch(() => {});} catch (e) {}
+  } catch (err) {
+    await updateDownloadStatus.run('error', 0, err.message, downloadId);
+    try {runDownloadSchedulerSoon();} catch (e) {}
+  }
+}
+
 async function startInstaloaderDownload(downloadId, url, platform, channel, title, metadata) {
   try {
     if (isCancelled(downloadId)) {
@@ -13933,6 +14148,8 @@ async function importExistingVideosFromDisk(options = {}) {
   const moveSource = options.moveSource == null ? AUTO_IMPORT_MOVE_SOURCE : !!options.moveSource;
   const minFileAgeMsRaw = Number(options.minFileAgeMs);
   const minFileAgeMs = Number.isFinite(minFileAgeMsRaw) ? Math.max(0, Math.floor(minFileAgeMsRaw)) : AUTO_IMPORT_MIN_FILE_AGE_MS;
+  const maxInsertsRaw = Number(options.maxInserts);
+  const maxInserts = Number.isFinite(maxInsertsRaw) && maxInsertsRaw > 0 ? Math.floor(maxInsertsRaw) : 0; // 0 = unlimited
   const requestedTargetDir = String(options.targetDir || '').trim();
   const targetDir = path.resolve(requestedTargetDir || DEFAULT_VDH_IMPORT_DIR);
 
@@ -13952,8 +14169,10 @@ async function importExistingVideosFromDisk(options = {}) {
   const walk = async (dir, depth = 0) => {
     if (!dir || !fs.existsSync(dir)) return;
     if (depth > maxDepth) return;
+    if (maxInserts > 0 && inserted.length >= maxInserts) return; // throttle
     const entries = fs.readdirSync(dir, { withFileTypes: true });
     for (const entry of entries) {
+      if (maxInserts > 0 && inserted.length >= maxInserts) break; // throttle mid-dir
       if (!entry || !entry.name) continue;
       if (entry.name.startsWith('.')) continue;
       const fullPath = path.join(dir, entry.name);
@@ -14051,8 +14270,20 @@ async function importExistingVideosFromDisk(options = {}) {
         const platform = inferPlatformFromImportedFile(fp, sourceUrl);
         const fallbackTitle = path.basename(fp, ext) || path.basename(fp) || 'imported-video';
         const title = String(sidecar.title || '').trim() || fallbackTitle;
+
+        // For 4K Downloader imports: use parent directory as channel name
+        // Structure: _4KDownloader/ChannelName/VideoTitle.mkv
+        let channelFromPath = '';
+        if (fp.includes('_4KDownloader') || fp.includes('_4kdownloader')) {
+          const rel4k = fp.split(/_4[Kk][Dd]ownloader[\/\\]/)[1] || '';
+          const pathParts = rel4k.split(/[\/\\]/).filter(Boolean);
+          if (pathParts.length >= 2) {
+            channelFromPath = pathParts[0]; // Parent dir = channel name
+          }
+        }
+
         const channelFromUrl = sourceUrl ? deriveChannelFromUrl(platform, sourceUrl) || '' : '';
-        const channel = String(sidecar.channel || '').trim() || channelFromUrl || 'imported';
+        const channel = String(sidecar.channel || '').trim() || channelFromPath || channelFromUrl || 'imported';
         const canonicalSource = sourceUrl ? sourceUrl : `file://${fp}`;
         if (sourceUrl) {
           const existingSource = await findReusableDownloadBySourceRef.get(canonicalSource, sourceUrl);
@@ -15479,6 +15710,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
   const type = String(req.query.type || 'all').toLowerCase();
   const tagFilter = String(req.query.tag || '').trim();
   const sort = String(req.query.sort || 'recent').toLowerCase();
+  const searchQuery = String(req.query.q || '').trim().toLowerCase();
   const cursorRaw = String(req.query.cursor || '').trim();
   const cur = decodeCursor(cursorRaw);
   const includeActive = String(req.query.include_active || '0') !== '0';
@@ -15551,10 +15783,25 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
         if (!row) {rowOffset += 1;continue;}
         
         // Apply directory filter
-        const relPath = row.kind === 'p' ? row.id : (row.filepath ? path.relative(BASE_DIR, row.filepath) : '');
+        let relPath;
+        if (row.kind === 'p') {
+          // For download_files items: build path from platform so dir filter matches (e.g. 'kinky/palmy_1.webp')
+          relPath = (row.platform ? row.platform + '/' : '') + (row.id || '');
+        } else {
+          relPath = row.filepath ? path.relative(BASE_DIR, row.filepath) : '';
+        }
         if (enabledDirs && relPath && !shouldIncludePath(relPath, enabledDirs)) {
           rowOffset += 1;
           continue;
+        }
+
+        // Apply search query filter
+        if (searchQuery) {
+          const haystack = [row.platform, row.channel, row.title, row.filepath, row.id].filter(Boolean).join(' ').toLowerCase();
+          if (!haystack.includes(searchQuery)) {
+            rowOffset += 1;
+            continue;
+          }
         }
 
         if (includeActiveFiles && String(row.kind || '') === 'p' && row.rating_kind === 'd' && row.rating_id != null) {
@@ -16688,7 +16935,8 @@ async function startServer() {
           dryRun: false,
           minFileAgeMs: AUTO_IMPORT_MIN_FILE_AGE_MS,
           flattenToWebdl: AUTO_IMPORT_FLATTEN_TO_WEBDL,
-          moveSource: AUTO_IMPORT_MOVE_SOURCE
+          moveSource: AUTO_IMPORT_MOVE_SOURCE,
+          maxInserts: 15
         });
         if (result && result.success) {
           console.log(`📥 Auto-import: inserted=${result.inserted} skipped=${result.skipped} errors=${Array.isArray(result.errors) ? result.errors.length : 0} root=${result.rootDir}`);
@@ -16719,7 +16967,8 @@ async function startServer() {
             dryRun: false,
             minFileAgeMs: AUTO_IMPORT_MIN_FILE_AGE_MS,
             flattenToWebdl: AUTO_IMPORT_FLATTEN_TO_WEBDL,
-            moveSource: AUTO_IMPORT_MOVE_SOURCE
+            moveSource: AUTO_IMPORT_MOVE_SOURCE,
+            maxInserts: 15
           });
           if (result && result.success) {
             if (result.inserted > 0 || result.relocated > 0) {
