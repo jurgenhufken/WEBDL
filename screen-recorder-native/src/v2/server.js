@@ -41,11 +41,17 @@ async function main() {
   app.use(express.urlencoded({ extended: true }));
 
   // 5. Context — het enige object dat modules ontvangen
-  const ctx = { db, queries, state, config, app };
+  const ctx = { db, queries, state, config, app, services: {} };
 
-  // 6. Routes mounten (elke module krijgt app + ctx)
+  // 6. Services starten
+  const { initQueue } = require('./services/download-queue');
+  ctx.services.queue = initQueue(ctx);
+  console.log('[v2] Download queue initialized');
+
+  // 7. Routes mounten (elke module krijgt app + ctx)
   require('./routes/health')(app, ctx);
   require('./routes/media')(app, ctx);
+  require('./routes/downloads')(app, ctx);
   require('./routes/pages')(app, ctx);
 
   // 7. Luisteren op aparte port (naast v1 op 35729)
