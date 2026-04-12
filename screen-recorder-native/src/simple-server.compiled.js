@@ -15152,48 +15152,84 @@ expressApp.get('/media/stream', async (req, res) => {
       }
     } catch (e) { }
 
-    // Remux to MP4 via ffmpeg (no re-encoding, container conversion only)
+    // Check for cached .stream.mp4 next to the source file
+    const cachedMp4 = videoPath.replace(/\.[^.]+$/, '.stream.mp4');
+    try {
+      const cacheStat = fs.statSync(cachedMp4);
+      if (cacheStat && cacheStat.size > 1000) {
+        res.setHeader('Cache-Control', 'public, max-age=3600');
+        return res.sendFile(cachedMp4, (err) => {
+          if (!err) return;
+          if (res.headersSent) return;
+          res.status(err.code === 'ENOENT' ? 404 : 500).end();
+        });
+      }
+    } catch (e) { /* no cache yet */ }
+
+    // Remux to cached MP4 file (no re-encoding, container conversion only)
     const ffmpegPath = resolveUsableFfmpegPath();
+    const tmpOut = cachedMp4 + '.tmp';
     const args = [
       '-hide_banner', '-loglevel', 'error',
+      '-y',
       '-i', videoPath,
       '-c', 'copy',                // No re-encoding
-      '-movflags', 'frag_keyframe+empty_moov+faststart', // Streaming-friendly MP4
+      '-movflags', '+faststart',   // Move moov atom to front for fast seek
       '-f', 'mp4',
-      'pipe:1'                     // Output to stdout
+      tmpOut
     ];
 
-    res.setHeader('Content-Type', 'video/mp4');
-    res.setHeader('Cache-Control', 'no-store');
-    // We can't set Content-Length because we don't know the output size
-    // But we can support connection abort
+    try {
+      await new Promise((resolve, reject) => {
+        const proc = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+        let stderr = '';
+        proc.stderr.on('data', (d) => { stderr += d.toString(); });
+        proc.on('close', (code) => {
+          if (code === 0) resolve();
+          else reject(new Error(stderr || `ffmpeg exit ${code}`));
+        });
+        proc.on('error', reject);
+        
+        // Abort if client disconnects during remux
+        let aborted = false;
+        res.on('close', () => {
+          if (!aborted) {
+            aborted = true;
+            try { proc.kill('SIGKILL'); } catch (e) { }
+          }
+        });
+      });
 
-    const proc = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    let killed = false;
-
-    proc.stdout.pipe(res);
-
-    proc.stderr.on('data', (d) => {
-      const msg = d.toString().trim();
-      if (msg && !msg.includes('deprecated')) console.warn(`[stream] ffmpeg: ${msg}`);
-    });
-
-    proc.on('error', (err) => {
-      if (!res.headersSent) res.status(500).end();
-    });
-
-    proc.on('close', (code) => {
-      if (code && code !== 0 && code !== 255 && !killed) {
-        console.warn(`[stream] ffmpeg exit code ${code} for ${path.basename(videoPath)}`);
-      }
-    });
-
-    // Clean up ffmpeg when client disconnects
-    res.on('close', () => {
-      killed = true;
-      try { proc.kill('SIGKILL'); } catch (e) { }
-    });
-
+      // Rename temp to final cache
+      fs.renameSync(tmpOut, cachedMp4);
+      
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+      return res.sendFile(cachedMp4, (err) => {
+        if (!err) return;
+        if (res.headersSent) return;
+        res.status(err.code === 'ENOENT' ? 404 : 500).end();
+      });
+    } catch (e) {
+      // Clean up temp file
+      try { fs.unlinkSync(tmpOut); } catch (e2) { }
+      console.warn(`[stream] remux failed for ${path.basename(videoPath)}: ${e.message}`);
+      
+      // Fallback: stream pipe (no seeking but at least plays)
+      const pipeArgs = [
+        '-hide_banner', '-loglevel', 'error',
+        '-i', videoPath,
+        '-c', 'copy',
+        '-movflags', 'frag_keyframe+empty_moov',
+        '-f', 'mp4',
+        'pipe:1'
+      ];
+      res.setHeader('Content-Type', 'video/mp4');
+      res.setHeader('Cache-Control', 'no-store');
+      const proc2 = spawn(ffmpegPath, pipeArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+      proc2.stdout.pipe(res);
+      proc2.on('error', () => { if (!res.headersSent) res.status(500).end(); });
+      res.on('close', () => { try { proc2.kill('SIGKILL'); } catch (e) { } });
+    }
   } catch (e) {
     if (!res.headersSent) res.status(500).end();
   }
@@ -15688,10 +15724,14 @@ function mediaItemKey(item) {
 function mediaItemPriority(item) {
   if (!item || typeof item !== 'object') return 0;
   const kind = String(item.kind || '').toLowerCase();
-  if (kind === 'd') return 3;
-  if (kind === 's') return 2;
-  if (kind === 'p') return 1;
-  return 0;
+  let base = 0;
+  if (kind === 'd') base = 3;
+  else if (kind === 's') base = 2;
+  else if (kind === 'p') base = 1;
+  // Prefer local disk over HDD (faster for streaming/thumbnails)
+  const dk = item.dedupe_key || '';
+  if (dk && /^\/Users\//i.test(dk)) base += 0.5;
+  return base;
 }
 
 function pushUniqueMediaItem({
