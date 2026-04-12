@@ -3364,10 +3364,18 @@ function getGalleryHTML() {
         el.playbackRate = state.playbackSpeed;
         state.currentMediaEl = el;
         const source = document.createElement('source');
-        source.src = it.src;
-        const ext = (it.src || '').match(/\.(mp4|webm|mov|m4v|mkv|avi)(?:[?#]|$)/i);
-        source.type = ext && ext[1] ? 'video/' + ext[1].toLowerCase().replace('m4v', 'mp4') : 'video/mp4';
+        // Use /media/stream for remuxing MKV/AVI to browser-playable MP4
+        var streamSrc = it.src ? it.src.replace('/media/file?', '/media/stream?') : it.src;
+        source.src = streamSrc;
+        source.type = 'video/mp4';
         el.appendChild(source);
+        // Fallback: if stream fails, try direct file
+        el.addEventListener('error', function() {
+          if (source.src.includes('/media/stream?')) {
+            source.src = it.src;
+            el.load();
+          }
+        }, { once: true });
         el.addEventListener('volumechange', () => {
           state.volume = el.volume;
         });
@@ -15104,6 +15112,90 @@ expressApp.get('/media/file', async (req, res) => {
     });
   } catch (e) {
     res.status(500).end();
+  }
+});
+
+// On-the-fly remux MKV/AVI/etc to MP4 for browser playback (no re-encoding)
+expressApp.get('/media/stream', async (req, res) => {
+  const kind = String(req.query.kind || '').toLowerCase();
+  const id = parseInt(req.query.id, 10);
+  if (!Number.isFinite(id)) return res.status(400).end();
+
+  try {
+    let row = null;
+    if (kind === 'd') row = await getDownload.get(id); else
+      if (kind === 's') row = await db.prepare(`SELECT * FROM screenshots WHERE id=?`).get(id); else
+        return res.status(400).end();
+    if (!row) return res.status(404).end();
+
+    const fp = String(row.filepath || '').trim();
+    if (!fp || !safeIsAllowedExistingPath(fp)) return res.status(404).end();
+
+    // If it's already MP4/WebM, just serve directly
+    const ext = path.extname(fp).toLowerCase();
+    if (ext === '.mp4' || ext === '.webm' || ext === '.m4v') {
+      return res.sendFile(fp, (err) => {
+        if (!err) return;
+        if (res.headersSent) return;
+        res.status(err.code === 'ENOENT' ? 404 : 500).end();
+      });
+    }
+
+    // For directories, find the first video file
+    let videoPath = fp;
+    try {
+      const st = fs.statSync(fp);
+      if (st && st.isDirectory && st.isDirectory()) {
+        const v = findFirstVideoInDirDeep(fp) || findFirstVideoInDir(fp);
+        if (v && safeIsAllowedExistingPath(v)) videoPath = v;
+        else return res.status(404).end();
+      }
+    } catch (e) { }
+
+    // Remux to MP4 via ffmpeg (no re-encoding, container conversion only)
+    const ffmpegPath = resolveUsableFfmpegPath();
+    const args = [
+      '-hide_banner', '-loglevel', 'error',
+      '-i', videoPath,
+      '-c', 'copy',                // No re-encoding
+      '-movflags', 'frag_keyframe+empty_moov+faststart', // Streaming-friendly MP4
+      '-f', 'mp4',
+      'pipe:1'                     // Output to stdout
+    ];
+
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Cache-Control', 'no-store');
+    // We can't set Content-Length because we don't know the output size
+    // But we can support connection abort
+
+    const proc = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let killed = false;
+
+    proc.stdout.pipe(res);
+
+    proc.stderr.on('data', (d) => {
+      const msg = d.toString().trim();
+      if (msg && !msg.includes('deprecated')) console.warn(`[stream] ffmpeg: ${msg}`);
+    });
+
+    proc.on('error', (err) => {
+      if (!res.headersSent) res.status(500).end();
+    });
+
+    proc.on('close', (code) => {
+      if (code && code !== 0 && code !== 255 && !killed) {
+        console.warn(`[stream] ffmpeg exit code ${code} for ${path.basename(videoPath)}`);
+      }
+    });
+
+    // Clean up ffmpeg when client disconnects
+    res.on('close', () => {
+      killed = true;
+      try { proc.kill('SIGKILL'); } catch (e) { }
+    });
+
+  } catch (e) {
+    if (!res.headersSent) res.status(500).end();
   }
 });
 
