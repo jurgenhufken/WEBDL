@@ -1,238 +1,260 @@
-# WEBDL Blauwdruk
+# WEBDL — Technische Blauwdruk
 
-## Kernfilosofie
-
-WEBDL is een persoonlijk mediabeheersysteem dat als **gast op jouw computer** draait, niet als eigenaar. Het systeem groeit organisch mee met de gebruiker, zonder opgedrongen structuur.
-
-### Ontwerpprincipes
-
-1. **Gast, geen eigenaar** — Het systeem claimt geen eigenaarschap over bestanden. Het indexeert, organiseert en verrijkt — maar de gebruiker bepaalt waar bestanden staan en wat ermee gebeurt. Geen lock-in, geen proprietary formaten, geen verplichte mapstructuur.
-
-2. **Groeiproces** — De architectuur erkent dat het systeem evolueert. Features worden iteratief toegevoegd. De codebase moet dit ondersteunen zonder telkens een herschrijving te vereisen.
-
-3. **Resource-bewust** — De app is zuinig met CPU, disk I/O en geheugen. Achtergrondtaken (thumbs, imports, scans) worden geThrottled. De HDD mag slapen. Startup blokkeert niet de event loop.
-
-4. **Lokaal eerst** — Alle data blijft lokaal. Geen cloud-afhankelijkheid. De browser-extensie en de server communiceren alleen via localhost.
+> Companion bij [WEBDL-Blauwdruk.docx](screen-recorder-native/WEBDL-Blauwdruk.docx)
+> — de productvisie. Dit document vertaalt die visie naar architectuur en code.
 
 ---
 
-## Huidige Architectuur
+## De Drie Wetten (uit de productblauwdruk)
 
-### Componenten
+1. **De viewer is het product** — Alles staat in dienst van de kijkervaring
+2. **Het bestand is de waarheid** — DB is index, niet bron
+3. **Informeer, dwing niet af** — Gebruiker kiest, app adviseert
 
-```
-Firefox Extensie (content scripts + background)
-    ↕ localhost:35729
-WEBDL Server (Node.js/Express)
-    ↕
-PostgreSQL (media catalogus)
-    ↕
-Bestandssysteem (lokale SSD + externe HDD)
-    ↕
-Externe tools (yt-dlp, ffmpeg, gallery-dl, ofscraper, etc.)
-```
+## De Vier Pijlers
 
-### Probleem: De Monoliet
-
-`simple-server.js` is 13.900+ regels (was 17.600 voor views-extractie) met:
-- 70 Express routes
-- 114 prepared SQL statements (58 top-level, 56 inline)
-- 31 mutable globals gedeeld tussen alle onderdelen
-- Downloaders, queue-management, thumb-gen en routes door elkaar heen
+| Pijler | Verantwoordelijkheid |
+|--------|---------------------|
+| **Ingest** | Media binnenhalen: downloaden, importeren, recording |
+| **Bibliotheek** | Opslaan, indexeren, organiseren (disk + DB) |
+| **Viewer** | Bekijken, navigeren, genieten — het product |
+| **Beheer** | Zoeken, filteren, tags, ratings, dedup, onderhoud |
 
 ---
 
-## Doel-Architectuur
+## Huidige Staat
 
-### Mapstructuur
+### De Monoliet
+
+`simple-server.js`: **13.910 regels** (was 17.638, views geëxtraheerd)
+
+Alle vier pijlers zitten door elkaar heen in één bestand. De refactor
+splitst ze in modules die elk bij één pijler horen.
+
+### Wat al werkt
+
+- [x] Views geëxtraheerd naar `src/views/` (viewer, gallery, dashboard)
+- [x] `/media/stream` endpoint: MKV→MP4 remuxing voor browser playback
+- [x] gallery-dl Twitter/X ondersteuning (hele profielen + threads)
+- [x] Thumbnail generator met ffmpeg
+- [x] Cursor-based gallery paginering
+- [x] Tag-systeem (handmatig)
+
+### Wat mist (t.o.v. de blauwdruk)
+
+- [ ] Modulaire serverarchitectuur (alles zit nog in de monoliet)
+- [ ] DB als pure index (nu worden records soms als waarheid behandeld)
+- [ ] Automatische tag-extractie bij ingest
+- [ ] Batch-acties in de viewer
+- [ ] Mobiele companion (premium)
+- [ ] Content-hashing voor slimme dedup (premium)
+
+---
+
+## Doelarchitectuur
+
+### Mappenstructuur
+
+Elke module hoort bij precies één pijler.
 
 ```
 src/
-  server.js              — Entry-point, compositie (~200 regels)
-  config.js              — Configuratie (bestaand)
-
-  db/
-    connection.js         — DB connectie + schema migratie
-    queries.js            — Prepared statements factory
+  server.js                ← Entry-point (~200 regels)
+  config.js                ← .env configuratie (bestaand)
 
   state/
-    index.js              — Gecentraliseerde mutable state
+    index.js               ← Alle mutable globals (Beheer)
 
-  views/
-    viewer.js             — Viewer HTML (klaar)
-    gallery.js            — Gallery HTML (klaar)
-    dashboard.js          — Dashboard HTML (klaar)
+  db/
+    connection.js           ← Connectie + schema (Bibliotheek)
+    queries.js              ← Prepared statements factory (Bibliotheek)
+
+  views/                    ← KLAAR
+    viewer.js               ← Viewer HTML (Viewer)
+    gallery.js              ← Gallery HTML (Viewer)
+    dashboard.js            ← Dashboard HTML (Beheer)
 
   services/
-    download-queue.js     — Queue, scheduler, rehydrate
-    download-activity.js  — Activity tracking
-    thumb-generator.js    — FFmpeg thumb gen + scheduling
-    recording.js          — Screen recording
-    addon-builder.js      — Firefox addon auto-build
-    auto-import.js        — 4K watcher + disk import
-    tag-scanner.js        — Tag extractie bij ingest
+    download-queue.js       ← Queue, scheduler (Ingest)
+    download-activity.js    ← Activity logging (Ingest)
+    thumb-generator.js      ← FFmpeg thumbs (Bibliotheek)
+    recording.js            ← Screen recording (Ingest)
+    addon-builder.js        ← Firefox addon (Ingest)
+    auto-import.js          ← Disk import + 4K watcher (Ingest)
+    tag-scanner.js          ← Auto-tagging bij ingest (Bibliotheek)
+    reindexer.js            ← Disk→DB sync (Bibliotheek)
 
   downloaders/
-    dispatcher.js         — startDownload() router
-    ytdlp.js              — yt-dlp
-    direct.js             — Direct file downloads
-    reddit.js             — Reddit-dl + API
-    ofscraper.js          — OnlyFans
-    gallery-dl.js         — gallery-dl
-    tdl.js                — Telegram
-    instaloader.js        — Instagram
-    kinky-nl.js           — kinky.nl
+    dispatcher.js           ← startDownload router (Ingest)
+    ytdlp.js                ← yt-dlp (Ingest)
+    direct.js               ← Direct files (Ingest)
+    reddit.js               ← Reddit-dl + API (Ingest)
+    gallery-dl.js           ← gallery-dl (Ingest)
+    ofscraper.js            ← OnlyFans (Ingest)
+    tdl.js                  ← Telegram (Ingest)
+    instaloader.js          ← Instagram (Ingest)
 
   routes/
-    media.js              — /media/*, /api/media/*
-    downloads.js          — /download*, cancel, retry, batch
-    recording.js          — start/stop recording
-    pages.js              — /gallery, /viewer, /dashboard
-    import.js             — /import, /upload
-    admin.js              — /api/stats, /api/tags, /api/rating
-    health.js             — /health, /status
+    media.js                ← /media/*, stream, thumb (Viewer)
+    downloads.js            ← /download*, batch, cancel (Ingest)
+    recording.js            ← Start/stop recording (Ingest)
+    pages.js                ← /gallery, /viewer, /dashboard (Viewer)
+    import.js               ← /import, /upload (Ingest)
+    admin.js                ← /api/stats, tags, rating (Beheer)
+    health.js               ← /health, /status
 
   utils/
-    logger.js             — Logging (bestaand)
-    paths.js              — Path safety, normalisatie
-    url-helpers.js        — URL parsing, filenames
-    media-helpers.js      — Media type detectie, item constructie
-    ffmpeg.js             — FFmpeg/FFprobe wrappers
+    logger.js               ← Logging (bestaand)
+    paths.js                ← Path safety
+    url-helpers.js          ← URL parsing
+    media-helpers.js        ← Media type detectie, items
+    ffmpeg.js               ← FFmpeg/FFprobe wrappers
 ```
 
 ### Context Pattern
 
-Eén object dat alle gedeelde state en services bevat:
-
 ```js
-// server.js
-const ctx = {
-  db,                    // Database connectie
-  queries,               // Prepared statements
-  state,                 // Mutable globals
-  config,                // Configuratie
-  services: {
-    queue,               // Download queue manager
-    thumbs,              // Thumb generator
-    activity,            // Activity tracker
-  }
-};
-
-// Elke module ontvangt ctx
+const ctx = { db, queries, state, config, services };
+// Elke module ontvangt ctx — geen circulaire deps
 require('./routes/media')(app, ctx);
-require('./services/thumb-generator').init(ctx);
 ```
-
----
-
-## Toekomstige Richting: Graph-Based Media
-
-### Van platte tabel naar relatienetwerk
-
-De huidige `downloads` tabel is plat: elke rij is een bestand met platform, channel, titel. Maar media heeft inherent **relaties**:
-
-- Een **creator** heeft meerdere **channels**
-- Een **channel** bevat meerdere **posts**
-- Een **post** bevat meerdere **media items**
-- Media items delen **tags**, **series**, **thema's**
-- Dezelfde creator kan op meerdere **platforms** actief zijn
-
-### Datamodel (toekomst)
-
-```
-creators ──1:N──> channels
-channels ──1:N──> posts
-posts    ──1:N──> media_items
-media_items ──N:M──> tags
-creators ──N:M──> platforms
-media_items ──1:1──> files (fysiek bestand)
-```
-
-Dit kan in PostgreSQL met junction tables, of later met een graph-extensie (Apache AGE) als de queries te complex worden.
-
-### Tag-Scraping bij Ingest
-
-Tags worden niet achteraf handmatig toegevoegd, maar **automatisch geëxtraheerd bij ingest**:
-
-- Uit de bestandsnaam: `#barefoot #outdoor → tags: barefoot, outdoor`
-- Uit de video-titel van het platform
-- Uit de URL-structuur (subreddit, channel naam)
-- Uit metadata (yt-dlp json, gallery-dl info)
-
-Dit gebeurt in `services/tag-scanner.js` en draait als onderdeel van de download-pipeline.
 
 ---
 
 ## Resource Management
 
-### Principe: De app is een gast
+De app is een **gast op jouw computer**, geen eigenaar.
 
-| Resource | Beleid |
-|----------|--------|
-| **CPU** | Thumb-gen en ffmpeg draaien met nice(10). Max 2 concurrent thumb jobs. |
-| **Disk I/O** | HDD-bestanden worden lazy geladen. Geen bulk-scans bij startup. |
-| **Memory** | Caches hebben TTL en max-size. Geen onbeperkte groei. |
-| **Netwerk** | Download concurrency is configureerbaar. YouTube-spacing voorkomt rate-limits. |
-| **Startup** | Server moet binnen 5s HTTP kunnen serveren. Zware taken starten na 10-30s delay. |
+| Principe | Implementatie |
+|----------|--------------|
+| **Startup < 5s** | Express + health eerst, zware taken na delay |
+| **HDD mag slapen** | Geen bulk-scans, lazy loading, lokale disk prioriteit |
+| **CPU respect** | nice(10), max 2 concurrent thumbs |
+| **Memory bounded** | Caches met TTL en max-size |
+| **Netwerk zuinig** | Configureerbare concurrency, YouTube spacing |
 
 ### Startup Volgorde
 
 ```
-0s    — Express luistert, health endpoint beschikbaar
-2s    — DB verbinding + schema check
-5s    — Gallery/viewer/dashboard serveerbaar
-10s   — Queue rehydrate (async, blokkeert niet)
-15s   — Thumb generator start (lazy, low priority)
-30s   — Auto-import watcher start
-60s   — Metadata probe start (als enabled)
+ 0s  Express luistert, /health beschikbaar
+ 2s  DB connectie + schema
+ 5s  Gallery/viewer serveerbaar
+10s  Queue rehydrate (async)
+15s  Thumb generator (lazy)
+30s  Auto-import watcher
+60s  Metadata probe (optioneel)
 ```
 
 ---
 
-## Migratiestrategie
+## Data-filosofie
 
-Dit is een groeiproces. We herbouwen niet alles in één keer.
+### Wet 2 in de praktijk: "Het bestand is de waarheid"
 
-### Fase 0 (klaar)
-- [x] Views geëxtraheerd naar `src/views/`
-- [x] simple-server.js van 17.638 naar 13.909 regels
+```
+BESTAND BESTAAT OP DISK?
+  ├─ Ja + in DB    → normaal: toon in gallery
+  ├─ Ja + niet DB  → toon alsnog (filesystem = waarheid), markeer voor indexering
+  └─ Nee + in DB   → markeer als "ontbrekend", NIET verwijderen uit DB
+```
 
-### Fase 1 — Foundation
-- [ ] `state/index.js` — alle mutable globals centraliseren
-- [ ] `db/queries.js` — prepared statements als factory
-- [ ] `db/connection.js` — DB setup uit simple-server halen
+### Mappenstructuur als metadata
 
-### Fase 2 — Services
-- [ ] `services/thumb-generator.js` — thumb gen extraheren
-- [ ] `services/download-queue.js` — queue management extraheren
-- [ ] `services/download-activity.js` — activity tracking
+```
+BASE_DIR/
+  {platform}/
+    {channel}/
+      {title}.mp4
+      {title}.jpg       ← thumbnail naast het bestand
+      {title}.stream.mp4 ← gecachte browser-versie (MKV→MP4)
+```
 
-### Fase 3 — Downloaders
-- [ ] `downloaders/dispatcher.js` — startDownload router
-- [ ] Elke downloader naar eigen bestand
+Het pad zelf communiceert platform, channel, en titel.
+De DB is een snelle index, herbouwbaar vanuit disk.
 
-### Fase 4 — Routes
-- [ ] Express routes naar `routes/*.js`
-- [ ] Nieuw `server.js` entry-point
+### Deduplicatie (twee niveaus)
 
-### Fase 5 — Enrichment
-- [ ] Graph-based media model
-- [ ] Tag-scraping bij ingest
-- [ ] Creator-channel-post hiërarchie
-
-### Per fase:
-1. Module bouwen en testen
-2. Git committen
-3. In simple-server.js vervangen door require()
-4. Server testen (health, gallery, video playback)
-5. Committen en pushen
+| Niveau | Wanneer | Actie |
+|--------|---------|-------|
+| **Download-preventie** | Vóór download | URL-check, melding aan gebruiker |
+| **Gallery-weergave** | Tijdens browsen | Path-normalisatie, dubbelen zichtbaar, gebruiker kiest |
 
 ---
 
-## Niet-functionele Eisen
+## Toekomstige Richting
 
-- **Geen downtime** — Elke fase levert werkende code op
-- **Git-veilig** — Elke stap gecommit, rollback altijd mogelijk
-- **Backward compatible** — Geen API-wijzigingen voor de Firefox extensie
-- **Testbaar** — Modules kunnen individueel getest worden
-- **Leesbaar** — Elke module past in één scherm (~200-400 regels)
+### Auto-tagging bij Ingest
+
+Tags worden niet handmatig toegevoegd, maar automatisch geëxtraheerd:
+
+- Uit bestandsnaam: `#barefoot #outdoor`
+- Uit video-titel van platform
+- Uit URL-structuur (subreddit, channel)
+- Uit metadata (yt-dlp/gallery-dl JSON)
+
+### Premium Laag (toekomst)
+
+Kernprincipe: **premium verrijkt, blokkeert nooit**.
+
+| Free | Premium |
+|------|---------|
+| Volledige gallery + viewer | Playlists, autoplay series |
+| Alle downloaders | Content-hash dedup |
+| Tags + ratings | AI-tags + beschrijvingen |
+| Zoeken + filteren | Cloud metadata sync |
+| Import + reindex | Mobiele companion |
+
+---
+
+## Migratiefasen
+
+### Fase 0 — KLAAR
+- [x] Views → `src/views/` (-3.729 regels)
+- [x] `/media/stream` MKV→MP4 remuxing
+- [x] Twitter/X profiel download via gallery-dl
+
+### Fase 1 — Foundation
+- [ ] `state/index.js` — globals centraliseren
+- [ ] `db/queries.js` — statements als factory
+- [ ] `db/connection.js` — DB setup extraheren
+
+### Fase 2 — Services
+- [ ] `services/thumb-generator.js`
+- [ ] `services/download-queue.js`
+- [ ] `services/download-activity.js`
+
+### Fase 3 — Downloaders
+- [ ] `downloaders/dispatcher.js`
+- [ ] Elke downloader → eigen bestand
+
+### Fase 4 — Routes
+- [ ] Routes → `routes/*.js`
+- [ ] Nieuw `server.js` entry-point
+
+### Fase 5 — Viewer Verrijking
+- [ ] Auto-tagging bij ingest
+- [ ] Batch-acties
+- [ ] Verbeterde keyboard controls
+
+### Per fase
+1. Bouw module, test individueel
+2. Git commit
+3. Vervang in monoliet door require()
+4. Test: health, gallery, video playback
+5. Commit + push
+
+---
+
+## Ontwerpprincipes (uit de blauwdruk)
+
+Bij elke wijziging toetsen:
+
+- **Viewer-first**: maakt het de kijkervaring beter?
+- **DB als index**: sla alleen op wat niet regenereerbaar is
+- **Informeer, dwing niet af**: geef inzicht en keuze
+- **Max 500 regels per module**: helder, leesbaar, testbaar
+- **Open Source kern**: premium verrijkt, blokkeert nooit
+
+---
+
+*Code verandert. De filosofie is stabiel.*
