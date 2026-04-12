@@ -53,7 +53,10 @@ async function main() {
   const { initThumbGenerator } = require('./services/thumb-generator');
   ctx.services.thumbs = initThumbGenerator(ctx);
 
-  console.log('[v2] Services initialized (queue, dispatcher, thumbs)');
+  const { initAutoImport } = require('./services/auto-import');
+  ctx.services.autoImport = initAutoImport(ctx);
+
+  console.log('[v2] Services initialized');
 
   // 7. Routes mounten (elke module krijgt app + ctx)
   require('./routes/health')(app, ctx);
@@ -62,12 +65,18 @@ async function main() {
   require('./routes/admin')(app, ctx);
   require('./routes/pages')(app, ctx);
 
-  // 7. Luisteren op aparte port (naast v1 op 35729)
+  // 8. HTTP server + Socket.IO
   const PORT = 35730;
   const server = http.createServer(app);
+
+  const { initRealtime } = require('./services/realtime');
+  ctx.services.realtime = initRealtime(ctx, server);
+
   server.listen(PORT, () => {
     console.log(`[v2] WEBDL v2 listening on http://localhost:${PORT}`);
     console.log(`[v2] Gallery: http://localhost:${PORT}/gallery`);
+    // Start background services na startup
+    ctx.services.autoImport.start();
   });
 
   // 8. Graceful shutdown
