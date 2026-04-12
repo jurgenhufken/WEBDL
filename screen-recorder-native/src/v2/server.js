@@ -56,12 +56,16 @@ async function main() {
   const { initAutoImport } = require('./services/auto-import');
   ctx.services.autoImport = initAutoImport(ctx);
 
+  const { initRecording } = require('./services/recording');
+  ctx.services.recording = initRecording(ctx);
+
   console.log('[v2] Services initialized');
 
   // 7. Routes mounten (elke module krijgt app + ctx)
   require('./routes/health')(app, ctx);
   require('./routes/media')(app, ctx);
   require('./routes/downloads')(app, ctx);
+  require('./routes/recording')(app, ctx);
   require('./routes/admin')(app, ctx);
   require('./routes/pages')(app, ctx);
 
