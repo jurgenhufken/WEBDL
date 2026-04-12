@@ -2419,7 +2419,14 @@ function getGalleryHTML() {
     }
 
     function itemKey(it) {
-      return (it && it.kind ? String(it.kind) : '') + ':' + String(it && it.id != null ? it.id : '');
+      if (!it) return '';
+      // Prefer dedupe_key (normalized WEBDL-relative path from server)
+      if (it.dedupe_key) {
+        var dk = String(it.dedupe_key);
+        var m = dk.match(/[\/\\]WEBDL[\/\\](.+)$/i);
+        return 'dp:' + (m ? m[1] : dk);
+      }
+      return (it.kind ? String(it.kind) : '') + ':' + String(it.id != null ? it.id : '');
     }
 
     function setHint() {
@@ -15555,18 +15562,23 @@ function makeIndexedMediaItem(row) {
 
 function mediaItemKey(item) {
   if (!item || typeof item !== 'object') return null;
+  // Normalize path: strip varying base dirs to get canonical WEBDL-relative path
+  // e.g. /Users/.../WEBDL/_4K/file.mkv and /Volumes/HDD/WEBDL/_4K/file.mkv → _4K/file.mkv
+  const normalizePath = (p) => {
+    const s = String(p || '');
+    const m = s.match(/[\/\\]WEBDL[\/\\](.+)$/i);
+    return m ? m[1] : s;
+  };
   try {
     const dk = item.dedupe_key ? String(item.dedupe_key) : '';
     if (dk) {
-      const abs = path.resolve(dk);
-      return `dedupe:${abs}`;
+      return `dedupe:${normalizePath(dk)}`;
     }
   } catch (e) { }
   try {
     const rel = item.file_rel ? String(item.file_rel) : '';
     if (rel) {
-      const abs = path.resolve(BASE_DIR, rel);
-      return `dedupe:${abs}`;
+      return `dedupe:${normalizePath(path.resolve(BASE_DIR, rel))}`;
     }
   } catch (e) { }
   if (item.kind && item.id != null) {
