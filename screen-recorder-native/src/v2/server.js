@@ -50,12 +50,16 @@ async function main() {
   const { initDispatcher } = require('./downloaders/dispatcher');
   ctx.services.dispatcher = initDispatcher(ctx);
 
-  console.log('[v2] Queue + dispatcher initialized');
+  const { initThumbGenerator } = require('./services/thumb-generator');
+  ctx.services.thumbs = initThumbGenerator(ctx);
+
+  console.log('[v2] Services initialized (queue, dispatcher, thumbs)');
 
   // 7. Routes mounten (elke module krijgt app + ctx)
   require('./routes/health')(app, ctx);
   require('./routes/media')(app, ctx);
   require('./routes/downloads')(app, ctx);
+  require('./routes/admin')(app, ctx);
   require('./routes/pages')(app, ctx);
 
   // 7. Luisteren op aparte port (naast v1 op 35729)
