@@ -1,67 +1,75 @@
-require('dotenv').config(); // Load config
+'use strict';
+/**
+ * WEBDL v2 — Entry Point
+ * 
+ * Dit bestand doet ALLEEN compositie:
+ * 1. Config laden
+ * 2. DB verbinden
+ * 3. State aanmaken
+ * 4. Services starten
+ * 5. Routes mounten
+ * 6. Luisteren
+ * 
+ * Geen businesslogica. Geen routes. Geen queries.
+ * Max 100 regels.
+ */
 const express = require('express');
-const cors = require('cors');
 const http = require('http');
-const socketIO = require('socket.io');
+const config = require('../config');
 
-const app = express();
-const server = http.createServer(app);
-const io = socketIO(server, {
-  cors: {
-    origin: '*',
-    methods: ['GET', 'POST', 'OPTIONS'],
-    credentials: true,
-  },
-  allowEIO3: true,
-});
+const { connectDb } = require('./db/connection');
+const initQueries = require('./db/queries');
+const createState = require('./state');
 
-// Port for V2 (Defaulting to 35730 to avoid clashing with V1 on 35729)
-const PORT = process.env.V2_PORT || 35730;
+async function main() {
+  console.log('[v2] Starting WEBDL v2 server...');
 
-// Basic middleware
-app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+  // 1. Database
+  const db = await connectDb(config);
+  console.log('[v2] DB connected');
 
-// Global generic logging
-app.use((req, res, next) => {
-  console.log(`[V2 INGRESS] ${req.method} ${req.url}`);
-  next();
-});
+  // 2. Queries (factory: geeft prepared statements terug)
+  const queries = initQueries(db);
+  console.log(`[v2] ${Object.keys(queries).length} queries initialized`);
 
-// Placeholder for router registry
-app.get('/api/health', (req, res) => {
-  res.json({
-    success: true,
-    version: '2.0.0-alpha',
-    status: 'Running concurrent with V1',
-    port: PORT,
+  // 3. State (alle mutable globals op één plek)
+  const state = createState();
+
+  // 4. Express app
+  const app = express();
+  app.use(express.json({ limit: '5mb' }));
+  app.use(express.urlencoded({ extended: true }));
+
+  // 5. Context — het enige object dat modules ontvangen
+  const ctx = { db, queries, state, config, app };
+
+  // 6. Routes mounten (elke module krijgt app + ctx)
+  require('./routes/health')(app, ctx);
+  require('./routes/media')(app, ctx);
+  require('./routes/pages')(app, ctx);
+
+  // 7. Luisteren op aparte port (naast v1 op 35729)
+  const PORT = 35730;
+  const server = http.createServer(app);
+  server.listen(PORT, () => {
+    console.log(`[v2] WEBDL v2 listening on http://localhost:${PORT}`);
+    console.log(`[v2] Gallery: http://localhost:${PORT}/gallery`);
   });
-});
 
-// Socket.io simple listener
-io.on('connection', (socket) => {
-  console.log('[V2 Socket] Client connected');
-  socket.on('disconnect', () => {
-    console.log('[V2 Socket] Client disconnected');
-  });
-});
+  // 8. Graceful shutdown
+  const shutdown = (sig) => {
+    console.log(`[v2] ${sig} received, shutting down...`);
+    state.isShuttingDown = true;
+    server.close(() => {
+      db.end().then(() => process.exit(0)).catch(() => process.exit(1));
+    });
+    setTimeout(() => process.exit(1), 5000);
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+}
 
-// Global Error Handler
-app.use((err, req, res, next) => {
-  console.error('[V2 GLOBAL ERROR]', err.stack);
-  res.status(500).json({
-    success: false,
-    error: 'Internal V2 Server Error',
-    message: err.message
-  });
+main().catch(err => {
+  console.error('[v2] Fatal:', err.message);
+  process.exit(1);
 });
-
-server.listen(PORT, () => {
-  console.log(`\n===========================================`);
-  console.log(`🚀 WEBDL V2 SERVER RUNNING ON PORT ${PORT}`);
-  console.log(`🔄 V1 is likely still running on 35729`);
-  console.log(`===========================================\n`);
-});
-
-module.exports = { app, server, io }; // Export for testability
