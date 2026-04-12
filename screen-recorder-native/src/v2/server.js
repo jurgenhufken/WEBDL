@@ -46,7 +46,11 @@ async function main() {
   // 6. Services starten
   const { initQueue } = require('./services/download-queue');
   ctx.services.queue = initQueue(ctx);
-  console.log('[v2] Download queue initialized');
+
+  const { initDispatcher } = require('./downloaders/dispatcher');
+  ctx.services.dispatcher = initDispatcher(ctx);
+
+  console.log('[v2] Queue + dispatcher initialized');
 
   // 7. Routes mounten (elke module krijgt app + ctx)
   require('./routes/health')(app, ctx);
