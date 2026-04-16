@@ -5006,7 +5006,10 @@ async function rehydrateDownloadQueue() {
       if (lane === 'light') queuedLight.push(id); else
         queuedHeavy.push(id);
 
-      // Vermijd zware DB writes tijdens startup; scheduler pakt queue direct op.
+      // Ensure DB status is 'queued' so items don't stay stuck as 'pending' across restarts
+      if (row.status !== 'queued') {
+        try { await db.prepare("UPDATE downloads SET status = 'queued' WHERE id = ?").run(id); } catch (e) {}
+      }
 
       if (STARTUP_METADATA_PROBE_ENABLED && METADATA_PROBE_ENABLED && METADATA_PROBE_CONCURRENCY > 0 && platform !== 'onlyfans' && platform !== 'instagram' && platform !== 'wikifeet' && platform !== 'kinky' && platform !== 'tiktok' && platform !== 'reddit' && platform !== 'aznudefeet' && platform !== 'amateurvoyeurforum') {
         metadataProbeQueue.push({ downloadId: id, url });
@@ -6574,6 +6577,7 @@ function detectPlatform(url) {
   if (/patreon\.com/i.test(u)) return 'patreon';
   if (/tiktok\.com|tiktokv\.com/i.test(u)) return 'tiktok';
   if (/pornpics\.com/i.test(u)) return 'pornpics';
+  if (/elitebabes\.com/i.test(u)) return 'elitebabes';
 
   try {
     const host = new URL(u).hostname.toLowerCase();
@@ -6621,6 +6625,7 @@ const KNOWN_PLATFORMS = new Set([
   'telegram',
   'tiktok',
   'pornpics',
+  'elitebabes',
   '4kdownloader',
   'other']
 );
@@ -6769,6 +6774,19 @@ function deriveChannelFromUrl(platform, url) {
       name = name.split(/\s+/g).filter(Boolean).map(w => w ? (w[0].toUpperCase() + w.slice(1)) : w).join(' ');
       if (name) return name;
     }
+  }
+
+  if (platform === 'elitebabes') {
+    // Model page: elitebabes.com/model/evita-lima/
+    const mm = u.match(/elitebabes\.com\/model\/([^\/?#]+)/i);
+    if (mm) {
+      let name = String(mm[1] || '').replace(/[-_]+/g, ' ').trim();
+      name = name.split(/\s+/g).filter(Boolean).map(w => w ? (w[0].toUpperCase() + w.slice(1)) : w).join(' ');
+      if (name) return name;
+    }
+    // CDN URL: cdn.elitebabes.com/content/170601/evita-lima-bares-...jpg
+    // Gallery page: elitebabes.com/evita-lima-bares-her-..../
+    // Can't reliably extract model name from CDN/gallery URLs
   }
 
   if (platform === 'twitter') {
