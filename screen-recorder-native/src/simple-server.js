@@ -9500,6 +9500,8 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
           if (isImage) {
             try {
               await updateDownloadThumbnail.run(`/download/${downloadId}/thumb`, downloadId);
+              // Image files serve as their own thumbnail - mark ready immediately
+              await db.prepare("UPDATE downloads SET is_thumb_ready = true WHERE id = ?").run(downloadId);
             } catch (e) { }
           }
 
