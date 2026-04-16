@@ -2066,7 +2066,7 @@
           const canAutoReload = !modalOpen && nearTop && !state.loading && !state.reloading;
           const changed = !!(last && key !== last);
           if (changed) {
-            if (canAutoReload && (now - lastReloadAt) >= 3000) {
+            if (canAutoReload && (now - lastReloadAt) >= 1500) {
               lastReloadAt = now;
               softRefreshTop();
             } else {
@@ -2076,7 +2076,7 @@
           last = key;
         } catch (e) {}
       };
-      setInterval(tick, 5000);
+      setInterval(tick, 2000);
       tick();
     } catch (e) {}
 
