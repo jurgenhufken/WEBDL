@@ -14,7 +14,8 @@
     "http://localhost/*",
     "http://127.0.0.1/*",
     "*://*.footfetishforum.com/*",
-    "*://*.amateurvoyeurforum.com/*"
+    "*://*.amateurvoyeurforum.com/*",
+    "*://*.elitebabes.com/*"
   ],
   "content_scripts": [
     {

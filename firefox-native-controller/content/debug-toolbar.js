@@ -799,6 +799,33 @@
       }
     }
 
+    // Elitebabes
+    else if (/elitebabes\.com/i.test(url)) {
+      meta.platform = 'elitebabes';
+      // Model page: /model/evita-lima/
+      const mm = url.match(/elitebabes\.com\/model\/([^\/?#]+)/i);
+      if (mm) {
+        let name = String(mm[1] || '').replace(/[-_]+/g, ' ').trim();
+        name = name.split(/\s+/g).filter(Boolean).map(w => w ? (w[0].toUpperCase() + w.slice(1)) : w).join(' ');
+        if (name) meta.channel = name;
+      }
+      // Gallery page title
+      const rawTitle = (document.title || '').replace(/\s*[-–—|]\s*Elite\s*Babes?\s*$/i, '').trim();
+      if (rawTitle) meta.title = rawTitle;
+      // Try to extract model name from the page
+      if (meta.channel === 'unknown') {
+        const modelLink = document.querySelector('a[href*="/model/"]');
+        if (modelLink) {
+          const ml = String(modelLink.getAttribute('href') || '').match(/\/model\/([^\/?#]+)/i);
+          if (ml) {
+            let name = String(ml[1] || '').replace(/[-_]+/g, ' ').trim();
+            name = name.split(/\s+/g).filter(Boolean).map(w => w ? (w[0].toUpperCase() + w.slice(1)) : w).join(' ');
+            if (name) meta.channel = name;
+          }
+        }
+      }
+    }
+
     if (!meta.platform || meta.platform === 'unknown') {
       try {
         const host = String(window.location.hostname || '').toLowerCase();
@@ -1317,6 +1344,99 @@
     return uniqueCandidates(out);
   }
 
+  function isEliteBabesPage() {
+    try {
+      const host = window.location.hostname.toLowerCase();
+      return host === 'www.elitebabes.com' || host === 'elitebabes.com';
+    } catch (e) { return false; }
+  }
+
+  function isEliteBabesGalleryPage() {
+    if (!isEliteBabesPage()) return false;
+    // Gallery pages have CDN image links; model/listing pages don't
+    return document.querySelectorAll('a[href*="cdn.elitebabes.com/content/"]').length > 0;
+  }
+
+  function isEliteBabesModelPage() {
+    if (!isEliteBabesPage()) return false;
+    return /\/model\//i.test(window.location.pathname);
+  }
+
+  function collectEliteBabesCandidates(maxItems = 600) {
+    const out = [];
+    const seen = new Set();
+    const push = (raw, el, kind) => {
+      try {
+        const s = String(raw || '').trim();
+        if (!s || /^(data:|blob:|javascript:)/i.test(s)) return;
+        const u = new URL(s, window.location.href);
+        u.hash = '';
+        const final = u.toString();
+        if (seen.has(final)) return;
+        seen.add(final);
+        out.push({ url: final, el: el || null, kind: kind || '' });
+      } catch (e) {}
+    };
+
+    if (isEliteBabesGalleryPage()) {
+      // Collect all full-size CDN images from gallery page
+      for (const a of document.querySelectorAll('a[href*="cdn.elitebabes.com/content/"]')) {
+        if (out.length >= maxItems) break;
+        const href = a.getAttribute('href');
+        if (href && /\.(jpe?g|png|gif|webp)([\?#]|$)/i.test(href)) {
+          push(href, a, 'gallery_image');
+        }
+      }
+    } else if (isEliteBabesModelPage()) {
+      // Collect all gallery page links from model page
+      for (const a of document.querySelectorAll('a[href*="elitebabes.com/"]')) {
+        if (out.length >= maxItems) break;
+        const href = a.getAttribute('href');
+        if (!href) continue;
+        try {
+          const u = new URL(href, window.location.href);
+          const host = u.hostname.toLowerCase();
+          if (!(host === 'www.elitebabes.com' || host === 'elitebabes.com')) continue;
+          const path = u.pathname;
+          // Skip nav/utility pages, model tags, other models
+          if (/^\/(model|model-tag|tag|category|search|random|explore|faves|history|watch-later|collections|pinboards|erotic-art-channels|updates|leaderboard|community|contribute|advertisers|18usc2257|privacy-policy|contact|dmca)\b/i.test(path)) continue;
+          // Gallery pages have a slug like /evita-lima-bares-her.../
+          if (/^\/[a-z0-9][a-z0-9-]+\/?$/i.test(path)) {
+            push(u.toString(), a, 'sub_gallery');
+          }
+        } catch (e) {}
+      }
+    } else {
+      // Generic elitebabes page — collect any CDN images and gallery links
+      for (const a of document.querySelectorAll('a[href*="cdn.elitebabes.com/content/"]')) {
+        if (out.length >= maxItems) break;
+        const href = a.getAttribute('href');
+        if (href && /\.(jpe?g|png|gif|webp)([\?#]|$)/i.test(href)) {
+          push(href, a, 'gallery_image');
+        }
+      }
+      if (out.length === 0) {
+        // No CDN links — treat as listing page
+        for (const a of document.querySelectorAll('a[href*="elitebabes.com/"]')) {
+          if (out.length >= maxItems) break;
+          const href = a.getAttribute('href');
+          if (!href) continue;
+          try {
+            const u = new URL(href, window.location.href);
+            const host = u.hostname.toLowerCase();
+            if (!(host === 'www.elitebabes.com' || host === 'elitebabes.com')) continue;
+            const path = u.pathname;
+            if (/^\/(model|model-tag|tag|category|search|random|explore|faves|history|watch-later|collections|pinboards|erotic-art-channels|updates|leaderboard|community|contribute|advertisers|18usc2257|privacy-policy|contact|dmca)\b/i.test(path)) continue;
+            if (/^\/[a-z0-9][a-z0-9-]+\/?$/i.test(path)) {
+              push(u.toString(), a, 'sub_gallery');
+            }
+          } catch (e) {}
+        }
+      }
+    }
+    return uniqueCandidates(out);
+  }
+
   function collectBatchCandidates(meta) {
     if (isFootFetishForumThreadPage()) {
       const candidates = uniqueCandidates(collectFootFetishForumCandidates(2000));
@@ -1324,6 +1444,10 @@
     }
     if (meta && meta.platform === 'aznudefeet' && isAznudeFeetViewPage()) {
       const candidates = collectAznudeFeetCandidates(600);
+      return { candidates, urls: candidates.map((c) => c.url) };
+    }
+    if (isEliteBabesPage()) {
+      const candidates = collectEliteBabesCandidates(600);
       return { candidates, urls: candidates.map((c) => c.url) };
     }
     const urls = collectBatchUrls(meta);
