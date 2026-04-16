@@ -8563,40 +8563,112 @@ expressApp.post('/download/batch', async (req, res) => {
     unique.push(s);
   }
 
-  // Elitebabes gallery expansion: if URLs are gallery pages, crawl and extract CDN images
+  // Elitebabes expansion: model pages → gallery URLs → CDN images
   const expanded = [];
+  const fetchElitababesPage = async (pageUrl) => {
+    const https = require('https');
+    return new Promise((resolve) => {
+      const req = https.get(pageUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36' },
+        timeout: 15000
+      }, (resp) => {
+        if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location) {
+          resolve(''); return;
+        }
+        let data = '';
+        resp.on('data', c => data += c);
+        resp.on('end', () => resolve(data));
+      });
+      req.on('error', () => resolve(''));
+      req.on('timeout', () => { req.destroy(); resolve(''); });
+    });
+  };
+
+  const extractCdnImages = (html) => {
+    const cdnUrls = [];
+    const re = /href="(https?:\/\/cdn\.elitebabes\.com\/content\/[^"]+\.(?:jpe?g|png|gif|webp))"/gi;
+    let m;
+    while ((m = re.exec(html)) !== null) {
+      if (!seen.has(m[1])) { seen.add(m[1]); cdnUrls.push(m[1]); }
+    }
+    return cdnUrls;
+  };
+
   for (const u of unique) {
-    if (/^https?:\/\/(www\.)?elitebabes\.com\/[a-z0-9][a-z0-9-]+\/?$/i.test(u) &&
-        !/\/(model|model-tag|tag|category|search|random|explore|faves|history)\b/i.test(u) &&
-        !/\.(jpe?g|png|gif|webp|mp4|webm)(\?|$)/i.test(u)) {
+    const isElitebabes = /^https?:\/\/(www\.)?elitebabes\.com\//i.test(u) &&
+      !/\.(jpe?g|png|gif|webp|mp4|webm)(\?|$)/i.test(u) &&
+      !/cdn\.elitebabes\.com/i.test(u);
+
+    if (!isElitebabes) { expanded.push(u); continue; }
+
+    const isModelPage = /\/model\/[a-z0-9][a-z0-9-]+/i.test(u);
+    const isGalleryPage = !isModelPage && /^https?:\/\/(www\.)?elitebabes\.com\/[a-z0-9][a-z0-9-]+\/?$/i.test(u) &&
+      !/\/(model-tag|tag|category|search|random|explore|faves|history)\b/i.test(u);
+
+    if (isModelPage) {
+      // Step 1: Crawl model page (all pagination pages) for gallery links
       try {
-        console.log(`[BATCH] Expanding elitebabes gallery: ${u}`);
-        const https = require('https');
-        const html = await new Promise((resolve, reject) => {
-          const req = https.get(u, {
-            headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36' },
-            timeout: 15000
-          }, (resp) => {
-            if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location) {
-              resolve(''); return;
+        console.log(`[BATCH] Crawling elitebabes model page: ${u}`);
+        const galleryUrls = [];
+        const baseUrl = u.replace(/\/+$/, '');
+        const MAX_PAGES = 10;
+
+        for (let page = 1; page <= MAX_PAGES; page++) {
+          const pageUrl = page === 1 ? baseUrl + '/' : baseUrl + '/page/' + page + '/';
+          const html = await fetchElitababesPage(pageUrl);
+          if (!html) break;
+
+          let foundOnPage = 0;
+          // Primary: links with thumb class
+          const galleryRe = /href="(https?:\/\/(?:www\.)?elitebabes\.com\/[a-z0-9][a-z0-9-]+\/?)"[^>]*class="[^"]*thumb/gi;
+          let gm;
+          while ((gm = galleryRe.exec(html)) !== null) {
+            const gUrl = gm[1];
+            if (!seen.has(gUrl) && !/\/model\/|\/tag\/|\/category\//i.test(gUrl)) {
+              seen.add(gUrl); galleryUrls.push(gUrl); foundOnPage++;
             }
-            let data = '';
-            resp.on('data', c => data += c);
-            resp.on('end', () => resolve(data));
-          });
-          req.on('error', () => resolve(''));
-          req.on('timeout', () => { req.destroy(); resolve(''); });
-        });
-        const cdnUrls = [];
-        const re = /href="(https?:\/\/cdn\.elitebabes\.com\/content\/[^"]+\.(?:jpe?g|png|gif|webp))"/gi;
-        let m;
-        while ((m = re.exec(html)) !== null) {
-          const imgUrl = m[1];
-          if (!seen.has(imgUrl)) {
-            seen.add(imgUrl);
-            cdnUrls.push(imgUrl);
+          }
+          // Fallback: any gallery-like link
+          if (foundOnPage === 0) {
+            const fallbackRe = /href="(https?:\/\/(?:www\.)?elitebabes\.com\/[a-z0-9][a-z0-9-]+\/)"/gi;
+            while ((gm = fallbackRe.exec(html)) !== null) {
+              const gUrl = gm[1];
+              if (!seen.has(gUrl) && !/\/model\/|\/tag\/|\/category\/|\/search\/|\/random\/|\/explore\/|\/page\//i.test(gUrl)) {
+                seen.add(gUrl); galleryUrls.push(gUrl); foundOnPage++;
+              }
+            }
+          }
+          console.log(`[BATCH] Model page ${page}: ${foundOnPage} galleries`);
+          if (foundOnPage === 0) break; // no more pages
+        }
+        console.log(`[BATCH] Model page total: ${galleryUrls.length} galleries found across all pages`);
+
+        // Step 2: Crawl each gallery for CDN images
+        let totalImages = 0;
+        for (const gUrl of galleryUrls) {
+          try {
+            const gHtml = await fetchElitababesPage(gUrl);
+            const imgs = extractCdnImages(gHtml);
+            if (imgs.length > 0) {
+              console.log(`[BATCH] Gallery ${gUrl.split('/').slice(-2, -1)[0]} → ${imgs.length} images`);
+              for (const img of imgs) expanded.push(img);
+              totalImages += imgs.length;
+            }
+          } catch (e) {
+            console.log(`[BATCH] Error crawling gallery ${gUrl}: ${e.message}`);
           }
         }
+        console.log(`[BATCH] Model page complete: ${galleryUrls.length} galleries, ${totalImages} images`);
+      } catch (e) {
+        console.log(`[BATCH] Error crawling model page ${u}: ${e.message}`);
+        expanded.push(u);
+      }
+    } else if (isGalleryPage) {
+      // Direct gallery page → extract CDN images
+      try {
+        console.log(`[BATCH] Expanding elitebabes gallery: ${u}`);
+        const html = await fetchElitababesPage(u);
+        const cdnUrls = extractCdnImages(html);
         if (cdnUrls.length > 0) {
           console.log(`[BATCH] Expanded ${u} → ${cdnUrls.length} images`);
           for (const img of cdnUrls) expanded.push(img);
