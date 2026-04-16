@@ -9285,6 +9285,14 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
     // Probeer lage resolutie links van footfetishforum te upgraden
     url = upgradeKnownLowQualityMediaUrl(url);
 
+    // Skip site infrastructure files (favicons, apple-touch-icons, etc.)
+    if (/(?:^|[/])(?:apple-touch-icon|favicon|browserconfig)(?:[_.]|\.\w+$)/i.test(url)) {
+      console.log(`[DL #${downloadId}] SKIP infrastructure URL: ${url}`);
+      await updateDownloadStatus.run('cancelled', 0, null, downloadId);
+      jobLane.delete(downloadId);
+      return;
+    }
+
     const pinContext = !!(metadata && typeof metadata === 'object' && !Array.isArray(metadata) && metadata.webdl_pin_context === true);
     const originThread = metadata && typeof metadata === 'object' && metadata.origin_thread && typeof metadata.origin_thread === 'object' ? metadata.origin_thread : null;
     const pinnedPlatform = String(originThread && originThread.platform ? originThread.platform : platform || '').toLowerCase();
