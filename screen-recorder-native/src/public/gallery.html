@@ -1069,7 +1069,7 @@
           const nextAt = parseInt(String(img.dataset.next_retry_at || '0'), 10) || 0;
           if (nextAt && now < nextAt) continue;
 
-          const delay = Math.min(120000, Math.floor(4000 * Math.pow(1.6, tries) + (Math.random() * 600)));
+          const delay = tries < 3 ? 500 : Math.min(120000, Math.floor(4000 * Math.pow(1.6, tries - 3) + (Math.random() * 600)));
           try { img.dataset.next_retry_at = String(now + delay); } catch (e) {}
           try { img.dataset.retries = String(tries + 1); } catch (e) {}
 
@@ -2006,6 +2006,9 @@
       }
     }, { rootMargin: '3000px' });
     try { io.observe(elSentinel); } catch(e) {}
+
+    // Periodically retry pending thumbnails so they appear quickly
+    setInterval(() => { try { refreshPendingThumbs(8); } catch(e) {} }, 1500);
 
     // Fallback if IntersectionObserver gets stuck or scroll isn't detected
     setInterval(() => {
