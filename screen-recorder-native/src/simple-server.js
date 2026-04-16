@@ -4094,6 +4094,10 @@ let statsCache = null;
 let statsCacheAt = 0;
 const STATS_CACHE_MS = Math.max(250, parseInt(process.env.WEBDL_STATS_CACHE_MS || '1500', 10) || 1500);
 
+// Media file path cache — avoids DB hit on every Range request for the same video
+const mediaFileCache = new Map();
+setInterval(() => { if (mediaFileCache.size > 2000) mediaFileCache.clear(); }, 300000);
+
 // File existence cache — avoids repeated stat() calls for missing files
 const _fileExistsMap = new Map();
 const _FILE_EXISTS_TTL = 60000; // 60s cache
@@ -11782,16 +11786,22 @@ expressApp.get('/media/file', async (req, res) => {
   if (!Number.isFinite(id)) return res.status(400).end();
 
   try {
+    // Use filepath cache to avoid DB hit on every Range request
+    const cacheKey = `${kind}:${id}`;
+    let fp = mediaFileCache.get(cacheKey);
     let row = null;
-    if (kind === 'd') row = await getDownload.get(id); else
-      if (kind === 's') row = await db.prepare(`SELECT * FROM screenshots WHERE id=?`).get(id); else
-        return res.status(400).end();
+    if (!fp) {
+      if (kind === 'd') row = await getDownload.get(id); else
+        if (kind === 's') row = await db.prepare(`SELECT * FROM screenshots WHERE id=?`).get(id); else
+          return res.status(400).end();
 
-    if (!row) return res.status(404).end();
-    const fp = String(row.filepath || '').trim();
+      if (!row) return res.status(404).end();
+      fp = String(row.filepath || '').trim();
+      if (fp) mediaFileCache.set(cacheKey, fp);
+    }
 
-    if (row.platform === 'patreon') {
-      console.log(`[DEBUG-PATREON-EXPAND] Processing id=${row.id}, fp=${fp}, isAllowed=${safeIsAllowedExistingPath(path.resolve(fp))}`);
+    if (row && row.platform === 'patreon') {
+      console.log(`[DEBUG-PATREON-EXPAND] Processing id=${row && row.id}, fp=${fp}, isAllowed=${safeIsAllowedExistingPath(path.resolve(fp))}`);
     }
 
     if (!fp || !safeIsAllowedExistingPath(fp)) return res.status(404).end();
