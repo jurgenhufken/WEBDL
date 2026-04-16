@@ -8691,8 +8691,9 @@ expressApp.post('/download/batch', async (req, res) => {
     const detectedPlatform = detectPlatform(u);
     const preferDetectedPlatform = !!(pinFffOrigin && pinToOrigin && detectedPlatform && detectedPlatform !== 'other' && detectedPlatform !== originPlatform);
     const platform = pinToOrigin ? originPlatform : (preferDetectedPlatform ? detectedPlatform : normalizePlatform(metaPlatform, u));
-    const channel = pinToOrigin ? originChannel : preferDetectedPlatform ? deriveChannelFromUrl(platform, u) || originChannel : metadata && metadata.channel && metadata.channel !== 'unknown' ? metadata.channel : deriveChannelFromUrl(platform, u) || 'unknown';
-    const title = pinToOrigin ? originTitle : preferDetectedPlatform ? deriveTitleFromUrl(u) : metadata && metadata.title ? metadata.title : deriveTitleFromUrl(u);
+    const isElitebabesCdn = originPlatform === 'elitebabes' && /cdn\.elitebabes\.com/i.test(u);
+    const channel = pinToOrigin ? originChannel : isElitebabesCdn ? (originChannel !== 'unknown' ? originChannel : metadata && metadata.channel || 'unknown') : preferDetectedPlatform ? deriveChannelFromUrl(platform, u) || originChannel : metadata && metadata.channel && metadata.channel !== 'unknown' ? metadata.channel : deriveChannelFromUrl(platform, u) || 'unknown';
+    const title = pinToOrigin ? originTitle : isElitebabesCdn ? (originTitle || metadata && metadata.title || deriveTitleFromUrl(u)) : preferDetectedPlatform ? deriveTitleFromUrl(u) : metadata && metadata.title ? metadata.title : deriveTitleFromUrl(u);
     const allowRedditRerun = platform === 'reddit' && isRedditRollingTargetUrl(u);
     const allowPatreonRerun = platform === 'patreon' && (u.includes('/posts') || u.includes('patreon.com/c/'));
     const allowRerun = allowRedditRerun || allowPatreonRerun;
