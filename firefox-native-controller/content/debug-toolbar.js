@@ -5,7 +5,7 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-04-16-22-59';
+  const WEBDL_BUILD = 'debug-toolbar-2026-04-16-23-10';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
@@ -224,6 +224,7 @@
         if (host === 'cdn.jsdelivr.net' && p.includes('/joypixels/')) return;
         if (/\b(twemoji|emoji)\b/i.test(p)) return;
         if (/\b(graemlins|smilies|smilies\b)\b/i.test(p)) return;
+        if (/apple-touch-icon|favicon|site-logo|logo\.\w+$|\/icons?\//i.test(p)) return;
         if (p === '/attachments/upload') return;
         if (p === '/proxy.php') {
           try {

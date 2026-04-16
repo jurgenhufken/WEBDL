@@ -8530,11 +8530,13 @@ expressApp.post('/download/batch', async (req, res) => {
 
   const unique = [];
   const seen = new Set();
+  const BATCH_SKIP_RE = /(?:^|[/])(?:apple-touch-icon|favicon|site-logo|browserconfig|manifest\.json)(?:\.\w+)?(?:\?|$)/i;
   for (const u of urls) {
     const raw = typeof u === 'string' ? u.trim() : '';
     const s = isRedditFamilyUrl(raw) ? canonicalizeRedditCandidateUrl(raw) : raw;
     if (!s) continue;
     if (seen.has(s)) continue;
+    if (BATCH_SKIP_RE.test(s)) continue;
     seen.add(s);
     unique.push(s);
   }
