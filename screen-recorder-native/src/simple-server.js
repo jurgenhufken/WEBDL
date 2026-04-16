@@ -8717,6 +8717,22 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
     return startOfscraperDownload(downloadId, url, platform, channel, title, metadata);
   }
 
+  if (platform === 'youtube') {
+    // Route YouTube downloads through 4K Video Downloader+ app
+    try {
+      const { execSync } = require('child_process');
+      const safeUrl = url.replace(/'/g, "'\\''");
+      execSync(`open 'fourkvd://${safeUrl}'`, { timeout: 5000 });
+      console.log(`[DL #${downloadId}] → 4K Video Downloader: ${url.slice(0, 80)}`);
+      await updateDownloadStatus.run('superseded', 0, '4K Video Downloader', downloadId);
+      emitDownloadEventActivity('completed', downloadId, { url, platform, channel, title, note: 'Handed off to 4K Video Downloader' }).catch(() => {});
+    } catch (e) {
+      console.log(`[DL #${downloadId}] 4K Downloader failed, falling back to yt-dlp: ${e.message}`);
+      return startYtDlpDownload(downloadId, url, platform, channel, title, metadata);
+    }
+    return;
+  }
+
   if (platform === 'instagram') {
     return startInstaloaderDownload(downloadId, url, platform, channel, title, metadata);
   }
