@@ -12,7 +12,7 @@ module.exports = function mountHealthRoutes(app, ctx) {
     res.json({
       success: true,
       status: state.isShuttingDown ? 'shutting_down' : 'running',
-      version: 'v2',
+      version: '0.2',
       serverTime: new Date().toISOString(),
     });
   });
@@ -22,7 +22,7 @@ module.exports = function mountHealthRoutes(app, ctx) {
       const stats = await ctx.queries.getStats.get();
       res.json({
         success: true,
-        version: 'v2',
+        version: '0.2',
         stats: {
           downloads: parseInt(stats.downloads || 0),
           screenshots: parseInt(stats.screenshots || 0),

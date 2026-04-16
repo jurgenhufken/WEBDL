@@ -1,6 +1,6 @@
 'use strict';
 /**
- * WEBDL v2 — Entry Point
+ * WEBDL 0.2 — Entry Point
  * 
  * Dit bestand doet ALLEEN compositie:
  * 1. Config laden
@@ -22,15 +22,15 @@ const initQueries = require('./db/queries');
 const createState = require('./state');
 
 async function main() {
-  console.log('[v2] Starting WEBDL v2 server...');
+  console.log('[0.2] Starting WEBDL 0.2 server...');
 
   // 1. Database
   const db = await connectDb(config);
-  console.log('[v2] DB connected');
+  console.log('[0.2] DB connected');
 
   // 2. Queries (factory: geeft prepared statements terug)
   const queries = initQueries(db);
-  console.log(`[v2] ${Object.keys(queries).length} queries initialized`);
+  console.log(`[0.2] ${Object.keys(queries).length} queries initialized`);
 
   // 3. State (alle mutable globals op één plek)
   const state = createState();
@@ -59,7 +59,7 @@ async function main() {
   const { initRecording } = require('./services/recording');
   ctx.services.recording = initRecording(ctx);
 
-  console.log('[v2] Services initialized');
+  console.log('[0.2] Services initialized');
 
   // 7. Routes mounten (elke module krijgt app + ctx)
   require('./routes/health')(app, ctx);
@@ -77,15 +77,15 @@ async function main() {
   ctx.services.realtime = initRealtime(ctx, server);
 
   server.listen(PORT, () => {
-    console.log(`[v2] WEBDL v2 listening on http://localhost:${PORT}`);
-    console.log(`[v2] Gallery: http://localhost:${PORT}/gallery`);
+    console.log(`[0.2] WEBDL 0.2 listening on http://localhost:${PORT}`);
+    console.log(`[0.2] Gallery: http://localhost:${PORT}/gallery`);
     // Start background services na startup
     ctx.services.autoImport.start();
   });
 
   // 8. Graceful shutdown
   const shutdown = (sig) => {
-    console.log(`[v2] ${sig} received, shutting down...`);
+    console.log(`[0.2] ${sig} received, shutting down...`);
     state.isShuttingDown = true;
     server.close(() => {
       db.end().then(() => process.exit(0)).catch(() => process.exit(1));
@@ -97,6 +97,6 @@ async function main() {
 }
 
 main().catch(err => {
-  console.error('[v2] Fatal:', err.message);
+  console.error('[0.2] Fatal:', err.message);
   process.exit(1);
 });

@@ -2209,6 +2209,31 @@ function getGalleryHTML() {
       else if (e.key === 'Escape') { e.preventDefault(); closeModal(); }
     });
 
+    // Socket.io auto-refresh: reload gallery when new downloads complete
+    try {
+      const _ioScript = document.createElement('script');
+      _ioScript.src = '/socket.io/socket.io.js';
+      _ioScript.onload = () => {
+        try {
+          const sock = io({ transports: ['websocket', 'polling'] });
+          let _refreshTimer = null;
+          sock.on('download-completed', (data) => {
+            log('Auto-refresh: download voltooid ' + (data && data.file ? data.file : ''));
+            // Debounce: if multiple complete rapidly, only refresh once
+            if (_refreshTimer) clearTimeout(_refreshTimer);
+            _refreshTimer = setTimeout(() => {
+              _refreshTimer = null;
+              if (!state.reloading && !elModal.classList.contains('open')) {
+                reloadAll().catch(() => {});
+              }
+            }, 2000);
+          });
+          sock.on('connect', () => log('Socket.io verbonden'));
+        } catch (e) {}
+      };
+      document.head.appendChild(_ioScript);
+    } catch (e) {}
+
     init().catch(e => { elSentinel.textContent = 'Fout: ' + e.message; });
   </script>
 </body>

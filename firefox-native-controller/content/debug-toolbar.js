@@ -5,7 +5,7 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-03-21-20-03';
+  const WEBDL_BUILD = 'debug-toolbar-2026-04-16-22-59';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
@@ -292,7 +292,17 @@
                   const isExternalMedia = !(linkHost === 'footfetishforum.com' || linkHost.endsWith('.footfetishforum.com')) && looksLikeExternalMediaPageUrl(linkUrl.toString(), parentLink.textContent || '');
                   const isUploadSite = linkHost === 'upload.footfetishforum.com' || linkHost.endsWith('.upload.footfetishforum.com') || isKnownExternalMediaWrapperHost(linkHost) || /pixhost|postimg|imgur|redgifs|gfycat/i.test(linkHost);
                   if (isFffAttachment || isFile || isExternalMedia || isUploadSite) {
-                    push(href, 'thumb_link');
+                    // For upload.footfetishforum.com/image/ wrapper, use <img> src (direct URL)
+                    if ((linkHost === 'upload.footfetishforum.com' || linkHost.endsWith('.upload.footfetishforum.com')) && /^\/image\//i.test(String(linkUrl.pathname || ''))) {
+                      const imgSrc = img.currentSrc || img.src || img.getAttribute('src') || img.getAttribute('data-src') || '';
+                      if (imgSrc && /upload\.footfetishforum\.com\/images\//i.test(imgSrc)) {
+                        push(imgSrc, 'fff_upload_direct');
+                      } else {
+                        push(href, 'thumb_link');
+                      }
+                    } else {
+                      push(href, 'thumb_link');
+                    }
                     hadParentLink = true;
                   }
                 } catch (e) {
@@ -921,7 +931,17 @@
                 const isUploadSite = linkHost === 'upload.footfetishforum.com' || linkHost.endsWith('.upload.footfetishforum.com') || isKnownExternalMediaWrapperHost(linkHost) || /pixhost|postimg|imgur|redgifs|gfycat/i.test(linkHost);
 
                 if (isFffAttachment || isFile || isExternalMedia || isUploadSite) {
-                  push(href, parentLink, 'thumb_link');
+                  // For upload.footfetishforum.com/image/ wrapper, use <img> src (direct URL)
+                  if ((linkHost === 'upload.footfetishforum.com' || linkHost.endsWith('.upload.footfetishforum.com')) && /^\/image\//i.test(String(linkUrl.pathname || ''))) {
+                    const imgSrc = img.currentSrc || img.src || img.getAttribute('src') || img.getAttribute('data-src') || '';
+                    if (imgSrc && /upload\.footfetishforum\.com\/images\//i.test(imgSrc)) {
+                      push(imgSrc, parentLink, 'fff_upload_direct');
+                    } else {
+                      push(href, parentLink, 'thumb_link');
+                    }
+                  } else {
+                    push(href, parentLink, 'thumb_link');
+                  }
                   hadParentLink = true;
                 }
               } catch (e) {}
@@ -3194,6 +3214,59 @@
 
     const ok = confirmBatchStart({ count: urls.length, force, label: 'Batch download', redditHint });
     if (!ok) return;
+
+    // Resolve upload.footfetishforum.com/image/ wrapper URLs in-browser
+    // The browser has Cloudflare cookies, so fetch() works where the server can't
+    const wrapperPattern = /^https?:\/\/upload\.footfetishforum\.com\/image\//i;
+    const wrapperUrls = urls.filter(u => wrapperPattern.test(u));
+    if (wrapperUrls.length > 0) {
+      try { addLog(`Resolving ${wrapperUrls.length} Chevereto wrapper URLs...`); } catch (e) {}
+      try { showNotification(`Resolving ${wrapperUrls.length} wrapper URLs...`, false); } catch (e) {}
+      const resolveOne = async (wrapperUrl) => {
+        try {
+          const ctrl = new AbortController();
+          const t = setTimeout(() => { try { ctrl.abort(); } catch (e) {} }, 12000);
+          const resp = await fetch(wrapperUrl, { credentials: 'include', cache: 'no-store', signal: ctrl.signal });
+          clearTimeout(t);
+          if (!resp.ok) return wrapperUrl;
+          const html = await resp.text();
+          // Try og:image meta tag first
+          const ogMatch = html.match(/<meta\s+property=["']og:image["']\s+content=["']([^"']+)["']/i);
+          if (ogMatch && ogMatch[1] && /upload\.footfetishforum\.com\/images\//i.test(ogMatch[1])) {
+            return ogMatch[1];
+          }
+          // Try finding direct image link in HTML
+          const imgMatch = html.match(/https?:\/\/upload\.footfetishforum\.com\/images\/[^\s"'<>]+\.(jpe?g|png|gif|webp)/i);
+          if (imgMatch && imgMatch[0]) {
+            return imgMatch[0];
+          }
+          return wrapperUrl;
+        } catch (e) {
+          return wrapperUrl;
+        }
+      };
+      // Resolve in batches of 3 to avoid hammering
+      const resolved = new Map();
+      for (let i = 0; i < wrapperUrls.length; i += 3) {
+        const batch = wrapperUrls.slice(i, i + 3);
+        const results = await Promise.all(batch.map(u => resolveOne(u)));
+        for (let j = 0; j < batch.length; j++) {
+          resolved.set(batch[j], results[j]);
+        }
+        if (i + 3 < wrapperUrls.length) {
+          await new Promise(r => setTimeout(r, 200));
+        }
+      }
+      let resolvedCount = 0;
+      urls = urls.map(u => {
+        if (resolved.has(u) && resolved.get(u) !== u) {
+          resolvedCount++;
+          return resolved.get(u);
+        }
+        return u;
+      });
+      try { addLog(`Resolved ${resolvedCount}/${wrapperUrls.length} wrapper URLs`); } catch (e) {}
+    }
 
     const modeLabel = force ? 'Force' : 'Batch';
     addLog(`${modeLabel} batch download: ${urls.length} items`);

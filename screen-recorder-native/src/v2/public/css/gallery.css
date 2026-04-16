@@ -1,0 +1,203 @@
+/* WEBDL 0.2 — Gallery layout: sidebar, grid, viewer */
+
+/* === Sidebar === */
+.sidebar {
+  width: var(--sidebar-w);
+  height: 100vh;
+  background: var(--bg-surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.sidebar-header {
+  padding: 20px 16px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.logo {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.5px;
+}
+.logo .version {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--accent);
+  vertical-align: super;
+  margin-left: 2px;
+}
+
+.stats {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 6px;
+}
+
+.sidebar-search { padding: 12px 16px 8px; }
+
+.sidebar-filters {
+  display: flex;
+  gap: 4px;
+  padding: 4px 16px 12px;
+}
+
+.filter-btn {
+  padding: 5px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  transition: all 0.15s;
+}
+.filter-btn:hover { color: var(--text); background: var(--bg-hover); }
+.filter-btn.active { color: white; background: var(--accent); }
+
+.sidebar-channels {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.channel-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  cursor: pointer;
+  transition: background 0.15s;
+  font-size: 13px;
+}
+.channel-item:hover { background: var(--bg-hover); }
+.channel-item.active { background: var(--accent-glow); color: var(--accent); border-right: 2px solid var(--accent); }
+
+.channel-platform {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  min-width: 52px;
+}
+.channel-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.channel-count { font-size: 11px; color: var(--text-dim); }
+
+/* === Main grid === */
+.main {
+  flex: 1;
+  height: 100vh;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 8px;
+}
+
+.grid-item {
+  position: relative;
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--bg-elevated);
+  cursor: pointer;
+  aspect-ratio: 16 / 10;
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+.grid-item:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+}
+
+.grid-item img, .grid-item video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.grid-item-overlay {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  padding: 24px 8px 8px;
+  background: linear-gradient(transparent, rgba(0,0,0,0.85));
+  pointer-events: none;
+}
+
+.grid-item-title {
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.grid-item-meta {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.grid-item-badge {
+  position: absolute;
+  top: 6px; right: 6px;
+  background: rgba(0,0,0,0.7);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.grid-loading, .grid-empty {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 40px;
+  color: var(--text-dim);
+}
+
+/* === Viewer overlay === */
+.viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(0,0,0,0.95);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.viewer-close {
+  position: absolute;
+  top: 16px; right: 20px;
+  font-size: 28px;
+  color: var(--text-muted);
+  z-index: 1001;
+  transition: color 0.15s;
+}
+.viewer-close:hover { color: white; }
+
+.viewer-content {
+  max-width: 90vw;
+  max-height: 80vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.viewer-content video, .viewer-content img {
+  max-width: 100%;
+  max-height: 80vh;
+  border-radius: var(--radius);
+}
+
+.viewer-info {
+  margin-top: 12px;
+  text-align: center;
+  max-width: 600px;
+}
+.viewer-info-title { font-size: 14px; font-weight: 500; }
+.viewer-info-meta { font-size: 12px; color: var(--text-muted); margin-top: 4px; }

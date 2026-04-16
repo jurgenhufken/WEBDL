@@ -1,0 +1,84 @@
+/* WEBDL 0.2 — Base styles: tokens, resets, typography */
+
+:root {
+  /* Colors */
+  --bg: #0d0d0f;
+  --bg-surface: #16161a;
+  --bg-elevated: #1e1e24;
+  --bg-hover: #26262e;
+  --border: #2a2a33;
+  --text: #e4e4e8;
+  --text-muted: #8888a0;
+  --text-dim: #555568;
+  --accent: #7c6cf0;
+  --accent-glow: #7c6cf033;
+  --success: #4ade80;
+  --error: #f87171;
+  --warning: #fbbf24;
+
+  /* Layout */
+  --sidebar-w: 260px;
+  --radius: 8px;
+  --radius-sm: 4px;
+
+  /* Typography */
+  --font: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --mono: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap');
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  font-family: var(--font);
+  font-size: 14px;
+  color: var(--text);
+  background: var(--bg);
+  overflow: hidden;
+}
+
+body { display: flex; }
+
+::selection { background: var(--accent); color: white; }
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+
+a { color: var(--accent); text-decoration: none; }
+
+button {
+  font-family: var(--font);
+  cursor: pointer;
+  border: none;
+  background: none;
+  color: var(--text);
+  font-size: inherit;
+}
+
+input {
+  font-family: var(--font);
+  font-size: inherit;
+  color: var(--text);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  outline: none;
+  width: 100%;
+  transition: border-color 0.2s;
+}
+input:focus { border-color: var(--accent); }
+
+.spinner {
+  width: 28px; height: 28px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.loading-text { color: var(--text-dim); padding: 16px; font-size: 13px; }

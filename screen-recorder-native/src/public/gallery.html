@@ -460,7 +460,8 @@
 
     function getSessionEnabledDirs() {
       try {
-        const instanceId = window.location.pathname === '/viewer' ? 'viewer' : 'gallery';
+        const _tabId = window._webdlTabId || (window._webdlTabId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6));
+        const instanceId = (window.location.pathname === '/viewer' ? 'viewer' : 'gallery') + '_' + _tabId;
         const raw = sessionStorage.getItem('gallery.enabledDirs.' + instanceId);
         if (!raw) return null;
         const parsed = JSON.parse(raw);
@@ -472,7 +473,8 @@
 
     function setSessionEnabledDirs(enabledDirs) {
       try {
-        const instanceId = window.location.pathname === '/viewer' ? 'viewer' : 'gallery';
+        const _tabId = window._webdlTabId || (window._webdlTabId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6));
+        const instanceId = (window.location.pathname === '/viewer' ? 'viewer' : 'gallery') + '_' + _tabId;
         if (enabledDirs == null) {
           sessionStorage.removeItem('gallery.enabledDirs.' + instanceId);
           return;
@@ -1084,7 +1086,8 @@
       const params = new URLSearchParams();
       params.set('mode', state.mode);
       params.set('filter', state.filter);
-      params.set('sort', state.sort);
+      // Don't persist random sort — it's a session-only mode
+      params.set('sort', state.sort === 'random' ? 'recent' : state.sort);
       if (state.channel) {
         params.set('platform', state.channel.platform);
         params.set('channel', state.channel.channel);
@@ -1097,7 +1100,11 @@
       const params = new URLSearchParams(window.location.search);
       if (params.has('mode')) state.mode = params.get('mode');
       if (params.has('filter')) state.filter = params.get('filter');
-      if (params.has('sort')) state.sort = params.get('sort');
+      if (params.has('sort')) {
+        const s = params.get('sort');
+        // Don't restore random — user must explicitly click Random
+        state.sort = (s === 'random') ? 'recent' : s;
+      }
       if (params.has('platform') && params.has('channel')) {
         state.channel = { platform: params.get('platform'), channel: params.get('channel') };
       }
@@ -1502,7 +1509,10 @@
         const source = document.createElement('source');
         source.src = it.src;
         const ext = (it.src || '').match(/\.(mp4|webm|mov|m4v|mkv|avi)(?:[?#]|$)/i);
-        source.type = ext && ext[1] ? 'video/' + ext[1].toLowerCase().replace('m4v', 'mp4') : 'video/mp4';
+        const rawExt = ext && ext[1] ? ext[1].toLowerCase() : 'mp4';
+        // Map container extensions to valid MIME types
+        const mimeMap = { mp4: 'video/mp4', webm: 'video/webm', mov: 'video/mp4', m4v: 'video/mp4', mkv: 'video/mp4', avi: 'video/mp4' };
+        source.type = mimeMap[rawExt] || 'video/mp4';
         el.appendChild(source);
         el.addEventListener('volumechange', () => {
           state.volume = el.volume;
@@ -2042,51 +2052,31 @@
       let lastReloadAt = 0;
       let lastPeriodicAt = Date.now();
       const tick = async () => {
+        // Skip when tab is hidden — prevents unnecessary polling
+        if (document.hidden) return;
         try {
           const data = await api('/api/stats');
           const s = data && data.stats ? data.stats : null;
           if (!s) return;
           const modalOpen = elModal.classList.contains('open');
-          const activeDl = state.status && Number.isFinite(Number(state.status.activeDownloads)) ? Number(state.status.activeDownloads) : 0;
-          const key = (activeDl > 0)
-            ? [s.downloads, s.downloads_created_last || '', s.downloads_finished_last || '', s.screenshots, s.download_files, s.screenshots_last, s.download_files_last].join('|')
-            : [s.downloads, s.downloads_created_last || '', s.downloads_finished_last || '', s.screenshots, s.download_files, s.downloads_last || '', s.screenshots_last, s.download_files_last].join('|');
+          const key = [s.downloads, s.downloads_created_last || '', s.downloads_finished_last || '', s.screenshots, s.download_files].join('|');
           const now = Date.now();
           const scrollTop = (typeof window !== 'undefined') ? (window.scrollY || document.documentElement.scrollTop || 0) : 0;
           const nearTop = scrollTop < 160;
           const canAutoReload = !modalOpen && nearTop && !state.loading && !state.reloading;
           const changed = !!(last && key !== last);
-          if (canAutoReload && !changed && (now - lastPeriodicAt) >= (activeDl > 0 ? 12000 : 8000)) {
-            lastPeriodicAt = now;
-            lastReloadAt = now;
-            softRefreshTop();
-          }
-          if (!modalOpen) {
-            if (activeDl > 0) {
-              if (changed && canAutoReload) {
-                lastReloadAt = now;
-                softRefreshTop();
-              } else if (canAutoReload && (now - lastReloadAt) >= 15000) {
-                lastReloadAt = now;
-                softRefreshTop();
-              } else if (!canAutoReload) {
-                elHint.textContent = 'Download bezig — nieuwe files beschikbaar (klik Herladen)';
-              }
-            } else if (changed) {
-              if (canAutoReload && (now - lastReloadAt) >= 2500) {
-                lastReloadAt = now;
-                softRefreshTop();
-              } else if (!canAutoReload) {
-                elHint.textContent = 'Nieuwe items — klik Herladen';
-              }
+          if (changed) {
+            if (canAutoReload && (now - lastReloadAt) >= 3000) {
+              lastReloadAt = now;
+              softRefreshTop();
+            } else {
+              elHint.textContent = 'Nieuwe items beschikbaar — klik Herladen';
             }
-          } else if (changed) {
-            elHint.textContent = 'Nieuwe items — klik Herladen';
           }
           last = key;
         } catch (e) {}
       };
-      setInterval(tick, 2500);
+      setInterval(tick, 5000);
       tick();
     } catch (e) {}
 
@@ -2095,21 +2085,172 @@
 
     const elInpSearch = document.getElementById('inpSearch');
     if (elInpSearch) {
-      elInpSearch.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-          const val = elInpSearch.value.trim();
-          if (val !== state.search) {
-            state.search = val;
-            reloadAll();
+      // --- Autocomplete dropdown ---
+      const acDrop = document.createElement('div');
+      acDrop.id = 'searchAutocomplete';
+      Object.assign(acDrop.style, {
+        position: 'absolute', top: '100%', left: '0', right: '0',
+        background: '#1a2238', border: '1px solid #334', borderTop: 'none',
+        borderRadius: '0 0 8px 8px', maxHeight: '320px', overflowY: 'auto',
+        zIndex: '9999', display: 'none', boxShadow: '0 8px 24px rgba(0,0,0,0.5)'
+      });
+      // Wrap search in relative container
+      const searchWrap = elInpSearch.parentElement || elInpSearch.parentNode;
+      if (searchWrap) { searchWrap.style.position = 'relative'; searchWrap.appendChild(acDrop); }
+
+      let acTimer = null;
+      let acIdx = -1;
+
+      function renderSuggestions(suggestions) {
+        acDrop.innerHTML = '';
+        if (!suggestions || suggestions.length === 0) { acDrop.style.display = 'none'; return; }
+        acIdx = -1;
+        for (let i = 0; i < suggestions.length; i++) {
+          const s = suggestions[i];
+          const row = document.createElement('div');
+          row.dataset.idx = i;
+          Object.assign(row.style, {
+            padding: '8px 12px', cursor: 'pointer', display: 'flex',
+            alignItems: 'center', gap: '8px', borderBottom: '1px solid #222',
+            transition: 'background 0.1s'
+          });
+          row.addEventListener('mouseenter', () => { acIdx = i; highlightAcItem(); });
+          row.addEventListener('mouseleave', () => row.style.background = '');
+          
+          // Type badge
+          const badge = document.createElement('span');
+          badge.textContent = s.type === 'platform' ? '📁' : s.type === 'channel' ? '📺' : '📄';
+          badge.style.fontSize = '14px';
+          badge.style.flexShrink = '0';
+          
+          // Label
+          const label = document.createElement('span');
+          label.style.cssText = 'flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#eee; font-size:13px;';
+          // Highlight matching part
+          const q = elInpSearch.value.trim().toLowerCase();
+          const labelText = s.label || '';
+          const matchIdx = labelText.toLowerCase().indexOf(q);
+          if (matchIdx >= 0) {
+            label.innerHTML = escHtml(labelText.slice(0, matchIdx)) + 
+              '<b style="color:#00d4ff">' + escHtml(labelText.slice(matchIdx, matchIdx + q.length)) + '</b>' +
+              escHtml(labelText.slice(matchIdx + q.length));
+          } else {
+            label.textContent = labelText;
           }
+          
+          // Sublabel (platform/channel info)
+          const sub = document.createElement('span');
+          sub.style.cssText = 'font-size:11px; color:#888; flex-shrink:0;';
+          sub.textContent = s.sublabel ? s.sublabel : (s.count ? s.count + ' items' : '');
+          
+          row.appendChild(badge);
+          row.appendChild(label);
+          row.appendChild(sub);
+          
+          row.addEventListener('click', () => {
+            acDrop.style.display = 'none';
+            if (s.type === 'channel' && s.platform) {
+              // Switch to channel mode for this platform/channel
+              elInpSearch.value = '';
+              state.search = '';
+              state.mode = 'channel';
+              state.channel = { platform: s.platform, channel: s.value };
+              state.limit = 5000;
+              if (elMode) elMode.value = 'channel';
+              if (elChannelSel) {
+                const optVal = s.platform + '||' + s.value;
+                let existingOpt = Array.from(elChannelSel.options).find(o => o.value === optVal);
+                if (!existingOpt) {
+                  const no = document.createElement('option');
+                  no.value = optVal;
+                  no.textContent = s.platform + ' / ' + s.value;
+                  elChannelSel.appendChild(no);
+                }
+                elChannelSel.value = optVal;
+                elChannelSel.style.display = '';
+              }
+              reloadAll().then(() => { state.limit = 120; });
+            } else if (s.type === 'platform') {
+              // Filter by platform via Mappen
+              elInpSearch.value = '';
+              state.search = '';
+              state.enabledDirs = [{ platform: s.value, channels: [] }];
+              setSessionEnabledDirs(state.enabledDirs);
+              state.mode = 'recent';
+              if (elMode) elMode.value = 'recent';
+              reloadAll();
+            } else {
+              // Title: use as search text
+              elInpSearch.value = s.value;
+              state.search = s.value;
+              reloadAll();
+            }
+          });
+          
+          acDrop.appendChild(row);
+        }
+        acDrop.style.display = 'block';
+      }
+
+      function highlightAcItem() {
+        const items = acDrop.children;
+        for (let i = 0; i < items.length; i++) {
+          items[i].style.background = i === acIdx ? '#2a3b5c' : '';
+        }
+      }
+
+      function escHtml(s) { const d = document.createElement('span'); d.textContent = s; return d.innerHTML; }
+
+      async function fetchSuggestions(q) {
+        try {
+          const data = await api('/api/media/search-suggest?q=' + encodeURIComponent(q));
+          if (data.success && data.suggestions) renderSuggestions(data.suggestions);
+          else acDrop.style.display = 'none';
+        } catch (e) { acDrop.style.display = 'none'; }
+      }
+
+      elInpSearch.addEventListener('input', () => {
+        clearTimeout(acTimer);
+        const val = elInpSearch.value.trim();
+        if (val.length < 2) { acDrop.style.display = 'none'; return; }
+        acTimer = setTimeout(() => fetchSuggestions(val), 250);
+      });
+
+      // Show popular suggestions on focus (empty box)
+      elInpSearch.addEventListener('focus', () => {
+        if (elInpSearch.value.trim().length < 2) {
+          fetchSuggestions('');  // empty query = popular items
         }
       });
-      elInpSearch.addEventListener('change', (e) => {
-        const val = elInpSearch.value.trim();
-        if (val !== state.search) {
+
+      elInpSearch.addEventListener('keydown', (e) => {
+        const items = acDrop.children;
+        if (acDrop.style.display !== 'none' && items.length > 0) {
+          if (e.key === 'ArrowDown') { e.preventDefault(); acIdx = Math.min(acIdx + 1, items.length - 1); highlightAcItem(); return; }
+          if (e.key === 'ArrowUp') { e.preventDefault(); acIdx = Math.max(acIdx - 1, 0); highlightAcItem(); return; }
+          if (e.key === 'Enter' && acIdx >= 0 && items[acIdx]) {
+            e.preventDefault();
+            items[acIdx].click();
+            return;
+          }
+        }
+        if (e.key === 'Enter') {
+          acDrop.style.display = 'none';
+          const val = elInpSearch.value.trim();
           state.search = val;
           reloadAll();
         }
+        if (e.key === 'Escape') { acDrop.style.display = 'none'; }
+      });
+
+      elInpSearch.addEventListener('blur', () => {
+        setTimeout(() => { acDrop.style.display = 'none'; }, 200);
+      });
+
+      elInpSearch.addEventListener('change', (e) => {
+        const val = elInpSearch.value.trim();
+        state.search = val;
+        reloadAll();
       });
     }
     const elBtnDirSelect = document.getElementById('btnDirSelect');

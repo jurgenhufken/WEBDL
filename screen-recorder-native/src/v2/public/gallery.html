@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WEBDL 0.2 — Gallery</title>
+  <link rel="stylesheet" href="/static/css/base.css">
+  <link rel="stylesheet" href="/static/css/gallery.css">
+</head>
+<body>
+  <!-- Sidebar: channels + filters -->
+  <aside id="sidebar" class="sidebar">
+    <header class="sidebar-header">
+      <h1 class="logo">WEBDL <span class="version">0.2</span></h1>
+      <div class="stats" id="stats"></div>
+    </header>
+    <div class="sidebar-search">
+      <input type="text" id="search-input" placeholder="Zoek..." autocomplete="off">
+    </div>
+    <nav class="sidebar-filters" id="filters">
+      <button class="filter-btn active" data-type="all">Alles</button>
+      <button class="filter-btn" data-type="video">Video</button>
+      <button class="filter-btn" data-type="image">Foto</button>
+    </nav>
+    <div class="sidebar-channels" id="channel-list">
+      <div class="loading-text">Kanalen laden...</div>
+    </div>
+  </aside>
+
+  <!-- Main content: grid -->
+  <main id="main" class="main">
+    <div class="grid" id="grid"></div>
+    <div class="grid-loading" id="grid-loading" style="display:none">
+      <div class="spinner"></div>
+    </div>
+    <div class="grid-empty" id="grid-empty" style="display:none">
+      Geen items gevonden.
+    </div>
+  </main>
+
+  <!-- Viewer overlay -->
+  <div id="viewer" class="viewer" style="display:none">
+    <button class="viewer-close" id="viewer-close">&times;</button>
+    <div class="viewer-content" id="viewer-content"></div>
+    <div class="viewer-info" id="viewer-info"></div>
+  </div>
+
+  <!-- Modules -->
+  <script src="/static/js/api.js"></script>
+  <script src="/static/js/grid.js"></script>
+  <script src="/static/js/sidebar.js"></script>
+  <script src="/static/js/viewer.js"></script>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

@@ -66,5 +66,26 @@ module.exports = function initQueries(db) {
     getRating: db.prepare(
       `SELECT * FROM ratings WHERE kind = ? AND media_id = ?`
     ),
+
+    // === Channels (Viewer) ===
+    getMediaChannels: db.prepare(
+      `SELECT platform, channel, COUNT(*) AS count,
+              MAX(COALESCE(finished_at, created_at)) AS last_item
+       FROM downloads
+       WHERE status = 'completed' AND filepath IS NOT NULL AND filepath != ''
+       GROUP BY platform, channel
+       ORDER BY last_item DESC
+       LIMIT ? OFFSET ?`
+    ),
+    getChannelFiles: db.prepare(
+      `SELECT d.id, d.platform, d.channel, d.title, d.status, d.thumbnail,
+              d.filepath, d.created_at, d.finished_at, d.source_url, d.url,
+              d.description, d.duration
+       FROM downloads d
+       WHERE d.status = 'completed' AND d.filepath IS NOT NULL AND d.filepath != ''
+         AND d.platform = ? AND d.channel = ?
+       ORDER BY COALESCE(d.finished_at, d.created_at) DESC
+       LIMIT ? OFFSET ?`
+    ),
   };
 };
