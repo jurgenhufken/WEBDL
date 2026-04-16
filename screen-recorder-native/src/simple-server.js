@@ -4491,7 +4491,7 @@ function detectLane(platform, url = '') {
   // Only pure image/direct link platforms get the fast lane
   const lightPlatforms = [
     'footfetishforum', 'forum-area', 'imagetwist', 'pixhost', 'postimg', 'bunkr', 'jpg', 'aznudefeet', 'pornpics',
-    'kinky', 'wikifeet', 'wikifeetx'
+    'kinky', 'wikifeet', 'wikifeetx', 'elitebabes'
   ];
 
   if (lightPlatforms.includes(p)) return 'light';
@@ -8545,8 +8545,58 @@ expressApp.post('/download/batch', async (req, res) => {
     unique.push(s);
   }
 
-  const created = [];
+  // Elitebabes gallery expansion: if URLs are gallery pages, crawl and extract CDN images
+  const expanded = [];
   for (const u of unique) {
+    if (/^https?:\/\/(www\.)?elitebabes\.com\/[a-z0-9][a-z0-9-]+\/?$/i.test(u) &&
+        !/\/(model|model-tag|tag|category|search|random|explore|faves|history)\b/i.test(u) &&
+        !/\.(jpe?g|png|gif|webp|mp4|webm)(\?|$)/i.test(u)) {
+      try {
+        console.log(`[BATCH] Expanding elitebabes gallery: ${u}`);
+        const https = require('https');
+        const html = await new Promise((resolve, reject) => {
+          const req = https.get(u, {
+            headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36' },
+            timeout: 15000
+          }, (resp) => {
+            if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location) {
+              resolve(''); return;
+            }
+            let data = '';
+            resp.on('data', c => data += c);
+            resp.on('end', () => resolve(data));
+          });
+          req.on('error', () => resolve(''));
+          req.on('timeout', () => { req.destroy(); resolve(''); });
+        });
+        const cdnUrls = [];
+        const re = /href="(https?:\/\/cdn\.elitebabes\.com\/content\/[^"]+\.(?:jpe?g|png|gif|webp))"/gi;
+        let m;
+        while ((m = re.exec(html)) !== null) {
+          const imgUrl = m[1];
+          if (!seen.has(imgUrl)) {
+            seen.add(imgUrl);
+            cdnUrls.push(imgUrl);
+          }
+        }
+        if (cdnUrls.length > 0) {
+          console.log(`[BATCH] Expanded ${u} → ${cdnUrls.length} images`);
+          for (const img of cdnUrls) expanded.push(img);
+        } else {
+          console.log(`[BATCH] No CDN images found in ${u}, keeping as-is`);
+          expanded.push(u);
+        }
+      } catch (e) {
+        console.log(`[BATCH] Error expanding ${u}: ${e.message}`);
+        expanded.push(u);
+      }
+    } else {
+      expanded.push(u);
+    }
+  }
+
+  const created = [];
+  for (const u of expanded) {
     const pinToOrigin = !!((pinFffOrigin || pinAznOrigin) && pageUrl && pageUrl !== u);
     const detectedPlatform = detectPlatform(u);
     const preferDetectedPlatform = !!(pinFffOrigin && pinToOrigin && detectedPlatform && detectedPlatform !== 'other' && detectedPlatform !== originPlatform);
