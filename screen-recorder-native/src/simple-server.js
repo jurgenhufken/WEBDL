@@ -11795,7 +11795,7 @@ expressApp.get('/media/file', async (req, res) => {
     }
 
     if (!fp || !safeIsAllowedExistingPath(fp)) return res.status(404).end();
-    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Cache-Control', 'private, max-age=3600, must-revalidate');
     try {
       const st = fs.statSync(fp);
       if (st && st.isDirectory && st.isDirectory()) {
