@@ -4775,7 +4775,7 @@ function scheduleAutoRehydrate() {
         `SELECT id, url, platform, channel, title, metadata, status
          FROM downloads
          WHERE status = 'pending'
-         ORDER BY created_at DESC, id DESC
+         ORDER BY COALESCE(priority, 0) DESC, id ASC
          LIMIT 250`
       ).all();
       if (!rows || rows.length === 0) return;
@@ -5225,6 +5225,17 @@ expressApp.post('/api/queue/resume', async (req, res) => {
   } catch (e) {
     res.status(500).json({ success: false, error: String(e && e.message ? e.message : e) });
   }
+});
+
+// Global priority mode — when ON, new downloads get priority=1
+let globalPriorityMode = false;
+expressApp.get('/api/settings/priority', (req, res) => {
+  res.json({ success: true, priority: globalPriorityMode });
+});
+expressApp.post('/api/settings/priority', (req, res) => {
+  globalPriorityMode = !!(req.body && req.body.enabled);
+  console.log(`🔥 Priority mode: ${globalPriorityMode ? 'AAN' : 'UIT'}`);
+  res.json({ success: true, priority: globalPriorityMode });
 });
 
 async function relaySocketCommandToHttp(endpoint, payload) {
@@ -8549,7 +8560,7 @@ expressApp.post('/stop-recording', (req, res) => {
 
 // Download starten via yt-dlp
 expressApp.post('/download', async (req, res) => {
-  const { url, metadata, force, lane } = req.body || {};
+  const { url, metadata, force, lane, priority } = req.body || {};
   try {
     console.log(`[INGRESS] POST /download url=${String(url || '').slice(0, 200)} page=${String(metadata && metadata.url || '').slice(0, 200)} force=${force === true ? '1' : '0'}`);
   } catch (e) { }
@@ -8657,6 +8668,12 @@ expressApp.post('/download', async (req, res) => {
   }
   const result = await insertDownload.run(effectiveUrl, platform, channel, title);
   const downloadId = result.lastInsertRowid;
+
+  // Set priority if requested or global priority mode is ON
+  const effectivePriority = (priority && Number(priority) > 0) ? Number(priority) : (globalPriorityMode ? 1 : 0);
+  if (effectivePriority > 0) {
+    try { await db.prepare("UPDATE downloads SET priority = ? WHERE id = ?").run(effectivePriority, downloadId); } catch (e) {}
+  }
 
   try {
     const pageUrl = metadata && typeof metadata.url === 'string' ? metadata.url.trim() : '';
@@ -8895,7 +8912,7 @@ async function _expandAndQueueBackground(deferredUrls, { originPlatform, originC
 }
 
 expressApp.post('/download/batch', async (req, res) => {
-  const { urls, metadata, force } = req.body || {};
+  const { urls, metadata, force, priority } = req.body || {};
   try {
     const n = Array.isArray(urls) ? urls.length : 0;
     console.log(`[INGRESS] POST /download/batch count=${n} page=${String(metadata && metadata.url || '').slice(0, 200)} force=${force === true ? '1' : '0'}`);
@@ -8992,6 +9009,9 @@ expressApp.post('/download/batch', async (req, res) => {
     }
     const result = await insertDownload.run(u, platform, channel, title);
     const downloadId = result.lastInsertRowid;
+    if (priority && Number(priority) > 0) {
+      try { await db.prepare("UPDATE downloads SET priority = ? WHERE id = ?").run(Number(priority), downloadId); } catch (e) {}
+    }
 
     try {
       const pageUrl = metadata && typeof metadata.url === 'string' ? metadata.url.trim() : '';
@@ -13394,6 +13414,8 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
       const items = [];
       const seenPaths = new Set();
       const seenKeys = new Map();
+      const platformCounts = new Map(); // Cap per platform to ensure mix
+      const PLATFORM_CAP = Math.max(40, Math.floor(limit * 0.4)); // max 40% per platform
       let rowsScanned = 0;
       for (const row of pgResult.rows) {
         rowsScanned++;
@@ -13405,9 +13427,13 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
         seenPaths.add(fp);
         // NOTE: skip fileExistsCache here — it does sync fs.existsSync which blocks
         // the event loop for HDD paths. DB rows with status=completed are reliable.
+        const plat = String(row.platform || '').toLowerCase();
+        const platCount = platformCounts.get(plat) || 0;
+        if (platCount >= PLATFORM_CAP) continue; // Platform mix: skip over-represented platforms
         const it = makeMediaItem(row);
         if (!it) continue;
         pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
+        platformCounts.set(plat, platCount + 1);
         if (items.length >= limit) break;
       }
       const jsMs = Date.now() - jsStart;

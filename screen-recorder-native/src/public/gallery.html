@@ -141,6 +141,7 @@
       <button id="btnRandomGrid" class="btn" style="background:#2f4f4f; margin-left:8px;">🔀 Random Beeld</button>
       <button id="btnDups" class="btn" style="background:#4a2f2f;">🛡 Duplicaten Scanner</button>
       <button id="btnImportOpen" class="btn" style="background:#205295; margin-left:8px;">📥 Importeer Lokaal</button>
+      <button id="btnPriority" class="btn" style="background:#333; margin-left:8px; border:2px solid #555;" title="Nieuwe downloads vooraan in wachtrij plaatsen">⚡ Prioriteit</button>
       <div class="yt-controls" id="ytControls" style="display:none;">
         <div class="yt-row">
           <span class="yt-tag">YT</span>
@@ -2330,6 +2331,34 @@
       });
     }
     // --- Import Modal Logic ---
+    // Priority toggle
+    const elBtnPriority = document.getElementById('btnPriority');
+    if (elBtnPriority) {
+      // Load initial state
+      api('/api/settings/priority').then(r => {
+        if (r && r.priority) {
+          elBtnPriority.style.background = '#b22222';
+          elBtnPriority.style.borderColor = '#ff4444';
+          elBtnPriority.textContent = '🔥 Prioriteit AAN';
+        }
+      }).catch(() => {});
+      elBtnPriority.onclick = async () => {
+        const current = elBtnPriority.style.background === 'rgb(178, 34, 34)';
+        const r = await api('/api/settings/priority', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ enabled: !current }) });
+        if (r && r.success) {
+          if (r.priority) {
+            elBtnPriority.style.background = '#b22222';
+            elBtnPriority.style.borderColor = '#ff4444';
+            elBtnPriority.textContent = '🔥 Prioriteit AAN';
+          } else {
+            elBtnPriority.style.background = '#333';
+            elBtnPriority.style.borderColor = '#555';
+            elBtnPriority.textContent = '⚡ Prioriteit';
+          }
+        }
+      };
+    }
+
     const elBtnImportOpen = document.getElementById('btnImportOpen');
     const elImportModal = document.getElementById('importModal');
     const elBtnImportClose = document.getElementById('btnImportClose');
