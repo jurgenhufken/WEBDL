@@ -8777,9 +8777,17 @@ expressApp.post('/reddit/index', async (req, res) => {
 // --- Shared gallery crawling helpers ---
 const _fetchGalleryPage = async (pageUrl) => {
   const https = require('https');
+  const headers = { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36' };
+  // For zishy: load Firefox cookies (login required for full content)
+  if (/zishy\.com/i.test(pageUrl)) {
+    try {
+      const cookieStr = await loadCookiesForDomain('zishy.com');
+      if (cookieStr) headers['Cookie'] = cookieStr;
+    } catch (e) {}
+  }
   return new Promise((resolve) => {
     const req = https.get(pageUrl, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36' },
+      headers,
       timeout: 15000
     }, (resp) => {
       if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location) { resolve(''); return; }
@@ -8929,7 +8937,7 @@ async function _expandAndQueueBackground(deferredUrls, { originPlatform, originC
           const imgRe = /href=["'](\/uploads\/full\/[^"']+\.(?:jpe?g|png|gif|webp))["']/gi;
           let m;
           while ((m = imgRe.exec(html)) !== null) {
-            const imgUrl = 'https://www.zishy.com' + m[1];
+            const imgUrl = 'https://www.zishy.com' + m[1].replace(/ /g, '%20');
             if (!seen.has(imgUrl)) { seen.add(imgUrl); cdnUrls.push(imgUrl); }
           }
           // Video: <video> or <source> src
