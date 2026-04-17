@@ -8530,6 +8530,161 @@ expressApp.post('/reddit/index', async (req, res) => {
   }
 });
 
+// --- Shared gallery crawling helpers ---
+const _fetchGalleryPage = async (pageUrl) => {
+  const https = require('https');
+  return new Promise((resolve) => {
+    const req = https.get(pageUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36' },
+      timeout: 15000
+    }, (resp) => {
+      if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location) { resolve(''); return; }
+      let data = '';
+      resp.on('data', c => data += c);
+      resp.on('end', () => resolve(data));
+    });
+    req.on('error', () => resolve(''));
+    req.on('timeout', () => { req.destroy(); resolve(''); });
+  });
+};
+
+function _extractElitebabesCdn(html, seen) {
+  const urls = [];
+  const re = /href="(https?:\/\/cdn\.elitebabes\.com\/content\/[^"]+\.(?:jpe?g|png|gif|webp))"/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    if (!seen.has(m[1])) { seen.add(m[1]); urls.push(m[1]); }
+  }
+  return urls;
+}
+
+function _extractPornpicsCdn(html, seen) {
+  const urls = [];
+  // Full-res links (1280px)
+  const re = /href='(https?:\/\/cdni\.pornpics\.com\/1280\/[^']+\.(?:jpe?g|png|webp))'/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    if (!seen.has(m[1])) { seen.add(m[1]); urls.push(m[1]); }
+  }
+  return urls;
+}
+
+// Background expansion: crawls model/gallery pages and queues downloads as discovered
+async function _expandAndQueueBackground(deferredUrls, { originPlatform, originChannel, originTitle, metadata, force, pageUrl }) {
+  const seen = new Set();
+  const MAX_PAGES = 50;
+  const forceDuplicates = force === true;
+
+  for (const { url: u, type, platform: sitePlatform } of deferredUrls) {
+    try {
+      let cdnUrls = [];
+
+      if (sitePlatform === 'elitebabes' && type === 'model') {
+        // Crawl all paginated model pages for gallery links, then each gallery for CDN images
+        const baseUrl = u.replace(/\/+$/, '');
+        const galleryUrls = [];
+        for (let page = 1; page <= MAX_PAGES; page++) {
+          const pUrl = page === 1 ? baseUrl + '/' : baseUrl + '/page/' + page + '/';
+          const html = await _fetchGalleryPage(pUrl);
+          if (!html) break;
+          let found = 0;
+          const galleryRe = /href="(https?:\/\/(?:www\.)?elitebabes\.com\/[a-z0-9][a-z0-9-]+\/?)"[^>]*class="[^"]*thumb/gi;
+          let gm;
+          while ((gm = galleryRe.exec(html)) !== null) {
+            if (!seen.has(gm[1]) && !/\/model\/|\/tag\/|\/category\//i.test(gm[1])) {
+              seen.add(gm[1]); galleryUrls.push(gm[1]); found++;
+            }
+          }
+          if (found === 0) {
+            const fbRe = /href="(https?:\/\/(?:www\.)?elitebabes\.com\/[a-z0-9][a-z0-9-]+\/)"/gi;
+            while ((gm = fbRe.exec(html)) !== null) {
+              if (!seen.has(gm[1]) && !/\/model\/|\/tag\/|\/category\/|\/search\/|\/random\/|\/explore\/|\/page\//i.test(gm[1])) {
+                seen.add(gm[1]); galleryUrls.push(gm[1]); found++;
+              }
+            }
+          }
+          console.log(`[BG-EXPAND] elitebabes model page ${page}: ${found} galleries`);
+          if (found === 0) break;
+        }
+        console.log(`[BG-EXPAND] elitebabes model total: ${galleryUrls.length} galleries`);
+        for (const gUrl of galleryUrls) {
+          try {
+            const gHtml = await _fetchGalleryPage(gUrl);
+            const imgs = _extractElitebabesCdn(gHtml, seen);
+            if (imgs.length > 0) {
+              console.log(`[BG-EXPAND] Gallery ${gUrl.split('/').slice(-2, -1)[0]} → ${imgs.length} images`);
+              cdnUrls.push(...imgs);
+            }
+          } catch (e) { console.log(`[BG-EXPAND] Gallery error ${gUrl}: ${e.message}`); }
+        }
+      } else if (sitePlatform === 'elitebabes' && type === 'gallery') {
+        const html = await _fetchGalleryPage(u);
+        cdnUrls = _extractElitebabesCdn(html, seen);
+        console.log(`[BG-EXPAND] elitebabes gallery ${u.split('/').slice(-2, -1)[0]} → ${cdnUrls.length} images`);
+      } else if (sitePlatform === 'pornpics' && type === 'model') {
+        // Crawl pornpics model page for gallery links, then each gallery for CDN images
+        const baseUrl = u.replace(/\/+$/, '');
+        const galleryUrls = [];
+        for (let page = 1; page <= MAX_PAGES; page++) {
+          const pUrl = page === 1 ? baseUrl + '/' : baseUrl + '/?page=' + page;
+          const html = await _fetchGalleryPage(pUrl);
+          if (!html) break;
+          let found = 0;
+          const galleryRe = /href='(https?:\/\/(?:www\.)?pornpics\.com\/galleries\/[^']+)'/gi;
+          let gm;
+          while ((gm = galleryRe.exec(html)) !== null) {
+            if (!seen.has(gm[1])) { seen.add(gm[1]); galleryUrls.push(gm[1]); found++; }
+          }
+          // Also try double-quote variant
+          const galleryRe2 = /href="(https?:\/\/(?:www\.)?pornpics\.com\/galleries\/[^"]+)"/gi;
+          while ((gm = galleryRe2.exec(html)) !== null) {
+            if (!seen.has(gm[1])) { seen.add(gm[1]); galleryUrls.push(gm[1]); found++; }
+          }
+          console.log(`[BG-EXPAND] pornpics model page ${page}: ${found} galleries`);
+          if (found === 0) break;
+        }
+        console.log(`[BG-EXPAND] pornpics model total: ${galleryUrls.length} galleries`);
+        for (const gUrl of galleryUrls) {
+          try {
+            const gHtml = await _fetchGalleryPage(gUrl);
+            const imgs = _extractPornpicsCdn(gHtml, seen);
+            if (imgs.length > 0) {
+              console.log(`[BG-EXPAND] Gallery ${gUrl.split('/').slice(-2, -1)[0]} → ${imgs.length} images`);
+              cdnUrls.push(...imgs);
+            }
+          } catch (e) { console.log(`[BG-EXPAND] Gallery error ${gUrl}: ${e.message}`); }
+        }
+      } else if (sitePlatform === 'pornpics' && type === 'gallery') {
+        const html = await _fetchGalleryPage(u);
+        cdnUrls = _extractPornpicsCdn(html, seen);
+        console.log(`[BG-EXPAND] pornpics gallery → ${cdnUrls.length} images`);
+      }
+
+      // Queue each discovered CDN URL
+      const channel = originChannel !== 'unknown' ? originChannel : deriveChannelFromUrl(sitePlatform, u) || 'unknown';
+      const title = originTitle || metadata && metadata.title || deriveTitleFromUrl(u);
+      for (const cdnUrl of cdnUrls) {
+        try {
+          const existing = await findReusableDownloadByUrl.get(cdnUrl);
+          if (!forceDuplicates && existing && existing.id) continue;
+          const result = await insertDownload.run(cdnUrl, sitePlatform, channel, title);
+          const downloadId = result.lastInsertRowid;
+          try {
+            if (pageUrl && pageUrl !== cdnUrl) await updateDownloadSourceUrl.run(pageUrl, downloadId);
+          } catch (e) {}
+          const jobMeta = { ...(metadata || {}), tool: 'curl', platform: sitePlatform, channel, title };
+          enqueueDownloadJob(downloadId, cdnUrl, sitePlatform, channel, title, jobMeta);
+        } catch (e) {
+          console.log(`[BG-EXPAND] Queue error for ${cdnUrl.slice(-40)}: ${e.message}`);
+        }
+      }
+      console.log(`[BG-EXPAND] ${sitePlatform} ${type} done: ${cdnUrls.length} images queued from ${u.slice(0, 80)}`);
+    } catch (e) {
+      console.log(`[BG-EXPAND] Error expanding ${u}: ${e.message}`);
+    }
+  }
+}
+
 expressApp.post('/download/batch', async (req, res) => {
   const { urls, metadata, force } = req.body || {};
   try {
@@ -8563,137 +8718,45 @@ expressApp.post('/download/batch', async (req, res) => {
     unique.push(s);
   }
 
-  // Elitebabes expansion: model pages → gallery URLs → CDN images
-  const expanded = [];
-  const fetchElitababesPage = async (pageUrl) => {
-    const https = require('https');
-    return new Promise((resolve) => {
-      const req = https.get(pageUrl, {
-        headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36' },
-        timeout: 15000
-      }, (resp) => {
-        if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location) {
-          resolve(''); return;
-        }
-        let data = '';
-        resp.on('data', c => data += c);
-        resp.on('end', () => resolve(data));
-      });
-      req.on('error', () => resolve(''));
-      req.on('timeout', () => { req.destroy(); resolve(''); });
-    });
-  };
-
-  const extractCdnImages = (html) => {
-    const cdnUrls = [];
-    const re = /href="(https?:\/\/cdn\.elitebabes\.com\/content\/[^"]+\.(?:jpe?g|png|gif|webp))"/gi;
-    let m;
-    while ((m = re.exec(html)) !== null) {
-      if (!seen.has(m[1])) { seen.add(m[1]); cdnUrls.push(m[1]); }
-    }
-    return cdnUrls;
-  };
-
+  // --- Classify URLs: immediate vs needs-expansion ---
+  const immediate = [];
+  const deferred = [];
   for (const u of unique) {
+    // Elitebabes model/gallery detection
     const isElitebabes = /^https?:\/\/(www\.)?elitebabes\.com\//i.test(u) &&
       !/\.(jpe?g|png|gif|webp|mp4|webm)(\?|$)/i.test(u) &&
       !/cdn\.elitebabes\.com/i.test(u);
-
-    if (!isElitebabes) { expanded.push(u); continue; }
-
-    const isModelPage = /\/model\/[a-z0-9][a-z0-9-]+/i.test(u);
-    const isGalleryPage = !isModelPage && /^https?:\/\/(www\.)?elitebabes\.com\/[a-z0-9][a-z0-9-]+\/?$/i.test(u) &&
-      !/\/(model-tag|tag|category|search|random|explore|faves|history)\b/i.test(u);
-
-    if (isModelPage) {
-      // Step 1: Crawl model page (all pagination pages) for gallery links
-      try {
-        console.log(`[BATCH] Crawling elitebabes model page: ${u}`);
-        const galleryUrls = [];
-        const baseUrl = u.replace(/\/+$/, '');
-        const MAX_PAGES = 10;
-
-        for (let page = 1; page <= MAX_PAGES; page++) {
-          const pageUrl = page === 1 ? baseUrl + '/' : baseUrl + '/page/' + page + '/';
-          const html = await fetchElitababesPage(pageUrl);
-          if (!html) break;
-
-          let foundOnPage = 0;
-          // Primary: links with thumb class
-          const galleryRe = /href="(https?:\/\/(?:www\.)?elitebabes\.com\/[a-z0-9][a-z0-9-]+\/?)"[^>]*class="[^"]*thumb/gi;
-          let gm;
-          while ((gm = galleryRe.exec(html)) !== null) {
-            const gUrl = gm[1];
-            if (!seen.has(gUrl) && !/\/model\/|\/tag\/|\/category\//i.test(gUrl)) {
-              seen.add(gUrl); galleryUrls.push(gUrl); foundOnPage++;
-            }
-          }
-          // Fallback: any gallery-like link
-          if (foundOnPage === 0) {
-            const fallbackRe = /href="(https?:\/\/(?:www\.)?elitebabes\.com\/[a-z0-9][a-z0-9-]+\/)"/gi;
-            while ((gm = fallbackRe.exec(html)) !== null) {
-              const gUrl = gm[1];
-              if (!seen.has(gUrl) && !/\/model\/|\/tag\/|\/category\/|\/search\/|\/random\/|\/explore\/|\/page\//i.test(gUrl)) {
-                seen.add(gUrl); galleryUrls.push(gUrl); foundOnPage++;
-              }
-            }
-          }
-          console.log(`[BATCH] Model page ${page}: ${foundOnPage} galleries`);
-          if (foundOnPage === 0) break; // no more pages
-        }
-        console.log(`[BATCH] Model page total: ${galleryUrls.length} galleries found across all pages`);
-
-        // Step 2: Crawl each gallery for CDN images
-        let totalImages = 0;
-        for (const gUrl of galleryUrls) {
-          try {
-            const gHtml = await fetchElitababesPage(gUrl);
-            const imgs = extractCdnImages(gHtml);
-            if (imgs.length > 0) {
-              console.log(`[BATCH] Gallery ${gUrl.split('/').slice(-2, -1)[0]} → ${imgs.length} images`);
-              for (const img of imgs) expanded.push(img);
-              totalImages += imgs.length;
-            }
-          } catch (e) {
-            console.log(`[BATCH] Error crawling gallery ${gUrl}: ${e.message}`);
-          }
-        }
-        console.log(`[BATCH] Model page complete: ${galleryUrls.length} galleries, ${totalImages} images`);
-      } catch (e) {
-        console.log(`[BATCH] Error crawling model page ${u}: ${e.message}`);
-        expanded.push(u);
-      }
-    } else if (isGalleryPage) {
-      // Direct gallery page → extract CDN images
-      try {
-        console.log(`[BATCH] Expanding elitebabes gallery: ${u}`);
-        const html = await fetchElitababesPage(u);
-        const cdnUrls = extractCdnImages(html);
-        if (cdnUrls.length > 0) {
-          console.log(`[BATCH] Expanded ${u} → ${cdnUrls.length} images`);
-          for (const img of cdnUrls) expanded.push(img);
-        } else {
-          console.log(`[BATCH] No CDN images found in ${u}, keeping as-is`);
-          expanded.push(u);
-        }
-      } catch (e) {
-        console.log(`[BATCH] Error expanding ${u}: ${e.message}`);
-        expanded.push(u);
-      }
-    } else {
-      expanded.push(u);
+    if (isElitebabes) {
+      const isModel = /\/model\/[a-z0-9][a-z0-9-]+/i.test(u);
+      const isGallery = !isModel && /^https?:\/\/(www\.)?elitebabes\.com\/[a-z0-9][a-z0-9-]+\/?$/i.test(u) &&
+        !/\/(model-tag|tag|category|search|random|explore|faves|history)\b/i.test(u);
+      if (isModel) { deferred.push({ url: u, type: 'model', platform: 'elitebabes' }); continue; }
+      if (isGallery) { deferred.push({ url: u, type: 'gallery', platform: 'elitebabes' }); continue; }
     }
+    // Pornpics model/gallery detection
+    const isPornpics = /^https?:\/\/(www\.)?pornpics\.com\//i.test(u) &&
+      !/cdni\.pornpics\.com/i.test(u) &&
+      !/\.(jpe?g|png|gif|webp)(\?|$)/i.test(u);
+    if (isPornpics) {
+      const isModel = /\/pornstars\/[a-z0-9][a-z0-9-]+/i.test(u);
+      const isGallery = /\/galleries\/[a-z0-9][a-z0-9-]+/i.test(u);
+      if (isModel) { deferred.push({ url: u, type: 'model', platform: 'pornpics' }); continue; }
+      if (isGallery) { deferred.push({ url: u, type: 'gallery', platform: 'pornpics' }); continue; }
+    }
+    immediate.push(u);
   }
 
+  // Process immediate URLs synchronously (fast)
   const created = [];
-  for (const u of expanded) {
+  for (const u of immediate) {
     const pinToOrigin = !!((pinFffOrigin || pinAznOrigin) && pageUrl && pageUrl !== u);
     const detectedPlatform = detectPlatform(u);
     const preferDetectedPlatform = !!(pinFffOrigin && pinToOrigin && detectedPlatform && detectedPlatform !== 'other' && detectedPlatform !== originPlatform);
     const platform = pinToOrigin ? originPlatform : (preferDetectedPlatform ? detectedPlatform : normalizePlatform(metaPlatform, u));
     const isElitebabesCdn = originPlatform === 'elitebabes' && /cdn\.elitebabes\.com/i.test(u);
-    const channel = pinToOrigin ? originChannel : isElitebabesCdn ? (originChannel !== 'unknown' ? originChannel : metadata && metadata.channel || 'unknown') : preferDetectedPlatform ? deriveChannelFromUrl(platform, u) || originChannel : metadata && metadata.channel && metadata.channel !== 'unknown' ? metadata.channel : deriveChannelFromUrl(platform, u) || 'unknown';
-    const title = pinToOrigin ? originTitle : isElitebabesCdn ? (originTitle || metadata && metadata.title || deriveTitleFromUrl(u)) : preferDetectedPlatform ? deriveTitleFromUrl(u) : metadata && metadata.title ? metadata.title : deriveTitleFromUrl(u);
+    const isPornpicsCdn = originPlatform === 'pornpics' && /cdni\.pornpics\.com/i.test(u);
+    const channel = pinToOrigin ? originChannel : (isElitebabesCdn || isPornpicsCdn) ? (originChannel !== 'unknown' ? originChannel : metadata && metadata.channel || 'unknown') : preferDetectedPlatform ? deriveChannelFromUrl(platform, u) || originChannel : metadata && metadata.channel && metadata.channel !== 'unknown' ? metadata.channel : deriveChannelFromUrl(platform, u) || 'unknown';
+    const title = pinToOrigin ? originTitle : (isElitebabesCdn || isPornpicsCdn) ? (originTitle || metadata && metadata.title || deriveTitleFromUrl(u)) : preferDetectedPlatform ? deriveTitleFromUrl(u) : metadata && metadata.title ? metadata.title : deriveTitleFromUrl(u);
     const allowRedditRerun = platform === 'reddit' && isRedditRollingTargetUrl(u);
     const allowPatreonRerun = platform === 'patreon' && (u.includes('/posts') || u.includes('patreon.com/c/'));
     const allowRerun = allowRedditRerun || allowPatreonRerun;
@@ -8744,7 +8807,18 @@ expressApp.post('/download/batch', async (req, res) => {
     enqueueDownloadJob(downloadId, u, platform, channel, title, jobMetadata);
   }
 
-  res.json({ success: true, downloads: created });
+  // Respond immediately
+  if (deferred.length > 0) {
+    console.log(`[BATCH] Responding immediately, ${deferred.length} URLs expanding in background (${deferred.map(d => d.platform + ':' + d.type).join(', ')})`);
+  }
+  res.json({ success: true, downloads: created, expanding: deferred.length });
+
+  // Fire-and-forget: expand deferred URLs in background
+  if (deferred.length > 0) {
+    _expandAndQueueBackground(deferred, { originPlatform, originChannel, originTitle, metadata, force, pageUrl })
+      .catch(e => console.log(`[BG-EXPAND] Fatal error: ${e.message}`));
+  }
+
 });
 
 async function startDownload(downloadId, url, platform, channel, title, metadata) {
