@@ -3245,7 +3245,8 @@
       const result = await queueBatchDownloadRequest(urls, meta);
       if (result.success) {
         const stats = summarizeBatchResult(result);
-        showNotification(`Media: ${stats.queued} nieuw, ${stats.duplicates} bestaand (${stats.total} totaal)`);
+        const expandHint = (result.expanding && Number(result.expanding) > 0) ? ` | 🔄 ${result.expanding} pagina's uitbreiden...` : '';
+        showNotification(`Media: ${stats.queued} nieuw, ${stats.duplicates} bestaand (${stats.total} totaal)${expandHint}`);
         addLog(`Media gestart: nieuw=${stats.queued}, bestaand=${stats.duplicates}, totaal=${stats.total}`);
       } else {
         showNotification(`Media fout: ${result.error}`, true);
@@ -3405,7 +3406,10 @@
       const result = await queueBatchDownloadRequest(urls, meta, { force, directHints: selectedDirectHints });
       if (result.success) {
         const stats = summarizeBatchResult(result);
-        showNotification(`${modeLabel}: ${stats.queued} nieuw, ${stats.duplicates} bestaand (${stats.total} totaal)`);
+        const expandHint = (result.expanding && Number(result.expanding) > 0)
+          ? ` | 🔄 ${result.expanding} pagina's worden op achtergrond uitgebreid`
+          : '';
+        showNotification(`${modeLabel}: ${stats.queued} nieuw, ${stats.duplicates} bestaand (${stats.total} totaal)${expandHint}`);
         addLog(`${modeLabel} gestart: nieuw=${stats.queued}, bestaand=${stats.duplicates}, totaal=${stats.total}`);
       } else {
         showNotification(`Batch fout: ${result.error}`, true);
