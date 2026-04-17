@@ -2110,7 +2110,7 @@
 
   // Priority toggle handler
   (async function initPrioToggle() {
-    const prioBtn = document.getElementById('webdl-prio-toggle');
+    const prioBtn = statusBar.querySelector('#webdl-prio-toggle');
     if (!prioBtn) return;
     let prioState = false;
 
