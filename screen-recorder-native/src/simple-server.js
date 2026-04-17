@@ -14684,6 +14684,7 @@ async function startServer() {
     // Watches _4KDownloader dirs for new files and auto-indexes them.
     const _4K_WATCH_DIRS = [
       path.join(BASE_DIR, '_4KDownloader'),
+      path.join(BASE_DIR, 'Videodownloadhelper'),
       '/Volumes/HDD - One Touch/WEBDL/_4KDownloader',
     ];
     const _4K_VIDEO_EXTS = new Set(['.mp4', '.mkv', '.webm', '.mov', '.m4v']);
@@ -14792,11 +14793,14 @@ async function startServer() {
         }
 
         // Derive channel from parent dir name
-        const relPath = absPath.includes('_4KDownloader') ? absPath.split('_4KDownloader')[1] : '';
+        const isVDH = absPath.includes('Videodownloadhelper');
+        const relPath = isVDH
+          ? absPath.split('Videodownloadhelper')[1]
+          : absPath.includes('_4KDownloader') ? absPath.split('_4KDownloader')[1] : '';
         const relParts = relPath.split(path.sep).filter(Boolean);
-        const channel = relParts.length >= 2 ? relParts[0] : '4KDownloader';
+        const channel = relParts.length >= 2 ? relParts[0] : (isVDH ? 'Videodownloadhelper' : '4KDownloader');
         const title = path.basename(absPath, ext).replace(/_/g, ' ').trim() || 'imported';
-        const platform = realPlatform || '4kdownloader';
+        const platform = realPlatform || (isVDH ? 'videodownloadhelper' : '4kdownloader');
 
         await insertCompletedDownload.run(
           sourceUrl || ('file://' + absPath),
