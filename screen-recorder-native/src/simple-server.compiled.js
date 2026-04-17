@@ -8807,11 +8807,43 @@ expressApp.post('/download/batch', async (req, res) => {
     enqueueDownloadJob(downloadId, u, platform, channel, title, jobMetadata);
   }
 
-  // Respond immediately
-  if (deferred.length > 0) {
-    console.log(`[BATCH] Responding immediately, ${deferred.length} URLs expanding in background (${deferred.map(d => d.platform + ':' + d.type).join(', ')})`);
+  // Quick probe: fetch first page of each deferred URL to estimate gallery count
+  let estimatedGalleries = 0;
+  const expandInfo = [];
+  for (const d of deferred) {
+    try {
+      const html = await _fetchGalleryPage(d.url);
+      if (!html) { expandInfo.push({ ...d, estimated: 0 }); continue; }
+      let galCount = 0;
+      if (d.platform === 'elitebabes') {
+        const re = /href="(https?:\/\/(?:www\.)?elitebabes\.com\/[a-z0-9][a-z0-9-]+\/?)"[^>]*class="[^"]*thumb/gi;
+        const fbRe = /href="(https?:\/\/(?:www\.)?elitebabes\.com\/[a-z0-9][a-z0-9-]+\/)"/gi;
+        let m; while ((m = re.exec(html)) !== null) { if (!/\/model\/|\/tag\/|\/category\//i.test(m[1])) galCount++; }
+        if (galCount === 0) { while ((m = fbRe.exec(html)) !== null) { if (!/\/model\/|\/tag\/|\/category\/|\/search\/|\/random\/|\/explore\/|\/page\//i.test(m[1])) galCount++; } }
+        // Check pagination to multiply
+        const pageMatch = html.match(/\/page\/(\d+)\//g);
+        const maxPage = pageMatch ? Math.max(...pageMatch.map(p => parseInt(p.match(/\d+/)[0]))) : 1;
+        galCount = galCount * Math.max(1, maxPage);
+      } else if (d.platform === 'pornpics') {
+        const re1 = /href=['"]https?:\/\/(?:www\.)?pornpics\.com\/galleries\/[^'"]+['"]/gi;
+        let m; while ((m = re1.exec(html)) !== null) galCount++;
+        // pornpics exposes P_MAX = <total pages> in JS
+        const pMaxMatch = html.match(/var\s+P_MAX\s*=\s*(\d+)/);
+        const maxPage = pMaxMatch ? parseInt(pMaxMatch[1]) : 1;
+        galCount = galCount * Math.max(1, maxPage);
+      }
+      expandInfo.push({ ...d, estimated: galCount });
+      estimatedGalleries += galCount;
+    } catch (e) {
+      expandInfo.push({ ...d, estimated: 0 });
+    }
   }
-  res.json({ success: true, downloads: created, expanding: deferred.length });
+
+  // Respond immediately with estimate
+  if (deferred.length > 0) {
+    console.log(`[BATCH] Responding immediately, ${deferred.length} URLs expanding in background, ~${estimatedGalleries} galleries estimated`);
+  }
+  res.json({ success: true, downloads: created, expanding: deferred.length, estimatedGalleries });
 
   // Fire-and-forget: expand deferred URLs in background
   if (deferred.length > 0) {

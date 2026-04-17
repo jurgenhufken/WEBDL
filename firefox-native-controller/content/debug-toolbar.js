@@ -3406,8 +3406,11 @@
       const result = await queueBatchDownloadRequest(urls, meta, { force, directHints: selectedDirectHints });
       if (result.success) {
         const stats = summarizeBatchResult(result);
+        const estGal = Number(result.estimatedGalleries) || 0;
         const expandHint = (result.expanding && Number(result.expanding) > 0)
-          ? ` | 🔄 ${result.expanding} pagina's worden op achtergrond uitgebreid`
+          ? estGal > 0
+            ? ` | 🔄 ~${estGal} galleries worden op achtergrond gedownload`
+            : ` | 🔄 Pagina's worden op achtergrond uitgebreid`
           : '';
         showNotification(`${modeLabel}: ${stats.queued} nieuw, ${stats.duplicates} bestaand (${stats.total} totaal)${expandHint}`);
         addLog(`${modeLabel} gestart: nieuw=${stats.queued}, bestaand=${stats.duplicates}, totaal=${stats.total}`);
