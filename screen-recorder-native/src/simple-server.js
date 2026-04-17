@@ -8784,9 +8784,20 @@ const _fetchGalleryPage = async (pageUrl) => {
 
 function _extractElitebabesCdn(html, seen) {
   const urls = [];
-  const re = /href="(https?:\/\/cdn\.elitebabes\.com\/content\/[^"]+\.(?:jpe?g|png|gif|webp))"/gi;
+  // Images from CDN links
+  const reImg = /href="(https?:\/\/cdn\.elitebabes\.com\/content\/[^"]+\.(?:jpe?g|png|gif|webp))"/gi;
   let m;
-  while ((m = re.exec(html)) !== null) {
+  while ((m = reImg.exec(html)) !== null) {
+    if (!seen.has(m[1])) { seen.add(m[1]); urls.push(m[1]); }
+  }
+  // Videos: <source src="...mp4"> or <video src="...mp4"> from media.elitebabes.com
+  const reVid = /(?:src|href)=["'](https?:\/\/media\.elitebabes\.com\/videos\/[^"']+\.(?:mp4|webm|mov))["']/gi;
+  while ((m = reVid.exec(html)) !== null) {
+    if (!seen.has(m[1])) { seen.add(m[1]); urls.push(m[1]); }
+  }
+  // Also check cdn.elitebabes.com for videos
+  const reVid2 = /(?:src|href)=["'](https?:\/\/cdn\.elitebabes\.com\/[^"']+\.(?:mp4|webm|mov))["']/gi;
+  while ((m = reVid2.exec(html)) !== null) {
     if (!seen.has(m[1])) { seen.add(m[1]); urls.push(m[1]); }
   }
   return urls;
@@ -9899,11 +9910,14 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
     const provisionalFilename = filenameFromUrl(url, `download_${downloadId}.bin`);
     const tmpFilepath = uniqueFilePath(path.join(dir, `${provisionalFilename}.part`), downloadId);
     const headerFilepath = uniqueFilePath(path.join(dir, `${provisionalFilename}.headers.txt`), downloadId);
-    const referer = String(
+    let referer = String(
       originThread && originThread.url ? originThread.url :
         metadata && typeof metadata === 'object' && metadata.url && metadata.url !== url ? metadata.url :
           ''
     ).trim();
+    // Auto-referer for platforms that require it
+    if (!referer && platform === 'elitebabes') referer = 'https://www.elitebabes.com/';
+    if (!referer && platform === 'erome') referer = 'https://www.erome.com/';
     const curlArgs = [
       '-L',
       '--fail',
