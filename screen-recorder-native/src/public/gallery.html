@@ -1238,6 +1238,7 @@
 
       const img = document.createElement('img');
       img.className = 'thumb';
+      img.loading = 'lazy';
       try { img.decoding = 'async'; } catch (e) {}
       const thumbUrl = it.thumb || '';
       if (String(thumbUrl).startsWith('data:')) {
@@ -1388,6 +1389,7 @@
 
         const img = document.createElement('img');
         img.className = 'thumb';
+        img.loading = 'lazy';
         try { img.decoding = 'async'; } catch (e) {}
         const thumbUrl = it.thumb || '';
         if (String(thumbUrl).startsWith('data:')) {
@@ -1883,8 +1885,13 @@
           const searchParam = state.search ? '&q=' + encodeURIComponent(state.search) : '';
           const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
           elSentinel.textContent = '📡 Aanvraag verzenden (limit=' + state.limit + ', filters=' + (state.enabledDirs ? state.enabledDirs.length : 'none') + ')...';
-          const apiSort = state.sort === 'group_channel' ? 'name_asc' : (state.sort || 'recent');
-          if (state.mode === 'recent') {
+          const apiSort = state.sort === 'group_channel' ? 'recent' : (state.sort || 'recent');
+          
+          // Use dedicated search endpoint when searching (much faster)
+          if (state.search && state.mode === 'recent') {
+            const searchOffset = state.cursor ? (JSON.parse(atob(state.cursor)).rowOffset || 0) : 0;
+            path = '/api/media/search?q=' + encodeURIComponent(state.search) + '&limit=' + state.limit + '&offset=' + searchOffset + '&type=' + encodeURIComponent(state.filter) + '&sort=' + encodeURIComponent(apiSort) + dirsParam;
+          } else if (state.mode === 'recent') {
             path = '/api/media/recent-files?limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0&sort=' + encodeURIComponent(apiSort) + dirsParam + searchParam;
           } else {
              const ch = state.channel;
@@ -1975,12 +1982,13 @@
         const fetchLimit = Math.min(state.limit, 120);
         const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
         const searchParam = state.search ? '&q=' + encodeURIComponent(state.search) : '';
+        const apiSort = state.sort === 'group_channel' ? 'recent' : (state.sort || 'recent');
         if (state.mode === 'recent') {
-          path = '/api/media/recent-files?limit=' + fetchLimit + '&cursor=&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam + searchParam;
+          path = '/api/media/recent-files?limit=' + fetchLimit + '&cursor=&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0&sort=' + encodeURIComponent(apiSort) + dirsParam + searchParam;
         } else {
           const ch = state.channel;
           if (!ch) return;
-          path = '/api/media/channel-files?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=' + fetchLimit + '&cursor=&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0' + '&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam;
+          path = '/api/media/channel-files?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=' + fetchLimit + '&cursor=&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0' + '&sort=' + encodeURIComponent(apiSort) + dirsParam;
         }
         const data = await api(path);
         if (!data || !data.success) return;
@@ -1989,10 +1997,13 @@
 
         // Find which items are genuinely new (not already in state.items)
         const existing = new Set();
+        const existingPaths = new Set();
         for (const it of state.items) {
           try {
             const k = itemKey(it);
             if (k) existing.add(k);
+            // Also track dedupe_key (filepath) to prevent visual duplicates
+            if (it.dedupe_key) existingPaths.add(it.dedupe_key);
           } catch (e) {}
         }
         const newItems = [];
@@ -2001,7 +2012,10 @@
             const k = itemKey(it);
             if (!k) continue;
             if (existing.has(k)) continue;
+            // Skip if same filepath already shown (different download ID, same directory)
+            if (it.dedupe_key && existingPaths.has(it.dedupe_key)) continue;
             existing.add(k);
+            if (it.dedupe_key) existingPaths.add(it.dedupe_key);
             newItems.push(it);
           } catch (e) {}
         }

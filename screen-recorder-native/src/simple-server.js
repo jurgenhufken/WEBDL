@@ -6,6 +6,10 @@ const socketIO = require('socket.io');
 const os = require('os');
 const util = require('util');
 const { exec, spawn } = require('child_process');
+
+// ═══ Event Loop Yield — prevents sync I/O from starving Express ═══
+const yieldEventLoop = () => new Promise(resolve => setImmediate(resolve));
+const yieldEveryN = (n = 5) => { let c = 0; return async () => { if (++c % n === 0) await yieldEventLoop(); }; };
 const { createDb } = require('./db-adapter');
 const multer = require('multer');
 const upload = multer({ dest: path.join(os.tmpdir(), 'webdl-uploads') });
@@ -777,6 +781,46 @@ function shouldSkipMetadataFetchForUrl(inputUrl, platform) {
     return false;
   } catch (e) {
     return false;
+  }
+}
+
+// Geeft het absolute pad terug van het eerste (alfabetisch) geïndexeerde bestand
+// voor een specifieke download. Nodig voor platforms waar meerdere downloads
+// dezelfde filepath (gedeelde channel-dir) delen, bv. gallery-dl/pornpics:
+// dan staat er in downloads.filepath alleen de channel-dir en moeten we via
+// download_files de echte per-download subdir achterhalen. Retourneert null
+// als er geen indexering is of het bestand niet bestaat.
+async function getFirstDownloadFileAbs(downloadId) {
+  try {
+    const id = Number(downloadId);
+    if (!Number.isFinite(id)) return null;
+    const cache = getFirstDownloadFileAbs._cache || (getFirstDownloadFileAbs._cache = new Map());
+    const cached = cache.get(id);
+    if (cached && (Date.now() - (cached.at || 0)) < 30000) {
+      return cached.abs || null;
+    }
+    const row = await db.prepare(
+      db.isPostgres
+        ? `SELECT relpath FROM download_files WHERE download_id = $1 ORDER BY relpath ASC LIMIT 1`
+        : `SELECT relpath FROM download_files WHERE download_id = ? ORDER BY relpath ASC LIMIT 1`
+    ).get(id);
+    if (!row || !row.relpath) {
+      cache.set(id, { at: Date.now(), abs: null });
+      return null;
+    }
+    const abs = path.resolve(BASE_DIR, String(row.relpath));
+    if (!safeIsAllowedExistingPath(abs)) {
+      cache.set(id, { at: Date.now(), abs: null });
+      return null;
+    }
+    cache.set(id, { at: Date.now(), abs });
+    if (cache.size > 2000) {
+      const keys = Array.from(cache.keys()).slice(0, 500);
+      for (const k of keys) cache.delete(k);
+    }
+    return abs;
+  } catch (e) {
+    return null;
   }
 }
 
@@ -1832,8 +1876,10 @@ async function indexDownloadFilesForDownload(row) {
       const maxFiles = (row && Number.isFinite(Number(row._maxFiles))) ? Math.max(1, Number(row._maxFiles)) : DOWNLOAD_FILES_AUTO_INDEX_MAX_FILES;
       const files = listMediaFilesInDir(abs, maxFiles);
       if (!files || !files.length) return { ok: true, reason: 'dir empty' };
+      const maybeYield = yieldEveryN(8);
       for (const f of files) {
         await upsertOne(f);
+        await maybeYield();
       }
       return { ok: true, reason: 'dir indexed', n: files.length };
     }
@@ -1863,6 +1909,7 @@ async function maybeAutoIndexDownloadFiles() {
         await indexDownloadFilesForDownload(r);
         downloadFilesActiveIndexLastById.set(id, now);
         did++;
+        await yieldEventLoop();
       }
     } catch (e) { }
 
@@ -1889,6 +1936,7 @@ async function maybeAutoIndexDownloadFiles() {
       await indexDownloadFilesForDownload(r);
       downloadFilesAutoIndexLastById.set(id, now);
       did++;
+      await yieldEventLoop();
     }
   } catch (e) {
   } finally {
@@ -4079,15 +4127,25 @@ const getStats = db.prepare(db.isPostgres ? `
 
 let statsRowCache = null;
 let statsRowCacheAt = 0;
+let statsRowInflight = null;
 const STATS_ROW_CACHE_MS = Math.max(150, parseInt(process.env.WEBDL_STATS_ROW_CACHE_MS || '800', 10) || 800);
 
 async function getStatsRowCached() {
   const now = Date.now();
   if (statsRowCache && now - statsRowCacheAt < STATS_ROW_CACHE_MS) return statsRowCache;
-  const row = await Promise.resolve(getStats.get());
-  statsRowCache = row || {};
-  statsRowCacheAt = now;
-  return statsRowCache;
+  // Mutex: if a stats query is already running, wait for it
+  if (statsRowInflight) return statsRowInflight;
+  statsRowInflight = (async () => {
+    try {
+      const row = await Promise.resolve(getStats.get());
+      statsRowCache = row || {};
+      statsRowCacheAt = Date.now();
+      return statsRowCache;
+    } finally {
+      statsRowInflight = null;
+    }
+  })();
+  return statsRowInflight;
 }
 
 let statsCache = null;
@@ -4117,6 +4175,7 @@ function fileExistsCache(fp) {
 
 let recentFilesTopCache = new Map();
 let recentFilesTopCacheAt = 0;
+let galleryFastPathCache = null; // { key, ts, data } - 3s TTL simple cache
 const RECENT_FILES_TOP_CACHE_MS = Math.max(250, parseInt(process.env.WEBDL_RECENT_FILES_TOP_CACHE_MS || '2000', 10) || 2000);
 
 function buildRecentFilesCacheMarker(stats) {
@@ -4655,7 +4714,14 @@ async function runDownloadScheduler() {
       startDownload(job.downloadId, job.url, job.platform, job.channel, job.title, job.metadata)
         .catch(() => { }).finally(() => {
           startingJobs.delete(id);
-          runDownloadSchedulerSoon();
+          // Throttle CDN image downloads: 500ms delay between dispatches
+          // to prevent event loop flooding from rapid-fire completions
+          const plat = String(job.platform || '').toLowerCase();
+          if (plat === 'pornpics' || plat === 'elitebabes' || (job.url && /^https?:\/\/cdn\./i.test(job.url))) {
+            setTimeout(() => runDownloadSchedulerSoon(), 500);
+          } else {
+            runDownloadSchedulerSoon();
+          }
         });
     } catch (e) {
       await updateDownloadStatus.run('error', 0, e.message, job.downloadId);
@@ -4692,7 +4758,66 @@ async function runDownloadScheduler() {
       startingJobs.delete(id);
     }
   }
+
+  // Auto-rehydrate: if all in-memory queues are empty, pull more pending items from DB
+  if (queuedHeavy.length === 0 && queuedLight.length === 0 && queuedBatch.length === 0) {
+    scheduleAutoRehydrate();
+  }
 }
+
+let autoRehydrateTimer = null;
+function scheduleAutoRehydrate() {
+  if (autoRehydrateTimer) return;
+  autoRehydrateTimer = setTimeout(async () => {
+    autoRehydrateTimer = null;
+    try {
+      const rows = await db.prepare(
+        `SELECT id, url, platform, channel, title, metadata, status
+         FROM downloads
+         WHERE status = 'pending'
+         ORDER BY created_at DESC, id DESC
+         LIMIT 250`
+      ).all();
+      if (!rows || rows.length === 0) return;
+      console.log(`🔁 Auto-rehydrate: loading ${rows.length} pending items into queue...`);
+      let loaded = 0;
+      for (const row of rows) {
+        const id = Number(row.id);
+        if (!Number.isFinite(id)) continue;
+        if (activeProcesses.has(id) || startingJobs.has(id) || queuedJobs.has(id)) continue;
+        const url = String(row.url || '').trim();
+        if (!url || url.startsWith('recording:')) continue;
+        let parsedMeta = null;
+        try { if (row.metadata) parsedMeta = JSON.parse(row.metadata); } catch (e) {}
+        if (parsedMeta && parsedMeta.webdl_kind === 'recording') continue;
+        const storedPlatform = String(row.platform || '').trim().toLowerCase();
+        const platform = normalizePlatform(storedPlatform, url);
+        const channel = (row.channel && row.channel !== 'unknown') ? row.channel : deriveChannelFromUrl(platform, url) || 'unknown';
+        const title = (row.title && row.title !== 'untitled') ? row.title : deriveTitleFromUrl(url);
+        const lane = detectLane(platform, url);
+        queuedJobs.set(id, { downloadId: id, url, platform, channel, title, metadata: parsedMeta, progress: 0 });
+        jobLane.set(id, lane);
+        jobPlatform.set(id, platform);
+        if (lane === 'light') queuedLight.push(id); else queuedHeavy.push(id);
+        try { await db.prepare("UPDATE downloads SET status = 'queued' WHERE id = ?").run(id); } catch (e) {}
+        loaded++;
+      }
+      if (loaded > 0) {
+        console.log(`🔁 Auto-rehydrate: ${loaded} items geladen, scheduler starten...`);
+        runDownloadSchedulerSoon();
+      }
+    } catch (e) {
+      console.error('Auto-rehydrate error:', e.message);
+    }
+  }, 2000);
+}
+
+// Periodic check: if in-memory queues are empty but pending items exist, trigger rehydrate
+setInterval(() => {
+  if (queuedHeavy.length === 0 && queuedLight.length === 0 && queuedBatch.length === 0) {
+    scheduleAutoRehydrate();
+  }
+}, 10000);
 
 let postprocessSchedulerTimer = null;
 function runPostprocessSchedulerSoon() {
@@ -4995,8 +5120,10 @@ async function rehydrateDownloadQueue() {
 
       let initialProgress = 0;
       if (row.status === 'downloading' || row.status === 'postprocessing') {
-        const dbProg = await getDatabaseProgress(id);
-        if (dbProg != null) initialProgress = dbProg;
+        try {
+          const progRow = await db.prepare("SELECT progress FROM downloads WHERE id = ?").get(id);
+          if (progRow && progRow.progress != null) initialProgress = progRow.progress;
+        } catch (e) { /* ignore */ }
       }
 
       const lane = detectLane(platform, url);
@@ -5053,6 +5180,8 @@ const io = socketIO(server, {
 });
 
 expressApp.use(express.json({ limit: '50mb' }));
+// Serve downloaded files directly as static assets (fast thumbnails, no DB lookup)
+expressApp.use('/webdl-static', express.static(BASE_DIR, { maxAge: '1h', immutable: true }));
 
 expressApp.get('/favicon.ico', (req, res) => {
   res.setHeader('Cache-Control', 'public, max-age=604800');
@@ -5693,16 +5822,52 @@ function pickThumbnailFileShallow(dir) {
 
     const entries = fs.readdirSync(abs, { withFileTypes: true });
     const candidates = [];
+    const subdirs = [];
     for (const e of entries) {
-      if (!e || !e.isFile()) continue;
-      if (!e.name || e.name.startsWith('.')) continue;
-      const full = path.join(abs, e.name);
-      if (!safeIsInsideBaseDir(full)) continue;
-      if (!isImagePath(full)) continue;
-      let score = 0;
-      if (/(thumb|thumbnail|cover|poster)/i.test(e.name)) score += 1000;
-      if (/\.(jpg|jpeg|png|webp)$/i.test(e.name)) score += 10;
-      candidates.push({ name: e.name, path: full, score });
+      if (!e || e.name.startsWith('.')) continue;
+      if (e.isFile()) {
+        const full = path.join(abs, e.name);
+        if (!safeIsInsideBaseDir(full)) continue;
+        if (!isImagePath(full)) continue;
+        let score = 0;
+        if (/(thumb|thumbnail|cover|poster)/i.test(e.name)) score += 1000;
+        if (/\.(jpg|jpeg|png|webp)$/i.test(e.name)) score += 10;
+        candidates.push({ name: e.name, path: full, score });
+      } else if (e.isDirectory()) {
+        subdirs.push(path.join(abs, e.name));
+      }
+    }
+
+    // If no images at root, look one level deeper (for gallery-dl/directlink/ etc.)
+    if (!candidates.length && subdirs.length) {
+      for (const sub of subdirs) {
+        try {
+          const subEntries = fs.readdirSync(sub, { withFileTypes: true });
+          for (const se of subEntries) {
+            if (!se || se.name.startsWith('.')) continue;
+            if (se.isFile()) {
+              const full = path.join(sub, se.name);
+              if (!safeIsInsideBaseDir(full) || !isImagePath(full)) continue;
+              candidates.push({ name: se.name, path: full, score: 5 });
+              if (candidates.length >= 3) break; // Just need one
+            } else if (se.isDirectory()) {
+              // One more level deep (gallery-dl/directlink/)
+              try {
+                const deepEntries = fs.readdirSync(path.join(sub, se.name), { withFileTypes: true });
+                for (const de of deepEntries) {
+                  if (!de || de.name.startsWith('.') || !de.isFile()) continue;
+                  const full = path.join(sub, se.name, de.name);
+                  if (!safeIsInsideBaseDir(full) || !isImagePath(full)) continue;
+                  candidates.push({ name: de.name, path: full, score: 3 });
+                  if (candidates.length >= 3) break;
+                }
+              } catch (e) {}
+            }
+            if (candidates.length >= 3) break;
+          }
+        } catch (e) {}
+        if (candidates.length >= 3) break;
+      }
     }
 
     if (!candidates.length) return null;
@@ -6037,7 +6202,8 @@ async function autoEnqueueMissingThumbs() {
   try {
     // Only fetch a small batch to keep it fast and iterative
     const limit = Math.max(5, THUMB_GEN_MAX_QUEUE - thumbGenQueue.length);
-    const rows = await db.prepare("SELECT filepath FROM downloads WHERE status = 'completed' AND is_thumb_ready = false AND filepath IS NOT NULL AND filepath != '' ORDER BY id DESC LIMIT ?").all(limit);
+    // Exclude HDD paths (/Volumes/) — they're too slow and cause event loop + DB contention
+    const rows = await db.prepare("SELECT filepath FROM downloads WHERE status = 'completed' AND is_thumb_ready = false AND filepath IS NOT NULL AND filepath != '' AND filepath NOT LIKE '/Volumes/%' ORDER BY id DESC LIMIT ?").all(limit);
     if (rows && rows.length > 0) {
       let enqueued = 0;
       for (const row of rows) {
@@ -6053,8 +6219,9 @@ async function autoEnqueueMissingThumbs() {
     isAutoEnqueueingThumbs = false;
   }
 }
-// Run thumb scanner every 15 seconds
-setInterval(() => { autoEnqueueMissingThumbs().catch(() => { }); }, 15000);
+// Background thumb scanner — generates thumbs for items that don't have one yet.
+// Runs every 30s with throttled drain (200ms between jobs) to avoid event loop starvation.
+setInterval(() => { autoEnqueueMissingThumbs().catch(() => { }); }, 30000);
 
 function scheduleThumbGeneration(targetPath) {
   try {
@@ -6067,6 +6234,11 @@ function scheduleThumbGeneration(targetPath) {
     if (!abs) {
       thumbGenScheduleDenied.empty_path++;
       return 'empty_path';
+    }
+    // Skip external HDD paths — they cause sync I/O stalls and DB contention
+    if (abs.startsWith('/Volumes/')) {
+      thumbGenScheduleDenied.hdd_path = (thumbGenScheduleDenied.hdd_path || 0) + 1;
+      return 'hdd_path';
     }
     if (!safeIsAllowedExistingPath(abs)) {
       thumbGenScheduleDenied.not_allowed++;
@@ -6098,55 +6270,45 @@ function scheduleThumbGeneration(targetPath) {
 
 function drainThumbGenQueue() {
   try {
-    while (thumbGenActive < THUMB_GEN_CONCURRENCY && thumbGenQueue.length) {
-      const abs = thumbGenQueue.shift();
-      if (!abs) continue;
-      thumbGenQueued.delete(abs);
-      if (thumbGenInflight.has(abs)) continue;
-      thumbGenInflight.add(abs);
-      thumbGenActive++;
-      pickOrCreateThumbPath(abs, { allowGenerate: true, throwOnError: true }).
-        then(async (out) => {
-          if (out) {
-            // Successfully generated or found: update DB to stop auto-enqueue from picking it up
-            try {
-              console.log(`✅ Thumb success for ${abs}, updating DB... (out=${out})`);
-              await db.prepare("UPDATE downloads SET is_thumb_ready = true WHERE is_thumb_ready = false AND filepath = ?").run(abs);
-              console.log(`✅ DB updated for ${abs}`);
-            } catch (e) {
-              console.error(`❌ DB thumb update failed for ${abs}: ${e && e.message ? e.message : e}`);
-            }
-            return;
+    // Only start ONE job at a time, with a delay to let the event loop breathe
+    if (thumbGenActive >= THUMB_GEN_CONCURRENCY || !thumbGenQueue.length) return;
+    const abs = thumbGenQueue.shift();
+    if (!abs) { drainThumbGenQueueSoon(); return; }
+    thumbGenQueued.delete(abs);
+    if (thumbGenInflight.has(abs)) { drainThumbGenQueueSoon(); return; }
+    thumbGenInflight.add(abs);
+    thumbGenActive++;
+    pickOrCreateThumbPath(abs, { allowGenerate: true, throwOnError: true }).
+      then(async (out) => {
+        if (out) {
+          try {
+            console.log(`✅ Thumb success for ${abs}, updating DB... (out=${out})`);
+            await db.prepare("UPDATE downloads SET is_thumb_ready = true WHERE is_thumb_ready = false AND filepath = ?").run(abs);
+            console.log(`✅ DB updated for ${abs}`);
+          } catch (e) {
+            console.error(`❌ DB thumb update failed for ${abs}: ${e && e.message ? e.message : e}`);
           }
-          try {
-            const st = fs.existsSync(abs) ? fs.statSync(abs) : null;
-            const ageMs = st ? (Date.now() - (st.mtimeMs || 0)) : 0;
-            if (ageMs > 15000) {
-              logThumbGenFailureOnce(abs, new Error('thumb gen returned null'));
-              try {
-                thumbGenCooldownUntil.set(abs, Date.now() + THUMB_GEN_COOLDOWN_MS);
-                if (thumbGenCooldownUntil.size > 12000) {
-                  const keys = Array.from(thumbGenCooldownUntil.keys()).slice(0, Math.max(1, thumbGenCooldownUntil.size - 9000));
-                  for (const k of keys) thumbGenCooldownUntil.delete(k);
-                }
-              } catch (e) { }
-            }
-          } catch (e) { }
-        }).
-        catch((e) => {
-          try { logThumbGenFailureOnce(abs, e); } catch (e2) { }
-          try {
-            const st = fs.existsSync(abs) ? fs.statSync(abs) : null;
-            const ageMs = st ? (Date.now() - (st.mtimeMs || 0)) : 0;
-            if (ageMs > 15000) thumbGenCooldownUntil.set(abs, Date.now() + THUMB_GEN_COOLDOWN_MS);
-          } catch (e2) { }
-        }).
-        finally(() => {
-          thumbGenActive = Math.max(0, thumbGenActive - 1);
-          thumbGenInflight.delete(abs);
-          drainThumbGenQueueSoon();
-        });
-    }
+          return;
+        }
+        // Mark as thumb_ready in DB so it stops being retried
+        try {
+          logThumbGenFailureOnce(abs, new Error('thumb gen returned null'));
+          await db.prepare("UPDATE downloads SET is_thumb_ready = true WHERE is_thumb_ready = false AND filepath = ?").run(abs);
+        } catch (e) { }
+      }).
+      catch(async (e) => {
+        try { logThumbGenFailureOnce(abs, e); } catch (e2) { }
+        // Mark as thumb_ready in DB so it stops being retried
+        try {
+          await db.prepare("UPDATE downloads SET is_thumb_ready = true WHERE is_thumb_ready = false AND filepath = ?").run(abs);
+        } catch (e2) { }
+      }).
+      finally(() => {
+        thumbGenActive = Math.max(0, thumbGenActive - 1);
+        thumbGenInflight.delete(abs);
+        // Delay 200ms before starting next job — lets the event loop serve API requests
+        setTimeout(() => drainThumbGenQueue(), 200);
+      });
   } catch (e) { }
 }
 
@@ -6212,6 +6374,9 @@ async function pickOrCreateThumbPath(targetPath, opts) {
       if (stat.isDirectory()) {
         const pickedShallow = pickThumbnailFileShallow(abs);
         if (pickedShallow) return pickedShallow;
+        // Also try recursive scan (e.g., gallery-dl puts files in subdirectories)
+        const pickedDeep = pickThumbnailFile(abs);
+        if (pickedDeep) return pickedDeep;
         if (!allowGenerate) return null;
 
         const picked = pickThumbnailFile(abs);
@@ -9646,7 +9811,10 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
         return;
       }
       const finalTitle = pinContext ? title : meta.title || title;
-      const finalChannel = pinContext ? channel : meta.channel || channel;
+      // Keep original channel if it's already a meaningful value — yt-dlp returns
+      // garbage for CDN image URLs (e.g., 'cdn.elitebabes.com' or empty)
+      const metaChannel = meta.channel && meta.channel !== 'unknown' && !meta.channel.includes('cdn.') ? meta.channel : null;
+      const finalChannel = pinContext ? channel : (channel && channel !== 'unknown' ? channel : metaChannel || channel);
       await updateDownloadMeta.run(finalTitle, finalChannel, meta.description, meta.duration, meta.thumbnail, JSON.stringify(meta.fullMeta), downloadId);
       title = finalTitle;
       channel = finalChannel;
@@ -9848,6 +10016,7 @@ async function startTdlDownload(downloadId, url, platform, channel, title, metad
 
         try {
           const files = fs.readdirSync(dir);
+          let _yieldIdx = 0;
           for (const file of files) {
             try {
               const fullPath = path.join(dir, file);
@@ -9862,6 +10031,7 @@ async function startTdlDownload(downloadId, url, platform, channel, title, metad
                 }
               }
             } catch (e) { }
+            if (++_yieldIdx % 10 === 0) await yieldEventLoop();
           }
           console.log(`   📂 Geïndexeerd: ${safeCount} files voor download #${downloadId}`);
         } catch (e) {
@@ -10329,6 +10499,15 @@ async function startGalleryDlDownload(downloadId, url, platform, channel, title,
     activeProcesses.set(downloadId, proc);
     try { startingJobs.delete(downloadId); } catch (e) { }
 
+    // Timeout: kill gallery-dl after 5 minutes to prevent hanging on blocked sites
+    const gdlTimeout = setTimeout(() => {
+      try {
+        console.log(`⏰ [DL #${downloadId}] gallery-dl timeout (5min), killing process`);
+        proc.kill('SIGTERM');
+        setTimeout(() => { try { proc.kill('SIGKILL'); } catch (e) {} }, 3000);
+      } catch (e) {}
+    }, 5 * 60 * 1000);
+
     let stderr = '';
     proc.stderr.on('data', (d) => { stderr += d.toString(); });
     proc.stdout.on('data', () => { });
@@ -10355,6 +10534,7 @@ async function startGalleryDlDownload(downloadId, url, platform, channel, title,
                 }
               }
             } catch (e) { }
+            if (indexed % 10 === 0) await yieldEventLoop();
           }
           console.log(`   📂 Geïndexeerd: ${indexed} files voor download #${downloadId}`);
           recentFilesTopCache.clear();
@@ -10585,6 +10765,7 @@ async function startKinkyNlDownload(downloadId, url, platform, channel, title, m
           const relpath = path.relative(path.resolve(BASE_DIR), fp);
           await upsertDownloadFile.run(downloadId, relpath, st.size || 0, Math.round(st.mtimeMs || now), now, now);
         } catch (e) { }
+        if (entries.indexOf(entry) % 10 === 9) await yieldEventLoop();
       }
       console.log(`   📂 Geïndexeerd: ${entries.length} files voor download #${downloadId}`);
     } catch (e) {
@@ -11792,7 +11973,12 @@ expressApp.get('/download/:id/thumb', async (req, res) => {
   }
 
   try {
-    const thumbPath = await pickOrCreateThumbPath(fp, { allowGenerate: false });
+    // Prefer de per-download geïndexeerde specifieke file boven de (mogelijk
+    // gedeelde) download.filepath. Dit voorkomt dat meerdere downloads met
+    // dezelfde channel-dir (bv. gallery-dl/pornpics) dezelfde thumb krijgen.
+    const specificAbs = await getFirstDownloadFileAbs(id);
+    const thumbSrc = specificAbs || fp;
+    const thumbPath = await pickOrCreateThumbPath(thumbSrc, { allowGenerate: false });
     if (!thumbPath) {
       let sched = 'error';
       try { sched = scheduleThumbGeneration(fp) || 'error'; } catch (e) { }
@@ -11837,7 +12023,11 @@ expressApp.get('/media/thumb', (req, res) => {
           res.setHeader('Cache-Control', 'no-store');
           return res.redirect(302, `/media/pending-thumb.svg?kind=${encodeURIComponent(kind)}&id=${encodeURIComponent(String(id))}`);
         }
-        const thumbPath = await pickOrCreateThumbPath(fp, { allowGenerate: false });
+        // Prefer per-download geïndexeerde specifieke file (zie toelichting in
+        // /download/:id/thumb endpoint).
+        const specificAbs = await getFirstDownloadFileAbs(id);
+        const thumbSrc = specificAbs || fp;
+        const thumbPath = await pickOrCreateThumbPath(thumbSrc, { allowGenerate: false });
         if (!thumbPath) {
           let sched = 'error';
           try { sched = scheduleThumbGeneration(fp) || 'error'; } catch (e) { }
@@ -11982,12 +12172,28 @@ expressApp.post('/download/:id/retry', async (req, res) => {
 
 let _directoryTreeCache = null;
 let _directoryTreeCacheTime = 0;
+let _directoryTreeInflight = null; // mutex: only one query at a time
 expressApp.get('/api/media/directories/tree', async (req, res) => {
   try {
     const now = Date.now();
-    if (_directoryTreeCache && (now - _directoryTreeCacheTime) < 30000) {
+    if (_directoryTreeCache && (now - _directoryTreeCacheTime) < 120000) {
       return res.json({ success: true, tree: _directoryTreeCache });
     }
+    // If a tree query is already running, wait for it instead of spawning another
+    if (_directoryTreeInflight) {
+      try {
+        const cached = await _directoryTreeInflight;
+        return res.json({ success: true, tree: cached });
+      } catch (e) {
+        return res.status(500).json({ success: false, error: 'tree query failed' });
+      }
+    }
+    _directoryTreeInflight = (async () => {
+    // Set a 15s statement timeout to prevent runaway queries
+    const pool = db.readPool || db.pool;
+    const client = await pool.connect();
+    try {
+      await client.query('SET statement_timeout = 15000');
     const q = `
       SELECT sub.platform, sub.channel,
              MAX(sub.source_url) as sample_source_url,
@@ -12011,7 +12217,7 @@ expressApp.get('/api/media/directories/tree', async (req, res) => {
       ORDER BY sub.platform ASC, sub.channel ASC
     `;
     const result = { tree: {} };
-    const rows = await db.prepare(q).all();
+    const { rows } = await client.query(q);
     for (const row of rows) {
       const p = row.platform || 'unknown';
       const c = row.channel || 'unknown';
@@ -12033,9 +12239,22 @@ expressApp.get('/api/media/directories/tree', async (req, res) => {
       result.tree[p].channels.push({ name: c, displayName: d_name, count: d_count, fileCount: f_count, screenshotCount: s_count });
     }
     _directoryTreeCache = result.tree;
-    _directoryTreeCacheTime = now;
-    res.json({ success: true, tree: result.tree });
+    _directoryTreeCacheTime = Date.now();
+    return result.tree;
+    } finally {
+      client.release();
+    }
+    })();
+    try {
+      const tree = await _directoryTreeInflight;
+      res.json({ success: true, tree });
+    } catch (e) {
+      res.status(500).json({ success: false, error: String(e.message || e) });
+    } finally {
+      _directoryTreeInflight = null;
+    }
   } catch (e) {
+    _directoryTreeInflight = null;
     res.status(500).json({ success: false, error: String(e.message || e) });
   }
 });
@@ -12133,8 +12352,19 @@ expressApp.get('/media/file', async (req, res) => {
           }
         }
 
-        const imgData = pickPrimaryMediaFile(fp);
-        const img = imgData ? imgData.path : null;
+        // Gebruik eerst de per-download geïndexeerde specifieke file; dit
+        // zorgt dat meerdere downloads die dezelfde channel-dir delen (bv.
+        // gallery-dl/pornpics) elk hun eigen afbeelding tonen die matcht met
+        // de card-thumbnail. Fallback op pickThumbnailFileShallow/Primary.
+        let img = null;
+        if (kind === 'd') {
+          try { img = await getFirstDownloadFileAbs(id); } catch (e) { img = null; }
+        }
+        if (!img) img = pickThumbnailFileShallow(fp);
+        if (!img) {
+          const imgData = pickPrimaryMediaFile(fp);
+          img = imgData ? imgData.path : null;
+        }
         if (img && safeIsAllowedExistingPath(img)) {
           return res.sendFile(img, (err) => {
             if (!err) return;
@@ -12150,9 +12380,40 @@ expressApp.get('/media/file', async (req, res) => {
       }
     } catch (e) { }
 
-    // Force video/mp4 for containers browsers can't handle by MIME
+    // For MKV/AVI: stream as fragmented MP4 via ffmpeg pipe (instant playback, no re-encoding)
     const fileExt = path.extname(fp).toLowerCase();
-    if (fileExt === '.mov' || fileExt === '.m4v' || fileExt === '.mkv') res.setHeader('Content-Type', 'video/mp4');
+    const needsRemux = fileExt === '.mkv' || fileExt === '.avi';
+    if (needsRemux) {
+      try {
+        const ffmpegPath = resolveUsableFfmpegPath();
+        res.setHeader('Content-Type', 'video/mp4');
+        res.setHeader('Cache-Control', 'private, max-age=3600');
+        // frag_keyframe+empty_moov: produces fragmented MP4 that streams immediately
+        const args = [
+          '-hide_banner', '-loglevel', 'error',
+          '-i', fp,
+          '-c', 'copy',
+          '-movflags', 'frag_keyframe+empty_moov',
+          '-f', 'mp4',
+          'pipe:1'
+        ];
+        const proc = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+        proc.stdout.pipe(res);
+        proc.stderr.on('data', () => {}); // silence stderr
+        proc.on('error', (e) => {
+          if (!res.headersSent) res.status(500).end();
+        });
+        res.on('close', () => {
+          try { proc.kill('SIGKILL'); } catch (e) {}
+        });
+        return;
+      } catch (e) {
+        // Fallback to raw sendFile if ffmpeg fails
+        console.warn(`fMP4 stream failed for ${fp}: ${e.message}, falling back to sendFile`);
+      }
+    }
+    // Native formats: MP4/MOV/M4V/WebM — serve directly
+    if (fileExt === '.mov' || fileExt === '.m4v') res.setHeader('Content-Type', 'video/mp4');
     res.sendFile(fp, (err) => {
       if (!err) return;
       if (res.headersSent) return;
@@ -12297,25 +12558,9 @@ function inferMediaType(fp) {
   if (['.mp4', '.mov', '.m4v', '.webm', '.mkv', '.avi', '.flv', '.ts', '.m3u8'].includes(ext)) return 'video';
   if (['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.svg', '.avif', '.heic', '.heif'].includes(ext)) return 'image';
 
-  // Slow path: only for extensionless paths (directories, etc.)
-  try {
-    const abs = path.resolve(p);
-    if (safeIsAllowedExistingPath(abs)) {
-      const st = fs.statSync(abs);
-      if (st && st.isDirectory && st.isDirectory()) {
-        const img = pickThumbnailFile(abs);
-        if (img) return 'image';
-        const v = findFirstVideoInDirDeep(abs) || findFirstVideoInDir(abs);
-        if (v) return 'video';
-        return 'file';
-      }
-      if (st && st.isFile && st.isFile()) {
-        const sn = sniffMediaKindByMagic(abs);
-        if (sn === 'image') return 'image';
-        if (sn === 'video') return 'video';
-      }
-    }
-  } catch (e) { }
+  // No extension = likely a directory (gallery-dl download)
+  // Return 'image' without any disk I/O — data comes from DB and is reliable
+  if (!ext) return 'image';
 
   return 'file';
 }
@@ -12344,9 +12589,7 @@ function makeMediaItem(row) {
   const sourceUrl = row.source_url || '';
   const fp = String(row.filepath || '').trim();
 
-  if (row.platform === 'patreon') {
-    console.log(`[DEBUG-PATREON-EXPAND] Processing id=${row.id}, fp=${fp}, isAllowed=${safeIsAllowedExistingPath(path.resolve(fp))}`);
-  }
+  // Patreon debug log removed — safeIsAllowedExistingPath does sync I/O
 
   if (fp && isAuxiliaryMediaPath(fp)) return null;
   const t = inferMediaType(fp);
@@ -12387,6 +12630,25 @@ function makeMediaItem(row) {
   let title = safeDecode(row.title);
   let channelDisplay = '';
   let titleDisplay = '';
+
+  // Derive channel from filepath when it's 'unknown'
+  if ((!channel || channel === 'unknown') && fp) {
+    try {
+      const parts = fp.split(path.sep).filter(Boolean);
+      // Look for the segment after the platform name in the path
+      // e.g., /Users/jurgen/Downloads/WEBDL/pornpics/Feet → 'Feet'
+      const platLower = String(row.platform || '').toLowerCase();
+      const platIdx = parts.findIndex(p => p.toLowerCase() === platLower);
+      if (platIdx >= 0 && platIdx < parts.length - 1) {
+        channel = parts[platIdx + 1];
+      } else if (parts.length >= 2) {
+        // Fallback: use the last meaningful directory name
+        const last = parts[parts.length - 1];
+        const secondLast = parts[parts.length - 2];
+        channel = path.extname(last) ? secondLast : last;
+      }
+    } catch (e) {}
+  }
   try {
     const plat = String(row && row.platform ? row.platform : '').toLowerCase();
     if (plat === 'footfetishforum') {
@@ -12401,9 +12663,20 @@ function makeMediaItem(row) {
 
   const src = `/media/file?kind=${encodeURIComponent(row.kind)}&id=${encodeURIComponent(row.id)}`;
   const preferredThumbFinal = preferredThumb ? (preferredThumb.includes('?') ? `${preferredThumb}&v=6` : `${preferredThumb}?v=6`) : '';
-  const thumb = row.kind === 's' && t === 'image' && src ?
-    src :
-    preferredThumbFinal || `/media/thumb?kind=${encodeURIComponent(row.kind)}&id=${encodeURIComponent(row.id)}&v=6`;
+  // For image files: serve the file itself as thumbnail via static path (no DB lookup needed)
+  let thumb;
+  const firstFileRel = row.first_file || null;
+  if (t === 'image' && firstFileRel) {
+    // Use the first indexed file from download_files (for gallery-dl/directory downloads)
+    thumb = '/webdl-static/' + firstFileRel.split('/').map(encodeURIComponent).join('/');
+  } else if (t === 'image' && fileRel && /\.(jpe?g|png|webp|gif)$/i.test(fileRel)) {
+    // Single image file download
+    thumb = '/webdl-static/' + fileRel.split(path.sep).map(encodeURIComponent).join('/');
+  } else if (row.kind === 's' && t === 'image' && src) {
+    thumb = src;
+  } else {
+    thumb = preferredThumbFinal || `/media/thumb?kind=${encodeURIComponent(row.kind)}&id=${encodeURIComponent(row.id)}&v=6`;
+  }
 
   return {
     kind: row.kind,
@@ -12915,16 +13188,37 @@ async function getDynamicHybridBatch(stmt, typeFilter, ...args) {
   if (args.length > 0 && args[args.length - 1] && typeof args[args.length - 1] === 'object' && args[args.length - 1]._platformFilter) {
     platformFilter = args.pop();
   }
+  // Extract optional searchFilter from last args
+  let searchFilter = null;
+  if (args.length > 0 && args[args.length - 1] && typeof args[args.length - 1] === 'object' && args[args.length - 1]._searchFilter) {
+    searchFilter = args.pop();
+  }
 
   const needsTypeFilter = (typeFilter === 'video_only' || typeFilter === 'image_only');
   const needsPlatformFilter = platformFilter && platformFilter.platforms && platformFilter.platforms.length > 0;
+  const needsSearchFilter = searchFilter && searchFilter.query;
 
-  if (!needsTypeFilter && !needsPlatformFilter) {
+  if (!needsTypeFilter && !needsPlatformFilter && !needsSearchFilter) {
     return await stmt.all(...args);
   }
 
   let sql = stmt.source || '';
   if (!sql) return await stmt.all(...args);
+
+  // Search filter: add ILIKE clauses and remove ID-window limits to search full DB
+  if (needsSearchFilter) {
+    const q = String(searchFilter.query).replace(/'/g, "''").replace(/%/g, '');
+    const searchLike = `%${q}%`;
+    // Remove ID-window limits so we search the full database
+    sql = sql.replace(/AND\s+d\.id\s*>\s*\(SELECT\s+MAX\(id\)\s*-\s*\d+\s+FROM\s+downloads\)/gi, '');
+    // Add search ILIKE as outer filter wrapping the whole query
+    const orderMatch = sql.match(/(ORDER\s+BY\s+ts\s+(?:DESC|ASC)\s*(?:NULLS\s+(?:FIRST|LAST)\s*)?LIMIT\s+\?\s*OFFSET\s+\?)\s*$/is);
+    if (orderMatch) {
+      const orderClause = orderMatch[1];
+      const baseQuery = sql.slice(0, sql.length - orderMatch[0].length).trimEnd();
+      sql = `SELECT * FROM (${baseQuery}) _srch WHERE (LOWER(COALESCE(platform,'') || ' ' || COALESCE(channel,'') || ' ' || COALESCE(title,'') || ' ' || COALESCE(filepath,'')) LIKE LOWER('${searchLike}')) ${orderClause}`;
+    }
+  }
 
   // Platform filter: replace ID-window with platform IN() directly in each subquery
   if (needsPlatformFilter) {
@@ -12956,6 +13250,70 @@ async function getDynamicHybridBatch(stmt, typeFilter, ...args) {
   return await dynamicStmt.all(...args);
 }
 
+// ═══ DEDICATED SEARCH API (fast, bypasses heavy hybrid query) ═══
+expressApp.get('/api/media/search', async (req, res) => {
+  const reqStart = Date.now();
+  const q = String(req.query.q || '').trim().toLowerCase();
+  if (!q || q.length < 2) return res.json({ success: true, items: [], done: true });
+  const limit = Math.max(1, Math.min(200, parseInt(req.query.limit || '60', 10) || 60));
+  const offset = Math.max(0, parseInt(req.query.offset || '0', 10) || 0);
+  const type = String(req.query.type || 'all').toLowerCase();
+  const sort = String(req.query.sort || 'recent').toLowerCase();
+  try {
+    const searchLike = '%' + q.replace(/%/g, '') + '%';
+    // Direct PG pool query — no db.prepare wrapper, no event loop blocking
+    const orderBy = sort === 'oldest' ? 'ts ASC NULLS LAST' 
+      : sort === 'rating_desc' ? 'rating DESC NULLS LAST, ts DESC NULLS LAST'
+      : sort === 'rating_asc' ? 'rating ASC NULLS FIRST, ts DESC NULLS LAST'
+      : sort === 'name_asc' ? 'channel ASC, ts DESC NULLS LAST'
+      : 'ts DESC NULLS LAST';
+    
+    // Type filter
+    let typeClause = '';
+    if (type === 'video_only') typeClause = "AND (d.filepath ILIKE '%.mp4' OR d.filepath ILIKE '%.webm' OR d.filepath ILIKE '%.mov' OR d.filepath ILIKE '%.mkv')";
+    else if (type === 'image_only') typeClause = "AND (d.filepath ILIKE '%.jpg' OR d.filepath ILIKE '%.jpeg' OR d.filepath ILIKE '%.png' OR d.filepath ILIKE '%.gif' OR d.filepath ILIKE '%.webp')";
+
+    const pgResult = await (db.readPool || db.pool).query(`
+      SELECT 
+        'd' AS kind,
+        d.id::text AS id,
+        d.platform, d.channel, d.title, d.filepath,
+        d.created_at::text AS created_at,
+        EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at))::bigint * 1000 AS ts,
+        d.thumbnail, d.url, d.source_url, d.rating,
+        'd' AS rating_kind, d.id AS rating_id
+      FROM downloads d
+      WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
+        AND d.filepath IS NOT NULL AND d.filepath != ''
+        AND (d.channel ILIKE $1 OR d.title ILIKE $1 OR d.platform ILIKE $1)
+        ${typeClause}
+      ORDER BY ${orderBy}
+      LIMIT $2 OFFSET $3
+    `, [searchLike, limit + 20, offset]);
+
+    const items = [];
+    for (const row of pgResult.rows) {
+      if (!row || !row.filepath) continue;
+      // File-exist check
+      const fp = String(row.filepath).trim();
+      if (fp && !fileExistsCache(fp)) continue;
+      const it = makeMediaItem(row);
+      if (it) items.push(it);
+      if (items.length >= limit) break;
+    }
+
+    const reqTime = Date.now() - reqStart;
+    console.log(`📤 [${new Date().toISOString().substr(11, 8)}] /api/media/search q="${q}" - ${items.length} items in ${reqTime}ms`);
+    res.json({ 
+      success: true, items, done: items.length < limit,
+      next_cursor: items.length >= limit ? encodeCursor({ rowOffset: offset + limit, activeOffset: 0 }) : ''
+    });
+  } catch (e) {
+    console.error('[Search API error]', e.message);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 expressApp.get('/api/media/recent-files', async (req, res) => {
   const reqStartTime = Date.now();
   console.log(`📥 [${new Date().toISOString().substr(11, 8)}] GET /api/media/recent-files - limit=${req.query.limit || '120'}, type=${req.query.type || 'all'}, cursor=${req.query.cursor ? 'yes' : 'no'}, dirs=${req.query.dirs ? 'yes' : 'no'}`);
@@ -12977,6 +13335,110 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
     if (dirsParam) enabledDirs = JSON.parse(dirsParam);
   } catch (e) { }
   if (!enabledDirs) enabledDirs = loadDirectoryFilter();
+
+  // ═══ FAST PATH: Gallery load — direct simple query (initial + scroll) ═══
+  const canUseFastPath = !searchQuery && !includeActive && !includeActiveFiles 
+    && (sort === 'recent' || sort === 'oldest' || sort === 'group_channel')
+    && (!enabledDirs || enabledDirs.length === 0 || !enabledDirs.some(d => d && typeof d === 'object' && d.platform))
+    && (!cursorRaw || (cur && !cur.dir && cur.fileIndex === 0));
+  
+  if (canUseFastPath) {
+    // Cache to avoid re-running expensive query during heavy write load
+    const cacheKey = `fp_${type||'media'}_${sort||'newest'}_${limit}_${cursorRaw||''}`;
+    const cached = galleryFastPathCache && galleryFastPathCache.key === cacheKey && (Date.now() - galleryFastPathCache.ts) < 3000
+      ? galleryFastPathCache.data : null;
+    if (cached) {
+      return res.json(cached);
+    }
+    try {
+      const orderBy = sort === 'oldest' ? 'ts ASC NULLS LAST' : 'ts DESC NULLS LAST';
+      // inferMediaType no longer does sync I/O for directories (fast heuristic),
+      // so we can safely include directory-based downloads (pornpics, gallery-dl)
+      let typeClause = '';
+      if (type === 'video_only' || type === 'video') typeClause = "AND (d.filepath ILIKE '%.mp4' OR d.filepath ILIKE '%.webm' OR d.filepath ILIKE '%.mov' OR d.filepath ILIKE '%.mkv' OR d.filepath ILIKE '%.avi' OR d.filepath ILIKE '%.flv')";
+      else if (type === 'image_only' || type === 'image') typeClause = "AND (d.filepath ILIKE '%.jpg' OR d.filepath ILIKE '%.jpeg' OR d.filepath ILIKE '%.png' OR d.filepath ILIKE '%.gif' OR d.filepath ILIKE '%.webp')";
+      
+      const sqlStart = Date.now();
+      const rowOffset = cur.rowOffset || 0;
+      // Fast query using idx_downloads_gallery_ts index (~9ms)
+      const stmtName = rowOffset > 0
+        ? `gallery_fast_${type || 'media'}_${sort || 'newest'}_paged`
+        : `gallery_fast_${type || 'media'}_${sort || 'newest'}`;
+      const fetchLimit = Math.max(limit * 5, 2000);
+      const pgResult = await (db.readPool || db.pool).query({
+        name: stmtName,
+        text: `
+          SELECT
+            'd' AS kind,
+            d.id::text AS id,
+            d.platform, d.channel, d.title, d.filepath,
+            d.created_at::text AS created_at,
+            EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at))::bigint * 1000 AS ts,
+            d.thumbnail, d.url, d.source_url, d.rating,
+            'd' AS rating_kind, d.id AS rating_id,
+            (SELECT df.relpath FROM download_files df WHERE df.download_id = d.id ORDER BY df.relpath LIMIT 1) AS first_file
+          FROM downloads d
+          WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
+            AND d.filepath IS NOT NULL AND d.filepath != ''
+            AND d.is_thumb_ready = true
+            AND d.id > (SELECT MAX(id) - 50000 FROM downloads)
+            ${typeClause}
+          ORDER BY ${orderBy}
+          LIMIT $1 OFFSET $2
+        `,
+        values: [fetchLimit, rowOffset]
+      });
+      const sqlMs = Date.now() - sqlStart;
+
+      const jsStart = Date.now();
+      const items = [];
+      const seenPaths = new Set();
+      const seenKeys = new Map();
+      let rowsScanned = 0;
+      for (const row of pgResult.rows) {
+        rowsScanned++;
+        if (!row || !row.filepath) continue;
+        const fp = String(row.filepath).trim();
+        if (!fp) continue;
+        // Skip duplicate filepaths — same channel-dir shared by many download rows
+        if (seenPaths.has(fp)) continue;
+        seenPaths.add(fp);
+        // NOTE: skip fileExistsCache here — it does sync fs.existsSync which blocks
+        // the event loop for HDD paths. DB rows with status=completed are reliable.
+        const it = makeMediaItem(row);
+        if (!it) continue;
+        pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
+        if (items.length >= limit) break;
+      }
+      const jsMs = Date.now() - jsStart;
+
+      const reqTime = Date.now() - reqStartTime;
+      console.log(`📤 [${new Date().toISOString().substr(11, 8)}] Response /api/media/recent-files (fast-path) - ${items.length} items in ${reqTime}ms (sql=${sqlMs}ms, js=${jsMs}ms, rows=${pgResult.rows.length}, offset=${rowOffset}, unique=${seenPaths.size})`);
+      // Advance cursor past ALL scanned rows (including dupes) so the next
+      // page's OFFSET jumps past the entire duplicate cluster.
+      const nextRowOffset = rowOffset + pgResult.rows.length;
+      const payload = {
+        success: true,
+        items,
+        next_cursor: items.length >= limit ? encodeCursor({ rowOffset: nextRowOffset, activeOffset: 0 }) : '',
+        done: items.length < limit,
+      };
+      // Cache it
+      try {
+        const st = await getStatsRowCached();
+        const marker = buildRecentFilesCacheMarker(st);
+        const dirFilterKey = '_all';
+        const key = `recent|${type}|${limit}|${sort}||${tagFilter}|${dirFilterKey}`;
+        recentFilesTopCache.set(key, { at: Date.now(), marker, payload });
+      } catch (e) {}
+      // Fast time-based cache (3s TTL) to avoid re-running during heavy write load
+      galleryFastPathCache = { key: cacheKey, ts: Date.now(), data: payload };
+      return res.json(payload);
+    } catch (fastErr) {
+      console.error('[Gallery fast-path error]', fastErr.message);
+      // Fall through to normal path
+    }
+  }
 
   try {
     const isTopCursor = !cursorRaw ||
@@ -13019,9 +13481,16 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
     const nextActiveOffset = -1;
     let rowOffset = cur.rowOffset;
     const hasDirectoryFilter = enabledDirs && enabledDirs.length > 0 && enabledDirs.length < 10;
-    const maxRowsPerCall = hasDirectoryFilter ? 2000 : 260;
+    const hasSearchQuery = !!searchQuery;
+    const maxRowsPerCall = hasSearchQuery ? 500 : (hasDirectoryFilter ? 2000 : 260);
     const getBatch = (sort === 'rating_asc') ? getRecentHybridMediaByRatingAsc : (sort === 'rating_desc') ? getRecentHybridMediaByRatingDesc : (sort === 'oldest') ? getRecentHybridMediaByOldest : (sort === 'name_asc') ? getRecentHybridMediaByNameAsc : (sort === 'name_desc') ? getRecentHybridMediaByNameDesc : (includeActiveFiles ? getRecentHybridMediaWithActiveFiles : getRecentHybridMedia);
     
+    // Build SQL-level search filter
+    let sqlSearchFilter = null;
+    if (hasSearchQuery) {
+      sqlSearchFilter = { _searchFilter: true, query: searchQuery };
+    }
+
     // Build SQL-level platform filter when enabledDirs contains platform objects
     let sqlPlatformFilter = null;
     if (hasDirectoryFilter && enabledDirs.some(d => d && typeof d === 'object' && d.platform)) {
@@ -13031,14 +13500,64 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
       }
     }
     
+    // ═══ FAST PATH: Direct SQL search (bypasses slow UNION ALL hybrid query) ═══
+    if (hasSearchQuery) {
+      try {
+        const searchLike = '%' + searchQuery.replace(/%/g, '') + '%';
+        const searchRows = await db.prepare(`
+          SELECT 
+            'd' AS kind,
+            CAST(d.id AS TEXT) AS id,
+            d.platform, d.channel, d.title, d.filepath,
+            d.created_at::text AS created_at,
+            CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
+            d.thumbnail, d.url, d.source_url, d.rating,
+            'd' AS rating_kind, d.id AS rating_id
+          FROM downloads d
+          WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
+            AND d.filepath IS NOT NULL AND d.filepath != ''
+            AND (d.channel ILIKE $1 OR d.title ILIKE $1 OR d.platform ILIKE $1)
+          ORDER BY ${sort === 'oldest' ? 'ts ASC NULLS LAST' : sort === 'rating_desc' ? 'COALESCE(d.rating, 0) DESC, ts DESC' : sort === 'rating_asc' ? 'COALESCE(d.rating, 0) ASC, ts DESC' : 'ts DESC NULLS LAST'}
+          LIMIT $2 OFFSET $3
+        `).all(searchLike, limit * 2, rowOffset);
+
+        for (const row of searchRows) {
+          if (!row || !row.filepath) continue;
+          if (enabledDirs && !shouldIncludeRow(row, enabledDirs)) continue;
+          if (row.filepath && String(row.kind || '') !== 'p') {
+            const fp = String(row.filepath).trim();
+            if (fp && !fileExistsCache(fp)) continue;
+          }
+          const it = makeMediaItem(row);
+          if (!it) continue;
+          pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
+          if (items.length >= limit) break;
+        }
+
+        const reqTime = Date.now() - reqStartTime;
+        console.log(`📤 [${new Date().toISOString().substr(11, 8)}] Response /api/media/recent-files (search fast-path) - ${items.length} items in ${reqTime}ms`);
+        return res.json({
+          success: true,
+          items,
+          next_cursor: items.length >= limit ? encodeCursor({ rowOffset: rowOffset + limit * 2, activeOffset: 0 }) : '',
+          done: items.length < limit,
+        });
+      } catch (searchErr) {
+        console.error('[Search fast-path error]', searchErr.message);
+        // Fall through to normal path
+      }
+    }
+
     let loopDone = false;
     let safetyLimit = 0;
-    const maxSafety = hasDirectoryFilter ? 60 : 15;
+    const maxSafety = hasSearchQuery ? 8 : (hasDirectoryFilter ? 60 : 15);
     while (items.length < limit && !loopDone && safetyLimit < maxSafety) {
       safetyLimit++;
-      const batchArgs = sqlPlatformFilter 
-        ? [maxRowsPerCall, rowOffset, sqlPlatformFilter]
-        : [maxRowsPerCall, rowOffset];
+      // Build args: [limit, offset, ...optional filters popped from end]
+      // getDynamicHybridBatch pops _searchFilter first, then _platformFilter
+      const batchArgs = [maxRowsPerCall, rowOffset];
+      if (sqlSearchFilter) batchArgs.push(sqlSearchFilter);
+      if (sqlPlatformFilter) batchArgs.push(sqlPlatformFilter);
       const batch = await getDynamicHybridBatch(getBatch, type, ...batchArgs);
       if (!batch || batch.length === 0) {
         loopDone = true;
@@ -13861,17 +14380,27 @@ async function startServer() {
     }
   } catch (e) { }
 
-  // Clean up thumbnail files from download_files
-  try {
-    const result = await deleteThumbnailFiles.run();
-    const deleted = result && result.changes ? result.changes : 0;
-    if (deleted > 0) {
-      console.log(`🧹 Verwijderd: ${deleted} thumbnail entries uit gallery`);
-      recentFilesTopCache.clear();
+  // Clean up thumbnail files from download_files — deferred to avoid blocking startup
+  // Previously ran synchronously and took 75s+ on large tables
+  setTimeout(async () => {
+    try {
+      const result = await db.prepare(`
+        DELETE FROM download_files WHERE id IN (
+          SELECT id FROM download_files
+          WHERE relpath LIKE '%_thumb.jpg' OR relpath LIKE '%_thumb.png'
+             OR relpath LIKE '%_logo.jpg' OR relpath LIKE '%_logo.png'
+          LIMIT 5000
+        )
+      `).run();
+      const deleted = result && result.changes ? result.changes : 0;
+      if (deleted > 0) {
+        console.log(`🧹 Verwijderd: ${deleted} thumbnail entries uit gallery (batch)`);
+        recentFilesTopCache.clear();
+      }
+    } catch (e) {
+      console.log(`⚠️  Thumbnail cleanup fout: ${e.message}`);
     }
-  } catch (e) {
-    console.log(`⚠️  Thumbnail cleanup fout: ${e.message}`);
-  }
+  }, 60000); // Run 60s after startup
 
   server.on('error', (err) => {
     if (err.code === 'EADDRINUSE') {

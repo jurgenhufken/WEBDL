@@ -21,12 +21,15 @@ function createDb({ engine, sqlitePath, databaseUrl }) {
   const isPostgres = normalized === 'postgres' || normalized === 'pg';
 
   if (isPostgres) {
-    const pool = new Pool({ connectionString: String(databaseUrl || '') });
+    const connStr = String(databaseUrl || '');
+    const pool = new Pool({ connectionString: connStr, max: 20, idleTimeoutMillis: 30000 });
+    const readPool = new Pool({ connectionString: connStr, max: 10, idleTimeoutMillis: 15000 });
     return {
       engine: 'postgres',
       isPostgres: true,
       isSqlite: false,
       pool,
+      readPool,
       prepare(sql) {
         const rawSql = maybeAddReturningIdForInsert(sql);
         
@@ -55,12 +58,14 @@ function createDb({ engine, sqlitePath, databaseUrl }) {
           source: rawSql,
           get: async (...args) => {
             const { pgSql, pgArgs } = buildExec(args);
-            const res = await pool.query(pgSql, pgArgs.length ? pgArgs : undefined);
+            const p = pgSql.trimStart().toUpperCase().startsWith('SELECT') ? readPool : pool;
+            const res = await p.query(pgSql, pgArgs.length ? pgArgs : undefined);
             return res.rows[0];
           },
           all: async (...args) => {
             const { pgSql, pgArgs } = buildExec(args);
-            const res = await pool.query(pgSql, pgArgs.length ? pgArgs : undefined);
+            const p = pgSql.trimStart().toUpperCase().startsWith('SELECT') ? readPool : pool;
+            const res = await p.query(pgSql, pgArgs.length ? pgArgs : undefined);
             return res.rows;
           },
           run: async (...args) => {
