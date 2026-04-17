@@ -6757,7 +6757,7 @@ function deriveChannelFromUrl(platform, url) {
 
   if (platform === 'pornpics') {
     // URL like: pornpics.com/galleries/masturbating-teen-evelina-darling-takes-selfie-94245654/
-    const m = u.match(/pornpics\.com\/galleries\/([^\/\?#]+)/i);
+    const m = u.match(/pornpics\.com\/galleries\/([^\/?#]+)/i);
     if (m) {
       let slug = String(m[1] || '');
       // Remove trailing gallery ID (digits at the end after last hyphen)
@@ -6768,9 +6768,30 @@ function deriveChannelFromUrl(platform, url) {
       if (name) return name;
     }
     // Model page: pornpics.com/pornstars/evelina-darling/
-    const m2 = u.match(/pornpics\.com\/pornstars\/([^\/\?#]+)/i);
+    const m2 = u.match(/pornpics\.com\/pornstars\/([^\/?#]+)/i);
     if (m2) {
       let name = String(m2[1] || '').replace(/[-_]+/g, ' ').trim();
+      name = name.split(/\s+/g).filter(Boolean).map(w => w ? (w[0].toUpperCase() + w.slice(1)) : w).join(' ');
+      if (name) return name;
+    }
+    // Channel page: pornpics.com/channels/zishy/
+    const m3 = u.match(/pornpics\.com\/channels\/([^\/?#]+)/i);
+    if (m3) {
+      let name = String(m3[1] || '').replace(/[-_]+/g, ' ').trim();
+      name = name.split(/\s+/g).filter(Boolean).map(w => w ? (w[0].toUpperCase() + w.slice(1)) : w).join(' ');
+      if (name) return name;
+    }
+    // Tag page: pornpics.com/tags/feet/
+    const m4 = u.match(/pornpics\.com\/tags\/([^\/?#]+)/i);
+    if (m4) {
+      let name = String(m4[1] || '').replace(/[-_]+/g, ' ').trim();
+      name = name.split(/\s+/g).filter(Boolean).map(w => w ? (w[0].toUpperCase() + w.slice(1)) : w).join(' ');
+      if (name) return name;
+    }
+    // Category page: pornpics.com/sandals/ or pornpics.com/big-tits/
+    const m5 = u.match(/pornpics\.com\/([a-z][a-z0-9-]+)\/?$/i);
+    if (m5 && !/^(galleries|pornstars|channels|tags|search|random|explore)$/i.test(m5[1])) {
+      let name = String(m5[1] || '').replace(/[-_]+/g, ' ').trim();
       name = name.split(/\s+/g).filter(Boolean).map(w => w ? (w[0].toUpperCase() + w.slice(1)) : w).join(' ');
       if (name) return name;
     }
@@ -7695,9 +7716,19 @@ function ensureFirefoxAddonBuilt(options = {}) {
 
       const outStat = fs.existsSync(outPath) ? fs.statSync(outPath) : null;
       const outMtime = outStat ? outStat.mtimeMs : 0;
-      let newest = fs.statSync(manifestPath).mtimeMs;
-      if (fs.existsSync(toolbarPath)) newest = Math.max(newest, fs.statSync(toolbarPath).mtimeMs);
-      if (fs.existsSync(backgroundPath)) newest = Math.max(newest, fs.statSync(backgroundPath).mtimeMs);
+      // Scan ALL source files for newest mtime
+      let newest = 0;
+      const scanDir = (dir) => {
+        try {
+          for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+            if (entry.name.startsWith('.')) continue;
+            const full = path.join(dir, entry.name);
+            if (entry.isDirectory()) { scanDir(full); } 
+            else { try { newest = Math.max(newest, fs.statSync(full).mtimeMs); } catch (e) {} }
+          }
+        } catch (e) {}
+      };
+      scanDir(ADDON_SOURCE_DIR);
 
       if (!force && outStat && outMtime >= newest) return resolve();
 
