@@ -25,6 +25,10 @@
 
     .content { padding: 14px; }
     .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+    .channel-group-header { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; padding: 14px 4px 6px; margin-top: 10px; border-bottom: 1px solid #1f2a52; }
+    .channel-group-header:first-child { margin-top: 0; }
+    .channel-group-header .group-name { font-size: 15px; font-weight: 700; color: #00d4ff; }
+    .channel-group-header .group-count { font-size: 12px; color: #9aa7d1; background: #1f2a52; padding: 2px 8px; border-radius: 10px; }
     .card { border: 1px solid #1f2a52; background: #050816; border-radius: 12px; overflow: hidden; cursor: pointer; position: relative; }
     .card:hover { border-color: #00d4ff; }
     .thumb { width: 100%; height: 140px; background: #000; object-fit: cover; display: block; }
@@ -128,6 +132,7 @@
         <option value="oldest">Oudste</option>
         <option value="rating_desc">Rating hoog→laag</option>
         <option value="rating_asc">Rating laag→hoog</option>
+        <option value="group_channel">Groep per model</option>
       </select>
       <select id="channelSel" style="min-width: 280px; display:none;"></select>
       <input type="text" id="inpSearch" placeholder="🔍 Zoeken..." style="padding: 6px 12px; border-radius: 4px; border: 1px solid #444; background: #222; color: #fff; margin-right: 8px;">
@@ -1222,96 +1227,131 @@
       } catch (e) {}
     }
 
+    function makeCard(it) {
+      const key = itemKey(it);
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.dataset.key = key;
+      if (it && it.ready === false) {
+        card.style.opacity = '0.82';
+      }
+
+      const img = document.createElement('img');
+      img.className = 'thumb';
+      try { img.decoding = 'async'; } catch (e) {}
+      const thumbUrl = it.thumb || '';
+      if (String(thumbUrl).startsWith('data:')) {
+        setThumbSource(img, thumbUrl);
+      } else {
+        const real = thumbUrl || '';
+        if (real) {
+          setThumbSource(img, real);
+        } else {
+          setThumbSource(img, '');
+        }
+      }
+      img.alt = it.title || '';
+      img.onerror = () => {
+        try {
+          console.error('Grid img.onerror fired for:', img.src, 'original base:', img.dataset && img.dataset.real);
+          img.onerror = null;
+          img.src = FALLBACK_THUMB;
+        } catch (e) {}
+      };
+
+      const b1 = document.createElement('div');
+      b1.className = 'badge';
+      b1.textContent = it.platform || 'other';
+
+      const b2 = document.createElement('div');
+      b2.className = 'badge r';
+      if (it && it.ready === false) {
+        const st = (it.status || 'queued');
+        const pct = Number.isFinite(Number(it.progress)) ? Math.max(0, Math.min(100, Number(it.progress))) : 0;
+        b2.textContent = st + ' ' + pct + '%';
+      } else {
+        b2.textContent = it.type || '';
+      }
+
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      const l1 = document.createElement('div');
+      l1.className = 'line1';
+      l1.textContent = it.channel_display || it.channel || 'unknown';
+      const l2 = document.createElement('div');
+      l2.className = 'line2';
+      if (it && it.ready === false) {
+        const st = (it.status || 'queued');
+        const pct = Number.isFinite(Number(it.progress)) ? Math.max(0, Math.min(100, Number(it.progress))) : 0;
+        l2.textContent = (it.title || '(download)') + ' • ' + st + ' ' + pct + '%';
+      } else {
+        l2.textContent = it.title_display || it.title || '(zonder titel)';
+      }
+      meta.appendChild(l1);
+      meta.appendChild(l2);
+      try {
+        const ratingEl = makeRatingEl(it);
+        meta.appendChild(ratingEl);
+      } catch (e) {}
+
+      card.appendChild(img);
+      card.appendChild(b1);
+      card.appendChild(b2);
+      card.appendChild(meta);
+      
+      if (it.source_url) {
+        const srcBtn = document.createElement('button');
+        srcBtn.className = 'src-btn';
+        srcBtn.textContent = 'Source';
+        srcBtn.title = 'Open bron';
+        srcBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          window.open(it.source_url, '_blank');
+        });
+        card.appendChild(srcBtn);
+      }
+      
+      card.addEventListener('click', () => openModalByKey(key));
+      return card;
+    }
+
     function addCards(items) {
       const frag = document.createDocumentFragment();
-      for (let i = 0; i < items.length; i++) {
-        const it = items[i];
-        const key = itemKey(it);
-        const card = document.createElement('div');
-        card.className = 'card';
-        card.dataset.key = key;
-        if (it && it.ready === false) {
-          card.style.opacity = '0.82';
-        }
 
-        const img = document.createElement('img');
-        img.className = 'thumb';
-        try { img.decoding = 'async'; } catch (e) {}
-        const thumbUrl = it.thumb || '';
-        if (String(thumbUrl).startsWith('data:')) {
-          setThumbSource(img, thumbUrl);
-        } else {
-          const real = thumbUrl || '';
-          if (real) {
-            setThumbSource(img, real);
-          } else {
-            setThumbSource(img, '');
+      if (state.sort === 'group_channel') {
+        // Group items by channel
+        const groups = new Map();
+        for (const it of items) {
+          const ch = it.channel_display || it.channel || 'unknown';
+          if (!groups.has(ch)) groups.set(ch, []);
+          groups.get(ch).push(it);
+        }
+        // Sort groups alphabetically
+        const sorted = Array.from(groups.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+        for (const [channel, channelItems] of sorted) {
+          // Check if this group header already exists in the grid
+          const existingHeaders = elGrid.querySelectorAll('.channel-group-header');
+          let headerExists = false;
+          for (const h of existingHeaders) {
+            if (h.dataset.channel === channel) { headerExists = true; break; }
+          }
+          if (!headerExists) {
+            const header = document.createElement('div');
+            header.className = 'channel-group-header';
+            header.dataset.channel = channel;
+            header.innerHTML = '<span class="group-name">' + channel + '</span><span class="group-count">' + channelItems.length + '</span>';
+            frag.appendChild(header);
+          }
+          for (const it of channelItems) {
+            frag.appendChild(makeCard(it));
           }
         }
-        img.alt = it.title || '';
-        img.onerror = () => {
-          try {
-            console.error('Grid img.onerror fired for:', img.src, 'original base:', img.dataset && img.dataset.real);
-            img.onerror = null;
-            img.src = FALLBACK_THUMB;
-          } catch (e) {}
-        };
-
-        const b1 = document.createElement('div');
-        b1.className = 'badge';
-        b1.textContent = it.platform || 'other';
-
-        const b2 = document.createElement('div');
-        b2.className = 'badge r';
-        if (it && it.ready === false) {
-          const st = (it.status || 'queued');
-          const pct = Number.isFinite(Number(it.progress)) ? Math.max(0, Math.min(100, Number(it.progress))) : 0;
-          b2.textContent = st + ' ' + pct + '%';
-        } else {
-          b2.textContent = it.type || '';
+      } else {
+        for (let i = 0; i < items.length; i++) {
+          frag.appendChild(makeCard(items[i]));
         }
-
-        const meta = document.createElement('div');
-        meta.className = 'meta';
-        const l1 = document.createElement('div');
-        l1.className = 'line1';
-        l1.textContent = it.channel_display || it.channel || 'unknown';
-        const l2 = document.createElement('div');
-        l2.className = 'line2';
-        if (it && it.ready === false) {
-          const st = (it.status || 'queued');
-          const pct = Number.isFinite(Number(it.progress)) ? Math.max(0, Math.min(100, Number(it.progress))) : 0;
-          l2.textContent = (it.title || '(download)') + ' • ' + st + ' ' + pct + '%';
-        } else {
-          l2.textContent = it.title_display || it.title || '(zonder titel)';
-        }
-        meta.appendChild(l1);
-        meta.appendChild(l2);
-        try {
-          const ratingEl = makeRatingEl(it);
-          meta.appendChild(ratingEl);
-        } catch (e) {}
-
-        card.appendChild(img);
-        card.appendChild(b1);
-        card.appendChild(b2);
-        card.appendChild(meta);
-        
-        if (it.source_url) {
-          const srcBtn = document.createElement('button');
-          srcBtn.className = 'src-btn';
-          srcBtn.textContent = 'Source';
-          srcBtn.title = 'Open bron';
-          srcBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            window.open(it.source_url, '_blank');
-          });
-          card.appendChild(srcBtn);
-        }
-        
-        card.addEventListener('click', () => openModalByKey(key));
-        frag.appendChild(card);
       }
+
       elGrid.appendChild(frag);
       try { requestAnimationFrame(() => primeThumbs(18)); } catch (e) { primeThumbs(18); }
     }
@@ -1843,12 +1883,13 @@
           const searchParam = state.search ? '&q=' + encodeURIComponent(state.search) : '';
           const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
           elSentinel.textContent = '📡 Aanvraag verzenden (limit=' + state.limit + ', filters=' + (state.enabledDirs ? state.enabledDirs.length : 'none') + ')...';
+          const apiSort = state.sort === 'group_channel' ? 'name_asc' : (state.sort || 'recent');
           if (state.mode === 'recent') {
-            path = '/api/media/recent-files?limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0&sort=' + encodeURIComponent(state.sort || 'recent') + dirsParam + searchParam;
+            path = '/api/media/recent-files?limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0&sort=' + encodeURIComponent(apiSort) + dirsParam + searchParam;
           } else {
              const ch = state.channel;
              if (!ch) { state.done = true; return; }
-             path = '/api/media/channel-files?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0&sort=' + encodeURIComponent(state.sort || 'recent') + searchParam + dirsParam;
+             path = '/api/media/channel-files?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0&sort=' + encodeURIComponent(apiSort) + searchParam + dirsParam;
           }
           
           const resp = await fetch(path);
