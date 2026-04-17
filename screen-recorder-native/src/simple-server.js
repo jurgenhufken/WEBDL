@@ -13408,7 +13408,28 @@ expressApp.get('/api/media/search', async (req, res) => {
   const type = String(req.query.type || 'all').toLowerCase();
   const sort = String(req.query.sort || 'recent').toLowerCase();
   try {
-    const searchLike = '%' + q.replace(/%/g, '') + '%';
+    const orGroups = q.split(',').map(g => g.trim()).filter(Boolean);
+    if (orGroups.length === 0) orGroups.push(q);
+    
+    const conditions = [];
+    const bindings = [];
+    
+    for (const group of orGroups) {
+      const andWords = group.split(/[\s*\-+]+/).filter(w => w.trim().length > 0);
+      if (andWords.length === 0) continue;
+      
+      const andConditions = [];
+      for (const w of andWords) {
+        andConditions.push(`(d.channel ILIKE $${bindings.length + 1} OR d.title ILIKE $${bindings.length + 1} OR d.platform ILIKE $${bindings.length + 1})`);
+        bindings.push('%' + w + '%');
+      }
+      if (andConditions.length > 0) {
+        conditions.push(`(${andConditions.join(' AND ')})`);
+      }
+    }
+    
+    bindings.push(limit + 40, offset);
+
     // Direct PG pool query — no db.prepare wrapper, no event loop blocking
     const orderBy = sort === 'oldest' ? 'ts ASC NULLS LAST' 
       : sort === 'rating_desc' ? 'rating DESC NULLS LAST, ts DESC NULLS LAST'
@@ -13433,11 +13454,11 @@ expressApp.get('/api/media/search', async (req, res) => {
       FROM downloads d
       WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
         AND d.filepath IS NOT NULL AND d.filepath != ''
-        AND (d.channel ILIKE $1 OR d.title ILIKE $1 OR d.platform ILIKE $1)
+        ${conditions.length > 0 ? 'AND (' + conditions.join(' OR ') + ')' : ''}
         ${typeClause}
       ORDER BY ${orderBy}
-      LIMIT $2 OFFSET $3
-    `, [searchLike, limit + 20, offset]);
+      LIMIT $${bindings.length - 1} OFFSET $${bindings.length}
+    `, bindings);
 
     const items = [];
     for (const row of pgResult.rows) {
@@ -13730,16 +13751,27 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
     // ═══ FAST PATH: Direct SQL search (bypasses slow UNION ALL hybrid query) ═══
     if (hasSearchQuery) {
       try {
-        const words = searchQuery.split(/[\s,*\-+]+/).filter(w => w.trim().length > 0);
-        if (words.length === 0) words.push(searchQuery.replace(/%/g, ''));
+        const orGroups = searchQuery.split(',').map(g => g.trim()).filter(Boolean);
+        if (orGroups.length === 0) orGroups.push(searchQuery.replace(/%/g, ''));
 
         const conditions = [];
         const bindings = [];
-        for (const w of words) {
-          conditions.push(`(d.channel ILIKE ? OR d.title ILIKE ? OR d.platform ILIKE ?)`);
-          const likeTerm = '%' + w + '%';
-          bindings.push(likeTerm, likeTerm, likeTerm);
+
+        for (const group of orGroups) {
+          const andWords = group.split(/[\s*\-+]+/).filter(w => w.trim().length > 0);
+          if (andWords.length === 0) continue;
+          
+          const andConditions = [];
+          for (const w of andWords) {
+            andConditions.push(`(d.channel ILIKE ? OR d.title ILIKE ? OR d.platform ILIKE ?)`);
+            const likeTerm = '%' + w + '%';
+            bindings.push(likeTerm, likeTerm, likeTerm);
+          }
+          if (andConditions.length > 0) {
+            conditions.push(`(${andConditions.join(' AND ')})`);
+          }
         }
+        
         bindings.push(Math.max(limit * 50, 15000), rowOffset);
 
         const searchRows = await db.prepare(`
@@ -13747,7 +13779,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
             SELECT * FROM downloads d
             WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
               AND d.filepath IS NOT NULL AND d.filepath != ''
-              ${conditions.length > 0 ? 'AND (' + conditions.join(' AND ') + ')' : ''}
+              ${conditions.length > 0 ? 'AND (' + conditions.join(' OR ') + ')' : ''}
           )
           SELECT * FROM (
             SELECT 
