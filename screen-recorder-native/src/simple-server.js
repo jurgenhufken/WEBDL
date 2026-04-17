@@ -9973,6 +9973,13 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
       '--show-error',
       '-A', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
     ];
+    // For zishy: use Firefox cookies (user is logged in)
+    if (platform === 'zishy') {
+      try {
+        const cookieStr = await loadCookiesForDomain('zishy.com');
+        if (cookieStr) curlArgs.push('-b', cookieStr);
+      } catch (e) {}
+    }
     if (referer) curlArgs.push('-e', referer);
     curlArgs.push('-D', headerFilepath);
     curlArgs.push('-o', tmpFilepath, url);
