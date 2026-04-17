@@ -2112,36 +2112,37 @@
   (async function initPrioToggle() {
     const prioBtn = document.getElementById('webdl-prio-toggle');
     if (!prioBtn) return;
+    let prioState = false;
+
+    function applyPrioUI(on) {
+      prioState = !!on;
+      prioBtn.dataset.active = on ? '1' : '0';
+      prioBtn.style.background = on ? '#b22222' : '#333';
+      prioBtn.style.borderColor = on ? '#ff4444' : '#555';
+      prioBtn.style.color = on ? '#fff' : '#888';
+      prioBtn.textContent = on ? '🔥 PRIO' : '⚡ Prio';
+    }
+
     // Load initial state
     try {
       const r = await getServerJson('api/settings/priority', 3000);
-      if (r && r.priority) {
-        prioBtn.style.background = '#b22222';
-        prioBtn.style.borderColor = '#ff4444';
-        prioBtn.style.color = '#fff';
-        prioBtn.textContent = '🔥 PRIO';
-      }
+      if (r && r.priority) applyPrioUI(true);
     } catch (e) {}
-    prioBtn.addEventListener('click', async () => {
-      const isOn = prioBtn.style.background === 'rgb(178, 34, 34)';
+
+    prioBtn.addEventListener('click', async (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
       try {
-        const r = await postServerJson('api/settings/priority', { enabled: !isOn }, 3000);
+        const r = await postServerJson('api/settings/priority', { enabled: !prioState }, 3000);
         if (r && r.success) {
-          if (r.priority) {
-            prioBtn.style.background = '#b22222';
-            prioBtn.style.borderColor = '#ff4444';
-            prioBtn.style.color = '#fff';
-            prioBtn.textContent = '🔥 PRIO';
-            showNotification('Prioriteit AAN — nieuwe downloads gaan vooraan');
-          } else {
-            prioBtn.style.background = '#333';
-            prioBtn.style.borderColor = '#555';
-            prioBtn.style.color = '#888';
-            prioBtn.textContent = '⚡ Prio';
-            showNotification('Prioriteit UIT');
-          }
+          applyPrioUI(r.priority);
+          showNotification(r.priority ? 'Prioriteit AAN — nieuwe downloads gaan vooraan' : 'Prioriteit UIT');
+        } else {
+          showNotification('Prioriteit toggle mislukt: ' + (r && r.error ? r.error : 'onbekend'), true);
         }
-      } catch (e) {}
+      } catch (e) {
+        showNotification('Prioriteit toggle fout: ' + (e && e.message ? e.message : String(e)), true);
+      }
     });
   })();
 
