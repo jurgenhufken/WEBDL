@@ -8572,7 +8572,7 @@ function _extractPornpicsCdn(html, seen) {
 // Background expansion: crawls model/gallery pages and queues downloads as discovered
 async function _expandAndQueueBackground(deferredUrls, { originPlatform, originChannel, originTitle, metadata, force, pageUrl }) {
   const seen = new Set();
-  const MAX_PAGES = 50;
+  const MAX_PAGES = 999;
   const forceDuplicates = force === true;
 
   for (const { url: u, type, platform: sitePlatform } of deferredUrls) {
