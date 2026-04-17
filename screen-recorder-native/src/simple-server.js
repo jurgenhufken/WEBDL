@@ -7007,6 +7007,16 @@ function deriveChannelFromUrl(platform, url) {
     // Can't reliably extract model name from CDN/gallery URLs
   }
 
+  if (platform === 'zishy') {
+    // Album: zishy.com/albums/2681-jupiter-stassy-nyam-nyam-vid
+    const m = u.match(/zishy\.com\/albums\/\d+-([a-z]+-[a-z]+)/i);
+    if (m) {
+      let name = String(m[1] || '').replace(/[-_]+/g, ' ').trim();
+      name = name.split(/\s+/g).filter(Boolean).map(w => w ? (w[0].toUpperCase() + w.slice(1)) : w).join(' ');
+      if (name) return name;
+    }
+  }
+
   if (platform === 'twitter') {
     // x.com/@username/status/123 or twitter.com/username/status/123 or x.com/username
     const m = u.match(/(?:twitter\.com|x\.com)\/([^\/\?#]+)/i);
