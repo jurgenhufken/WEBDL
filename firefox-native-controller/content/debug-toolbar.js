@@ -3337,8 +3337,16 @@
         try { showNotification('Preview niet getoond; fallback confirm', true); } catch (e) {}
       }
     }
-
-    const ok = confirmBatchStart({ count: urls.length, force, label: 'Batch download', redditHint });
+    // For pornpics/elitebabes listing pages: show smarter confirm
+    const isPornpicsListing = meta.platform === 'pornpics' && urls.length === 1 && /pornpics\.com/i.test(urls[0]) && !/\/galleries\//i.test(urls[0]);
+    const isElitebabesListing = meta.platform === 'elitebabes' && urls.length === 1 && /elitebabes\.com/i.test(urls[0]) && !/cdn\.elitebabes\.com/i.test(urls[0]);
+    const isGalleryExpansion = isPornpicsListing || isElitebabesListing;
+    const confirmLabel = isGalleryExpansion
+      ? `Alle galleries downloaden van deze pagina?\n(Server crawlt automatisch alle pagina's)`
+      : null;
+    const ok = confirmLabel
+      ? window.confirm(confirmLabel)
+      : confirmBatchStart({ count: urls.length, force, label: 'Batch download', redditHint });
     if (!ok) return;
 
     // Resolve upload.footfetishforum.com/image/ wrapper URLs in-browser
