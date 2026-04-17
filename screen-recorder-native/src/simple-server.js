@@ -13485,7 +13485,6 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
       const stmtName = rowOffset > 0
         ? `gallery_fast_${type || 'media'}_${sort || 'newest'}_paged`
         : `gallery_fast_${type || 'media'}_${sort || 'newest'}`;
-      const fetchLimit = Math.max(limit * 5, 2000);
       const pgResult = await (db.readPool || db.pool).query({
         name: stmtName,
         text: `
@@ -13505,9 +13504,8 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
             AND d.id > (SELECT MAX(id) - 50000 FROM downloads)
             ${typeClause}
           ORDER BY ${orderBy}
-          LIMIT $1 OFFSET $2
         `,
-        values: [fetchLimit, rowOffset]
+        values: []
       });
       const sqlMs = Date.now() - sqlStart;
 
@@ -13516,7 +13514,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
       const seenPaths = new Set();
       const seenKeys = new Map();
       const platformCounts = new Map(); // Cap per platform to ensure mix
-      const PLATFORM_CAP = Math.max(40, Math.floor(limit * 0.4)); // max 40% per platform
+      const PLATFORM_CAP = Math.max(30, Math.floor(limit * 0.25)); // max 25% per platform (was 40%)
       let rowsScanned = 0;
       for (const row of pgResult.rows) {
         rowsScanned++;
