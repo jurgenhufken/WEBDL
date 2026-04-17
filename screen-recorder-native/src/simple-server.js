@@ -8601,6 +8601,8 @@ function _extractPornpicsCdn(html, seen) {
 }
 
 // Background expansion: crawls model/gallery pages and queues downloads as discovered
+// Global dedup: track all CDN URLs queued in this session to prevent race-condition duplicates
+const _expandQueuedUrls = new Set();
 async function _expandAndQueueBackground(deferredUrls, { originPlatform, originChannel, originTitle, metadata, force, pageUrl }) {
   const seen = new Set();
   const MAX_PAGES = 999;
@@ -8694,10 +8696,20 @@ async function _expandAndQueueBackground(deferredUrls, { originPlatform, originC
       // Queue each discovered CDN URL
       const channel = originChannel !== 'unknown' ? originChannel : deriveChannelFromUrl(sitePlatform, u) || 'unknown';
       const title = originTitle || metadata && metadata.title || deriveTitleFromUrl(u);
+      let queuedCount = 0;
+      let skippedCount = 0;
       for (const cdnUrl of cdnUrls) {
         try {
+          // In-memory dedup: prevent race-condition duplicates across concurrent expand runs
+          if (!forceDuplicates && _expandQueuedUrls.has(cdnUrl)) { skippedCount++; continue; }
           const existing = await findReusableDownloadByUrl.get(cdnUrl);
-          if (!forceDuplicates && existing && existing.id) continue;
+          if (!forceDuplicates && existing && existing.id) { skippedCount++; continue; }
+          _expandQueuedUrls.add(cdnUrl);
+          // Cap set size to prevent unbounded memory growth
+          if (_expandQueuedUrls.size > 200000) {
+            const iter = _expandQueuedUrls.values();
+            for (let i = 0; i < 50000; i++) { const v = iter.next(); if (v.done) break; _expandQueuedUrls.delete(v.value); }
+          }
           const result = await insertDownload.run(cdnUrl, sitePlatform, channel, title);
           const downloadId = result.lastInsertRowid;
           try {
@@ -8705,11 +8717,12 @@ async function _expandAndQueueBackground(deferredUrls, { originPlatform, originC
           } catch (e) {}
           const jobMeta = { ...(metadata || {}), tool: 'curl', platform: sitePlatform, channel, title };
           enqueueDownloadJob(downloadId, cdnUrl, sitePlatform, channel, title, jobMeta);
+          queuedCount++;
         } catch (e) {
           console.log(`[BG-EXPAND] Queue error for ${cdnUrl.slice(-40)}: ${e.message}`);
         }
       }
-      console.log(`[BG-EXPAND] ${sitePlatform} ${type} done: ${cdnUrls.length} images queued from ${u.slice(0, 80)}`);
+      console.log(`[BG-EXPAND] ${sitePlatform} ${type} done: ${queuedCount} queued, ${skippedCount} skipped (dedup) from ${u.slice(0, 80)}`);
     } catch (e) {
       console.log(`[BG-EXPAND] Error expanding ${u}: ${e.message}`);
     }
