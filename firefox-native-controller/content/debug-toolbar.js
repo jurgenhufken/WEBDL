@@ -2105,8 +2105,45 @@
     borderRadius: '4px', marginBottom: '6px', display: 'flex',
     justifyContent: 'space-between', alignItems: 'center'
   });
-  statusBar.innerHTML = '<span id="webdl-conn" style="color:#F44336">Verbinden...</span><span id="webdl-url-status" style="margin-left:8px;font-weight:bold;color:#888;">🔍 Checken...</span><span id="webdl-dl-count" style="color:#888;margin-left:auto;">0 downloads</span>';
+  statusBar.innerHTML = '<span id="webdl-conn" style="color:#F44336">Verbinden...</span><span id="webdl-url-status" style="margin-left:8px;font-weight:bold;color:#888;">🔍 Checken...</span><span id="webdl-prio-toggle" style="margin-left:8px;cursor:pointer;padding:2px 6px;border-radius:3px;background:#333;border:1px solid #555;font-size:10px;font-weight:bold;color:#888;" title="Nieuwe downloads vooraan in wachtrij">⚡ Prio</span><span id="webdl-dl-count" style="color:#888;margin-left:auto;">0 downloads</span>';
   toolbar.appendChild(statusBar);
+
+  // Priority toggle handler
+  (async function initPrioToggle() {
+    const prioBtn = document.getElementById('webdl-prio-toggle');
+    if (!prioBtn) return;
+    // Load initial state
+    try {
+      const r = await getServerJson('api/settings/priority', 3000);
+      if (r && r.priority) {
+        prioBtn.style.background = '#b22222';
+        prioBtn.style.borderColor = '#ff4444';
+        prioBtn.style.color = '#fff';
+        prioBtn.textContent = '🔥 PRIO';
+      }
+    } catch (e) {}
+    prioBtn.addEventListener('click', async () => {
+      const isOn = prioBtn.style.background === 'rgb(178, 34, 34)';
+      try {
+        const r = await postServerJson('api/settings/priority', { enabled: !isOn }, 3000);
+        if (r && r.success) {
+          if (r.priority) {
+            prioBtn.style.background = '#b22222';
+            prioBtn.style.borderColor = '#ff4444';
+            prioBtn.style.color = '#fff';
+            prioBtn.textContent = '🔥 PRIO';
+            showNotification('Prioriteit AAN — nieuwe downloads gaan vooraan');
+          } else {
+            prioBtn.style.background = '#333';
+            prioBtn.style.borderColor = '#555';
+            prioBtn.style.color = '#888';
+            prioBtn.textContent = '⚡ Prio';
+            showNotification('Prioriteit UIT');
+          }
+        }
+      } catch (e) {}
+    });
+  })();
 
   // Notificatie area
   const notifArea = document.createElement('div');
