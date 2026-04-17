@@ -8979,6 +8979,8 @@ expressApp.post('/download/batch', async (req, res) => {
         !/\/(model-tag|tag|category|search|random|explore|faves|history)\b/i.test(u);
       if (isModel) { deferred.push({ url: u, type: 'model', platform: 'elitebabes' }); continue; }
       if (isGallery) { deferred.push({ url: u, type: 'gallery', platform: 'elitebabes' }); continue; }
+      // Any other elitebabes page (tag, category, etc.) → treat as listing page (same crawl as model)
+      deferred.push({ url: u, type: 'model', platform: 'elitebabes' }); continue;
     }
     // Pornpics model/gallery detection
     const isPornpics = /^https?:\/\/(www\.)?pornpics\.com\//i.test(u) &&
