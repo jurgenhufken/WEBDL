@@ -4550,7 +4550,7 @@ function detectLane(platform, url = '') {
   // Only pure image/direct link platforms get the fast lane
   const lightPlatforms = [
     'footfetishforum', 'forum-area', 'imagetwist', 'pixhost', 'postimg', 'bunkr', 'jpg', 'aznudefeet', 'pornpics',
-    'kinky', 'wikifeet', 'wikifeetx', 'elitebabes'
+    'kinky', 'wikifeet', 'wikifeetx', 'elitebabes', 'erome'
   ];
 
   if (lightPlatforms.includes(p)) return 'light';
@@ -4717,7 +4717,7 @@ async function runDownloadScheduler() {
           // Throttle CDN image downloads: 500ms delay between dispatches
           // to prevent event loop flooding from rapid-fire completions
           const plat = String(job.platform || '').toLowerCase();
-          if (plat === 'pornpics' || plat === 'elitebabes' || (job.url && /^https?:\/\/cdn\./i.test(job.url))) {
+          if (plat === 'pornpics' || plat === 'elitebabes' || plat === 'erome' || (job.url && /^https?:\/\/cdn\./i.test(job.url))) {
             setTimeout(() => runDownloadSchedulerSoon(), 500);
           } else {
             runDownloadSchedulerSoon();
@@ -6754,6 +6754,7 @@ function detectPlatform(url) {
   if (/tiktok\.com|tiktokv\.com/i.test(u)) return 'tiktok';
   if (/pornpics\.com/i.test(u)) return 'pornpics';
   if (/elitebabes\.com/i.test(u)) return 'elitebabes';
+  if (/erome\.com/i.test(u)) return 'erome';
 
   try {
     const host = new URL(u).hostname.toLowerCase();
@@ -6802,6 +6803,7 @@ const KNOWN_PLATFORMS = new Set([
   'tiktok',
   'pornpics',
   'elitebabes',
+  'erome',
   '4kdownloader',
   'other']
 );
@@ -9099,6 +9101,7 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
             platform === 'wikifeetx' ||
             platform === 'kinky' ||
             platform === 'pornpics' ||
+            platform === 'erome' ||
             platform === 'twitter' ||
             platform === 'aznudefeet' && !looksLikeDirectFileUrl(url) ||
             platform === 'tiktok' && isTikTokPhotoUrl(url)
@@ -9369,7 +9372,7 @@ function isKnownExternalMediaWrapperHost(hostname) {
   try {
     const host = String(hostname || '').toLowerCase();
     if (!host) return false;
-    if (/^(?:www\.)?(?:pixhost\.to|postimages\.org|postimg\.cc|imagebam\.com|imgvb\.com|ibb\.co|imgbox\.com|imagevenue\.com|imgchest\.com|turboimagehost\.com|imx\.to|vipr\.im|pixeldrain\.com|cyberfile\.me|jpg\.pet|gofile\.io|erome\.com|img\.kiwi)$/.test(host)) return true;
+    if (/^(?:www\.)?(?:pixhost\.to|postimages\.org|postimg\.cc|imagebam\.com|imgvb\.com|ibb\.co|imgbox\.com|imagevenue\.com|imgchest\.com|turboimagehost\.com|imx\.to|vipr\.im|pixeldrain\.com|cyberfile\.me|jpg\.pet|gofile\.io|img\.kiwi)$/.test(host)) return true;
     if (/^(?:www\.)?bunkr\.(?:si|ru|is|ph)$/.test(host)) return true;
     return false;
   } catch (e) {
