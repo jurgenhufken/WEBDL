@@ -8738,10 +8738,10 @@ expressApp.post('/download/batch', async (req, res) => {
       !/cdni\.pornpics\.com/i.test(u) &&
       !/\.(jpe?g|png|gif|webp)(\?|$)/i.test(u);
     if (isPornpics) {
-      const isModel = /\/pornstars\/[a-z0-9][a-z0-9-]+/i.test(u);
       const isGallery = /\/galleries\/[a-z0-9][a-z0-9-]+/i.test(u);
-      if (isModel) { deferred.push({ url: u, type: 'model', platform: 'pornpics' }); continue; }
       if (isGallery) { deferred.push({ url: u, type: 'gallery', platform: 'pornpics' }); continue; }
+      // Any other pornpics page (pornstars, tags, categories, etc.) → treat as listing page
+      deferred.push({ url: u, type: 'model', platform: 'pornpics' }); continue;
     }
     immediate.push(u);
   }
