@@ -3375,10 +3375,14 @@
         try { showNotification('Preview niet getoond; fallback confirm', true); } catch (e) {}
       }
     }
-    // For pornpics/elitebabes listing pages: show smarter confirm
-    const isPornpicsListing = meta.platform === 'pornpics' && urls.length === 1 && /pornpics\.com/i.test(urls[0]) && !/\/galleries\//i.test(urls[0]);
-    const isElitebabesListing = meta.platform === 'elitebabes' && urls.length === 1 && /elitebabes\.com/i.test(urls[0]) && !/cdn\.elitebabes\.com/i.test(urls[0]);
+    // For pornpics/elitebabes listing pages: send just the page URL for server-side expansion
+    const isPornpicsListing = meta.platform === 'pornpics' && /pornpics\.com/i.test(meta.url) && !/\/galleries\//i.test(meta.url) && !/cdni\.pornpics\.com/i.test(meta.url);
+    const isElitebabesListing = meta.platform === 'elitebabes' && /elitebabes\.com/i.test(meta.url) && !/cdn\.elitebabes\.com/i.test(meta.url);
     const isGalleryExpansion = isPornpicsListing || isElitebabesListing;
+    if (isGalleryExpansion) {
+      // Override scraped URLs: send just the page URL for server-side crawl
+      urls = [meta.url];
+    }
     const confirmLabel = isGalleryExpansion
       ? `Alle galleries downloaden van deze pagina?\n(Server crawlt automatisch alle pagina's)`
       : null;
