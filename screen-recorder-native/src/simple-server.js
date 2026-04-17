@@ -8850,8 +8850,14 @@ async function _expandAndQueueBackground(deferredUrls, { originPlatform, originC
               }
             }
           }
+          // Also extract video URLs directly from listing page
+          const listingVids = _extractElitebabesCdn(html, seen);
+          if (listingVids.length > 0) {
+            console.log(`[BG-EXPAND] elitebabes listing page ${page}: ${listingVids.length} videos/images found directly`);
+            cdnUrls.push(...listingVids);
+          }
           console.log(`[BG-EXPAND] elitebabes model page ${page}: ${found} galleries`);
-          if (found === 0) break;
+          if (found === 0 && listingVids.length === 0) break;
         }
         console.log(`[BG-EXPAND] elitebabes model total: ${galleryUrls.length} galleries`);
         for (const gUrl of galleryUrls) {
