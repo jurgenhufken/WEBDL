@@ -3384,6 +3384,26 @@
       // Override scraped URLs: send just the page URL for server-side crawl
       urls = [meta.url];
     }
+    // Zishy: also grab video URLs from browser DOM (logged-in session has access)
+    if (isZishyAlbum) {
+      try {
+        const videoSrcs = [];
+        document.querySelectorAll('video[src], video source[src]').forEach(el => {
+          const s = el.src || el.getAttribute('src') || '';
+          if (s && /\.(mp4|webm|m4v)/i.test(s)) videoSrcs.push(s);
+        });
+        // Also check Download MP4 links
+        document.querySelectorAll('a[href]').forEach(a => {
+          const h = a.href || '';
+          if (/\.(mp4|webm|m4v)/i.test(h) && /download|video/i.test(a.textContent || '')) videoSrcs.push(h);
+        });
+        if (videoSrcs.length > 0) {
+          const unique = [...new Set(videoSrcs)];
+          urls.push(...unique);
+          try { addLog(`Zishy: ${unique.length} video URL(s) uit DOM gehaald`); } catch(e) {}
+        }
+      } catch(e) {}
+    }
     const confirmLabel = isGalleryExpansion
       ? `Alle foto's en video's downloaden van deze pagina?\n(Server haalt automatisch alles op)`
       : null;
