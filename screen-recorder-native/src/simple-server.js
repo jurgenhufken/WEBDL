@@ -8911,6 +8911,28 @@ async function _expandAndQueueBackground(deferredUrls, { originPlatform, originC
         const html = await _fetchGalleryPage(u);
         cdnUrls = _extractPornpicsCdn(html, seen);
         console.log(`[BG-EXPAND] pornpics gallery → ${cdnUrls.length} images`);
+      } else if (sitePlatform === 'zishy') {
+        // Zishy album: extract full-res images + video
+        const html = await _fetchGalleryPage(u);
+        if (html) {
+          // Full-res images: href="/uploads/full/..."
+          const imgRe = /href=["'](\/uploads\/full\/[^"']+\.(?:jpe?g|png|gif|webp))["']/gi;
+          let m;
+          while ((m = imgRe.exec(html)) !== null) {
+            const imgUrl = 'https://www.zishy.com' + m[1];
+            if (!seen.has(imgUrl)) { seen.add(imgUrl); cdnUrls.push(imgUrl); }
+          }
+          // Video: <video> or <source> src
+          const vidRe = /(?:src)=["']((?:https?:\/\/[^"']*|\/[^"']*?)\.(?:mp4|webm|m4v))["']/gi;
+          while ((m = vidRe.exec(html)) !== null) {
+            let vidUrl = m[1];
+            if (vidUrl.startsWith('/')) vidUrl = 'https://www.zishy.com' + vidUrl;
+            if (!seen.has(vidUrl) && !/poster|thumb|preview/i.test(vidUrl)) {
+              seen.add(vidUrl); cdnUrls.push(vidUrl);
+            }
+          }
+          console.log(`[BG-EXPAND] zishy album → ${cdnUrls.length} items (images + videos)`);
+        }
       }
 
       // Queue each discovered CDN URL
@@ -9008,6 +9030,15 @@ expressApp.post('/download/batch', async (req, res) => {
       if (isGallery) { deferred.push({ url: u, type: 'gallery', platform: 'pornpics' }); continue; }
       // Any other pornpics page (pornstars, tags, categories, etc.) → treat as listing page
       deferred.push({ url: u, type: 'model', platform: 'pornpics' }); continue;
+    }
+    // Zishy album detection
+    const isZishy = /^https?:\/\/(www\.)?zishy\.com\//i.test(u) &&
+      !/\.(jpe?g|png|gif|webp|mp4|webm)(\?|$)/i.test(u);
+    if (isZishy) {
+      const isAlbum = /\/albums\/\d+/i.test(u);
+      if (isAlbum) { deferred.push({ url: u, type: 'gallery', platform: 'zishy' }); continue; }
+      // Any other zishy page → treat as listing
+      deferred.push({ url: u, type: 'model', platform: 'zishy' }); continue;
     }
     immediate.push(u);
   }
@@ -9924,6 +9955,7 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
     // Auto-referer for platforms that require it
     if (!referer && platform === 'elitebabes') referer = 'https://www.elitebabes.com/';
     if (!referer && platform === 'erome') referer = 'https://www.erome.com/';
+    if (!referer && platform === 'zishy') referer = 'https://www.zishy.com/';
     const curlArgs = [
       '-L',
       '--fail',

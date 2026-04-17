@@ -3375,16 +3375,17 @@
         try { showNotification('Preview niet getoond; fallback confirm', true); } catch (e) {}
       }
     }
-    // For pornpics/elitebabes listing pages: send just the page URL for server-side expansion
+    // For pornpics/elitebabes/zishy listing pages: send just the page URL for server-side expansion
     const isPornpicsListing = meta.platform === 'pornpics' && /pornpics\.com/i.test(meta.url) && !/\/galleries\//i.test(meta.url) && !/cdni\.pornpics\.com/i.test(meta.url);
     const isElitebabesListing = meta.platform === 'elitebabes' && /elitebabes\.com/i.test(meta.url) && !/cdn\.elitebabes\.com/i.test(meta.url);
-    const isGalleryExpansion = isPornpicsListing || isElitebabesListing;
+    const isZishyAlbum = meta.platform === 'zishy' && /zishy\.com/i.test(meta.url);
+    const isGalleryExpansion = isPornpicsListing || isElitebabesListing || isZishyAlbum;
     if (isGalleryExpansion) {
       // Override scraped URLs: send just the page URL for server-side crawl
       urls = [meta.url];
     }
     const confirmLabel = isGalleryExpansion
-      ? `Alle galleries downloaden van deze pagina?\n(Server crawlt automatisch alle pagina's)`
+      ? `Alle foto's en video's downloaden van deze pagina?\n(Server haalt automatisch alles op)`
       : null;
     const ok = confirmLabel
       ? window.confirm(confirmLabel)
