@@ -4586,9 +4586,28 @@ async function enqueueDownloadJob(downloadId, url, platform, channel, title, met
   const lane = laneOverride || detectLane(platform, url);
   const earlyThumb = deriveEarlyThumbnail(url, platform);
   setDownloadActivityContext(downloadId, { url, platform, channel, title, lane, thumbnail: earlyThumb });
-  queuedJobs.set(downloadId, { downloadId, url, platform, channel, title, metadata });
   jobLane.set(downloadId, lane);
   jobPlatform.set(downloadId, platform);
+
+  // Priority mode: bypass queue, start immediately
+  if (globalPriorityMode) {
+    console.log(`🔥 PRIO DISPATCH #${downloadId}: ${url.slice(0, 80)}`);
+    await updateDownloadStatus.run('downloading', 0, null, downloadId);
+    startingJobs.add(downloadId);
+    try {
+      startDownload(downloadId, url, platform, channel, title, metadata)
+        .catch(() => {}).finally(() => {
+          startingJobs.delete(downloadId);
+          runDownloadSchedulerSoon();
+        });
+    } catch (e) {
+      await updateDownloadStatus.run('error', 0, e.message, downloadId);
+      startingJobs.delete(downloadId);
+    }
+    return;
+  }
+
+  queuedJobs.set(downloadId, { downloadId, url, platform, channel, title, metadata });
   await updateDownloadStatus.run('queued', 0, null, downloadId);
 
   if (lane === 'batch') queuedBatch.push(downloadId); else
