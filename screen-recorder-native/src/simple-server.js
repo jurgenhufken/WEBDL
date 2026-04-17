@@ -13513,27 +13513,45 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
       const items = [];
       const seenPaths = new Set();
       const seenKeys = new Map();
-      const platformCounts = new Map(); // Cap per platform to ensure mix
-      const PLATFORM_CAP = Math.max(30, Math.floor(limit * 0.25)); // max 25% per platform (was 40%)
+      const platformBuckets = new Map(); // per-platform item lists
+      const PLATFORM_CAP = Math.max(30, Math.floor(limit * 0.25)); // max 25% per platform
       let rowsScanned = 0;
+      let cappedPlatforms = 0;
+      const allPlatforms = new Set();
       for (const row of pgResult.rows) {
         rowsScanned++;
         if (!row || !row.filepath) continue;
         const fp = String(row.filepath).trim();
         if (!fp) continue;
-        // Skip duplicate filepaths — same channel-dir shared by many download rows
         if (seenPaths.has(fp)) continue;
         seenPaths.add(fp);
-        // NOTE: skip fileExistsCache here — it does sync fs.existsSync which blocks
-        // the event loop for HDD paths. DB rows with status=completed are reliable.
         const plat = String(row.platform || '').toLowerCase();
-        const platCount = platformCounts.get(plat) || 0;
-        if (platCount >= PLATFORM_CAP) continue; // Platform mix: skip over-represented platforms
+        allPlatforms.add(plat);
+        const bucket = platformBuckets.get(plat) || [];
+        if (bucket.length >= PLATFORM_CAP) continue;
         const it = makeMediaItem(row);
         if (!it) continue;
-        pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
-        platformCounts.set(plat, platCount + 1);
-        if (items.length >= limit) break;
+        bucket.push(it);
+        platformBuckets.set(plat, bucket);
+        if (bucket.length === PLATFORM_CAP) cappedPlatforms++;
+      }
+      // Interleave: round-robin per platform, newest first within each
+      const iterators = new Map();
+      for (const [plat, bucket] of platformBuckets) iterators.set(plat, 0);
+      let added = 0;
+      while (added < limit) {
+        let anyAdded = false;
+        for (const [plat, bucket] of platformBuckets) {
+          const idx = iterators.get(plat);
+          if (idx >= bucket.length) continue;
+          const it = bucket[idx];
+          iterators.set(plat, idx + 1);
+          pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
+          added++;
+          anyAdded = true;
+          if (added >= limit) break;
+        }
+        if (!anyAdded) break;
       }
       const jsMs = Date.now() - jsStart;
 
