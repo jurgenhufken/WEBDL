@@ -4346,8 +4346,8 @@ const getMediaByChannelByRatingAsc = db.prepare(`
 // ========================
 const activeProcesses = new Map();
 
-const HEAVY_DOWNLOAD_CONCURRENCY = parseInt(process.env.WEBDL_HEAVY_DOWNLOAD_CONCURRENCY || '4', 10);
-const LIGHT_DOWNLOAD_CONCURRENCY = parseInt(process.env.WEBDL_LIGHT_DOWNLOAD_CONCURRENCY || '8', 10);
+let HEAVY_DOWNLOAD_CONCURRENCY = parseInt(process.env.WEBDL_HEAVY_DOWNLOAD_CONCURRENCY || '4', 10);
+let LIGHT_DOWNLOAD_CONCURRENCY = parseInt(process.env.WEBDL_LIGHT_DOWNLOAD_CONCURRENCY || '12', 10);
 
 const initialYoutubeConcurrency = parseInt(process.env.WEBDL_YOUTUBE_DOWNLOAD_CONCURRENCY || '1', 10);
 const initialYoutubeSpacing = parseInt(process.env.WEBDL_YOUTUBE_START_SPACING_MS || '0', 10);
@@ -7513,6 +7513,28 @@ expressApp.post('/api/settings/youtube/reset', (req, res) => {
   res.json({ success: true, config: updated });
 });
 
+expressApp.get('/api/settings/lanes', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({
+    success: true,
+    heavy: HEAVY_DOWNLOAD_CONCURRENCY,
+    light: LIGHT_DOWNLOAD_CONCURRENCY,
+    active_heavy: activeLaneCount('heavy'),
+    active_light: activeLaneCount('light'),
+    queued_heavy: queuedHeavy.length,
+    queued_light: queuedLight.length,
+  });
+});
+
+expressApp.post('/api/settings/lanes', (req, res) => {
+  const body = req && req.body ? req.body : {};
+  if (Number.isFinite(Number(body.heavy))) HEAVY_DOWNLOAD_CONCURRENCY = Math.max(0, Math.floor(Number(body.heavy)));
+  if (Number.isFinite(Number(body.light))) LIGHT_DOWNLOAD_CONCURRENCY = Math.max(0, Math.floor(Number(body.light)));
+  runDownloadSchedulerSoon();
+  console.log(`⚙️  Lane concurrency bijgewerkt: heavy=${HEAVY_DOWNLOAD_CONCURRENCY}, light=${LIGHT_DOWNLOAD_CONCURRENCY}`);
+  res.json({ success: true, heavy: HEAVY_DOWNLOAD_CONCURRENCY, light: LIGHT_DOWNLOAD_CONCURRENCY });
+});
+
 function parseSqliteDateMs(s) {
   try {
     const str = String(s || '').trim();
@@ -9125,36 +9147,41 @@ expressApp.post('/download/batch', async (req, res) => {
     enqueueDownloadJob(downloadId, u, platform, channel, title, jobMetadata);
   }
 
-  // Quick probe: fetch first page of each deferred URL to estimate gallery count
+  // Quick probe: fetch first page of each deferred URL concurrently to estimate gallery count (strict timeout to prevent addon blocking)
   let estimatedGalleries = 0;
   const expandInfo = [];
-  for (const d of deferred) {
-    try {
-      const html = await _fetchGalleryPage(d.url);
-      if (!html) { expandInfo.push({ ...d, estimated: 0 }); continue; }
-      let galCount = 0;
-      if (d.platform === 'elitebabes') {
-        const re = /href="(https?:\/\/(?:www\.)?elitebabes\.com\/[a-z0-9][a-z0-9-]+\/?)"[^>]*class="[^"]*thumb/gi;
-        const fbRe = /href="(https?:\/\/(?:www\.)?elitebabes\.com\/[a-z0-9][a-z0-9-]+\/)"/gi;
-        let m; while ((m = re.exec(html)) !== null) { if (!/\/model\/|\/tag\/|\/category\//i.test(m[1])) galCount++; }
-        if (galCount === 0) { while ((m = fbRe.exec(html)) !== null) { if (!/\/model\/|\/tag\/|\/category\/|\/search\/|\/random\/|\/explore\/|\/page\//i.test(m[1])) galCount++; } }
-        // Check pagination to multiply
-        const pageMatch = html.match(/\/page\/(\d+)\//g);
-        const maxPage = pageMatch ? Math.max(...pageMatch.map(p => parseInt(p.match(/\d+/)[0]))) : 1;
-        galCount = galCount * Math.max(1, maxPage);
-      } else if (d.platform === 'pornpics') {
-        const re1 = /href=['"]https?:\/\/(?:www\.)?pornpics\.com\/galleries\/[^'"]+['"]/gi;
-        let m; while ((m = re1.exec(html)) !== null) galCount++;
-        // pornpics exposes P_MAX = <total pages> in JS
-        const pMaxMatch = html.match(/var\s+P_MAX\s*=\s*(\d+)/);
-        const maxPage = pMaxMatch ? parseInt(pMaxMatch[1]) : 1;
-        galCount = galCount * Math.max(1, maxPage);
+  
+  if (deferred.length > 0) {
+    await Promise.all(deferred.map(async (d) => {
+      try {
+        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('probe timeout')), 800));
+        const fetchPromise = _fetchGalleryPage(d.url);
+        const html = await Promise.race([fetchPromise, timeoutPromise]);
+        
+        if (!html) { expandInfo.push({ ...d, estimated: 0 }); return; }
+        
+        let galCount = 0;
+        if (d.platform === 'elitebabes') {
+          const re = /href="(https?:\/\/(?:www\.)?elitebabes\.com\/[a-z0-9][a-z0-9-]+\/?)"[^>]*class="[^"]*thumb/gi;
+          const fbRe = /href="(https?:\/\/(?:www\.)?elitebabes\.com\/[a-z0-9][a-z0-9-]+\/)"/gi;
+          let m; while ((m = re.exec(html)) !== null) { if (!/\/model\/|\/tag\/|\/category\//i.test(m[1])) galCount++; }
+          if (galCount === 0) { while ((m = fbRe.exec(html)) !== null) { if (!/\/model\/|\/tag\/|\/category\/|\/search\/|\/random\/|\/explore\/|\/page\//i.test(m[1])) galCount++; } }
+          const pageMatch = html.match(/\/page\/(\d+)\//g);
+          const maxPage = pageMatch ? Math.max(...pageMatch.map(p => parseInt(p.match(/\d+/)[0]))) : 1;
+          galCount = galCount * Math.max(1, maxPage);
+        } else if (d.platform === 'pornpics') {
+          const re1 = /href=['"]https?:\/\/(?:www\.)?pornpics\.com\/galleries\/[^'"]+['"]/gi;
+          let m; while ((m = re1.exec(html)) !== null) galCount++;
+          const pMaxMatch = html.match(/var\s+P_MAX\s*=\s*(\d+)/);
+          const maxPage = pMaxMatch ? parseInt(pMaxMatch[1]) : 1;
+          galCount = galCount * Math.max(1, maxPage);
+        }
+        expandInfo.push({ ...d, estimated: galCount });
+        estimatedGalleries += galCount;
+      } catch (e) {
+        expandInfo.push({ ...d, estimated: 0 });
       }
-      expandInfo.push({ ...d, estimated: galCount });
-      estimatedGalleries += galCount;
-    } catch (e) {
-      expandInfo.push({ ...d, estimated: 0 });
-    }
+    }));
   }
 
   // Respond immediately with estimate
@@ -13457,15 +13484,30 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
   } catch (e) { }
   if (!enabledDirs) enabledDirs = loadDirectoryFilter();
 
+  // Date range filter
+  const dateFrom = String(req.query.date_from || '').trim();
+  const dateTo = String(req.query.date_to || '').trim();
+
   // ═══ FAST PATH: Gallery load — direct simple query (initial + scroll) ═══
+  // Extract platform filter from enabledDirs (e.g. [{platform:'pornpics'}])
+  let fastPathPlatforms = null;
+  if (enabledDirs && enabledDirs.length > 0 && enabledDirs.some(d => d && typeof d === 'object' && d.platform)) {
+    fastPathPlatforms = enabledDirs
+      .filter(d => d && typeof d === 'object' && d.platform)
+      .map(d => String(d.platform).toLowerCase().trim())
+      .filter(Boolean);
+    if (fastPathPlatforms.length === 0) fastPathPlatforms = null;
+  }
+
   const canUseFastPath = !searchQuery && !includeActive && !includeActiveFiles 
     && (sort === 'recent' || sort === 'oldest' || sort === 'group_channel')
-    && (!enabledDirs || enabledDirs.length === 0 || !enabledDirs.some(d => d && typeof d === 'object' && d.platform))
+    && (!enabledDirs || enabledDirs.length === 0 || fastPathPlatforms)
     && (!cursorRaw || (cur && !cur.dir && cur.fileIndex === 0));
   
   if (canUseFastPath) {
     // Cache to avoid re-running expensive query during heavy write load
-    const cacheKey = `fp_${type||'media'}_${sort||'newest'}_${limit}_${cursorRaw||''}`;
+    const platKey = fastPathPlatforms ? fastPathPlatforms.sort().join(',') : '_all';
+    const cacheKey = `fp_${type||'media'}_${sort||'newest'}_${limit}_${cursorRaw||''}_${dateFrom}_${dateTo}_${platKey}`;
     const cached = galleryFastPathCache && galleryFastPathCache.key === cacheKey && (Date.now() - galleryFastPathCache.ts) < 3000
       ? galleryFastPathCache.data : null;
     if (cached) {
@@ -13479,15 +13521,67 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
       if (type === 'video_only' || type === 'video') typeClause = "AND (d.filepath ILIKE '%.mp4' OR d.filepath ILIKE '%.webm' OR d.filepath ILIKE '%.mov' OR d.filepath ILIKE '%.mkv' OR d.filepath ILIKE '%.avi' OR d.filepath ILIKE '%.flv')";
       else if (type === 'image_only' || type === 'image') typeClause = "AND (d.filepath ILIKE '%.jpg' OR d.filepath ILIKE '%.jpeg' OR d.filepath ILIKE '%.png' OR d.filepath ILIKE '%.gif' OR d.filepath ILIKE '%.webp')";
       
+      // Platform filter clause: when a specific platform is selected, filter by it
+      // and remove the ID window since we want ALL items for that platform
+      let platformClause = '';
+      let idWindowClause = 'AND d.id > (SELECT MAX(id) - 50000 FROM downloads)';
+      if (fastPathPlatforms && fastPathPlatforms.length > 0) {
+        const safePlats = fastPathPlatforms.map(p => `'${p.replace(/'/g, "''")}'`).join(',');
+        platformClause = `AND d.platform IN (${safePlats})`;
+        // Remove the ID window when filtering by platform — platform scoping
+        // already limits the result set, and the ID window would miss older items
+        idWindowClause = '';
+      }
+
       const sqlStart = Date.now();
       const rowOffset = cur.rowOffset || 0;
       // Fast query using idx_downloads_gallery_ts index (~9ms)
-      const stmtName = rowOffset > 0
-        ? `gallery_fast_${type || 'media'}_${sort || 'newest'}_paged`
-        : `gallery_fast_${type || 'media'}_${sort || 'newest'}`;
-      const pgResult = await (db.readPool || db.pool).query({
-        name: stmtName,
-        text: `
+      const stmtName = `gallery_fast_${type || 'media'}_${sort || 'newest'}_${platKey}_${dateFrom}_${dateTo}${rowOffset > 0 ? '_paged' : ''}`;
+      
+      // When platform-filtering, use UNION ALL to show individual files (kind='p')
+      // from download_files alongside download-level items (kind='d').
+      // This ensures platforms like pornpics show every individual image as a separate card.
+      const sqlText = fastPathPlatforms ? `
+        SELECT * FROM (
+          SELECT
+            'd' AS kind,
+            d.id::text AS id,
+            d.platform, d.channel, d.title, d.filepath,
+            d.created_at::text AS created_at,
+            EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at))::bigint * 1000 AS ts,
+            d.thumbnail, d.url, d.source_url, d.rating,
+            'd' AS rating_kind, d.id AS rating_id,
+            (SELECT df2.relpath FROM download_files df2 WHERE df2.download_id = d.id ORDER BY df2.relpath LIMIT 1) AS first_file
+          FROM downloads d
+          WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
+            AND d.filepath IS NOT NULL AND d.filepath != ''
+            AND d.is_thumb_ready = true
+            ${platformClause}
+            ${typeClause}
+            ${dateFrom ? `AND COALESCE(d.finished_at, d.updated_at, d.created_at) >= '${dateFrom.replace(/[^0-9-]/g,'')}'::date` : ''}
+            ${dateTo ? `AND COALESCE(d.finished_at, d.updated_at, d.created_at) < ('${dateTo.replace(/[^0-9-]/g,'')}'::date + INTERVAL '1 day')` : ''}
+            AND NOT EXISTS (SELECT 1 FROM download_files f2 WHERE f2.download_id = d.id)
+          UNION ALL
+          SELECT
+            'p' AS kind,
+            df.relpath AS id,
+            d.platform, d.channel, d.title, d.filepath,
+            d.created_at::text AS created_at,
+            (COALESCE(df.mtime_ms, EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at))::bigint * 1000)) AS ts,
+            d.thumbnail, d.url, d.source_url, d.rating,
+            'd' AS rating_kind, d.id AS rating_id,
+            df.relpath AS first_file
+          FROM download_files df
+          JOIN downloads d ON d.id = df.download_id
+          WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
+            AND d.filepath IS NOT NULL AND d.filepath != ''
+            ${platformClause}
+            ${dateFrom ? `AND COALESCE(d.finished_at, d.updated_at, d.created_at) >= '${dateFrom.replace(/[^0-9-]/g,'')}'::date` : ''}
+            ${dateTo ? `AND COALESCE(d.finished_at, d.updated_at, d.created_at) < ('${dateTo.replace(/[^0-9-]/g,'')}'::date + INTERVAL '1 day')` : ''}
+        ) s
+        ORDER BY ${orderBy}
+                  LIMIT ${Math.max(limit * 50, 15000)} OFFSET ${rowOffset}
+      ` : `
           SELECT
             'd' AS kind,
             d.id::text AS id,
@@ -13501,10 +13595,18 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
           WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
             AND d.filepath IS NOT NULL AND d.filepath != ''
             AND d.is_thumb_ready = true
-            AND d.id > (SELECT MAX(id) - 50000 FROM downloads)
+            ${idWindowClause}
+            ${platformClause}
             ${typeClause}
+            ${dateFrom ? `AND COALESCE(d.finished_at, d.updated_at, d.created_at) >= '${dateFrom.replace(/[^0-9-]/g,'')}'::date` : ''}
+            ${dateTo ? `AND COALESCE(d.finished_at, d.updated_at, d.created_at) < ('${dateTo.replace(/[^0-9-]/g,'')}'::date + INTERVAL '1 day')` : ''}
           ORDER BY ${orderBy}
-        `,
+          LIMIT ${Math.max(limit * 50, 15000)} OFFSET ${rowOffset}
+      `;
+
+      const pgResult = await (db.readPool || db.pool).query({
+        name: stmtName,
+        text: sqlText,
         values: []
       });
       const sqlMs = Date.now() - sqlStart;
@@ -13513,50 +13615,32 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
       const items = [];
       const seenPaths = new Set();
       const seenKeys = new Map();
-      const platformBuckets = new Map(); // per-platform item lists
-      const PLATFORM_CAP = Math.max(30, Math.floor(limit * 0.25)); // max 25% per platform
-      let rowsScanned = 0;
-      let cappedPlatforms = 0;
-      const allPlatforms = new Set();
+      // Chronological order with soft platform cap to prevent one platform
+      // from dominating the entire page. Items stay in timestamp order,
+      // but once a platform has enough representation, its remaining items are skipped.
+      const platformCount = new Map();
+      const SOFT_CAP = fastPathPlatforms ? Infinity : Math.max(30, Math.ceil(limit * 0.3));
       for (const row of pgResult.rows) {
-        rowsScanned++;
-        if (!row || !row.filepath) continue;
-        const fp = String(row.filepath).trim();
-        if (!fp) continue;
-        if (seenPaths.has(fp)) continue;
-        seenPaths.add(fp);
+        if (items.length >= limit) break;
+        if (!row || !row.id) continue;
+        const dedupId = String(row.id).trim();
+        if (!dedupId) continue;
+        if (seenPaths.has(dedupId)) continue;
+        seenPaths.add(dedupId);
+        // Soft cap: skip if this platform already has enough items
         const plat = String(row.platform || '').toLowerCase();
-        allPlatforms.add(plat);
-        const bucket = platformBuckets.get(plat) || [];
-        if (bucket.length >= PLATFORM_CAP) continue;
-        const it = makeMediaItem(row);
+        const pc = platformCount.get(plat) || 0;
+        if (pc >= SOFT_CAP) continue;
+        const it = makeIndexedMediaItem(row);
         if (!it) continue;
-        bucket.push(it);
-        platformBuckets.set(plat, bucket);
-        if (bucket.length === PLATFORM_CAP) cappedPlatforms++;
-      }
-      // Interleave: round-robin per platform, newest first within each
-      const iterators = new Map();
-      for (const [plat, bucket] of platformBuckets) iterators.set(plat, 0);
-      let added = 0;
-      while (added < limit) {
-        let anyAdded = false;
-        for (const [plat, bucket] of platformBuckets) {
-          const idx = iterators.get(plat);
-          if (idx >= bucket.length) continue;
-          const it = bucket[idx];
-          iterators.set(plat, idx + 1);
-          pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
-          added++;
-          anyAdded = true;
-          if (added >= limit) break;
+        if (pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type })) {
+          platformCount.set(plat, pc + 1);
         }
-        if (!anyAdded) break;
       }
       const jsMs = Date.now() - jsStart;
 
       const reqTime = Date.now() - reqStartTime;
-      console.log(`📤 [${new Date().toISOString().substr(11, 8)}] Response /api/media/recent-files (fast-path) - ${items.length} items in ${reqTime}ms (sql=${sqlMs}ms, js=${jsMs}ms, rows=${pgResult.rows.length}, offset=${rowOffset}, unique=${seenPaths.size})`);
+      console.log(`📤 [${new Date().toISOString().substr(11, 8)}] Response /api/media/recent-files (fast-path${fastPathPlatforms ? ' plat=' + platKey : ''}) - ${items.length} items in ${reqTime}ms (sql=${sqlMs}ms, js=${jsMs}ms, rows=${pgResult.rows.length}, offset=${rowOffset}, unique=${seenPaths.size})`);
       // Advance cursor past ALL scanned rows (including dupes) so the next
       // page's OFFSET jumps past the entire duplicate cluster.
       const nextRowOffset = rowOffset + pgResult.rows.length;
@@ -13570,7 +13654,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
       try {
         const st = await getStatsRowCached();
         const marker = buildRecentFilesCacheMarker(st);
-        const dirFilterKey = '_all';
+        const dirFilterKey = platKey;
         const key = `recent|${type}|${limit}|${sort}||${tagFilter}|${dirFilterKey}`;
         recentFilesTopCache.set(key, { at: Date.now(), marker, payload });
       } catch (e) {}
@@ -13646,32 +13730,69 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
     // ═══ FAST PATH: Direct SQL search (bypasses slow UNION ALL hybrid query) ═══
     if (hasSearchQuery) {
       try {
-        const searchLike = '%' + searchQuery.replace(/%/g, '') + '%';
+        const words = searchQuery.split(/[\s,*\-+]+/).filter(w => w.trim().length > 0);
+        if (words.length === 0) words.push(searchQuery.replace(/%/g, ''));
+
+        const conditions = [];
+        const bindings = [];
+        for (const w of words) {
+          conditions.push(`(d.channel ILIKE ? OR d.title ILIKE ? OR d.platform ILIKE ?)`);
+          const likeTerm = '%' + w + '%';
+          bindings.push(likeTerm, likeTerm, likeTerm);
+        }
+        bindings.push(Math.max(limit * 50, 15000), rowOffset);
+
         const searchRows = await db.prepare(`
-          SELECT 
-            'd' AS kind,
-            CAST(d.id AS TEXT) AS id,
-            d.platform, d.channel, d.title, d.filepath,
-            d.created_at::text AS created_at,
-            CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
-            d.thumbnail, d.url, d.source_url, d.rating,
-            'd' AS rating_kind, d.id AS rating_id
-          FROM downloads d
-          WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
-            AND d.filepath IS NOT NULL AND d.filepath != ''
-            AND (d.channel ILIKE $1 OR d.title ILIKE $1 OR d.platform ILIKE $1)
-          ORDER BY ${sort === 'oldest' ? 'ts ASC NULLS LAST' : sort === 'rating_desc' ? 'COALESCE(d.rating, 0) DESC, ts DESC' : sort === 'rating_asc' ? 'COALESCE(d.rating, 0) ASC, ts DESC' : 'ts DESC NULLS LAST'}
-          LIMIT $2 OFFSET $3
-        `).all(searchLike, limit * 2, rowOffset);
+          WITH matched_downloads AS (
+            SELECT * FROM downloads d
+            WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
+              AND d.filepath IS NOT NULL AND d.filepath != ''
+              ${conditions.length > 0 ? 'AND (' + conditions.join(' AND ') + ')' : ''}
+          )
+          SELECT * FROM (
+            SELECT 
+              'd' AS kind,
+              CAST(d.id AS TEXT) AS id,
+              d.platform, d.channel, d.title, d.filepath,
+              d.created_at::text AS created_at,
+              CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT) AS ts,
+              d.thumbnail, d.url, d.source_url, d.rating,
+              'd' AS rating_kind, d.id AS rating_id,
+              (SELECT df2.relpath FROM download_files df2 WHERE df2.download_id = d.id ORDER BY df2.relpath LIMIT 1) AS first_file
+            FROM matched_downloads d
+            WHERE NOT EXISTS (SELECT 1 FROM download_files f2 WHERE f2.download_id = d.id)
+            UNION ALL
+            SELECT
+              'p' AS kind,
+              df.relpath AS id,
+              d.platform, d.channel, d.title, d.filepath,
+              d.created_at::text AS created_at,
+              (COALESCE(df.mtime_ms, CAST(EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at)) * 1000 AS BIGINT))) AS ts,
+              d.thumbnail, d.url, d.source_url, d.rating,
+              'd' AS rating_kind, d.id AS rating_id,
+              df.relpath AS first_file
+            FROM matched_downloads d
+            JOIN download_files df ON df.download_id = d.id
+          ) s
+          ORDER BY ${sort === 'oldest' ? 'ts ASC NULLS LAST' : sort === 'rating_desc' ? 'COALESCE(rating, 0) DESC, ts DESC' : sort === 'rating_asc' ? 'COALESCE(rating, 0) ASC, ts DESC' : 'ts DESC NULLS LAST'}
+          LIMIT ? OFFSET ?
+        `).all(...bindings);
 
         for (const row of searchRows) {
-          if (!row || !row.filepath) continue;
+          if (!row || !row.id) continue;
           if (enabledDirs && !shouldIncludeRow(row, enabledDirs)) continue;
           if (row.filepath && String(row.kind || '') !== 'p') {
             const fp = String(row.filepath).trim();
             if (fp && !fileExistsCache(fp)) continue;
           }
-          const it = makeMediaItem(row);
+
+          const preDedupeVal = String(row.kind || '') === 'p' ? String(row.id || '').trim() : String(row.filepath || '').trim();
+          const preDedupeKey = preDedupeVal ? path.resolve(BASE_DIR, preDedupeVal) : null;
+          if (preDedupeKey && seenKeys.has(preDedupeKey)) {
+            continue;
+          }
+
+          const it = makeIndexedMediaItem(row);
           if (!it) continue;
           pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
           if (items.length >= limit) break;
@@ -13900,7 +14021,16 @@ expressApp.get('/api/media/channel-files', async (req, res) => {
             } catch (e) { }
           }
         }
+
+        const preDedupeVal = String(row.kind || '') === 'p' ? String(row.id || '').trim() : String(row.filepath || '').trim();
+        const preDedupeKey = preDedupeVal ? path.resolve(BASE_DIR, preDedupeVal) : null;
+        if (preDedupeKey && seenKeys.has(preDedupeKey)) {
+          rowOffset += 1;
+          continue;
+        }
+
         const it = makeIndexedMediaItem(row);
+        if (!it) { rowOffset += 1; continue; }
         pushUniqueMediaItem({ bucket: items, item: it, seen: seenKeys, typeFilter: type });
         rowOffset += 1;
         if (items.length >= limit) break;
