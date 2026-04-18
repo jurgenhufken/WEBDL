@@ -12322,88 +12322,52 @@ let _directoryTreeCache = null;
 let _directoryTreeCacheTime = 0;
 let _directoryTreeInflight = null; // mutex: only one query at a time
 expressApp.get('/api/media/directories/tree', async (req, res) => {
+  console.log('[TREE] Request received');
   try {
     const now = Date.now();
     if (_directoryTreeCache && (now - _directoryTreeCacheTime) < 120000) {
+      console.log('[TREE] Serving from cache');
       return res.json({ success: true, tree: _directoryTreeCache });
     }
-    // If a tree query is already running, wait for it instead of spawning another
-    if (_directoryTreeInflight) {
-      try {
-        const cached = await _directoryTreeInflight;
-        return res.json({ success: true, tree: cached });
-      } catch (e) {
-        return res.status(500).json({ success: false, error: 'tree query failed' });
+    console.log('[TREE] Scanning filesystem at', BASE_DIR);
+    const tree = {};
+    let platforms = [];
+    try { platforms = await fs.promises.readdir(BASE_DIR, { withFileTypes: true }); }
+    catch(e) { console.error('[TREE] Cannot read BASE_DIR:', e.message); }
+    console.log('[TREE] Found', platforms.length, 'entries in BASE_DIR');
+    const platDirs = platforms.filter(e => e.isDirectory() && !e.name.startsWith('.'));
+    const results = await Promise.allSettled(platDirs.map(async (pEnt) => {
+      const p = pEnt.name;
+      const entry = { count: 0, fileCount: 0, screenshotCount: 0, channels: [] };
+      let channels = [];
+      try { channels = await fs.promises.readdir(require('path').join(BASE_DIR, p), { withFileTypes: true }); }
+      catch(e) { return { name: p, entry }; }
+      let platFileCount = 0;
+      for (const cEnt of channels) {
+        if (!cEnt.isDirectory() || cEnt.name.startsWith('.')) {
+          if (/\.(mp4|webm|mkv|mov|avi|jpg|jpeg|png)$/i.test(cEnt.name)) platFileCount++;
+          continue;
+        }
+        const c = cEnt.name;
+        let d_name = c;
+        if (/^thread_\d+$/i.test(c)) d_name = 'Thread ' + c.replace(/^thread_/i, '');
+        entry.channels.push({ name: c, displayName: d_name, count: 0, fileCount: 0, screenshotCount: 0 });
       }
+      entry.count = platFileCount + entry.channels.length;
+      return { name: p, entry };
+    }));
+    for (const r of results) {
+      if (r.status === 'fulfilled' && r.value) tree[r.value.name] = r.value.entry;
     }
-    _directoryTreeInflight = (async () => {
-    // Set a 15s statement timeout to prevent runaway queries
-    const pool = db.readPool || db.pool;
-    const client = await pool.connect();
-    try {
-      await client.query('SET statement_timeout = 15000');
-    const q = `
-      SELECT sub.platform, sub.channel,
-             MAX(sub.source_url) as sample_source_url,
-             MAX(sub.url) as sample_url,
-             SUM(CASE WHEN sub.kind = 'd' THEN 1 ELSE 0 END) as download_count,
-             SUM(CASE WHEN sub.kind = 'f' THEN 1 ELSE 0 END) as file_count,
-             SUM(CASE WHEN sub.kind = 's' THEN 1 ELSE 0 END) as screenshot_count
-      FROM (
-        SELECT 'd' AS kind, d.platform, d.channel, d.source_url, d.url
-        FROM downloads d
-        WHERE d.status NOT IN ('error') AND d.filepath IS NOT NULL AND TRIM(d.filepath) != ''
-        UNION ALL
-        SELECT 'f' AS kind, d.platform, d.channel, NULL AS source_url, d.url
-        FROM download_files f
-        JOIN downloads d ON d.id = f.download_id
-        WHERE d.status NOT IN ('error')
-      ) sub
-      WHERE sub.platform IS NOT NULL AND TRIM(sub.platform) != ''
-        AND sub.channel IS NOT NULL AND TRIM(sub.channel) != ''
-      GROUP BY sub.platform, sub.channel
-      ORDER BY sub.platform ASC, sub.channel ASC
-    `;
-    const result = { tree: {} };
-    const { rows } = await client.query(q);
-    for (const row of rows) {
-      const p = row.platform || 'unknown';
-      const c = row.channel || 'unknown';
-      const d_count = parseInt(row.download_count, 10) || 0;
-      const f_count = parseInt(row.file_count, 10) || 0;
-      const s_count = parseInt(row.screenshot_count, 10) || 0;
-
-      let d_name = c;
-      if (/^thread_\\d+$/i.test(c)) {
-        const info = parseFootFetishForumThreadInfo(row.sample_source_url || row.sample_url || '');
-        if (info && info.name) d_name = info.name;
-        else d_name = 'Thread ' + c.replace(/^thread_/i, '');
-      }
-
-      if (!result.tree[p]) result.tree[p] = { count: 0, fileCount: 0, screenshotCount: 0, channels: [] };
-      result.tree[p].count += d_count;
-      result.tree[p].fileCount += f_count;
-      result.tree[p].screenshotCount = (result.tree[p].screenshotCount || 0) + s_count;
-      result.tree[p].channels.push({ name: c, displayName: d_name, count: d_count, fileCount: f_count, screenshotCount: s_count });
-    }
-    _directoryTreeCache = result.tree;
+    _directoryTreeCache = tree;
     _directoryTreeCacheTime = Date.now();
-    return result.tree;
-    } finally {
-      client.release();
-    }
-    })();
-    try {
-      const tree = await _directoryTreeInflight;
-      res.json({ success: true, tree });
-    } catch (e) {
-      res.status(500).json({ success: false, error: String(e.message || e) });
-    } finally {
-      _directoryTreeInflight = null;
-    }
+    _directoryTreeInflight = null;
+    console.log('[TREE] Done! Platforms:', Object.keys(tree).length);
+    return res.json({ success: true, tree });
   } catch (e) {
     _directoryTreeInflight = null;
-    res.status(500).json({ success: false, error: String(e.message || e) });
+    console.error('[TREE] Error:', e.message);
+    return res.status(500).json({ success: false, error: String(e.message || e) });
   }
 });
 
@@ -13398,6 +13362,136 @@ async function getDynamicHybridBatch(stmt, typeFilter, ...args) {
   return await dynamicStmt.all(...args);
 }
 
+
+// ═══ RAW FILESYSTEM BROWSER FALLBACK ═══
+async function performRawFilesystemScan(enabledDirs, searchQuery, typeFilter, sort, limit, cur, db) {
+  async function scanDirRec(dir, depth, maxDepth) {
+    if (depth > maxDepth) return [];
+    let entries;
+    try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); }
+    catch(e) { return []; }
+    let results = [];
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
+      const fullPath = require('path').join(dir, entry.name);
+      if (entry.isDirectory()) {
+        const sub = await scanDirRec(fullPath, depth + 1, maxDepth);
+        for (let i = 0; i < sub.length; i++) results.push(sub[i]);
+      } else {
+        const isVid = /\.(mp4|webm|mov|mkv|avi)$/i.test(entry.name);
+        const isImg = /\.(jpg|jpeg|png|webp|gif)$/i.test(entry.name);
+        if (typeFilter === 'video_only' && !isVid) continue;
+        if (typeFilter === 'image_only' && !isImg) continue;
+        if (!isVid && !isImg) continue;
+        results.push(fullPath);
+      }
+    }
+    return results;
+  }
+
+  let allRawPaths = [];
+  for (const dirObj of enabledDirs) {
+    if (!dirObj || typeof dirObj !== 'object') {
+      const fp = require('path').join(BASE_DIR, String(dirObj).trim());
+      allRawPaths.push(...(await scanDirRec(fp, 0, 3)));
+    } else {
+      const dPlat = String(dirObj.platform || '').trim();
+      if (dPlat.startsWith('/')) continue;
+      if (Array.isArray(dirObj.channels) && dirObj.channels.length > 0) {
+        for (const c of dirObj.channels) {
+          allRawPaths.push(...(await scanDirRec(require('path').join(BASE_DIR, dPlat, String(c).trim()), 0, 3)));
+        }
+      } else {
+        allRawPaths.push(...(await scanDirRec(require('path').join(BASE_DIR, dPlat), 0, 3)));
+      }
+    }
+  }
+
+  if (searchQuery) {
+    const qWords = searchQuery.split(',').map(function(s){return s.trim();}).filter(Boolean);
+    allRawPaths = allRawPaths.filter(function(fp) {
+      const pLow = fp.toLowerCase();
+      for (const w of qWords) {
+        const ands = w.split(/[\s+*-]+/).filter(Boolean);
+        let ok = true;
+        for (const a of ands) { if (!pLow.includes(a)) { ok = false; break; } }
+        if (ok) return true;
+      }
+      return false;
+    });
+  }
+
+  const fileStats = [];
+  for (const fp of allRawPaths) {
+    try { const st = await fs.promises.stat(fp); fileStats.push({ fp: fp, ts: st.mtimeMs }); } catch(e) {}
+  }
+  fileStats.sort(function(a, b) { return sort === 'oldest' ? a.ts - b.ts : b.ts - a.ts; });
+
+  const pageOffset = cur ? (cur.rowOffset || 0) : 0;
+  const pageSlice = fileStats.slice(pageOffset, pageOffset + limit);
+
+  const rawItems = [];
+  for (const p of pageSlice) {
+    const relPath = require('path').relative(BASE_DIR, p.fp);
+    const isVid = /\.(mp4|webm|mov|mkv|avi)$/i.test(p.fp);
+    const mediaType = isVid ? 'video' : 'image';
+    rawItems.push({
+      kind: 'p',
+      id: relPath,
+      platform: require('path').dirname(relPath).split(require('path').sep)[0] || 'raw',
+      channel: require('path').dirname(relPath).split(require('path').sep)[1] || 'folder',
+      channel_display: require('path').dirname(relPath).split(require('path').sep)[1] || 'folder',
+      title: require('path').basename(p.fp),
+      title_display: require('path').basename(p.fp, require('path').extname(p.fp)),
+      filepath: p.fp,
+      type: mediaType,
+      src: '/media/path?path=' + encodeURIComponent(relPath),
+      thumb: '/media/path-thumb?path=' + encodeURIComponent(relPath) + '&v=5',
+      open: { path: relPath },
+      dedupe_key: p.fp,
+      file_rel: relPath,
+      url: null,
+      source_url: null,
+      created_at: new Date(p.ts).toISOString(),
+      ts: p.ts,
+      rating: null,
+    });
+  }
+
+  if (pageSlice.length > 0 && db && db.isPostgres) {
+    try {
+      const sqlPaths = pageSlice.map(function(x) { return x.fp; });
+      const binds = [];
+      const pms = [];
+      for (let i = 0; i < sqlPaths.length; i++) { pms.push('$' + (i + 1)); binds.push(sqlPaths[i]); }
+      const qRes = await (db.readPool || db.pool).query('SELECT * FROM downloads WHERE filepath IN (' + pms.join(', ') + ')', binds);
+      const map = new Map();
+      for (const r of qRes.rows) map.set(r.filepath, r);
+      for (const item of rawItems) {
+        const matched = map.get(item.filepath);
+        if (matched) {
+          item.id = String(matched.id);
+          item.kind = 'd';
+          item.platform = matched.platform || item.platform;
+          item.channel = matched.channel || item.channel;
+          item.channel_display = matched.channel || item.channel_display;
+          item.title = matched.title || item.title;
+          item.title_display = matched.title || item.title_display;
+          item.rating = matched.rating;
+          item.rating_kind = 'd';
+          item.rating_id = matched.id;
+          item.source_url = matched.source_url || matched.url || null;
+          if (matched.thumbnail) {
+            item.thumb = '/download/' + matched.id + '/thumb';
+          }
+        }
+      }
+    } catch(e) { /* DB enrichment failed, raw items still usable */ }
+  }
+
+  return { items: rawItems, nextOffset: pageOffset + rawItems.length, hitLimit: rawItems.length >= limit };
+}
+
 // ═══ DEDICATED SEARCH API (fast, bypasses heavy hybrid query) ═══
 expressApp.get('/api/media/search', async (req, res) => {
   const reqStart = Date.now();
@@ -13407,6 +13501,22 @@ expressApp.get('/api/media/search', async (req, res) => {
   const offset = Math.max(0, parseInt(req.query.offset || '0', 10) || 0);
   const type = String(req.query.type || 'all').toLowerCase();
   const sort = String(req.query.sort || 'recent').toLowerCase();
+  const hasSpecificChannelsSearch = enabledDirs && enabledDirs.length > 0 &&
+    enabledDirs.some(function(d) { return d && Array.isArray(d.channels) && d.channels.length > 0; });
+  if (hasSpecificChannelsSearch) {
+    try {
+      const rawRes = await performRawFilesystemScan(enabledDirs, q, type, sort, limit, { rowOffset: offset }, db);
+      const reqTime = Date.now() - reqStart;
+      console.log('[DIR FALLBACK] /api/media/search - ' + rawRes.items.length + ' items in ' + reqTime + 'ms');
+      return res.json({
+        success: true, items: rawRes.items, done: !rawRes.hitLimit,
+        next_cursor: rawRes.hitLimit ? encodeCursor({ rowOffset: rawRes.nextOffset, activeOffset: 0 }) : ''
+      });
+    } catch(err) {
+      console.error('[Search DIR FALLBACK error]', err.message);
+    }
+  }
+
   try {
     const orGroups = q.split(',').map(g => g.trim()).filter(Boolean);
     if (orGroups.length === 0) orGroups.push(q);
@@ -13505,6 +13615,24 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
   } catch (e) { }
   if (!enabledDirs) enabledDirs = loadDirectoryFilter();
 
+  // Only use filesystem fallback for specific channel selections (small targeted scans)
+  // Platform-level filters are handled efficiently by the fast-path DB query below
+  const hasSpecificChannels = enabledDirs && enabledDirs.length > 0 &&
+    enabledDirs.some(function(d) { return d && Array.isArray(d.channels) && d.channels.length > 0; });
+  if (hasSpecificChannels) {
+    try {
+      const rawRes = await performRawFilesystemScan(enabledDirs, searchQuery, type, sort, limit, cur, db);
+      const reqTime = Date.now() - reqStartTime;
+      console.log('[DIR FALLBACK] /api/media/recent-files - ' + rawRes.items.length + ' items in ' + reqTime + 'ms');
+      return res.json({
+        success: true, items: rawRes.items, done: !rawRes.hitLimit,
+        next_cursor: rawRes.hitLimit ? encodeCursor({ rowOffset: rawRes.nextOffset, activeOffset: 0 }) : ''
+      });
+    } catch(err) {
+      console.error('[Recent-Files DIR FALLBACK error]', err.message);
+    }
+  }
+
   // Date range filter
   const dateFrom = String(req.query.date_from || '').trim();
   const dateTo = String(req.query.date_to || '').trim();
@@ -13562,7 +13690,9 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
       // When platform-filtering, use UNION ALL to show individual files (kind='p')
       // from download_files alongside download-level items (kind='d').
       // This ensures platforms like pornpics show every individual image as a separate card.
-      const sqlText = fastPathPlatforms ? `
+      // Skip UNION for video_only — videos live in downloads.filepath, not download_files
+      const useUnion = fastPathPlatforms && type !== 'video_only' && type !== 'video';
+      const sqlText = useUnion ? `
         SELECT * FROM (
           SELECT
             'd' AS kind,
@@ -13597,6 +13727,8 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
           WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
             AND d.filepath IS NOT NULL AND d.filepath != ''
             ${platformClause}
+            ${type === 'video_only' || type === 'video' ? "AND (df.relpath ILIKE '%.mp4' OR df.relpath ILIKE '%.webm' OR df.relpath ILIKE '%.mov' OR df.relpath ILIKE '%.mkv' OR df.relpath ILIKE '%.avi' OR df.relpath ILIKE '%.flv')" : ''}
+            ${type === 'image_only' || type === 'image' ? "AND (df.relpath ILIKE '%.jpg' OR df.relpath ILIKE '%.jpeg' OR df.relpath ILIKE '%.png' OR df.relpath ILIKE '%.gif' OR df.relpath ILIKE '%.webp')" : ''}
             ${dateFrom ? `AND COALESCE(d.finished_at, d.updated_at, d.created_at) >= '${dateFrom.replace(/[^0-9-]/g,'')}'::date` : ''}
             ${dateTo ? `AND COALESCE(d.finished_at, d.updated_at, d.created_at) < ('${dateTo.replace(/[^0-9-]/g,'')}'::date + INTERVAL '1 day')` : ''}
         ) s
@@ -13963,6 +14095,7 @@ expressApp.get('/api/media/channel-files', async (req, res) => {
   if (!enabledDirs) enabledDirs = loadDirectoryFilter();
 
   if (!platform || !channel) return res.status(400).json({ success: false, error: 'platform en channel zijn vereist' });
+
 
   try {
     const isTopCursor = !cursorRaw ||
