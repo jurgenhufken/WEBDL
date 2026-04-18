@@ -22,6 +22,13 @@
     .yt-input { width: 52px; border-radius: 8px; border: 1px solid #1f2a52; background: #020614; color: #fff; padding: 6px; text-align: center; font-size: 12px; }
     .yt-status { font-size: 11px; color: #9aa7d1; min-height: 14px; }
     .hint { font-size: 11px; color: #9aa7d1; }
+    .date-nav { display: inline-flex; align-items: center; gap: 2px; background: #0a1428; border: 1px solid #1f2a52; border-radius: 8px; padding: 2px; height: 34px; }
+    .date-nav .dn-btn { background: transparent; border: none; color: #9aa7d1; font-size: 14px; padding: 4px 7px; border-radius: 6px; cursor: pointer; transition: all 0.15s; line-height: 1; min-width: 28px; text-align: center; }
+    .date-nav .dn-btn:hover { background: rgba(0,212,255,0.15); color: #00d4ff; }
+    .date-nav .dn-btn.active { background: rgba(0,212,255,0.2); color: #00d4ff; border: 1px solid rgba(0,212,255,0.4); }
+    .date-nav .dn-label { font-size: 11px; color: #d7e6ff; padding: 2px 6px; min-width: 60px; text-align: center; white-space: nowrap; font-weight: 600; }
+    .date-nav .dn-sep { width: 1px; height: 18px; background: #1f2a52; margin: 0 1px; }
+    .date-nav .dn-preset { font-size: 10px; padding: 3px 6px; letter-spacing: 0.02em; }
 
     .content { padding: 14px; }
     .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
@@ -135,6 +142,19 @@
         <option value="group_channel">Groep per model</option>
       </select>
       <select id="channelSel" style="min-width: 280px; display:none;"></select>
+      <div class="date-nav" id="dateNav">
+        <button class="dn-btn" id="dnPrev" title="Vorige periode">◀</button>
+        <span class="dn-label" id="dnLabel">Alles</span>
+        <button class="dn-btn" id="dnNext" title="Volgende periode">▶</button>
+        <span class="dn-sep"></span>
+        <button class="dn-btn dn-preset" id="dnAll" title="Alle periodes">✕</button>
+        <button class="dn-btn dn-preset" id="dnToday" title="Vandaag">Vandaag</button>
+        <button class="dn-btn dn-preset" id="dnYesterday" title="Gisteren">Gisteren</button>
+        <button class="dn-btn dn-preset" id="dnWeekend" title="Dit weekend (za-zo)">Weekend</button>
+        <button class="dn-btn dn-preset" id="dnPrevWeekend" title="Vorig weekend">Vorig WE</button>
+        <button class="dn-btn dn-preset" id="dnWeek" title="Afgelopen 7 dagen">Week</button>
+        <button class="dn-btn dn-preset" id="dnPrevWeek" title="Vorige week (ma-zo)">Vorige wk</button>
+      </div>
       <input type="text" id="inpSearch" placeholder="🔍 Zoeken..." style="padding: 6px 12px; border-radius: 4px; border: 1px solid #444; background: #222; color: #fff; margin-right: 8px;">
       <button id="btnReload" class="btn">↻ Herladen</button>
       <button id="btnDirSelect" class="btn">📁 Mappen</button>
@@ -341,6 +361,15 @@
     const elYtReset = document.getElementById('btnYtReset');
     const elYtValue = document.getElementById('inpYtConcurrency');
 
+    const elDatePeriod = document.getElementById('datePeriod'); // legacy
+    const elDateNav = document.getElementById('dateNav');
+    const elDnLabel = document.getElementById('dnLabel');
+    const elDnPrev = document.getElementById('dnPrev');
+    const elDnNext = document.getElementById('dnNext');
+    const elDateRangeWrapper = document.getElementById('dateRangeWrapper');
+    const elDateFrom = document.getElementById('dateFrom');
+    const elDateTo = document.getElementById('dateTo');
+
     const elModal = document.getElementById('modal');
     const elPanel = document.getElementById('mPanel');
     const elBtnClose = document.getElementById('btnClose');
@@ -422,6 +451,11 @@
       mode: 'recent',
       filter: 'media',
       sort: 'recent',
+      datePeriod: '',
+      dateNavMode: '', // 'day', 'weekend', 'week', or '' (all)
+      dateNavAnchor: null, // Date object for current position
+      dateFrom: '',
+      dateTo: '',
       enabledDirs: null,
       dirConfig: null,
       loading: false,
@@ -466,8 +500,7 @@
 
     function getSessionEnabledDirs() {
       try {
-        const _tabId = window._webdlTabId || (window._webdlTabId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6));
-        const instanceId = (window.location.pathname === '/viewer' ? 'viewer' : 'gallery') + '_' + _tabId;
+        const instanceId = window.location.pathname === '/viewer' ? 'viewer' : 'gallery';
         const raw = sessionStorage.getItem('gallery.enabledDirs.' + instanceId);
         if (!raw) return null;
         const parsed = JSON.parse(raw);
@@ -479,8 +512,7 @@
 
     function setSessionEnabledDirs(enabledDirs) {
       try {
-        const _tabId = window._webdlTabId || (window._webdlTabId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6));
-        const instanceId = (window.location.pathname === '/viewer' ? 'viewer' : 'gallery') + '_' + _tabId;
+        const instanceId = window.location.pathname === '/viewer' ? 'viewer' : 'gallery';
         if (enabledDirs == null) {
           sessionStorage.removeItem('gallery.enabledDirs.' + instanceId);
           return;
@@ -1301,16 +1333,18 @@
       card.appendChild(b2);
       card.appendChild(meta);
       
-      if (it.source_url) {
-        const srcBtn = document.createElement('button');
-        srcBtn.className = 'src-btn';
-        srcBtn.textContent = 'Source';
-        srcBtn.title = 'Open bron';
-        srcBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          window.open(it.source_url, '_blank');
-        });
-        card.appendChild(srcBtn);
+      { const srcUrl = it.source_url || it.url || '';
+        if (srcUrl && /^https?:\/\//i.test(srcUrl)) {
+          const srcBtn = document.createElement('button');
+          srcBtn.className = 'src-btn';
+          srcBtn.textContent = '🔗';
+          srcBtn.title = new URL(srcUrl).hostname;
+          srcBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            window.open(srcUrl, '_blank');
+          });
+          card.appendChild(srcBtn);
+        }
       }
       
       card.addEventListener('click', () => openModalByKey(key));
@@ -1451,16 +1485,18 @@
         card.appendChild(b2);
         card.appendChild(meta);
         
-        if (it.source_url) {
-          const srcBtn = document.createElement('button');
-          srcBtn.className = 'src-btn';
-          srcBtn.textContent = 'Source';
-          srcBtn.title = 'Open bron';
-          srcBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            window.open(it.source_url, '_blank');
-          });
-          card.appendChild(srcBtn);
+        { const srcUrl = it.source_url || it.url || '';
+          if (srcUrl && /^https?:\/\//i.test(srcUrl)) {
+            const srcBtn = document.createElement('button');
+            srcBtn.className = 'src-btn';
+            srcBtn.textContent = '🔗';
+            srcBtn.title = new URL(srcUrl).hostname;
+            srcBtn.addEventListener('click', (e) => {
+              e.stopPropagation();
+              window.open(srcUrl, '_blank');
+            });
+            card.appendChild(srcBtn);
+          }
         }
         
         card.addEventListener('click', () => openModalByKey(key));
@@ -1885,19 +1921,31 @@
           let path = '';
           const searchParam = state.search ? '&q=' + encodeURIComponent(state.search) : '';
           const dirsParam = state.enabledDirs ? '&dirs=' + encodeURIComponent(JSON.stringify(state.enabledDirs)) : '';
+          // Date period filter
+          let dateParam = '';
+          if (state.datePeriod) {
+            const now = new Date();
+            let from = '', to = '';
+            if (state.datePeriod === 'today') { from = now.toISOString().slice(0,10); }
+            else if (state.datePeriod === 'yesterday') { const y = new Date(now); y.setDate(y.getDate()-1); from = y.toISOString().slice(0,10); to = from; }
+            else if (state.datePeriod === 'custom') { from = state.dateFrom || ''; to = state.dateTo || ''; }
+            else { const m = parseInt(state.datePeriod); if (m > 0) { const d = new Date(now); d.setDate(d.getDate()-m); from = d.toISOString().slice(0,10); } }
+            if (from) dateParam += '&date_from=' + encodeURIComponent(from);
+            if (to) dateParam += '&date_to=' + encodeURIComponent(to);
+          }
           elSentinel.textContent = '📡 Aanvraag verzenden (limit=' + state.limit + ', filters=' + (state.enabledDirs ? state.enabledDirs.length : 'none') + ')...';
           const apiSort = state.sort === 'group_channel' ? 'recent' : (state.sort || 'recent');
           
           // Use dedicated search endpoint when searching (much faster)
           if (state.search && state.mode === 'recent') {
             const searchOffset = state.cursor ? (JSON.parse(atob(state.cursor)).rowOffset || 0) : 0;
-            path = '/api/media/search?q=' + encodeURIComponent(state.search) + '&limit=' + state.limit + '&offset=' + searchOffset + '&type=' + encodeURIComponent(state.filter) + '&sort=' + encodeURIComponent(apiSort) + dirsParam;
+            path = '/api/media/search?q=' + encodeURIComponent(state.search) + '&limit=' + state.limit + '&offset=' + searchOffset + '&type=' + encodeURIComponent(state.filter) + '&sort=' + encodeURIComponent(apiSort) + dirsParam + dateParam;
           } else if (state.mode === 'recent') {
-            path = '/api/media/recent-files?limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0&sort=' + encodeURIComponent(apiSort) + dirsParam + searchParam;
+            path = '/api/media/recent-files?limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0&sort=' + encodeURIComponent(apiSort) + dirsParam + searchParam + dateParam;
           } else {
              const ch = state.channel;
              if (!ch) { state.done = true; return; }
-             path = '/api/media/channel-files?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0&sort=' + encodeURIComponent(apiSort) + searchParam + dirsParam;
+             path = '/api/media/channel-files?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0&sort=' + encodeURIComponent(apiSort) + searchParam + dirsParam + dateParam;
           }
           
           const resp = await fetch(path);
@@ -2908,6 +2956,102 @@
     elMode.addEventListener('change', async () => { state.mode = elMode.value; await reloadAll(); });
     elFilter.addEventListener('change', async () => { state.filter = elFilter.value; await reloadAll(); });
     elSort.addEventListener('change', async () => { state.sort = elSort.value; await reloadAll(); });
+    // ═══ Date navigator logic ═══
+    const DAYS_NL = ['zo','ma','di','wo','do','vr','za'];
+    const MONTHS_NL = ['jan','feb','mrt','apr','mei','jun','jul','aug','sep','okt','nov','dec'];
+    function fmtDateNl(d) { return DAYS_NL[d.getDay()] + ' ' + d.getDate() + ' ' + MONTHS_NL[d.getMonth()]; }
+    function isoDate(d) { return d.toISOString().slice(0,10); }
+    function addDays(d, n) { const r = new Date(d); r.setDate(r.getDate()+n); return r; }
+    function startOfWeek(d) { const r = new Date(d); const day = r.getDay(); r.setDate(r.getDate() - ((day + 6) % 7)); r.setHours(0,0,0,0); return r; } // Monday
+    function getWeekendRange(d) { // sa-su containing or near d
+      const sat = new Date(d); const day = sat.getDay();
+      sat.setDate(sat.getDate() - ((day + 1) % 7)); // most recent Saturday
+      const sun = addDays(sat, 1);
+      return { from: sat, to: sun };
+    }
+
+    function applyDateNav() {
+      const mode = state.dateNavMode;
+      const anchor = state.dateNavAnchor || new Date();
+      let from = '', to = '', label = 'Alles';
+      if (mode === 'day') {
+        from = isoDate(anchor); to = from;
+        const today = new Date(); today.setHours(0,0,0,0);
+        const a = new Date(anchor); a.setHours(0,0,0,0);
+        const diff = Math.round((today - a) / 86400000);
+        if (diff === 0) label = '📅 Vandaag';
+        else if (diff === 1) label = '📅 Gisteren';
+        else label = '📅 ' + fmtDateNl(anchor);
+      } else if (mode === 'weekend') {
+        const we = getWeekendRange(anchor);
+        from = isoDate(we.from); to = isoDate(we.to);
+        const today = new Date(); today.setHours(0,0,0,0);
+        const thisWe = getWeekendRange(today);
+        if (isoDate(we.from) === isoDate(thisWe.from)) label = '🗓 Dit weekend';
+        else label = '🗓 WE ' + fmtDateNl(we.from);
+      } else if (mode === 'week') {
+        const mon = startOfWeek(anchor);
+        const sun = addDays(mon, 6);
+        from = isoDate(mon); to = isoDate(sun);
+        const thisMon = startOfWeek(new Date());
+        if (isoDate(mon) === isoDate(thisMon)) label = '🗓 Deze week';
+        else label = '🗓 ' + fmtDateNl(mon) + '–' + fmtDateNl(sun);
+      }
+      state.dateFrom = from;
+      state.dateTo = to;
+      state.datePeriod = from ? 'custom' : '';
+      if (elDnLabel) elDnLabel.textContent = label;
+      // Highlight active preset
+      if (elDateNav) {
+        for (const btn of elDateNav.querySelectorAll('.dn-preset')) btn.classList.remove('active');
+        if (!mode) document.getElementById('dnAll')?.classList.add('active');
+      }
+    }
+
+    function dateNavStep(delta) {
+      if (!state.dateNavMode) { state.dateNavMode = 'day'; state.dateNavAnchor = new Date(); }
+      const anchor = state.dateNavAnchor || new Date();
+      if (state.dateNavMode === 'day') {
+        state.dateNavAnchor = addDays(anchor, delta);
+      } else if (state.dateNavMode === 'weekend') {
+        state.dateNavAnchor = addDays(anchor, delta * 7);
+      } else if (state.dateNavMode === 'week') {
+        state.dateNavAnchor = addDays(anchor, delta * 7);
+      }
+      applyDateNav();
+      reloadAll();
+    }
+
+    if (elDnPrev) elDnPrev.addEventListener('click', () => dateNavStep(-1));
+    if (elDnNext) elDnNext.addEventListener('click', () => dateNavStep(1));
+    document.getElementById('dnAll')?.addEventListener('click', async () => {
+      state.dateNavMode = ''; state.dateNavAnchor = null;
+      applyDateNav(); await reloadAll();
+    });
+    document.getElementById('dnToday')?.addEventListener('click', async () => {
+      state.dateNavMode = 'day'; state.dateNavAnchor = new Date();
+      applyDateNav(); await reloadAll();
+    });
+    document.getElementById('dnYesterday')?.addEventListener('click', async () => {
+      state.dateNavMode = 'day'; state.dateNavAnchor = addDays(new Date(), -1);
+      applyDateNav(); await reloadAll();
+    });
+    document.getElementById('dnWeekend')?.addEventListener('click', async () => {
+      state.dateNavMode = 'weekend'; state.dateNavAnchor = new Date();
+      applyDateNav(); await reloadAll();
+    });
+    document.getElementById('dnPrevWeekend')?.addEventListener('click', async () => {
+      state.dateNavMode = 'weekend'; state.dateNavAnchor = addDays(new Date(), -7);
+      applyDateNav(); await reloadAll();
+    });
+    document.getElementById('dnWeek')?.addEventListener('click', async () => {
+      state.dateNavMode = 'week'; state.dateNavAnchor = new Date();
+      applyDateNav(); await reloadAll();
+    });
+    document.getElementById('dnPrevWeek')?.addEventListener('click', async () => {
+      state.dateNavMode = 'week'; state.dateNavAnchor = addDays(new Date(), -7);
+      applyDateNav(); await reloadAll();
+    });
     elChannelSel.addEventListener('change', async () => {
       const parts = String(elChannelSel.value || '').split('||');
       if (parts.length === 2) state.channel = { platform: parts[0], channel: parts[1] };
