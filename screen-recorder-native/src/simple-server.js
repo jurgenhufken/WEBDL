@@ -13659,7 +13659,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
   }
 
   const canUseFastPath = !searchQuery && !includeActive && !includeActiveFiles 
-    && (sort === 'recent' || sort === 'oldest' || sort === 'group_channel')
+    && (sort === 'recent' || sort === 'oldest' || sort === 'group_channel' || sort === 'random')
     && (!enabledDirs || enabledDirs.length === 0 || fastPathPlatforms)
     && (!cursorRaw || (cur && !cur.dir && cur.fileIndex === 0));
   
@@ -13673,7 +13673,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
       return res.json(cached);
     }
     try {
-      const orderBy = sort === 'oldest' ? 'ts ASC NULLS LAST' : 'ts DESC NULLS LAST';
+      const orderBy = sort === 'oldest' ? 'ts ASC NULLS LAST' : (sort === 'random' ? 'RANDOM()' : 'ts DESC NULLS LAST');
       // inferMediaType no longer does sync I/O for directories (fast heuristic),
       // so we can safely include directory-based downloads (pornpics, gallery-dl)
       let typeClause = '';
@@ -13691,15 +13691,17 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
         // already limits the result set, and the ID window would miss older items
         idWindowClause = '';
       }
-      // If we specifically requested the oldest items, disable the ID window limitation
-      // otherwise it just returns the oldest of the newest 50000 items
-      if (sort === 'oldest') { idWindowClause = ''; }
+      // If we specifically requested the oldest items, or random items, disable the ID limitation.
+      // TABLESAMPLE handles random scan speed optimizations natively across the entire table.
+      if (sort === 'oldest' || sort === 'random') { idWindowClause = ''; }
 
       const sqlStart = Date.now();
       const rowOffset = cur.rowOffset || 0;
       // Fast query using idx_downloads_gallery_ts index (~9ms)
       const stmtName = `gallery_fast_${type || 'media'}_${sort || 'newest'}_${platKey}_${dateFrom}_${dateTo}${rowOffset > 0 ? '_paged' : ''}`;
       
+      const targetTableClause = sort === 'random' ? 'downloads d TABLESAMPLE SYSTEM(10)' : 'downloads d';
+
       // When platform-filtering, use UNION ALL to show individual files (kind='p')
       // from download_files alongside download-level items (kind='d').
       // This ensures platforms like pornpics show every individual image as a separate card.
@@ -13716,7 +13718,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
             d.thumbnail, d.url, d.source_url, d.rating,
             'd' AS rating_kind, d.id AS rating_id,
             (SELECT df2.relpath FROM download_files df2 WHERE df2.download_id = d.id ORDER BY df2.relpath LIMIT 1) AS first_file
-          FROM downloads d
+          FROM ${targetTableClause}
           WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
             AND d.filepath IS NOT NULL AND d.filepath != ''
             AND d.is_thumb_ready = true
@@ -13736,7 +13738,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
             'd' AS rating_kind, d.id AS rating_id,
             df.relpath AS first_file
           FROM download_files df
-          JOIN downloads d ON d.id = df.download_id
+          JOIN ${targetTableClause} ON d.id = df.download_id
           WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
             AND d.filepath IS NOT NULL AND d.filepath != ''
             ${platformClause}
@@ -13757,7 +13759,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
             d.thumbnail, d.url, d.source_url, d.rating,
             'd' AS rating_kind, d.id AS rating_id,
             (SELECT df.relpath FROM download_files df WHERE df.download_id = d.id ORDER BY df.relpath LIMIT 1) AS first_file
-          FROM downloads d
+          FROM ${targetTableClause}
           WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
             AND d.filepath IS NOT NULL AND d.filepath != ''
             AND d.is_thumb_ready = true
