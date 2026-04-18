@@ -1789,7 +1789,8 @@
       if (state.currentIndex < 0) return;
       
       // If random mode is on and we want the next item, jump infinitely within the selection
-      if (state.random && delta > 0 && state.items.length > 1) {
+      // Applies to both forward (delta > 0) and backward (delta < 0, via left arrow)
+      if (state.random && delta !== 0 && state.items.length > 1) {
         // Occasionally load more items into the pool so the random selection stays fresh
         if (!state.done && Math.random() < 0.2) {
           loadNext().catch(() => {});
