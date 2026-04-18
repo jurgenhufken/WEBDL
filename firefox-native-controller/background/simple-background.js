@@ -9,8 +9,8 @@ const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 const HTTP_STATUS_PROBE_INTERVAL_MS = 4000;
 const HTTP_TIMEOUT_MS = 6000;
-const PROBE_FAILURES_BEFORE_DISCONNECT = 3;
-const PROBE_DISCONNECT_GRACE_MS = 90000;
+const PROBE_FAILURES_BEFORE_DISCONNECT = 2; // Reduced so it detects faster
+const PROBE_DISCONNECT_GRACE_MS = 12000; // Drop after 12s of no heartbeat
 const SOCKET_ENABLED = false;
 const BACKGROUND_BUILD = 'simple-background-2026-02-27-02-29';
 
@@ -115,7 +115,7 @@ async function probeServerStatus(source = 'probe') {
   const error = health && health.error ? health.error : 'Health probe mislukt';
   const lastOkAgo = lastHeartbeatAt ? (Date.now() - lastHeartbeatAt) : Number.POSITIVE_INFINITY;
   const shouldDisconnect = consecutiveProbeFailures >= PROBE_FAILURES_BEFORE_DISCONNECT && lastOkAgo > PROBE_DISCONNECT_GRACE_MS;
-  if (shouldDisconnect && SOCKET_ENABLED) {
+  if (shouldDisconnect) {
     setConnectedState(false);
   }
   const errText = String(error || '').toLowerCase();
