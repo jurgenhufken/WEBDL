@@ -13423,9 +13423,19 @@ async function performRawFilesystemScan(enabledDirs, searchQuery, typeFilter, so
 
   const fileStats = [];
   for (const fp of allRawPaths) {
-    try { const st = await fs.promises.stat(fp); fileStats.push({ fp: fp, ts: st.mtimeMs }); } catch(e) {}
+    try { 
+      const st = await fs.promises.stat(fp); 
+      // Use birthtime (creation) if possible, fallback to mtime
+      fileStats.push({ fp: fp, ts: st.birthtimeMs || st.mtimeMs }); 
+    } catch(e) {}
   }
-  fileStats.sort(function(a, b) { return sort === 'oldest' ? a.ts - b.ts : b.ts - a.ts; });
+  fileStats.sort(function(a, b) { 
+    const diff = sort === 'oldest' ? a.ts - b.ts : b.ts - a.ts;
+    if (diff !== 0) return diff;
+    // Fallback to alphabetical sort if timestamps are completely identical
+    // so oldest vs newest always correctly reverses the results
+    return sort === 'oldest' ? a.fp.localeCompare(b.fp) : b.fp.localeCompare(a.fp);
+  });
 
   const pageOffset = cur ? (cur.rowOffset || 0) : 0;
   const pageSlice = fileStats.slice(pageOffset, pageOffset + limit);
@@ -13681,6 +13691,9 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
         // already limits the result set, and the ID window would miss older items
         idWindowClause = '';
       }
+      // If we specifically requested the oldest items, disable the ID window limitation
+      // otherwise it just returns the oldest of the newest 50000 items
+      if (sort === 'oldest') { idWindowClause = ''; }
 
       const sqlStart = Date.now();
       const rowOffset = cur.rowOffset || 0;
