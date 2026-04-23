@@ -13883,6 +13883,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
         ORDER BY ${orderBy}
                   LIMIT ${Math.max(limit * 50, 15000)} OFFSET ${rowOffset}
       ` : `
+        SELECT * FROM (
           SELECT
             'd' AS kind,
             d.id::text AS id,
@@ -13901,6 +13902,21 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
             ${typeClause}
             ${dateFrom ? `AND COALESCE(d.finished_at, d.updated_at, d.created_at) >= '${dateFrom.replace(/[^0-9-]/g,'')}'::date` : ''}
             ${dateTo ? `AND COALESCE(d.finished_at, d.updated_at, d.created_at) < ('${dateTo.replace(/[^0-9-]/g,'')}'::date + INTERVAL '1 day')` : ''}
+          UNION ALL
+          SELECT
+            's' AS kind,
+            s.id::text AS id,
+            s.platform, s.channel, s.title, s.filepath,
+            s.created_at::text AS created_at,
+            COALESCE(s.ts_ms, EXTRACT(EPOCH FROM s.created_at)::bigint * 1000) AS ts,
+            NULL AS thumbnail, s.url, NULL AS source_url, s.rating,
+            's' AS rating_kind, s.id AS rating_id,
+            NULL AS first_file
+          FROM screenshots s
+          WHERE s.filepath IS NOT NULL AND s.filepath != ''
+            ${dateFrom ? `AND s.created_at >= '${dateFrom.replace(/[^0-9-]/g,'')}'::date` : ''}
+            ${dateTo ? `AND s.created_at < ('${dateTo.replace(/[^0-9-]/g,'')}'::date + INTERVAL '1 day')` : ''}
+        ) combined
           ORDER BY ${orderBy}
           LIMIT ${Math.max(limit * 50, 15000)} OFFSET ${rowOffset}
       `;
