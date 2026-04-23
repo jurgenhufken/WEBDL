@@ -1154,10 +1154,18 @@
 
     function fmtItemSub(it) {
       if (!it) return '';
-      const src = it.src ? ' - ' + it.src.split('/').pop() : '';
       const origin = it.origin_url ? ' (' + new URL(it.origin_url).hostname + ')' : '';
       const channelText = it.channel_display || it.channel || '-';
-      return (it.platform || '-') + ' | ' + channelText + ' | ' + (it.type || '-') + ' | ' + (it.created_at || '-') + origin + src;
+      // Show filename from file_rel path if available
+      let fname = '';
+      try {
+        if (it.file_rel) fname = it.file_rel.split('/').pop();
+        else if (it.src) fname = decodeURIComponent(it.src.split('/').pop().split('?')[0]);
+      } catch(e) {}
+      const parts = [(it.platform || '-'), channelText, (it.type || '-')];
+      if (fname) parts.push(fname);
+      if (it.created_at) parts.push(it.created_at);
+      return parts.join(' │ ') + origin;
     }
 
     function syncZoomUi() {

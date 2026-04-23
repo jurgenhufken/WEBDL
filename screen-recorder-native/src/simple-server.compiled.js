@@ -15005,11 +15005,20 @@ async function startServer() {
     }
   });
 
-  server.listen(PORT, () => {
+  server.listen(PORT, async () => {
     console.log(`\n🟢 WEBDL Server draait op http://localhost:${PORT}`);
     console.log(`📁 Bestanden: ${BASE_DIR}`);
     console.log(`🗄️  DB engine: ${db && db.engine ? db.engine : 'unknown'}`);
     console.log(`🗄️  DB target: ${db && db.isPostgres ? DATABASE_URL : DB_PATH}`);
+    // Fix 5: Reset stuck downloads from previous crash
+    try {
+      const stuck = await (db.readPool || db.pool).query(
+        "UPDATE downloads SET status = 'pending', progress = 0 WHERE status = 'downloading' RETURNING id"
+      );
+      if (stuck.rows.length > 0) {
+        console.log(`🔄 ${stuck.rows.length} vastzittende downloads gereset naar pending`);
+      }
+    } catch (e) { console.warn('Stuck recovery failed:', e.message); }
     console.log(`\nEndpoints:`);
     console.log(`  GET  /status          - Server status`);
     console.log(`  GET  /dashboard       - Web dashboard`);
