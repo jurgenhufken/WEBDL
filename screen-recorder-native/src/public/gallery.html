@@ -1586,12 +1586,14 @@
         el.playbackRate = state.playbackSpeed;
         state.currentMediaEl = el;
         const source = document.createElement('source');
-        source.src = it.src;
-        const ext = (it.src || '').match(/\.(mp4|webm|mov|m4v|mkv|avi)(?:[?#]|$)/i);
-        const rawExt = ext && ext[1] ? ext[1].toLowerCase() : 'mp4';
-        // Map container extensions to valid MIME types
-        const mimeMap = { mp4: 'video/mp4', webm: 'video/webm', mov: 'video/mp4', m4v: 'video/mp4', mkv: 'video/mp4', avi: 'video/mp4' };
-        source.type = mimeMap[rawExt] || 'video/mp4';
+        // Use /media/stream endpoint — transcodes AV1→H.264 on the fly for smooth playback
+        const streamSrc = it.src.includes('/media/path?')
+          ? it.src.replace('/media/path?', '/media/stream?')
+          : it.src.includes('/media/file?')
+            ? it.src.replace('/media/file?', '/media/stream?')
+            : '/media/stream?kind=' + encodeURIComponent(it.open && it.open.kind || 'd') + '&id=' + encodeURIComponent(it.open && it.open.id || it.id);
+        source.src = streamSrc;
+        source.type = 'video/mp4';
         el.appendChild(source);
         el.addEventListener('volumechange', () => {
           state.volume = el.volume;

@@ -5456,6 +5456,104 @@ expressApp.get('/media/path', (req, res) => {
   });
 });
 
+// Streaming transcoder for AV1 → H.264 (M1 has no hardware AV1 decode)
+const _streamCodecCache = new Map(); // filepath → codec_name
+expressApp.get('/media/stream', async (req, res) => {
+  try {
+    let abs = '';
+    const rel = String(req.query.path || '').trim();
+    const kind = String(req.query.kind || '').trim();
+    const id = parseInt(req.query.id, 10);
+    if (rel) {
+      abs = safeResolveMediaRelPath(rel);
+    } else if (kind === 'd' && Number.isFinite(id)) {
+      try {
+        const row = await getDownload.get(id);
+        if (row && row.filepath) abs = String(row.filepath).trim();
+      } catch (e) {}
+    }
+    if (!abs || !safeIsAllowedExistingPath(abs)) return res.status(404).end();
+    const ext = String(path.extname(abs)).toLowerCase();
+    const videoExts = new Set(['.mp4', '.mkv', '.webm', '.mov', '.m4v', '.avi']);
+    if (!videoExts.has(ext)) {
+      // Not a video — just serve directly
+      return res.sendFile(abs);
+    }
+
+    // Probe codec (cached)
+    let codec = _streamCodecCache.get(abs);
+    if (!codec) {
+      try {
+        const probeResult = require('child_process').execSync(
+          `ffprobe -v quiet -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "${abs.replace(/"/g, '\\"')}"`,
+          { timeout: 5000, encoding: 'utf8' }
+        ).trim().split('\n')[0].trim();
+        codec = probeResult || 'unknown';
+        _streamCodecCache.set(abs, codec);
+        // Limit cache size
+        if (_streamCodecCache.size > 500) {
+          const first = _streamCodecCache.keys().next().value;
+          _streamCodecCache.delete(first);
+        }
+      } catch (e) {
+        codec = 'unknown';
+      }
+    }
+
+    // If not AV1, serve directly (browser can handle H.264/VP9 fine)
+    if (codec !== 'av1') {
+      res.setHeader('Cache-Control', 'no-store');
+      if (ext === '.mkv' || ext === '.mov' || ext === '.m4v') {
+        res.setHeader('Content-Type', 'video/mp4');
+      }
+      return res.sendFile(abs, (err) => {
+        if (!err) return;
+        if (res.headersSent) return;
+        res.status(err.code === 'ENOENT' ? 404 : 500).end();
+      });
+    }
+
+    // AV1 detected — transcode to H.264 on the fly
+    console.log(`[stream] Transcoding AV1→H.264: ${path.basename(abs)}`);
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Transfer-Encoding', 'chunked');
+
+    const ffmpeg = require('child_process').spawn('ffmpeg', [
+      '-i', abs,
+      '-c:v', 'libx264',
+      '-preset', 'ultrafast',
+      '-crf', '23',
+      '-vf', 'scale=min(1280\\,iw):-2',  // Cap at 720p width for smooth playback
+      '-c:a', 'aac',
+      '-b:a', '128k',
+      '-movflags', 'frag_keyframe+empty_moov+faststart',
+      '-f', 'mp4',
+      'pipe:1'
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+    ffmpeg.stdout.pipe(res);
+    ffmpeg.stderr.on('data', () => {}); // Suppress stderr
+
+    req.on('close', () => {
+      try { ffmpeg.kill('SIGTERM'); } catch (e) {}
+    });
+    res.on('close', () => {
+      try { ffmpeg.kill('SIGTERM'); } catch (e) {}
+    });
+    ffmpeg.on('error', () => {
+      if (!res.headersSent) res.status(500).end();
+    });
+    ffmpeg.on('exit', () => {
+      try { res.end(); } catch (e) {}
+    });
+  } catch (e) {
+    console.error('[stream] Error:', e.message);
+    if (!res.headersSent) res.status(500).end();
+  }
+});
+
+
 expressApp.get('/media/path-thumb', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   (async () => {
