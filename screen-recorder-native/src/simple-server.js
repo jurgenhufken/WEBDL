@@ -5478,9 +5478,17 @@ expressApp.get('/media/stream', async (req, res) => {
     const id = parseInt(req.query.id, 10);
     if (rel) {
       abs = safeResolveMediaRelPath(rel);
+    } else if (kind === 'p') {
+      const pRel = String(req.query.id || '').trim();
+      if (pRel) abs = safeResolveMediaRelPath(pRel);
     } else if (kind === 'd' && Number.isFinite(id)) {
       try {
         const row = await getDownload.get(id);
+        if (row && row.filepath) abs = String(row.filepath).trim();
+      } catch (e) {}
+    } else if (kind === 's' && Number.isFinite(id)) {
+      try {
+        const row = await db.prepare(`SELECT * FROM screenshots WHERE id=?`).get(id);
         if (row && row.filepath) abs = String(row.filepath).trim();
       } catch (e) {}
     }
@@ -8858,26 +8866,7 @@ expressApp.post('/download', async (req, res) => {
             console.log(`   📸 Thumbnail generatie getriggerd voor bestaand bestand`);
             scheduleThumbGeneration(existing.filepath);
           }
-        } catch (e) {
-          console.log(`   ⚠️  Duplicate handling fout: ${e.message}`);
-        }
-        // Bump gallery_bumped_at so this download (and siblings from the same thread/batch)
-        // appear at the top of the gallery without re-downloading.
-        // Original finished_at is preserved.
-        try {
-          const bumpTitle = existing.title || title;
-          const bumpPlatform = existing.platform || platform;
-          if (bumpTitle && bumpPlatform) {
-            const bumpRes = await (db.readPool || db.pool).query(
-              "UPDATE downloads SET gallery_bumped_at = NOW() WHERE platform = $1 AND title = $2 AND status = 'completed' AND (gallery_bumped_at IS NULL OR gallery_bumped_at < NOW() - INTERVAL '1 minute')",
-              [bumpPlatform, bumpTitle]
-            );
-            const bumped = bumpRes.rowCount || 0;
-            if (bumped > 0) console.log(`   ⬆️  ${bumped} bestaande items naar boven in gallery (bump)`);
-          }
-        } catch (e) {
-          console.log(`   ⚠️  Bump fout: ${e.message}`);
-        }
+
         return res.json({
           success: true,
           downloadId: Number(existing.id),
@@ -13958,7 +13947,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
             df.relpath AS id,
             d.platform, d.channel, d.title, d.filepath,
             d.created_at::text AS created_at,
-            (COALESCE(EXTRACT(EPOCH FROM d.gallery_bumped_at)::bigint * 1000, df.mtime_ms, EXTRACT(EPOCH FROM COALESCE((d.finished_at AT TIME ZONE 'Europe/Amsterdam'), (d.updated_at AT TIME ZONE 'Europe/Amsterdam'), (d.created_at AT TIME ZONE 'Europe/Amsterdam')))::bigint * 1000)) AS ts,
+            (COALESCE(EXTRACT(EPOCH FROM d.gallery_bumped_at)::bigint * 1000, CASE WHEN d.platform = '4kdownloader' THEN df.mtime_ms ELSE NULL END, EXTRACT(EPOCH FROM COALESCE((d.finished_at AT TIME ZONE 'Europe/Amsterdam'), (d.updated_at AT TIME ZONE 'Europe/Amsterdam'), (d.created_at AT TIME ZONE 'Europe/Amsterdam')))::bigint * 1000)) AS ts,
             d.thumbnail, d.url, d.source_url, d.rating,
             'd' AS rating_kind, d.id AS rating_id,
             df.relpath AS first_file

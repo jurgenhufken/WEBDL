@@ -202,6 +202,7 @@
       <button class="qf-btn" data-qf="4kdownloader"><span class="qf-icon">📦</span>4K Downloader</button>
       <button class="qf-btn" data-qf="videodownloadhelper"><span class="qf-icon">🔧</span>VDH</button>
       <button class="qf-btn" data-qf="pornpics"><span class="qf-icon">📸</span>PornPics</button>
+      <button class="qf-btn" data-qf="sandals"><span class="qf-icon">👡</span>Sandals</button>
       <button class="qf-btn" data-qf="footfetishforum"><span class="qf-icon">🦶</span>FFF</button>
       <button class="qf-btn" data-qf="reddit"><span class="qf-icon">🤖</span>Reddit</button>
       <button class="qf-btn" data-qf="elitebabes"><span class="qf-icon">👑</span>EliteBabes</button>
@@ -2292,6 +2293,14 @@
           setSessionEnabledDirs(null);
           if (elSearch) elSearch.value = 'recording_';
           state.search = 'recording_';
+        } else if (qf === 'pornpics') {
+          state.enabledDirs = [{ platform: 'pornpics', channels: [] }];
+          setSessionEnabledDirs(state.enabledDirs);
+          state.search = ''; elInpSearch.value = '';
+        } else if (qf === 'sandals') {
+          state.enabledDirs = [{ platform: 'pornpics', channels: [] }];
+          setSessionEnabledDirs(state.enabledDirs);
+          state.search = 'sandals'; elInpSearch.value = 'sandals';
         } else {
           state.enabledDirs = [{ platform: qf, channels: [] }];
           setSessionEnabledDirs(state.enabledDirs);
