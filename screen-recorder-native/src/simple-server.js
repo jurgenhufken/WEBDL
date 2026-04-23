@@ -8866,6 +8866,9 @@ expressApp.post('/download', async (req, res) => {
             console.log(`   📸 Thumbnail generatie getriggerd voor bestaand bestand`);
             scheduleThumbGeneration(existing.filepath);
           }
+        } catch (e) {
+          console.log(`   ⚠️  Duplicate handling fout: ${e.message}`);
+        }
 
         return res.json({
           success: true,
@@ -13929,7 +13932,12 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
             d.id::text AS id,
             d.platform, d.channel, d.title, d.filepath,
             d.created_at::text AS created_at,
-            EXTRACT(EPOCH FROM COALESCE(d.gallery_bumped_at, (d.finished_at AT TIME ZONE 'Europe/Amsterdam'), (d.updated_at AT TIME ZONE 'Europe/Amsterdam'), (d.created_at AT TIME ZONE 'Europe/Amsterdam')))::bigint * 1000 AS ts,
+            (COALESCE(
+              EXTRACT(EPOCH FROM d.gallery_bumped_at)::bigint * 1000,
+              CASE WHEN d.platform != 'pornpics' THEN d.ts_ms ELSE NULL END,
+              CASE WHEN d.platform != 'pornpics' THEN (SELECT MAX(df3.mtime_ms) FROM download_files df3 WHERE df3.download_id = d.id AND df3.mtime_ms > 0) ELSE NULL END,
+              EXTRACT(EPOCH FROM COALESCE((d.finished_at AT TIME ZONE 'Europe/Amsterdam'), (d.updated_at AT TIME ZONE 'Europe/Amsterdam'), (d.created_at AT TIME ZONE 'Europe/Amsterdam')))::bigint * 1000
+            )) AS ts,
             d.thumbnail, d.url, d.source_url, d.rating,
             'd' AS rating_kind, d.id AS rating_id,
             (SELECT df2.relpath FROM download_files df2 WHERE df2.download_id = d.id ORDER BY df2.relpath LIMIT 1) AS first_file
@@ -13947,7 +13955,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
             df.relpath AS id,
             d.platform, d.channel, d.title, d.filepath,
             d.created_at::text AS created_at,
-            (COALESCE(EXTRACT(EPOCH FROM d.gallery_bumped_at)::bigint * 1000, CASE WHEN d.platform = '4kdownloader' THEN df.mtime_ms ELSE NULL END, EXTRACT(EPOCH FROM COALESCE((d.finished_at AT TIME ZONE 'Europe/Amsterdam'), (d.updated_at AT TIME ZONE 'Europe/Amsterdam'), (d.created_at AT TIME ZONE 'Europe/Amsterdam')))::bigint * 1000)) AS ts,
+            (COALESCE(EXTRACT(EPOCH FROM d.gallery_bumped_at)::bigint * 1000, CASE WHEN d.platform != 'pornpics' THEN df.mtime_ms ELSE NULL END, EXTRACT(EPOCH FROM COALESCE((d.finished_at AT TIME ZONE 'Europe/Amsterdam'), (d.updated_at AT TIME ZONE 'Europe/Amsterdam'), (d.created_at AT TIME ZONE 'Europe/Amsterdam')))::bigint * 1000)) AS ts,
             d.thumbnail, d.url, d.source_url, d.rating,
             'd' AS rating_kind, d.id AS rating_id,
             df.relpath AS first_file
@@ -13970,7 +13978,12 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
             d.id::text AS id,
             d.platform, d.channel, d.title, d.filepath,
             d.created_at::text AS created_at,
-            EXTRACT(EPOCH FROM COALESCE(d.gallery_bumped_at, (d.finished_at AT TIME ZONE 'Europe/Amsterdam'), (d.updated_at AT TIME ZONE 'Europe/Amsterdam'), (d.created_at AT TIME ZONE 'Europe/Amsterdam')))::bigint * 1000 AS ts,
+            (COALESCE(
+              EXTRACT(EPOCH FROM d.gallery_bumped_at)::bigint * 1000,
+              CASE WHEN d.platform != 'pornpics' THEN d.ts_ms ELSE NULL END,
+              CASE WHEN d.platform != 'pornpics' THEN (SELECT MAX(df3.mtime_ms) FROM download_files df3 WHERE df3.download_id = d.id AND df3.mtime_ms > 0) ELSE NULL END,
+              EXTRACT(EPOCH FROM COALESCE((d.finished_at AT TIME ZONE 'Europe/Amsterdam'), (d.updated_at AT TIME ZONE 'Europe/Amsterdam'), (d.created_at AT TIME ZONE 'Europe/Amsterdam')))::bigint * 1000
+            )) AS ts,
             d.thumbnail, d.url, d.source_url, d.rating,
             'd' AS rating_kind, d.id AS rating_id,
             (SELECT df.relpath FROM download_files df WHERE df.download_id = d.id ORDER BY df.relpath LIMIT 1) AS first_file
