@@ -8423,7 +8423,7 @@ expressApp.post('/stop-recording', (req, res) => {
 
   // Guard against duplicate stop handling
   if (session._stopHandled) {
-    return res.json({ success: false, error: 'Stop al in uitvoering' });
+    return res.json({ success: true, action: 'stop-recording', message: 'Stop in uitvoering' });
   }
   session._stopHandled = true;
 
@@ -8621,7 +8621,15 @@ expressApp.post('/download', async (req, res) => {
   const forceDuplicates = force === true;
 
   const metaPlatform = metadata && typeof metadata.platform === 'string' ? metadata.platform : null;
-  const effectiveUrl = String(url || '');
+  let effectiveUrl = String(url || '');
+  // Fix broken redd.it preview slug URLs: redd.it/<title>-v0-<id>.ext → i.redd.it/<id>.ext
+  try {
+    const _ru = new URL(effectiveUrl);
+    if (_ru.hostname === 'redd.it' || _ru.hostname.endsWith('.redd.it')) {
+      const _rm = _ru.pathname.match(/-v0-([a-z0-9]+\.[a-z]{2,5})$/i);
+      if (_rm) effectiveUrl = `https://i.redd.it/${_rm[1]}`;
+    }
+  } catch (e) {}
   const isOnlyFansProfileUrl = /onlyfans\.com\//i.test(effectiveUrl) && !/onlyfans\.com\/[^\/\?#]+\/posts\//i.test(effectiveUrl);
 
   const isProfileUrl = (u) => {
@@ -9649,6 +9657,14 @@ function upgradeKnownLowQualityMediaUrl(rawUrl) {
       const u = new URL(out);
       const host = String(u.hostname || '').toLowerCase();
       const p = String(u.pathname || '');
+      // Fix broken redd.it preview slug URLs: redd.it/<title>-v0-<id>.ext → i.redd.it/<id>.ext
+      if (host === 'redd.it' || host.endsWith('.redd.it')) {
+        const rm = p.match(/-v0-([a-z0-9]+\.[a-z]{2,5})$/i);
+        if (rm) {
+          out = `https://i.redd.it/${rm[1]}`;
+          return out;
+        }
+      }
       if ((host === 'upload.footfetishforum.com' || host.endsWith('.footfetishforum.com')) && /\/images\//i.test(p)) {
         u.pathname = p
           .replace(/\.md\.(jpg|jpeg|png|gif|webp)(?:$|[?#])/i, '.$1')
@@ -13696,7 +13712,9 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
       if (sort === 'oldest' || sort === 'random') { idWindowClause = ''; }
 
       const sqlStart = Date.now();
-      const rowOffset = cur.rowOffset || 0;
+      // For random, we always pull a fresh page 0 because TABLESAMPLE dynamically shuffles.
+      // E.g. OFFSET 15000 on a 10% sample of a 100k DB would yield 0 rows on page 2!
+      const rowOffset = sort === 'random' ? 0 : (cur.rowOffset || 0);
       // Fast query using idx_downloads_gallery_ts index (~9ms)
       const stmtName = `gallery_fast_${type || 'media'}_${sort || 'newest'}_${platKey}_${dateFrom}_${dateTo}${rowOffset > 0 ? '_paged' : ''}`;
       
@@ -15126,18 +15144,28 @@ async function startServer() {
           JSON.stringify({ webdl_kind: 'imported_video', importer: '4k-watcher', source_platform: realPlatform, source_url: sourceUrl || null })
         );
 
-        // Set source_url after insert
-        if (sourceUrl) {
-          try {
-            const ins = await getDownloadIdByFilepath.get(absPath);
-            if (ins && ins.id) {
-              const q = db.isPostgres
+        // Use file mtime as timestamp so imports don't flood the gallery with today's date
+        try {
+          const ins = await getDownloadIdByFilepath.get(absPath);
+          if (ins && ins.id) {
+            const fileMtime = new Date(st.mtimeMs || Date.now()).toISOString();
+            const tsQ = db.isPostgres
+              ? 'UPDATE downloads SET created_at = $1, updated_at = $1, finished_at = $1 WHERE id = $2'
+              : 'UPDATE downloads SET created_at = ?, updated_at = ?, finished_at = ? WHERE id = ?';
+            if (db.isPostgres) {
+              await db.prepare(tsQ).run(fileMtime, ins.id);
+            } else {
+              await db.prepare(tsQ).run(fileMtime, fileMtime, fileMtime, ins.id);
+            }
+            // Set source_url
+            if (sourceUrl) {
+              const srcQ = db.isPostgres
                 ? 'UPDATE downloads SET source_url = $1 WHERE id = $2'
                 : 'UPDATE downloads SET source_url = ? WHERE id = ?';
-              await db.prepare(q).run(sourceUrl, ins.id);
+              await db.prepare(srcQ).run(sourceUrl, ins.id);
             }
-          } catch (e) {}
-        }
+          }
+        } catch (e) {}
 
         console.log(`📥 [4K-Watcher] ${platform}/${channel}/${path.basename(absPath)}${sourceUrl ? ' ← ' + sourceUrl : ''}`);
         recentFilesTopCache.clear();
@@ -15253,41 +15281,47 @@ function shutdownGracefully(signal) {
 
   console.log(`\nServer wordt afgesloten... (${signal})`);
 
-  const stopRecordingIfAny = () => new Promise((resolve) => {
-    try {
-      const proc = recordingProcess;
-      if (!proc) return resolve();
+  const stopRecordings = () => {
+    const promises = [];
+    for (const session of activeRecordings.values()) {
+      promises.push(new Promise((resolve) => {
+        try {
+          const proc = session.recordingProcess;
+          if (!proc || proc.killed) return resolve();
 
-      let done = false;
-      const finish = () => {
-        if (done) return;
-        done = true;
-        resolve();
-      };
+          let done = false;
+          const finish = () => {
+            if (done) return;
+            done = true;
+            resolve();
+          };
 
-      proc.once('close', finish);
-      proc.once('error', finish);
+          proc.once('close', finish);
+          proc.once('error', finish);
 
-      try {
-        proc.stdin.write('q\n');
-        proc.stdin.end();
-      } catch (e) {
-        try { proc.kill('SIGINT'); } catch (err) { }
-      }
+          try {
+            proc.stdin.write('q\n');
+            proc.stdin.end();
+          } catch (e) {
+            try { proc.kill('SIGINT'); } catch (err) { }
+          }
 
-      setTimeout(() => {
-        if (done) return;
-        try { proc.kill('SIGINT'); } catch (e) { }
-        setTimeout(() => {
-          if (done) return;
-          try { proc.kill('SIGKILL'); } catch (e) { }
-          finish();
-        }, 2500);
-      }, 8000);
-    } catch (e) {
-      resolve();
+          setTimeout(() => {
+            if (done) return;
+            try { proc.kill('SIGINT'); } catch (e) { }
+            setTimeout(() => {
+              if (done) return;
+              try { proc.kill('SIGKILL'); } catch (e) { }
+              finish();
+            }, 2500);
+          }, 4000);
+        } catch (e) {
+          resolve();
+        }
+      }));
     }
-  });
+    return Promise.all(promises);
+  };
 
   stopRecordingIfAny().finally(() => {
     for (const [id, proc] of activeProcesses) {
