@@ -2298,8 +2298,8 @@
           setSessionEnabledDirs(state.enabledDirs);
           state.search = ''; elInpSearch.value = '';
         } else if (qf === 'sandals') {
-          state.enabledDirs = [{ platform: 'pornpics', channels: [] }];
-          setSessionEnabledDirs(state.enabledDirs);
+          state.enabledDirs = null;
+          setSessionEnabledDirs(null);
           state.search = 'sandals'; elInpSearch.value = 'sandals';
         } else {
           state.enabledDirs = [{ platform: qf, channels: [] }];
