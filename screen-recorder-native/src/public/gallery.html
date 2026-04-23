@@ -117,6 +117,22 @@
     .queue-pct-badge.postprocessing { color:#ff8c00; border-color:rgba(255,140,0,0.4); font-size:10px; font-weight:800; padding:2px 6px; }
     @keyframes pulseOrange { 0% { opacity: 0.7; } 50% { opacity: 1; box-shadow: 0 0 14px rgba(255,140,0,0.9); } 100% { opacity: 0.7; } }
     @keyframes barberPole { 0% { background-position: 0 0; } 100% { background-position: 30px 0; } }
+
+    /* Quick-filter bar */
+    .quick-filters {
+      display: flex; gap: 6px; padding: 6px 16px; background: #0a0e1a;
+      border-bottom: 1px solid #1a1f35; overflow-x: auto; -webkit-overflow-scrolling: touch;
+      scrollbar-width: none; align-items: center; flex-wrap: nowrap;
+    }
+    .quick-filters::-webkit-scrollbar { display: none; }
+    .qf-btn {
+      flex-shrink: 0; padding: 5px 14px; border-radius: 20px; border: 1px solid #2a3055;
+      background: #141830; color: #8a94b8; font-size: 12px; font-weight: 600;
+      cursor: pointer; transition: all 0.15s ease; white-space: nowrap; user-select: none;
+    }
+    .qf-btn:hover { background: #1e2548; color: #c4caf0; border-color: #3a4575; }
+    .qf-btn.active { background: #1a3a6a; color: #5daaff; border-color: #2a6ac4; box-shadow: 0 0 8px rgba(45,120,220,0.25); }
+    .qf-btn .qf-icon { margin-right: 4px; }
   </style>
 </head>
 <body>
@@ -176,6 +192,20 @@
       </div>
       <div class="spacer"></div>
       <div class="hint" id="hint">-</div>
+    </div>
+    <div class="quick-filters" id="quickFilters">
+      <button class="qf-btn active" data-qf="all"><span class="qf-icon">🌐</span>Alles</button>
+      <button class="qf-btn" data-qf="recordings"><span class="qf-icon">🔴</span>Opnames</button>
+      <button class="qf-btn" data-qf="tiktok"><span class="qf-icon">🎵</span>TikTok</button>
+      <button class="qf-btn" data-qf="youtube"><span class="qf-icon">▶️</span>YouTube</button>
+      <button class="qf-btn" data-qf="chaturbate"><span class="qf-icon">🎥</span>Chaturbate</button>
+      <button class="qf-btn" data-qf="4kdownloader"><span class="qf-icon">📦</span>4K Downloader</button>
+      <button class="qf-btn" data-qf="videodownloadhelper"><span class="qf-icon">🔧</span>VDH</button>
+      <button class="qf-btn" data-qf="pornpics"><span class="qf-icon">📸</span>PornPics</button>
+      <button class="qf-btn" data-qf="footfetishforum"><span class="qf-icon">🦶</span>FFF</button>
+      <button class="qf-btn" data-qf="reddit"><span class="qf-icon">🤖</span>Reddit</button>
+      <button class="qf-btn" data-qf="elitebabes"><span class="qf-icon">👑</span>EliteBabes</button>
+      <button class="qf-btn" data-qf="aznudefeet"><span class="qf-icon">🌸</span>AznNudeFeet</button>
     </div>
     <div id="queue-bar-container" style="display:none;">
       <div class="queue-controls" id="queue-controls">
@@ -1939,6 +1969,11 @@
     async function loadNext() {
       if (state.loading || state.done) return;
       state.loading = true;
+      state._abortLoad = false;
+      // Cancel any previous in-flight fetch
+      if (state._loadAbortCtrl) { try { state._loadAbortCtrl.abort(); } catch(e) {} }
+      state._loadAbortCtrl = new AbortController();
+      const abortCtrl = state._loadAbortCtrl;
       try {
         const startTime = Date.now();
         elSentinel.textContent = '⏳ Verbinden met server...';
@@ -1973,8 +2008,10 @@
              path = '/api/media/channel-files?platform=' + encodeURIComponent(ch.platform) + '&channel=' + encodeURIComponent(ch.channel) + '&limit=' + state.limit + '&cursor=' + encodeURIComponent(state.cursor) + '&type=' + encodeURIComponent(state.filter) + '&include_active=0&include_active_files=0&sort=' + encodeURIComponent(apiSort) + searchParam + dirsParam + dateParam;
           }
           
-          const resp = await fetch(path);
+          const resp = await fetch(path, { signal: abortCtrl.signal });
+          if (state._abortLoad) return; // Aborted by reloadAll — discard result
           const data = await resp.json();
+          if (state._abortLoad) return;
           if (!data || !data.success) throw new Error(data && data.error ? data.error : 'Geen data ontvangen');
           
           let items = Array.isArray(data.items) ? data.items : [];
@@ -2021,6 +2058,7 @@
             elSentinel.innerHTML = '↓ Scroll voor meer (' + stats + ') <button onclick="loadNext()" style="margin-left:10px;padding:4px 8px;font-size:11px;background:#0f3460;color:#fff;border:1px solid #1f2a52;border-radius:4px;cursor:pointer;">Forceer laden</button>';
           }
         } catch (e) {
+          if (e.name === 'AbortError' || state._abortLoad) return; // Silently ignore aborted loads
           const totalTime = Date.now() - startTime;
           elSentinel.textContent = '❌ Fout na ' + totalTime + 'ms: ' + e.message;
           log('Load error: ' + e.message);
@@ -2031,6 +2069,12 @@
     }
     async function reloadAll() {
       if (state.reloading) return;
+      // If a load is in progress, abort it so we can restart with new filters
+      if (state.loading) {
+        state._abortLoad = true;
+        if (state._loadAbortCtrl) { try { state._loadAbortCtrl.abort(); } catch(e) {} }
+        state.loading = false;
+      }
       state.reloading = true;
       resetPaging();
       state.channels = null; // Invalidate cache so ArrowUp/Down gets latest filtered channels
@@ -2049,6 +2093,8 @@
 
     async function softRefreshTop() {
       if (state.loading || state.reloading || state.items.length === 0) return;
+      // Don't fire during initial page load — let loadNext() settle first
+      if (Date.now() - (state._pageLoadedAt || 0) < 5000) return;
       const refreshStart = Date.now();
       try {
         // Fetch the NEWEST items from scratch (no cursor) so we catch new downloads
@@ -2126,7 +2172,7 @@
     var io = new IntersectionObserver((entries) => {
       for (const e of entries) {
         if (!e.isIntersecting) continue;
-        if (state.loading || state.done) continue;
+        if (state.loading || state.done || state.reloading) continue;
         
         const now = Date.now();
         if (now - (state.lastAutoLoadAt || 0) < 500) continue;
@@ -2134,6 +2180,7 @@
         loadNext().catch(e => { log('LoadNext error: ' + e.message); });
       }
     }, { rootMargin: '3000px' });
+    state._pageLoadedAt = Date.now();
     try { io.observe(elSentinel); } catch(e) {}
 
     // Periodically retry pending thumbnails so they appear quickly
@@ -2141,18 +2188,19 @@
 
     // Fallback if IntersectionObserver gets stuck or scroll isn't detected
     setInterval(() => {
-      if (state.loading || state.done) return;
+      if (state.loading || state.done || state.reloading) return;
+      if (Date.now() - (state._pageLoadedAt || 0) < 3000) return; // Don't fight with initial load
       try {
         const r = elSentinel.getBoundingClientRect();
         if (r && r.top < window.innerHeight + 2000) {
           const now = Date.now();
-          if (now - (state.lastAutoLoadAt || 0) > 1000) {
+          if (now - (state.lastAutoLoadAt || 0) > 1500) {
             state.lastAutoLoadAt = now;
             loadNext().catch(() => {});
           }
         }
       } catch (e) {}
-    }, 1500);
+    }, 2000);
 
     try {
       document.addEventListener('fullscreenchange', () => {
@@ -2186,6 +2234,8 @@
       const tick = async () => {
         // Skip when tab is hidden — prevents unnecessary polling
         if (document.hidden) return;
+        // Don't poll during the initial load grace period
+        if (Date.now() - (state._pageLoadedAt || 0) < 4000) return;
         try {
           const data = await api('/api/stats');
           const s = data && data.stats ? data.stats : null;
@@ -2198,7 +2248,7 @@
           const canAutoReload = !modalOpen && nearTop && !state.loading && !state.reloading;
           const changed = !!(last && key !== last);
           if (changed) {
-            if (canAutoReload && (now - lastReloadAt) >= 1500) {
+            if (canAutoReload && (now - lastReloadAt) >= 2000) {
               lastReloadAt = now;
               softRefreshTop();
             } else {
@@ -2208,12 +2258,50 @@
           last = key;
         } catch (e) {}
       };
-      setInterval(tick, 2000);
-      tick();
+      setInterval(tick, 2500);
+      setTimeout(tick, 4000); // Delay first tick to let initial loadNext finish
     } catch (e) {}
 
     const elBtnReload = document.getElementById('btnReload');
     if (elBtnReload) elBtnReload.addEventListener('click', () => reloadAll());
+
+    // --- Quick-filter bar ---
+    const elQuickFilters = document.getElementById('quickFilters');
+    if (elQuickFilters) {
+      elQuickFilters.addEventListener('click', (e) => {
+        const btn = e.target.closest('.qf-btn');
+        if (!btn) return;
+        const qf = btn.dataset.qf;
+        if (!qf) return;
+
+        // Update active state
+        elQuickFilters.querySelectorAll('.qf-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+
+        // Clear search
+        const elSearch = document.getElementById('inpSearch');
+        if (elSearch) elSearch.value = '';
+        state.search = '';
+
+        if (qf === 'all') {
+          state.enabledDirs = null;
+          setSessionEnabledDirs(null);
+        } else if (qf === 'recordings') {
+          // Special: search for recordings
+          state.enabledDirs = null;
+          setSessionEnabledDirs(null);
+          if (elSearch) elSearch.value = 'recording_';
+          state.search = 'recording_';
+        } else {
+          state.enabledDirs = [{ platform: qf, channels: [] }];
+          setSessionEnabledDirs(state.enabledDirs);
+        }
+
+        state.mode = 'recent';
+        if (elMode) elMode.value = 'recent';
+        reloadAll();
+      });
+    }
 
     const elInpSearch = document.getElementById('inpSearch');
     if (elInpSearch) {

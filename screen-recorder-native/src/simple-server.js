@@ -5181,6 +5181,17 @@ async function rehydrateDownloadQueue() {
 let activeRecordings = new Map();
 Object.defineProperty(global, 'isRecording', { get: () => activeRecordings.size > 0 });
 
+// Kill orphaned ffmpeg avfoundation recording processes from previous server runs.
+// These zombies block new recordings from capturing the screen.
+try {
+  const { execSync } = require('child_process');
+  const pids = execSync("pgrep -f 'ffmpeg.*avfoundation.*recording_' 2>/dev/null || true", { encoding: 'utf8' }).trim().split('\n').filter(Boolean);
+  for (const pid of pids) {
+    try { process.kill(Number(pid), 'SIGKILL'); } catch (e) {}
+  }
+  if (pids.length > 0) console.log(`[startup] Killed ${pids.length} orphaned ffmpeg recording process(es)`);
+} catch (e) {}
+
 let avfoundationDeviceListCache = null;
 
 // ========================
@@ -7476,6 +7487,10 @@ expressApp.get('/status', async (req, res) => {
 
     const cp = await db.prepare("SELECT COUNT(*) as c FROM downloads WHERE status = 'completed' AND url NOT LIKE 'recording:%'").get();
     dbCompletedCount = cp && Number.isFinite(Number(cp.c)) ? Number(cp.c) : 0;
+    const statsRow = await getStatsRowCached();
+    if (statsRow && statsRow.screenshots_count) {
+      dbCompletedCount += Number(statsRow.screenshots_count) || 0;
+    }
   } catch (e) {
     dbStatusError = (e && e.message) ? e.message : String(e);
   }
@@ -8397,6 +8412,10 @@ expressApp.post('/start-recording', async (req, res) => {
 
   const outputPixFmt = recordingVideoCodec === 'h264_videotoolbox' ? 'nv12' : 'yuv420p';
 
+  // Note: +faststart requires ffmpeg to finalize the file properly. If the
+  // recording is interrupted, the raw file may lack a moov atom. The
+  // lock-mode error handler has a fallback that uses the raw file directly
+  // when the remux fails, so the recording still appears in the gallery.
   args.push(
     '-pix_fmt', outputPixFmt,
     '-max_muxing_queue_size', FFMPEG_MAX_MUXING_QUEUE_SIZE,
@@ -8522,9 +8541,19 @@ expressApp.post('/stop-recording', (req, res) => {
 
   // Guard against duplicate stop handling
   if (session._stopHandled) {
-    return res.json({ success: true, action: 'stop-recording', message: 'Stop in uitvoering' });
+    return res.json({ 
+      success: true, 
+      action: 'stop-recording', 
+      message: 'Stop in uitvoering',
+      file: file,
+      processing: !!lockJob,
+      rawFile: lockJob ? lockJob.rawFilePath : undefined,
+      finalFile: lockJob ? lockJob.finalFilePath : undefined
+    });
   }
   session._stopHandled = true;
+
+  let isFfmpegClosed = false;
 
   // Immediately try graceful stop: write 'q' to ffmpeg stdin
   try {
@@ -8537,7 +8566,7 @@ expressApp.post('/stop-recording', (req, res) => {
   // Fallback: SIGINT after 3 seconds if still running
   const softTimeout = setTimeout(() => {
     try {
-      if (recordingProcess && !recordingProcess.killed) {
+      if (recordingProcess && !isFfmpegClosed) {
         recordingProcess.kill('SIGINT');
         console.log('⚠️ Sent SIGINT to ffmpeg (3s fallback)');
       }
@@ -8547,16 +8576,15 @@ expressApp.post('/stop-recording', (req, res) => {
   // Hard kill after 8 seconds
   const hardTimeout = setTimeout(() => {
     try {
-      if (recordingProcess && !recordingProcess.killed) {
+      if (recordingProcess && !isFfmpegClosed) {
         console.warn('ffmpeg stop timeout, force kill');
         recordingProcess.kill('SIGKILL');
-        cleanup();
-        finish(false, 'Opname stop timeout');
       }
     } catch (e) { }
   }, 8000);
 
   proc.once('close', async () => {
+    isFfmpegClosed = true;
     clearTimeout(softTimeout);
     clearTimeout(hardTimeout);
     cleanup();
@@ -8656,8 +8684,30 @@ expressApp.post('/stop-recording', (req, res) => {
         }
       }).catch(async (e) => {
         try {
-          fs.appendFileSync(lockJob.logFile, `\n[WEBDL] LOCK CROP queue error: ${e.message}\n`);
+          fs.appendFileSync(lockJob.logFile, `\n[WEBDL] LOCK CROP error: ${e.message}\n`);
         } catch (err) { }
+        // Recovery: if the remux/crop failed, fall back to the raw file as completed
+        // recording so it still appears in the gallery instead of being stuck as 'error'
+        if (dbId) {
+          try {
+            const rawFp = String(lockJob.rawFilePath || '');
+            const rawExists = rawFp && fs.existsSync(rawFp);
+            if (rawExists) {
+              const rawSize = fs.statSync(rawFp).size;
+              if (rawSize > 10000) {
+                console.log(`[recording] Lock crop failed, falling back to raw file: ${rawFp}`);
+                const fallbackMeta = {
+                  webdl_kind: 'recording',
+                  webdl_recording: { lock: true, raw: rawFp, final: lockJob.finalFilePath, log: lockJob.logFile, page_url: meta && meta.pageUrl ? meta.pageUrl : null, crop_failed: true }
+                };
+                await updateDownload.run('completed', 100, rawFp, path.basename(rawFp), rawSize, 'mp4', JSON.stringify(fallbackMeta), null, dbId);
+                try { fs.appendFileSync(lockJob.logFile, `\n[WEBDL] LOCK CROP fallback: using raw file ${rawFp}\n`); } catch (err) { }
+              }
+            }
+          } catch (fallbackErr) {
+            console.error(`[recording] Lock crop fallback also failed: ${fallbackErr.message}`);
+          }
+        }
       });
       return;
     }
@@ -8811,6 +8861,23 @@ expressApp.post('/download', async (req, res) => {
         } catch (e) {
           console.log(`   ⚠️  Duplicate handling fout: ${e.message}`);
         }
+        // Bump gallery_bumped_at so this download (and siblings from the same thread/batch)
+        // appear at the top of the gallery without re-downloading.
+        // Original finished_at is preserved.
+        try {
+          const bumpTitle = existing.title || title;
+          const bumpPlatform = existing.platform || platform;
+          if (bumpTitle && bumpPlatform) {
+            const bumpRes = await (db.readPool || db.pool).query(
+              "UPDATE downloads SET gallery_bumped_at = NOW() WHERE platform = $1 AND title = $2 AND status = 'completed' AND (gallery_bumped_at IS NULL OR gallery_bumped_at < NOW() - INTERVAL '1 minute')",
+              [bumpPlatform, bumpTitle]
+            );
+            const bumped = bumpRes.rowCount || 0;
+            if (bumped > 0) console.log(`   ⬆️  ${bumped} bestaande items naar boven in gallery (bump)`);
+          }
+        } catch (e) {
+          console.log(`   ⚠️  Bump fout: ${e.message}`);
+        }
         return res.json({
           success: true,
           downloadId: Number(existing.id),
@@ -8818,8 +8885,9 @@ expressApp.post('/download', async (req, res) => {
           channel: existing.channel || channel,
           title: existing.title || title,
           duplicate: true,
+          bumped: true,
           status: existing.status || null,
-          message: `Dit bestand is al gedownload (#${existing.id})`
+          message: `Dit bestand is al gedownload (#${existing.id}) — naar boven in gallery`
         });
       }
     } catch (e) {
@@ -12194,6 +12262,8 @@ expressApp.post('/screenshot', upload.single('image'), async (req, res) => {
   try {
     const info = await insertScreenshot.run(resolvedUrl || '', platform, channel, title, filename, filepath, size);
     const newId = info && info.lastInsertRowid != null ? Number(info.lastInsertRowid) : null;
+    galleryFastPathCache = null;
+    try { recentFilesTopCache.clear(); } catch(e) {}
     console.log(`📷 Screenshot DB: id=${newId} path=${filepath}`);
     return res.json({ success: true, id: newId, file: filename, path: filepath, meta: resolved });
   } catch (e) {
@@ -12284,7 +12354,26 @@ expressApp.get('/media/thumb', (req, res) => {
         }
 
         const fp = String(download.filepath || '').trim();
-        if (!fp || !safeIsAllowedExistingPath(fp)) {
+        const fileExists = fp && safeIsAllowedExistingPath(fp);
+        
+        if (!fp) {
+          res.setHeader('Cache-Control', 'no-store');
+          return res.redirect(302, `/media/pending-thumb.svg?kind=${encodeURIComponent(kind)}&id=${encodeURIComponent(String(id))}`);
+        }
+        
+        if (!fileExists) {
+          // File missing, but maybe we have a generated thumbnail we can serve?
+          const cand = makeVideoThumbPath(fp);
+          if (cand && fs.existsSync(cand)) {
+            try {
+              if (fs.statSync(cand).size >= MIN_THUMB_BYTES) {
+                res.setHeader('Cache-Control', 'public, max-age=86400');
+                res.setHeader('Content-Type', 'image/jpeg');
+                return res.sendFile(cand);
+              }
+            } catch(e) {}
+          }
+          // If no thumbnail found, return pending
           res.setHeader('Cache-Control', 'no-store');
           return res.redirect(302, `/media/pending-thumb.svg?kind=${encodeURIComponent(kind)}&id=${encodeURIComponent(String(id))}`);
         }
@@ -13798,11 +13887,15 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
     // Cache to avoid re-running expensive query during heavy write load
     const platKey = fastPathPlatforms ? fastPathPlatforms.sort().join(',') : '_all';
     const cacheKey = `fp_${type||'media'}_${sort||'newest'}_${limit}_${cursorRaw||''}_${dateFrom}_${dateTo}_${platKey}`;
-    const cached = galleryFastPathCache && galleryFastPathCache.key === cacheKey && (Date.now() - galleryFastPathCache.ts) < 3000
-      ? galleryFastPathCache.data : null;
-    if (cached) {
-      return res.json(cached);
-    }
+    try {
+      const st = await getStatsRowCached();
+      const marker = buildRecentFilesCacheMarker(st);
+      const cached = galleryFastPathCache && galleryFastPathCache.key === cacheKey && (Date.now() - galleryFastPathCache.ts) < 3000 && galleryFastPathCache.marker === marker
+        ? galleryFastPathCache.data : null;
+      if (cached) {
+        return res.json(cached);
+      }
+    } catch(e) {}
     try {
       const orderBy = sort === 'oldest' ? 'ts ASC NULLS LAST' : (sort === 'random' ? 'RANDOM()' : 'ts DESC NULLS LAST');
       // inferMediaType no longer does sync I/O for directories (fast heuristic),
@@ -13814,7 +13907,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
       // Platform filter clause: when a specific platform is selected, filter by it
       // and remove the ID window since we want ALL items for that platform
       let platformClause = '';
-      let idWindowClause = 'AND d.id > (SELECT MAX(id) - 50000 FROM downloads)';
+      let idWindowClause = "AND (d.id > (SELECT MAX(id) - 50000 FROM downloads) OR d.url LIKE 'recording:%')";
       if (fastPathPlatforms && fastPathPlatforms.length > 0) {
         const safePlats = fastPathPlatforms.map(p => `'${p.replace(/'/g, "''")}'`).join(',');
         platformClause = `AND d.platform IN (${safePlats})`;
@@ -13847,14 +13940,13 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
             d.id::text AS id,
             d.platform, d.channel, d.title, d.filepath,
             d.created_at::text AS created_at,
-            EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at))::bigint * 1000 AS ts,
+            EXTRACT(EPOCH FROM COALESCE(d.gallery_bumped_at, d.finished_at, d.updated_at, d.created_at))::bigint * 1000 AS ts,
             d.thumbnail, d.url, d.source_url, d.rating,
             'd' AS rating_kind, d.id AS rating_id,
             (SELECT df2.relpath FROM download_files df2 WHERE df2.download_id = d.id ORDER BY df2.relpath LIMIT 1) AS first_file
           FROM ${targetTableClause}
-          WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
+          WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing', 'error')
             AND d.filepath IS NOT NULL AND d.filepath != ''
-            AND d.is_thumb_ready = true
             ${platformClause}
             ${typeClause}
             ${dateFrom ? `AND COALESCE(d.finished_at, d.updated_at, d.created_at) >= '${dateFrom.replace(/[^0-9-]/g,'')}'::date` : ''}
@@ -13866,13 +13958,13 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
             df.relpath AS id,
             d.platform, d.channel, d.title, d.filepath,
             d.created_at::text AS created_at,
-            (COALESCE(df.mtime_ms, EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at))::bigint * 1000)) AS ts,
+            (COALESCE(EXTRACT(EPOCH FROM d.gallery_bumped_at)::bigint * 1000, df.mtime_ms, EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at))::bigint * 1000)) AS ts,
             d.thumbnail, d.url, d.source_url, d.rating,
             'd' AS rating_kind, d.id AS rating_id,
             df.relpath AS first_file
           FROM download_files df
           JOIN ${targetTableClause} ON d.id = df.download_id
-          WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
+          WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing', 'error')
             AND d.filepath IS NOT NULL AND d.filepath != ''
             ${platformClause}
             ${type === 'video_only' || type === 'video' ? "AND (df.relpath ILIKE '%.mp4' OR df.relpath ILIKE '%.webm' OR df.relpath ILIKE '%.mov' OR df.relpath ILIKE '%.mkv' OR df.relpath ILIKE '%.avi' OR df.relpath ILIKE '%.flv')" : ''}
@@ -13889,14 +13981,13 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
             d.id::text AS id,
             d.platform, d.channel, d.title, d.filepath,
             d.created_at::text AS created_at,
-            EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at))::bigint * 1000 AS ts,
+            EXTRACT(EPOCH FROM COALESCE(d.gallery_bumped_at, d.finished_at, d.updated_at, d.created_at))::bigint * 1000 AS ts,
             d.thumbnail, d.url, d.source_url, d.rating,
             'd' AS rating_kind, d.id AS rating_id,
             (SELECT df.relpath FROM download_files df WHERE df.download_id = d.id ORDER BY df.relpath LIMIT 1) AS first_file
           FROM ${targetTableClause}
-          WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
+          WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing', 'error')
             AND d.filepath IS NOT NULL AND d.filepath != ''
-            AND d.is_thumb_ready = true
             ${idWindowClause}
             ${platformClause}
             ${typeClause}
@@ -13922,7 +14013,6 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
       `;
 
       const pgResult = await (db.readPool || db.pool).query({
-        name: stmtName,
         text: sqlText,
         values: []
       });
@@ -13974,9 +14064,8 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
         const dirFilterKey = platKey;
         const key = `recent|${type}|${limit}|${sort}||${tagFilter}|${dirFilterKey}`;
         recentFilesTopCache.set(key, { at: Date.now(), marker, payload });
+        galleryFastPathCache = { key: cacheKey, ts: Date.now(), data: payload, marker };
       } catch (e) {}
-      // Fast time-based cache (3s TTL) to avoid re-running during heavy write load
-      galleryFastPathCache = { key: cacheKey, ts: Date.now(), data: payload };
       return res.json(payload);
     } catch (fastErr) {
       console.error('[Gallery fast-path error]', fastErr.message);
@@ -14073,7 +14162,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
         const searchRows = await db.prepare(`
           WITH matched_downloads AS (
             SELECT * FROM downloads d
-            WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing')
+            WHERE (d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing', 'error') OR (d.status = 'error' AND d.url LIKE 'recording:%'))
               AND d.filepath IS NOT NULL AND d.filepath != ''
               ${conditions.length > 0 ? 'AND (' + conditions.join(' OR ') + ')' : ''}
           )
