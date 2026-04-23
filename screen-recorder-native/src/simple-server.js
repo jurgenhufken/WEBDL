@@ -13627,6 +13627,12 @@ expressApp.get('/api/media/search', async (req, res) => {
   const offset = Math.max(0, parseInt(req.query.offset || '0', 10) || 0);
   const type = String(req.query.type || 'all').toLowerCase();
   const sort = String(req.query.sort || 'recent').toLowerCase();
+  let enabledDirs = null;
+  try {
+    const dirsParam = String(req.query.dirs || '').trim();
+    if (dirsParam) enabledDirs = JSON.parse(dirsParam);
+  } catch (e) { }
+  if (!enabledDirs) enabledDirs = loadDirectoryFilter();
   const hasSpecificChannelsSearch = enabledDirs && enabledDirs.length > 0 &&
     enabledDirs.some(function(d) { return d && Array.isArray(d.channels) && d.channels.length > 0; });
   if (hasSpecificChannelsSearch) {
