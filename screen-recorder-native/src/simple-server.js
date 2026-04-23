@@ -13940,7 +13940,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
             d.id::text AS id,
             d.platform, d.channel, d.title, d.filepath,
             d.created_at::text AS created_at,
-            EXTRACT(EPOCH FROM COALESCE(d.gallery_bumped_at, d.finished_at, d.updated_at, d.created_at))::bigint * 1000 AS ts,
+            EXTRACT(EPOCH FROM COALESCE(d.gallery_bumped_at, (d.finished_at AT TIME ZONE 'Europe/Amsterdam'), (d.updated_at AT TIME ZONE 'Europe/Amsterdam'), (d.created_at AT TIME ZONE 'Europe/Amsterdam')))::bigint * 1000 AS ts,
             d.thumbnail, d.url, d.source_url, d.rating,
             'd' AS rating_kind, d.id AS rating_id,
             (SELECT df2.relpath FROM download_files df2 WHERE df2.download_id = d.id ORDER BY df2.relpath LIMIT 1) AS first_file
@@ -13958,7 +13958,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
             df.relpath AS id,
             d.platform, d.channel, d.title, d.filepath,
             d.created_at::text AS created_at,
-            (COALESCE(EXTRACT(EPOCH FROM d.gallery_bumped_at)::bigint * 1000, df.mtime_ms, EXTRACT(EPOCH FROM COALESCE(d.finished_at, d.updated_at, d.created_at))::bigint * 1000)) AS ts,
+            (COALESCE(EXTRACT(EPOCH FROM d.gallery_bumped_at)::bigint * 1000, df.mtime_ms, EXTRACT(EPOCH FROM COALESCE((d.finished_at AT TIME ZONE 'Europe/Amsterdam'), (d.updated_at AT TIME ZONE 'Europe/Amsterdam'), (d.created_at AT TIME ZONE 'Europe/Amsterdam')))::bigint * 1000)) AS ts,
             d.thumbnail, d.url, d.source_url, d.rating,
             'd' AS rating_kind, d.id AS rating_id,
             df.relpath AS first_file
@@ -13981,7 +13981,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
             d.id::text AS id,
             d.platform, d.channel, d.title, d.filepath,
             d.created_at::text AS created_at,
-            EXTRACT(EPOCH FROM COALESCE(d.gallery_bumped_at, d.finished_at, d.updated_at, d.created_at))::bigint * 1000 AS ts,
+            EXTRACT(EPOCH FROM COALESCE(d.gallery_bumped_at, (d.finished_at AT TIME ZONE 'Europe/Amsterdam'), (d.updated_at AT TIME ZONE 'Europe/Amsterdam'), (d.created_at AT TIME ZONE 'Europe/Amsterdam')))::bigint * 1000 AS ts,
             d.thumbnail, d.url, d.source_url, d.rating,
             'd' AS rating_kind, d.id AS rating_id,
             (SELECT df.relpath FROM download_files df WHERE df.download_id = d.id ORDER BY df.relpath LIMIT 1) AS first_file
@@ -13999,7 +13999,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
             s.id::text AS id,
             s.platform, s.channel, s.title, s.filepath,
             s.created_at::text AS created_at,
-            COALESCE(s.ts_ms, EXTRACT(EPOCH FROM s.created_at)::bigint * 1000) AS ts,
+            COALESCE(s.ts_ms, EXTRACT(EPOCH FROM s.created_at AT TIME ZONE 'Europe/Amsterdam')::bigint * 1000) AS ts,
             NULL AS thumbnail, s.url, NULL AS source_url, s.rating,
             's' AS rating_kind, s.id AS rating_id,
             NULL AS first_file
