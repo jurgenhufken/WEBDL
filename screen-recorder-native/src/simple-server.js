@@ -775,6 +775,7 @@ function hostMatchesAnySuffix(host, suffixes) {
 function shouldSkipMetadataFetchForUrl(inputUrl, platform) {
   try {
     if (String(platform || '').toLowerCase() === 'reddit') return true;
+    if (String(platform || '').toLowerCase() === 'footfetishforum') return true;
     const u = new URL(String(inputUrl || ''));
     const host = String(u.hostname || '').toLowerCase();
     if (hostMatchesAnySuffix(host, METADATA_BLOCKED_DOMAIN_SUFFIXES)) return true;
@@ -12887,13 +12888,21 @@ function makeMediaItem(row) {
     }
   } catch (e) { }
   if (!channelDisplay) channelDisplay = channel;
-  if (channelDisplay) titleDisplay = title ? `${channelDisplay} • ${title}` : channelDisplay;
+  // For downloads with a first_file, use that filename as display title
+  // to prevent duplicate-looking titles when multiple downloads share the same title
+  const firstFileRel = row.first_file || null;
+  let displayTitle = title;
+  if (firstFileRel) {
+    const fileBase = path.basename(firstFileRel, path.extname(firstFileRel));
+    if (fileBase && fileBase !== title) displayTitle = fileBase;
+  }
+  if (channelDisplay) titleDisplay = displayTitle ? `${channelDisplay} • ${displayTitle}` : channelDisplay;
 
   const src = `/media/file?kind=${encodeURIComponent(row.kind)}&id=${encodeURIComponent(row.id)}`;
   const preferredThumbFinal = preferredThumb ? (preferredThumb.includes('?') ? `${preferredThumb}&v=6` : `${preferredThumb}?v=6`) : '';
   // For image files: serve the file itself as thumbnail via static path (no DB lookup needed)
   let thumb;
-  const firstFileRel = row.first_file || null;
+  // firstFileRel already declared above for title display
   if (t === 'image' && firstFileRel) {
     // Use the first indexed file from download_files (for gallery-dl/directory downloads)
     thumb = '/webdl-static/' + firstFileRel.split('/').map(encodeURIComponent).join('/');
