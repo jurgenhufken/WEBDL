@@ -11152,8 +11152,10 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
           applyAbortStatus(downloadId, abort1);
           return;
         }
-        const finalTitle = pinContext ? title : meta.title || title;
-        const finalChannel = pinContext ? channel : meta.channel || channel;
+        // For footfetishforum, always keep original channel/title from extension — yt-dlp returns 'unknown' for FFF attachments
+        const keepOriginal = pinContext || platform === 'footfetishforum';
+        const finalTitle = keepOriginal ? title : meta.title || title;
+        const finalChannel = keepOriginal ? channel : meta.channel || channel;
         await updateDownloadMeta.run(finalTitle, finalChannel, meta.description, meta.duration, meta.thumbnail, JSON.stringify(meta.fullMeta), downloadId);
         title = finalTitle;
         channel = finalChannel;
