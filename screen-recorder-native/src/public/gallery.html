@@ -2270,6 +2270,7 @@
           row.appendChild(sub);
           
           row.addEventListener('click', () => {
+            state._acSelecting = true; // suppress change event
             acDrop.style.display = 'none';
             if (s.type === 'channel' && s.platform) {
               // Switch to channel mode for this platform/channel
@@ -2370,6 +2371,7 @@
       });
 
       elInpSearch.addEventListener('change', (e) => {
+        if (state._acSelecting) { state._acSelecting = false; return; }
         const val = elInpSearch.value.trim();
         state.search = val;
         reloadAll();
@@ -3041,6 +3043,8 @@
     if (elDnNext) elDnNext.addEventListener('click', () => dateNavStep(1));
     document.getElementById('dnAll')?.addEventListener('click', async () => {
       state.dateNavMode = ''; state.dateNavAnchor = null;
+      state.search = ''; elInpSearch.value = '';
+      state.enabledDirs = null; setSessionEnabledDirs(null);
       applyDateNav(); await reloadAll();
     });
     document.getElementById('dnToday')?.addEventListener('click', async () => {
