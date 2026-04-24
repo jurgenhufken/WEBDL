@@ -43,6 +43,7 @@
     panX: 0,
     panY: 0,
     dragging: false,
+    dragMoved: false,
     dragStart: null,
 
     // Channel-mode
@@ -600,9 +601,21 @@
     }, { capture: true });
   }
 
-  // ─── Zoom (exact als oude viewer) ─────────────────────────────────────────
+  // ─── Zoom (exact als oude viewer: attachZoomHandlers) ──────────────────────
   function applyTransform() {
-    el.vContent.style.transform = 'translate(' + vs.panX + 'px, ' + vs.panY + 'px) scale(' + vs.scale + ')';
+    const mediaEl = el.vContent.querySelector('video, img');
+    if (mediaEl) {
+      mediaEl.style.transform = 'translate(' + vs.panX + 'px, ' + vs.panY + 'px) scale(' + vs.scale + ')';
+      mediaEl.style.transformOrigin = '0 0';
+    }
+  }
+
+  function setZoom(z) {
+    vs.scale = Math.max(1, Math.min(6, z));
+    vs.zoomed = vs.scale > 1;
+    if (!vs.zoomed) { vs.panX = 0; vs.panY = 0; }
+    el.vStage.classList.toggle('zoomed', vs.zoomed);
+    applyTransform();
   }
 
   function resetZoom() {
@@ -610,63 +623,60 @@
     vs.scale = 1;
     vs.panX = 0;
     vs.panY = 0;
+    vs.dragging = false;
+    vs.dragStart = null;
     el.vStage.classList.remove('zoomed');
-    applyTransform();
-  }
-
-  function toggleZoom() {
-    if (!vs.zoomed) {
-      vs.zoomed = true;
-      vs.scale = 2;
-      vs.panX = 0;
-      vs.panY = 0;
-      el.vStage.classList.add('zoomed');
-      applyTransform();
-    } else {
-      resetZoom();
+    const mediaEl = el.vContent.querySelector('video, img');
+    if (mediaEl) {
+      mediaEl.style.transform = '';
+      mediaEl.style.transformOrigin = '';
     }
   }
 
-  // ─── Muis (exact als oude viewer) ─────────────────────────────────────────
+  // ─── Muis (exact als oude viewer: attachZoomHandlers) ──────────────────────
   function bindMouse() {
     // Klik op viewer overlay (buiten stage) → sluit
     el.viewer.addEventListener('click', (e) => {
       if (e.target === el.viewer) close();
     });
 
-    // Stage klik: play/pause video (niet op nav-knoppen)
-    // Oude viewer had lege click handler: elStage.addEventListener('click', () => {})
-    // Maar wij willen play/pause, met uitzonderingen
-    el.vStage.addEventListener('click', (e) => {
-      if (vs.dragging) return; // Niet na drag
+    // Scroll wheel op content → ALTIJD zoom in/uit (exact als oude viewer!)
+    el.vContent.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const delta = e.deltaY > 0 ? -0.1 : 0.1;
+      setZoom(vs.scale + delta);
+    }, { passive: false });
+
+    // Klik op content → toggle zoom (exact als oude viewer!)
+    // Als ingezoomd: reset. Als niet ingezoomd: zoom 2x.
+    // Na drag: niet triggeren (dragMoved check)
+    el.vContent.addEventListener('click', (e) => {
       if (el.vPrev.contains(e.target) || el.vNext.contains(e.target)) return;
       if (el.vHudLeft.contains(e.target) || el.vHudRight.contains(e.target)) return;
       if (el.vProgressBar && el.vProgressBar.contains(e.target)) return;
-      const v = el.vContent.querySelector('video');
-      if (v) { v.paused ? v.play() : v.pause(); }
+      if (vs.dragMoved) { vs.dragMoved = false; return; }
+
+      if (vs.scale > 1) {
+        resetZoom();
+      } else {
+        setZoom(2);
+      }
     });
 
     // Dubbelklik blokkeren (exact als oude viewer)
-    el.vStage.addEventListener('dblclick', (e) => {
+    el.vContent.addEventListener('dblclick', (e) => {
       e.preventDefault();
       e.stopPropagation();
     }, { passive: false });
 
-    // Scroll wheel: alleen als ingezoomd → zoom in/uit (exact als oude viewer)
-    el.vStage.addEventListener('wheel', (e) => {
-      if (!vs.zoomed) return; // Doet NIETS als niet ingezoomd
-      e.preventDefault();
-      const delta = (e.deltaY > 0) ? -0.1 : 0.1;
-      vs.scale = Math.max(1, Math.min(6, vs.scale + delta));
-      if (vs.scale <= 1) resetZoom();
-      else applyTransform();
-    }, { passive: false });
-
-    // Mousedown op stage: alleen als ingezoomd → start drag (exact als oude viewer)
-    el.vStage.addEventListener('mousedown', (e) => {
-      if (!vs.zoomed) return;
+    // Mousedown op content: start drag als ingezoomd (exact als oude viewer)
+    el.vContent.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      if (vs.scale <= 1) return;
       vs.dragging = true;
+      vs.dragMoved = false;
       vs.dragStart = { x: e.clientX, y: e.clientY, panX: vs.panX, panY: vs.panY };
+      e.preventDefault();
     });
 
     // Mousemove: als dragging → pan (exact als oude viewer)
@@ -674,12 +684,13 @@
       if (!vs.dragging || !vs.dragStart) return;
       const dx = e.clientX - vs.dragStart.x;
       const dy = e.clientY - vs.dragStart.y;
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) vs.dragMoved = true;
       vs.panX = vs.dragStart.panX + dx;
       vs.panY = vs.dragStart.panY + dy;
       applyTransform();
     });
 
-    // Mouseup: stop drag (exact als oude viewer)
+    // Mouseup: stop drag + muis-back-knop
     window.addEventListener('mouseup', (e) => {
       if (!vs.open) return;
       vs.dragging = false;
