@@ -33,8 +33,8 @@ const DOWNLOAD_ROOT = path.isAbsolute(DOWNLOAD_ROOT_RAW)
 
 const config = Object.freeze({
   port: intEnv('PORT', 35730),
-  databaseUrl: required('DATABASE_URL', 'postgres://jurgen@localhost:5432/webdl'),
-  dbSchema: required('DB_SCHEMA', 'webdl'),
+  databaseUrl: required('DATABASE_URL', 'postgres://localhost/webdl'),
+  dbSchema: required('DB_SCHEMA', 'public'),
   downloadRoot: DOWNLOAD_ROOT,
   workerConcurrency: intEnv('WORKER_CONCURRENCY', 2),
   logLevel: required('LOG_LEVEL', 'info'),

@@ -6,14 +6,14 @@ const { EventEmitter } = require('node:events');
 function createQueue({ repo }) {
   const events = new EventEmitter();
 
-  async function enqueue({ url, adapter, priority = 0, options = {}, maxAttempts = 3 }) {
-    const job = await repo.createJob({ url, adapter, priority, options, maxAttempts });
+  async function enqueue({ url, adapter, priority = 0, options = {}, maxAttempts = 3, lane = null }) {
+    const job = await repo.createJob({ url, adapter, priority, options, maxAttempts, lane });
     events.emit('job:created', job);
     return job;
   }
 
-  async function claimNext(workerId) {
-    const job = await repo.claimNextJob(workerId);
+  async function claimNext(workerId, { lane = null } = {}) {
+    const job = await repo.claimNextJob(workerId, { lane });
     if (job) events.emit('job:claimed', job);
     return job;
   }
@@ -36,9 +36,9 @@ function createQueue({ repo }) {
     return job;
   }
 
-  async function progress(id, pct) {
+  async function progress(id, pct, extra = {}) {
     await repo.updateProgress(id, pct);
-    events.emit('job:progress', { id, pct });
+    events.emit('job:progress', { id, pct, speed: extra.speed || null, eta: extra.eta || null });
   }
 
   return { events, enqueue, claimNext, complete, fail, cancel, progress };

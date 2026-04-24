@@ -4,68 +4,188 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>WebDL-Hub</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <header>
-    <h1>WebDL-Hub</h1>
-    <div id="status" class="status status-unknown">•</div>
+    <div class="header-left">
+      <h1>📥 WebDL-Hub</h1>
+      <div id="status" class="status status-unknown">•</div>
+    </div>
+    <div class="queue-stats" id="queueStats">
+      <div class="stat"><div class="dot queued"></div> <span id="statQueued">0</span> wachtrij</div>
+      <div class="stat"><div class="dot running"></div> <span id="statRunning">0</span> actief</div>
+      <div class="stat"><div class="dot done"></div> <span id="statDone">0</span> klaar</div>
+      <div class="stat"><div class="dot failed"></div> <span id="statFailed">0</span> mislukt</div>
+    </div>
   </header>
 
+  <!-- New job composer -->
   <section class="composer">
     <form id="newJobForm" autocomplete="off">
-      <input id="url" type="url" name="url" placeholder="URL om te downloaden…" required>
-      <select id="adapter" name="adapter" title="adapter">
-        <option value="">auto</option>
-      </select>
-      <button type="submit">Download</button>
-      <label class="force" title="Negeer dedupe — download ook als deze URL al een job heeft">
-        <input id="force" type="checkbox"> forceer
-      </label>
+      <input id="url" type="url" name="url" placeholder="Plak een URL om te downloaden…" required>
+      <div class="form-actions">
+        <button type="submit" class="btn-download" id="btnSubmit">⬇ Download</button>
+        <button type="button" id="btnExpand" class="btn-expand">📋 Playlist</button>
+        <label class="force-label" title="Negeer dedupe">
+          <input id="force" type="checkbox"> forceer
+        </label>
+      </div>
     </form>
     <div id="msg" class="msg"></div>
   </section>
 
+  <!-- Main layout: jobs left, detail right -->
   <main>
-    <aside class="jobs">
-      <div class="jobs-header">
+    <!-- Left panel: Jobs -->
+    <aside class="jobs-panel">
+      <div class="panel-header">
         <h2>Jobs</h2>
-        <select id="filter" title="filter">
-          <option value="">alle</option>
-          <option value="queued">queued</option>
-          <option value="running">running</option>
-          <option value="done">done</option>
-          <option value="failed">failed</option>
-          <option value="cancelled">cancelled</option>
-        </select>
+        <div class="panel-actions">
+          <select id="filter" title="filter">
+            <option value="">alle</option>
+            <option value="queued">wachtrij</option>
+            <option value="running">actief</option>
+            <option value="done">klaar</option>
+            <option value="failed">mislukt</option>
+          </select>
+          <button id="btnBulkCancel" class="btn-sm" title="Cancel alle wachtende">✕ wacht</button>
+          <button id="btnBulkRetry" class="btn-sm" title="Retry alle mislukte">↻ failed</button>
+          <button id="btnBulkClear" class="btn-sm" title="Wis voltooide">🧹 klaar</button>
+        </div>
       </div>
-      <ul id="jobList"></ul>
+      <div id="jobList" class="job-list"></div>
     </aside>
 
-    <section class="detail">
-      <div id="detailEmpty" class="empty">Selecteer een job om details te zien.</div>
-      <article id="detail" hidden>
-        <header class="detail-header">
-          <h2 id="dTitle"></h2>
-          <div class="actions">
-            <button id="btnRetry">Retry</button>
-            <button id="btnCancel">Cancel</button>
+    <!-- Right panel: Detail -->
+    <section class="detail-panel">
+      <div id="detailEmpty" class="empty-state">
+        <div class="empty-icon">📋</div>
+        <div class="empty-text">Selecteer een job om details te bekijken</div>
+      </div>
+
+      <div id="detail" class="detail-content" hidden>
+        <!-- Job info header -->
+        <div class="detail-header">
+          <div class="detail-title-block">
+            <h2 id="dTitle"></h2>
+            <a id="dUrl" class="detail-url" href="#" target="_blank" rel="noopener"></a>
           </div>
-        </header>
-        <dl class="kv">
-          <dt>URL</dt>      <dd id="dUrl"></dd>
-          <dt>Adapter</dt>  <dd id="dAdapter"></dd>
-          <dt>Status</dt>   <dd id="dStatus"></dd>
-          <dt>Progress</dt> <dd><div class="bar"><div id="dBar" class="bar-fill"></div></div><span id="dPct"></span></dd>
-          <dt>Attempts</dt> <dd id="dAttempts"></dd>
-          <dt>Aangemaakt</dt><dd id="dCreated"></dd>
-          <dt>Fout</dt>     <dd id="dError"></dd>
-        </dl>
-        <h3>Bestanden</h3>
-        <ul id="dFiles" class="files"></ul>
-        <h3>Logs</h3>
-        <ol id="dLogs" class="logs"></ol>
-      </article>
+          <div class="detail-actions">
+            <button id="btnRetry" class="btn-action" title="Opnieuw proberen">⟳ Retry</button>
+            <button id="btnCancel" class="btn-action btn-danger" title="Annuleren">✕ Stop</button>
+          </div>
+        </div>
+
+        <!-- Tabs -->
+        <nav class="detail-tabs">
+          <button class="tab active" data-tab="media">🖼 Media</button>
+          <button class="tab" data-tab="params">⚙ Parameters</button>
+          <button class="tab" data-tab="files">📁 Bestanden</button>
+          <button class="tab" data-tab="logs">📝 Logs</button>
+        </nav>
+
+        <!-- Tab: Media -->
+        <div class="tab-panel active" data-panel="media">
+          <div class="media-hero" id="mediaHero">
+            <img id="heroThumb" class="hero-thumb" src="" alt="preview" loading="lazy">
+            <div class="hero-overlay" id="heroOverlay">
+              <span id="heroStatus" class="hero-badge"></span>
+              <div class="hero-progress" id="heroProgress">
+                <div class="hero-bar"><div id="heroBar" class="hero-bar-fill"></div></div>
+                <span id="heroPct" class="hero-pct"></span>
+              </div>
+            </div>
+          </div>
+          <div class="media-grid" id="mediaGrid">
+            <!-- media items populated by JS -->
+          </div>
+          <div id="noMedia" class="empty-inline" hidden>Nog geen media gedownload</div>
+        </div>
+
+        <!-- Tab: Parameters -->
+        <div class="tab-panel" data-panel="params">
+          <div class="param-grid">
+            <div class="param-group">
+              <h3>Job info</h3>
+              <div class="param-row">
+                <span class="param-label">Status</span>
+                <span id="dStatus"></span>
+              </div>
+              <div class="param-row">
+                <span class="param-label">Voortgang</span>
+                <div class="param-progress">
+                  <div class="bar"><div id="dBar" class="bar-fill"></div></div>
+                  <span id="dPct" class="pct-label"></span>
+                </div>
+              </div>
+              <div class="param-row">
+                <span class="param-label">Adapter</span>
+                <span id="dAdapter" class="param-value"></span>
+              </div>
+              <div class="param-row">
+                <span class="param-label">Prioriteit</span>
+                <span id="dPriority" class="param-value"></span>
+              </div>
+            </div>
+            <div class="param-group">
+              <h3>Timing</h3>
+              <div class="param-row">
+                <span class="param-label">Aangemaakt</span>
+                <span id="dCreated" class="param-value"></span>
+              </div>
+              <div class="param-row">
+                <span class="param-label">Gestart</span>
+                <span id="dStarted" class="param-value"></span>
+              </div>
+              <div class="param-row">
+                <span class="param-label">Voltooid</span>
+                <span id="dFinished" class="param-value"></span>
+              </div>
+            </div>
+            <div class="param-group">
+              <h3>Verwerking</h3>
+              <div class="param-row">
+                <span class="param-label">Pogingen</span>
+                <span id="dAttempts" class="param-value"></span>
+              </div>
+              <div class="param-row">
+                <span class="param-label">Worker</span>
+                <span id="dWorker" class="param-value"></span>
+              </div>
+              <div class="param-row" id="dErrorRow" hidden>
+                <span class="param-label">Fout</span>
+                <span id="dError" class="error-text"></span>
+              </div>
+            </div>
+            <div class="param-group" id="dOptionsGroup" hidden>
+              <h3>Opties</h3>
+              <pre id="dOptions" class="options-json"></pre>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab: Files (non-media) -->
+        <div class="tab-panel" data-panel="files">
+          <div class="files-table" id="filesTable">
+            <div class="files-header">
+              <span>Bestandsnaam</span>
+              <span>Type</span>
+              <span>Grootte</span>
+            </div>
+            <div id="filesList" class="files-body"></div>
+          </div>
+          <div id="noFiles" class="empty-inline" hidden>Geen bestanden</div>
+        </div>
+
+        <!-- Tab: Logs -->
+        <div class="tab-panel" data-panel="logs">
+          <div id="logsList" class="logs-list"></div>
+          <div id="noLogs" class="empty-inline" hidden>Geen logs</div>
+        </div>
+      </div>
     </section>
   </main>
 

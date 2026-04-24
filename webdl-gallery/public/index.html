@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WEBDL Gallery</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>WEBDL Gallery</h1>
+    <div class="filters">
+      <input id="q" type="search" placeholder="Zoeken...">
+      <select id="platform"><option value="">Alle platforms</option></select>
+      <select id="channel"><option value="">Alle kanalen</option></select>
+      <select id="sort">
+        <option value="recent">Nieuwste</option>
+        <option value="rating">Rating</option>
+        <option value="random">Random</option>
+      </select>
+      <select id="minRating">
+        <option value="">Min rating</option>
+        <option value="5">★★★★★</option>
+        <option value="4">★★★★</option>
+        <option value="3">★★★</option>
+        <option value="2">★★</option>
+        <option value="1">★</option>
+      </select>
+      <button id="refresh">Ververs</button>
+      <span id="stats" class="stats"></span>
+    </div>
+  </header>
+
+  <main id="grid" class="grid"></main>
+  <div id="sentinel" class="sentinel">Laden…</div>
+
+  <!-- ═══ VIEWER OVERLAY ════════════════════════════════════════════════════ -->
+  <div id="viewer" class="viewer hidden" aria-hidden="true">
+
+    <!-- LEFT SIDEBAR -->
+    <aside id="vSidebar" class="vsidebar">
+
+      <!-- Sidebar header: mode + filter -->
+      <div class="vsidebar-head">
+        <select id="vMode" title="Modus">
+          <option value="recent">Recent</option>
+          <option value="channel">Kanaal</option>
+        </select>
+        <select id="vFilter" title="Type filter">
+          <option value="all">Alles</option>
+          <option value="video">Video</option>
+          <option value="image">Foto</option>
+        </select>
+        <select id="vTagFilter" title="Tag filter">
+          <option value="">Alle tags</option>
+        </select>
+        <button id="vReload" title="Herladen">↻</button>
+      </div>
+
+      <!-- Slideshow controls -->
+      <div class="vsidebar-slideshow">
+        <button id="vSlideshow" title="Slideshow aan/uit">▶︎ Dia</button>
+        <select id="vSlideshowSec" title="Interval">
+          <option value="2">2s</option>
+          <option value="4" selected>4s</option>
+          <option value="7">7s</option>
+          <option value="10">10s</option>
+          <option value="15">15s</option>
+          <option value="30">30s</option>
+          <option value="60">1m</option>
+          <option value="300">5m</option>
+        </select>
+        <button id="vWrap" title="Wrap aan/uit" class="active">🔁 Wrap: aan</button>
+        <button id="vRandom" title="Random aan/uit">🔀 Rand: uit</button>
+        <button id="vVideoWait" title="Wacht op video-einde" class="active">⏳ Wacht: aan</button>
+      </div>
+
+      <!-- Items list -->
+      <div id="vList" class="vsidebar-list"></div>
+    </aside>
+
+    <!-- Sidebar backdrop (mobiel) -->
+    <div id="vSidebarBackdrop" class="vsidebar-backdrop hidden"></div>
+
+    <!-- MAIN: topbar + stage -->
+    <div class="viewer-main">
+
+      <!-- Topbar -->
+      <div class="viewer-topbar">
+        <!-- Links: sidebar toggle + titel -->
+        <div class="vtop-left">
+          <button id="vBtnSidebar" class="vtop-btn" title="Sidebar openen/sluiten (S)">☰</button>
+          <div class="vtop-info">
+            <div id="vNowTitle" class="vtop-title"></div>
+            <div id="vNowSub" class="vtop-sub"></div>
+          </div>
+        </div>
+
+        <!-- Midden: rating + afspeelknoppen -->
+        <div class="vtop-center">
+          <div class="vtop-rating" id="vNowRating"></div>
+          <button id="vSlideshow2" class="vtop-btn" title="Diashow starten/stoppen (spatiebalk)">▶ Dia</button>
+          <button id="vRandom2" class="vtop-btn" title="Willekeurige volgorde aan/uit">🔀 Rand</button>
+        </div>
+
+        <!-- Rechts: media-controls + tools -->
+        <div class="vtop-right">
+          <label class="vtop-ctrl" title="Volume"><span>Vol</span> <input id="vVol" type="range" min="0" max="1" step="0.01" value="0.8"></label>
+          <button id="vBtnMute" class="vtop-btn" title="Geluid dempen (M)">🔊</button>
+          <label class="vtop-ctrl" title="Positie in video"><span>Tijd</span> <input id="vSeek" type="range" min="0" max="1000" step="1" value="0"></label>
+          <span class="vtop-sep"></span>
+          <button id="vBtnOpen" class="vtop-btn" title="Bron-URL openen in browser">🔗 Bron</button>
+          <button id="vBtnFinder" class="vtop-btn" title="Bestand tonen in Finder">📁 Finder</button>
+          <button id="vBtnTags" class="vtop-btn" title="Tags beheren">🏷 Tags</button>
+          <button id="vBtnLog" class="vtop-btn" title="Activiteitenlog tonen (L)">📋 Log</button>
+          <button id="vClose" class="vtop-close" title="Viewer sluiten (Esc)">✕</button>
+        </div>
+      </div>
+
+      <!-- Stage -->
+      <div class="viewer-stage" id="vStage">
+        <div id="vContent" class="vcontent"></div>
+        <button class="viewer-nav prev" id="vPrev" title="Vorige (←)">‹</button>
+        <button class="viewer-nav next" id="vNext" title="Volgende (→)">›</button>
+        <div class="hud-pill hud-left" id="vHudLeft"></div>
+        <div class="hud-pill hud-right" id="vHudRight"></div>
+        <!-- YouTube-stijl progress bar -->
+        <div class="vprogressbar" id="vProgressBar">
+          <div class="vprogressbar-fill" id="vProgressFill"></div>
+          <div class="vprogressbar-handle" id="vProgressHandle"></div>
+        </div>
+      </div>
+
+    </div><!-- /viewer-main -->
+
+    <!-- Tag dialog -->
+    <div id="vTagDialog" class="tag-dialog hidden">
+      <div class="tag-dialog-inner">
+        <div class="tag-dialog-head">
+          <strong>Tags</strong>
+          <button id="vBtnCloseTagDialog">✕</button>
+        </div>
+        <div id="vTagList" class="tag-list"></div>
+        <div class="tag-new">
+          <input id="vNewTagInput" type="text" placeholder="Nieuwe tag...">
+          <button id="vBtnAddTag">＋ Toevoegen</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Log panel -->
+    <div id="vLogPanel" class="log-panel hidden">
+      <div class="log-panel-head">Log</div>
+      <pre id="vLogBody"></pre>
+    </div>
+
+  </div><!-- /viewer -->
+
+  <script src="/app.js"></script>
+  <script src="/viewer.js"></script>
+</body>
+</html>

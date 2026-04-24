@@ -3,7 +3,11 @@
 
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const { execFile } = require('node:child_process');
 const { defineAdapter } = require('./base');
+
+const YT_DLP = process.env.WEBDL_YT_DLP || 'yt-dlp';
+const FFMPEG_LOCATION = process.env.WEBDL_FFMPEG || '/opt/homebrew/bin/ffmpeg';
 
 // Generieke matcher: yt-dlp ondersteunt duizenden sites, dus we accepteren
 // elke http(s)-URL. Andere adapters (reddit, instagram, tdl) hebben hogere
@@ -30,9 +34,13 @@ function plan(url, opts = {}) {
     'download:PROG pct=%(progress._percent_str)s speed=%(progress._speed_str)s eta=%(progress._eta_str)s',
     '-f', quality,
     '-o', OUTPUT_TEMPLATE,
+    '--ffmpeg-location', FFMPEG_LOCATION,  // Fix postprocessing / audio merge
+    '--cookies-from-browser', 'firefox',   // Fix age verification
+    '--write-info-json',                   // Metadata voor gallery sync
+    '--no-playlist',                       // NOOIT een hele playlist in 1 job
     url,
   ];
-  return { cmd: 'yt-dlp', args, cwd, env: {} };
+  return { cmd: YT_DLP, args, cwd, env: {} };
 }
 
 // Matcht op onze custom progress-template hierboven.
@@ -63,6 +71,46 @@ async function collectOutputs(workdir) {
   }
 }
 
+// ─── Playlist/channel expansion ───────────────────────────────────────────────
+// Draait `yt-dlp --flat-playlist --dump-json` en parsed elke JSON-line
+// tot een compacte entry { id, title, url }.
+// Resolvet naar een array of rejects bij fatale fouten.
+function expandPlaylist(url) {
+  return new Promise((resolve, reject) => {
+    const args = [
+      '--flat-playlist',
+      '--dump-json',
+      '--no-colors',
+      '--cookies-from-browser', 'firefox',
+      url,
+    ];
+
+    const child = execFile(YT_DLP, args, {
+      maxBuffer: 100 * 1024 * 1024, // 100 MB — playlists kunnen groot zijn
+      timeout: 120_000,
+    }, (err, stdout, stderr) => {
+      if (err && (!stdout || stdout.trim().length === 0)) {
+        return reject(new Error(stderr || err.message || String(err)));
+      }
+      const entries = [];
+      for (const line of stdout.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const obj = JSON.parse(trimmed);
+          const id = obj.id || '';
+          const title = obj.title || obj.fulltitle || '';
+          const entryUrl = obj.url || obj.webpage_url || obj.original_url || '';
+          if (entryUrl) {
+            entries.push({ id, title, url: entryUrl });
+          }
+        } catch { /* niet-JSON regel, skip */ }
+      }
+      resolve(entries);
+    });
+  });
+}
+
 module.exports = defineAdapter({
   name: 'ytdlp',
   priority: 50,
@@ -70,4 +118,5 @@ module.exports = defineAdapter({
   plan,
   parseProgress,
   collectOutputs,
+  expandPlaylist,
 });

@@ -221,7 +221,7 @@ function getViewerHTML() {
 
     function log(msg) {
       const ts = new Date().toLocaleTimeString();
-      elLogBody.textContent = '[' + ts + '] ' + msg + '\n' + elLogBody.textContent;
+      elLogBody.textContent = '[' + ts + '] ' + msg + '\\n' + elLogBody.textContent;
     }
 
     function attachThumbRetry(img) {
@@ -925,11 +925,13 @@ function getViewerHTML() {
     }
 
     // close dialog when clicking outside
-    elModal.addEventListener('click', (e) => {
-      if (elTagDialog && elTagDialog.style.display !== 'none' && !elTagDialog.contains(e.target) && e.target !== elBtnTags) {
-        elTagDialog.style.display = 'none';
-      }
-    });
+    try {
+      document.addEventListener('click', (e) => {
+        if (elTagDialog && elTagDialog.style.display !== 'none' && !elTagDialog.contains(e.target) && e.target !== elBtnTags) {
+          elTagDialog.style.display = 'none';
+        }
+      });
+    } catch (e) {}
 
 
     elMode.addEventListener('change', async () => {
@@ -1038,13 +1040,16 @@ function getViewerHTML() {
 
     
     window.addEventListener('popstate', (e) => {
-      if (elModal.classList.contains('open') && (!e.state || e.state.page !== 'viewer')) {
-        closeModal(true);
-      } else if (!elModal.classList.contains('open') && e.state && e.state.page === 'viewer') {
-        if (typeof e.state.index === 'number') {
-          openModalIndex(e.state.index);
+      try {
+        if (typeof elModal === 'undefined' || !elModal) return;
+        if (elModal.classList.contains('open') && (!e.state || e.state.page !== 'viewer')) {
+          closeModal(true);
+        } else if (!elModal.classList.contains('open') && e.state && e.state.page === 'viewer') {
+          if (typeof e.state.index === 'number') {
+            openModalIndex(e.state.index);
+          }
         }
-      }
+      } catch (err) {}
     });
     
     window.addEventListener('keydown', async (e) => {
@@ -1107,6 +1112,31 @@ function getViewerHTML() {
           }
         } catch (err) {}
         resetZoom();
+        e.preventDefault();
+      }
+      else if (/^[0-9]$/.test(e.key)) {
+        const key = parseInt(e.key, 10);
+        const rating = (10 - key) / 2;
+        console.log('[RATING] key=' + key + ' rating=' + rating);
+        const it = currentItem();
+        console.log('[RATING] item:', it ? { id: it.id, kind: it.kind, rating_id: it.rating_id, rating_kind: it.rating_kind } : null);
+        if (it) {
+          const ref = getRatingRef(it);
+          console.log('[RATING] ref:', ref);
+          if (ref) {
+            try {
+              const resp = await postApi('/api/rating', { kind: ref.kind, id: ref.id, rating });
+              if (!resp || !resp.success) throw new Error((resp && resp.error) ? resp.error : 'rating opslaan mislukt');
+              applyRatingToState(ref, rating);
+              updateAllRatingUIs(ref, rating);
+              showCurrent();
+              renderList();
+              log('Rating ingesteld: ' + rating + ' (toets ' + key + ')');
+            } catch (err) {
+              log('Rating fout: ' + (err.message || String(err)));
+            }
+          }
+        }
         e.preventDefault();
       }
     }, { capture: true });

@@ -1163,21 +1163,7 @@ if (db.isSqlite) db.pragma('journal_mode = WAL');
 
 async function ensurePostgresSchemaReady() {
   if (!db.isPostgres) return;
-  try {
-    await db.prepare('ALTER TABLE downloads ADD COLUMN IF NOT EXISTS finished_at TIMESTAMP').run();
-  } catch (e) { }
-  try {
-    await db.prepare('ALTER TABLE downloads ADD COLUMN IF NOT EXISTS rating DOUBLE PRECISION').run();
-  } catch (e) { }
-  try {
-    await db.prepare('CREATE INDEX IF NOT EXISTS idx_downloads_finished_at ON downloads(finished_at DESC)').run();
-  } catch (e) { }
-  try {
-    await db.prepare('ALTER TABLE screenshots ADD COLUMN IF NOT EXISTS rating DOUBLE PRECISION').run();
-  } catch (e) { }
-  try {
-    await db.prepare('ALTER TABLE screenshots ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP').run();
-  } catch (e) { }
+  // ALTER TABLE removed to prevent deadlocks with webdl-hub polling
 
   try {
     await db.prepare(`
@@ -15488,6 +15474,8 @@ async function startServer() {
     async function index4kFile(absPath) {
       try {
         if (!fs.existsSync(absPath)) return;
+        // Skip bestanden in hub/ subdirectory — die worden door webdl-hub beheerd
+        if (/[\\/]hub[\\/]/i.test(absPath)) return;
         const ext = path.extname(absPath).toLowerCase();
         if (!_4K_MEDIA_EXTS.has(ext)) return;
         if (_4K_SKIP_BASENAME_RE.test(path.basename(absPath))) return;
@@ -15501,7 +15489,7 @@ async function startServer() {
         const sourceUrl = get4kSourceUrl(absPath) || '';
         const realPlatform = detectSourcePlatform(sourceUrl);
 
-        // Check if already in DB
+        // Check if already in DB by filepath
         const existing = await getDownloadIdByFilepath.get(absPath);
         if (existing && existing.id) {
           // Back-fill source_url and real platform if missing
@@ -15522,6 +15510,16 @@ async function startServer() {
             }
           } catch (e) {}
           return;
+        }
+
+        // Check if already in DB by source_url (voorkom youtube + 4kdownloader duplicaten)
+        if (sourceUrl) {
+          try {
+            const byUrl = db.isPostgres
+              ? await db.prepare('SELECT id FROM downloads WHERE source_url = $1 LIMIT 1').get(sourceUrl)
+              : await db.prepare('SELECT id FROM downloads WHERE source_url = ? LIMIT 1').get(sourceUrl);
+            if (byUrl && byUrl.id) return;
+          } catch (e) {}
         }
 
         // Derive channel from parent dir name

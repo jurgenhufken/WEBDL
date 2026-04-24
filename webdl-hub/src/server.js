@@ -7,6 +7,7 @@ const config = require('./config');
 const { createLogger } = require('./util/logger');
 const { createRepo } = require('./db/repo');
 const { startWorkerPool } = require('./queue/worker');
+const { startSlavePoller } = require('./queue/slave-poller');
 const { buildApp } = require('./app');
 
 const adapters = [
@@ -28,11 +29,14 @@ async function main() {
     concurrency: config.workerConcurrency,
   });
 
+  const slavePoller = startSlavePoller({ repo, logger, intervalMs: 5000 });
+
   await new Promise((r) => server.listen(config.port, r));
   logger.info('server.listening', { port: config.port, worker: pool.workerId });
 
   const shutdown = async (sig) => {
     logger.info('server.shutdown', { sig });
+    await slavePoller.stop();
     await pool.stop();
     server.close();
     await repo.close();

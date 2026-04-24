@@ -1,0 +1,307 @@
+/* ─── Reset & base ──────────────────────────────────────────────────────── */
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: #0b0d12; color: #e6e8ec; font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+a { color: #7ab2ff; text-decoration: none; }
+button { cursor: pointer; border: 1px solid #2c3240; background: #1a1f2b; color: #e6e8ec; border-radius: 6px; padding: 5px 9px; font-size: 13px; white-space: nowrap; }
+button:hover { background: #242b3a; }
+button.active { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+input, select { border: 1px solid #2c3240; background: #12151d; color: #e6e8ec; border-radius: 6px; padding: 5px 9px; font-size: 13px; }
+input[type="range"] { padding: 0; width: 80px; cursor: pointer; accent-color: #1f6feb; }
+input[type="range"]:disabled { opacity: 0.35; cursor: default; }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-thumb { background: #2c3240; border-radius: 3px; }
+
+/* ─── Gallery topbar ─────────────────────────────────────────────────────── */
+.topbar {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; align-items: center; gap: 16px; padding: 10px 16px;
+  background: #0f1218cc; backdrop-filter: blur(8px);
+  border-bottom: 1px solid #1f2430;
+}
+.topbar h1 { font-size: 16px; margin: 0; letter-spacing: .5px; flex-shrink: 0; }
+.filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; flex: 1; }
+.stats { color: #8a92a6; font-size: 12px; margin-left: auto; white-space: nowrap; }
+
+/* ─── Gallery grid ───────────────────────────────────────────────────────── */
+.grid {
+  display: grid; gap: 8px; padding: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+}
+.card {
+  position: relative; background: #12151d; border-radius: 8px; overflow: hidden;
+  cursor: pointer; aspect-ratio: 16/10; display: flex; flex-direction: column;
+  border: 1px solid #1f2430; transition: transform .1s, border-color .1s;
+}
+.card:hover { transform: translateY(-1px); border-color: #3a4256; }
+.card-thumb { flex: 1; background: #0a0c11 center/cover no-repeat; position: relative; }
+.card-thumb::after { content: ''; position: absolute; inset: 0; background: linear-gradient(180deg, transparent 60%, rgba(0,0,0,.55)); }
+.card-badge { position: absolute; top: 6px; left: 6px; background: rgba(0,0,0,.6); padding: 2px 6px; border-radius: 4px; font-size: 10px; letter-spacing: .5px; color: #cfd3dc; }
+.card-video-mark { position: absolute; top: 6px; right: 6px; background: rgba(0,0,0,.6); padding: 2px 6px; border-radius: 4px; font-size: 10px; }
+.card-info { position: absolute; left: 0; right: 0; bottom: 0; padding: 6px 8px 8px; color: #fff; z-index: 1; }
+.card-title { font-size: 12px; font-weight: 500; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.card-sub { font-size: 11px; color: #b8beca; margin-top: 2px; }
+.card-stars { margin-top: 4px; color: #ffd700; font-size: 12px; letter-spacing: 1px; }
+.card-stars .off { color: #3a4256; }
+
+.sentinel { text-align: center; color: #6b7280; padding: 24px; }
+
+/* ─── VIEWER — fullscreen overlay (oude layout: sidebar als overlay) ──── */
+.viewer {
+  position: fixed; inset: 0; z-index: 100;
+  background: #0b1020; overflow: hidden;
+}
+.viewer.hidden { display: none !important; }
+
+/* ─── Viewer sidebar: fixed overlay, schuift in/uit ──────────────────── */
+.vsidebar {
+  position: fixed; left: 0; top: 0; bottom: 0;
+  width: 320px; max-width: 92vw;
+  background: #121a33; border-right: 1px solid #1f2a52;
+  display: flex; flex-direction: column;
+  transform: translateX(-102%);
+  transition: transform 0.22s ease;
+  z-index: 200;
+}
+/* Sidebar open: schuift naar rechts */
+.viewer.viewer--sidebar-open .vsidebar { transform: translateX(0); }
+
+/* Sidebar gesloten: verborgen via translateX (niet display:none, animatie!) */
+.viewer.viewer--no-sidebar .vsidebar { transform: translateX(-102%); }
+
+/* Sidebar backdrop */
+.vsidebar-backdrop {
+  position: fixed; inset: 0; z-index: 150;
+  background: rgba(0,0,0,.55);
+  display: none;
+}
+.viewer.viewer--sidebar-open .vsidebar-backdrop { display: block; }
+
+.vsidebar-head {
+  display: flex; flex-wrap: wrap; gap: 4px; padding: 8px;
+  border-bottom: 1px solid #1f2430; flex-shrink: 0;
+}
+.vsidebar-head select { flex: 1; min-width: 70px; font-size: 12px; }
+.vsidebar-head button { padding: 4px 7px; font-size: 13px; }
+
+.vsidebar-slideshow {
+  display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 8px;
+  border-bottom: 1px solid #1f2430; flex-shrink: 0;
+}
+.vsidebar-slideshow button, .vsidebar-slideshow select { font-size: 11px; padding: 3px 6px; }
+
+.vsidebar-list {
+  flex: 1; overflow-y: auto; padding: 4px 0;
+}
+
+.vsidebar-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 8px; cursor: pointer;
+  border-bottom: 1px solid #12151d;
+  transition: background .1s;
+}
+.vsidebar-item:hover { background: #1a1f2b; }
+.vsidebar-item.active { background: #1f3050; border-left: 3px solid #1f6feb; }
+
+.vsidebar-thumb {
+  width: 52px; height: 38px; object-fit: contain; border-radius: 6px;
+  background: #000; flex-shrink: 0; border: 1px solid #1f2430;
+}
+.vsidebar-label {
+  font-size: 11px; line-height: 1.3; color: #cfd3dc;
+  display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2;
+  -webkit-box-orient: vertical; overflow: hidden;
+}
+
+/* ─── Viewer main: fullscreen, flex column ────────────────────────────── */
+.viewer-main {
+  width: 100%; height: 100vh;
+  display: flex; flex-direction: column;
+}
+
+/* Topbar */
+.viewer-topbar {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 10px;
+  background: #141c2e; border-bottom: 1px solid #1f2a52;
+  flex-shrink: 0; min-height: 44px;
+}
+.vtop-left {
+  display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1;
+}
+.vtop-info { min-width: 0; flex: 1; }
+.vtop-title { font-size: 12px; font-weight: 500; color: #00d4ff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vtop-sub { font-size: 11px; color: #9aa4b2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.vtop-center { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+
+.vtop-rating {
+  font-size: 22px; letter-spacing: 2px; color: #ffd700; cursor: pointer;
+  user-select: none; white-space: nowrap; flex-shrink: 0;
+}
+.vtop-rating .off { color: #2c3240; }
+.vtop-rating .rating-val { font-size: 12px; color: #8a92a6; margin-left: 6px; vertical-align: middle; }
+
+.vtop-right {
+  display: flex; align-items: center; gap: 4px; flex-shrink: 0;
+}
+
+/* Universele topbar-knop */
+.vtop-btn {
+  background: #1a2540; color: #c8d0e0; border: 1px solid #2a3555;
+  border-radius: 5px; padding: 4px 8px; font-size: 11px;
+  cursor: pointer; white-space: nowrap; transition: all .15s;
+}
+.vtop-btn:hover { background: #243050; border-color: #3a5080; color: #fff; }
+.vtop-btn.active { background: #1a3a2a; border-color: #2a6a4a; color: #5bd38a; }
+
+.vtop-ctrl { display: flex; align-items: center; gap: 4px; font-size: 11px; color: #8a92a6; }
+.vtop-ctrl input[type="range"] { width: 80px; }
+.vtop-sep { width: 1px; height: 20px; background: #2a3555; margin: 0 2px; flex-shrink: 0; }
+
+.vtop-close {
+  background: transparent; border: 0; color: #8a92a6; font-size: 18px;
+  width: 28px; height: 28px; border-radius: 50%; padding: 0;
+  cursor: pointer; transition: all .15s;
+}
+.vtop-close:hover { background: #3a1a1a; color: #ff6b6b; }
+
+/* ─── Stage: flex centered, vult rest van viewport ────────────────────── */
+.viewer-stage {
+  flex: 1 1 auto; position: relative;
+  display: flex; justify-content: center; align-items: center;
+  background: #0b1020; overflow: hidden; min-height: 0;
+}
+
+/* Content wrapper */
+.vcontent {
+  position: relative;
+  display: flex; align-items: center; justify-content: center;
+  width: 100%; height: 100%;
+  overflow: hidden;
+}
+
+/* Media: vult stage, behoudt proportie */
+.vcontent img, .vcontent video {
+  max-width: 100%;
+  max-height: 100%;
+  display: block;
+  user-select: none;
+  object-fit: contain;
+}
+.vcontent video { background: #000; }
+
+/* Nav pijlen */
+.viewer-nav {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  width: 44px; height: 80px;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,.3); color: #fff; font-size: 30px;
+  border: 0; cursor: pointer; z-index: 2;
+  opacity: .4; transition: opacity .15s;
+  border-radius: 4px;
+}
+.viewer-nav:hover { opacity: 1; background: rgba(0,0,0,.6); }
+.viewer-nav.prev { left: 0; border-radius: 0 6px 6px 0; }
+.viewer-nav.next { right: 0; border-radius: 6px 0 0 6px; }
+
+/* HUD pills — auto-hide na 3s */
+.hud-pill {
+  position: absolute; bottom: 28px;
+  background: rgba(15,52,96,0.85); color: #d7e6ff;
+  padding: 6px 10px; border-radius: 999px; border: 1px solid rgba(31,42,82,0.8);
+  font-size: 11px; pointer-events: none;
+  white-space: nowrap; max-width: 50%;
+  overflow: hidden; text-overflow: ellipsis;
+  transition: opacity 0.4s;
+}
+.hud-pill.hud-hidden { opacity: 0; }
+.hud-left  { left: 12px; }
+.hud-right { right: 12px; }
+
+/* Nav pijlen auto-hide */
+.viewer-nav { transition: opacity .3s; }
+.viewer-stage.hud-hidden .viewer-nav { opacity: 0; pointer-events: none; }
+
+/* YouTube-stijl progress bar — onderaan de stage */
+.vprogressbar {
+  position: absolute; bottom: 0; left: 0; right: 0;
+  height: 4px; background: rgba(255,255,255,0.15);
+  cursor: pointer; z-index: 10;
+  transition: height 0.15s;
+}
+.vprogressbar:hover { height: 8px; }
+.vprogressbar-fill {
+  height: 100%; background: #ff0033; width: 0%;
+  transition: width 0.1s linear;
+  pointer-events: none;
+}
+.vprogressbar-handle {
+  position: absolute; top: 50%; right: 0;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: #ff0033; transform: translate(50%, -50%);
+  opacity: 0; transition: opacity 0.15s;
+  pointer-events: none;
+}
+.vprogressbar:hover .vprogressbar-handle { opacity: 1; }
+
+/* ─── Tag dialog ──────────────────────────────────────────────────────────── */
+.tag-dialog {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  z-index: 200; width: 320px; max-height: 80vh;
+  background: #12151d; border: 1px solid #2c3240; border-radius: 10px;
+  box-shadow: 0 20px 60px rgba(0,0,0,.8);
+  display: flex; flex-direction: column;
+}
+.tag-dialog.hidden { display: none; }
+.tag-dialog-inner { display: flex; flex-direction: column; height: 100%; }
+.tag-dialog-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px; border-bottom: 1px solid #1f2430;
+  font-weight: 600;
+}
+.tag-dialog-head button { background: transparent; border: 0; color: #8a92a6; font-size: 16px; }
+.tag-list { flex: 1; overflow-y: auto; padding: 8px; }
+.tag-row {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 4px; border-bottom: 1px solid #1a1f2b;
+}
+.tag-name { flex: 1; font-size: 13px; }
+.tag-toggle { padding: 2px 10px; font-size: 14px; font-weight: 700; }
+.tag-toggle.tag-has { background: #1a2d1a; border-color: #2a5a2a; color: #4ade80; }
+.tag-del { background: transparent; border: 0; color: #6b7280; font-size: 14px; padding: 2px 4px; }
+.tag-del:hover { color: #ff6b6b; }
+.tag-new {
+  display: flex; gap: 6px; padding: 10px 12px;
+  border-top: 1px solid #1f2430;
+}
+.tag-new input { flex: 1; }
+
+/* ─── Log panel ───────────────────────────────────────────────────────────── */
+.log-panel {
+  position: absolute; bottom: 0; left: 0; right: 0; z-index: 150;
+  background: rgba(10,12,17,.95); border-top: 1px solid #1f2430;
+  max-height: 200px; overflow: hidden;
+  display: flex; flex-direction: column;
+}
+.log-panel.hidden { display: none; }
+.log-panel-head {
+  padding: 6px 12px; font-size: 11px; color: #6b7280;
+  border-bottom: 1px solid #1f2430; flex-shrink: 0;
+}
+.log-panel pre { flex: 1; overflow-y: auto; margin: 0; padding: 8px 12px; font-size: 11px; color: #8a92a6; line-height: 1.5; }
+
+/* ─── Responsive: smal scherm ─────────────────────────────────────────────── */
+@media (max-width: 700px) {
+  .viewer { grid-template-columns: 1fr; }
+  .vsidebar {
+    position: fixed; left: 0; top: 0; bottom: 0;
+    width: 260px; z-index: 99;
+    transform: translateX(0);
+  }
+  .viewer.viewer--no-sidebar .vsidebar {
+    display: flex;
+    transform: translateX(-100%);
+  }
+  .viewer-topbar { flex-wrap: wrap; }
+  input[type="range"] { width: 60px; }
+}

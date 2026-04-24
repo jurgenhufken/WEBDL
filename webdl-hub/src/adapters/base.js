@@ -15,7 +15,7 @@ function defineAdapter(spec) {
       throw new Error(`Adapter mist verplichte eigenschap: ${key}`);
     }
   }
-  return {
+  const adapter = {
     name: spec.name,
     priority: spec.priority,
     matches: spec.matches,
@@ -23,6 +23,9 @@ function defineAdapter(spec) {
     parseProgress: spec.parseProgress || (() => null),
     collectOutputs: spec.collectOutputs || (async () => []),
   };
+  // Optionele extensies (bijv. expandPlaylist voor playlist-URLs)
+  if (spec.expandPlaylist) adapter.expandPlaylist = spec.expandPlaylist;
+  return adapter;
 }
 
 module.exports = { defineAdapter };

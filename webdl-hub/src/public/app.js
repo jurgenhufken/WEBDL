@@ -1,16 +1,19 @@
-// src/public/app.js — vanilla dashboard. Geen dependencies, geen bundler.
+// src/public/app.js — WebDL-Hub dashboard met gegroepeerde playlist-weergave.
 'use strict';
 
 const $ = (id) => document.getElementById(id);
 
 const state = {
-  jobs: new Map(),        // id -> job
+  jobs: new Map(),
   selectedId: null,
   filter: '',
   adapters: [],
+  collapsedGroups: new Set(),
+  // Live progress data van WebSocket (speed/eta)
+  liveProgress: new Map(),
 };
 
-// --- fetch-helpers ---
+// ─── API ──────────────────────────────────────────────────────────────────────
 async function api(method, path, body) {
   const res = await fetch(path, {
     method,
@@ -22,47 +25,236 @@ async function api(method, path, body) {
   return data;
 }
 
-// --- rendering ---
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 function fmtTime(iso) {
-  if (!iso) return '';
+  if (!iso) return '—';
   const d = new Date(iso);
-  const today = new Date();
-  const sameDay = d.toDateString() === today.toDateString();
-  return sameDay ? d.toLocaleTimeString('nl-NL') : d.toLocaleString('nl-NL');
+  return d.toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
-function jobTitle(job) {
-  try { return new URL(job.url).hostname.replace(/^www\./, '') + ' — ' + (job.url.slice(-40)); }
-  catch { return job.url; }
+function humanSize(n) {
+  if (!Number.isFinite(n) || n <= 0) return '';
+  const u = ['B', 'KB', 'MB', 'GB'];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return n.toFixed(i === 0 ? 0 : 1) + ' ' + u[i];
 }
 
-function renderList() {
-  const ul = $('jobList');
-  const items = [...state.jobs.values()]
-    .filter((j) => !state.filter || j.status === state.filter)
-    .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
-  ul.innerHTML = '';
-  for (const j of items) {
-    const li = document.createElement('li');
-    li.dataset.id = j.id;
-    if (String(j.id) === String(state.selectedId)) li.classList.add('selected');
-    li.innerHTML = `
-      <div class="title" title="${escapeHtml(j.url)}">${escapeHtml(jobTitle(j))}</div>
-      <span class="badge ${j.status}">${j.status}</span>
-      <div class="meta">#${j.id} · ${escapeHtml(j.adapter)} · ${fmtTime(j.created_at)}</div>
-      <div class="bar"><div class="bar-fill" style="width:${Math.round(j.progress_pct || 0)}%"></div></div>
-    `;
-    li.onclick = () => selectJob(j.id);
-    ul.appendChild(li);
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+}
+
+function statusIcon(status) {
+  switch (status) {
+    case 'queued':    return '⏳';
+    case 'running':   return '⬇️';
+    case 'done':      return '✅';
+    case 'failed':    return '❌';
+    case 'cancelled': return '⊘';
+    default:          return '•';
   }
 }
 
-function escapeHtml(s) {
-  return String(s ?? '').replace(/[&<>"']/g, (c) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  })[c]);
+function videoTitle(job) {
+  // Probeer video-titel uit options
+  const opts = job.options || {};
+  if (opts.videoTitle) return opts.videoTitle;
+  // Fallback: haal iets leesbars uit de URL
+  try {
+    const u = new URL(job.url);
+    if (u.searchParams.get('v')) return u.searchParams.get('v');
+    const parts = u.pathname.split('/').filter(Boolean);
+    return parts[parts.length - 1] || u.hostname;
+  } catch { return job.url; }
 }
 
+// ─── Queue stats ──────────────────────────────────────────────────────────────
+function updateStats() {
+  let q = 0, r = 0, d = 0, f = 0;
+  for (const j of state.jobs.values()) {
+    if (j.status === 'queued') q++;
+    else if (j.status === 'running') r++;
+    else if (j.status === 'done') d++;
+    else if (j.status === 'failed') f++;
+  }
+  $('statQueued').textContent = q;
+  $('statRunning').textContent = r;
+  $('statDone').textContent = d;
+  $('statFailed').textContent = f;
+}
+
+// ─── Groepering ───────────────────────────────────────────────────────────────
+// Jobs worden gegroepeerd op expandGroup (uit options).
+// Jobs zonder expandGroup staan als "losse downloads" bovenaan.
+function buildGroups() {
+  const groups = new Map(); // groupId → { name, url, jobs[] }
+  const standalone = [];
+
+  const allJobs = [...state.jobs.values()]
+    .filter((j) => !state.filter || j.status === state.filter)
+    .sort((a, b) => {
+      // Sorteer op expandIndex als die er is, anders op id
+      const aIdx = a.options?.expandIndex || Infinity;
+      const bIdx = b.options?.expandIndex || Infinity;
+      if (aIdx !== bIdx) return aIdx - bIdx;
+      return Number(a.id) - Number(b.id);
+    });
+
+  for (const j of allJobs) {
+    const gid = j.options?.expandGroup;
+    if (gid) {
+      if (!groups.has(gid)) {
+        groups.set(gid, {
+          id: gid,
+          name: j.options.expandName || 'Playlist',
+          url: j.options.expandUrl || '',
+          total: j.options.expandTotal || 0,
+          jobs: [],
+        });
+      }
+      groups.get(gid).jobs.push(j);
+    } else {
+      standalone.push(j);
+    }
+  }
+
+  return { standalone, groups: [...groups.values()].reverse() };
+}
+
+function groupStats(group) {
+  let q = 0, r = 0, d = 0, f = 0;
+  for (const j of group.jobs) {
+    if (j.status === 'queued') q++;
+    else if (j.status === 'running') r++;
+    else if (j.status === 'done') d++;
+    else if (j.status === 'failed') f++;
+  }
+  return { queued: q, running: r, done: d, failed: f, total: group.jobs.length };
+}
+
+// ─── Render job list ──────────────────────────────────────────────────────────
+function renderList() {
+  const container = $('jobList');
+  container.innerHTML = '';
+
+  const { standalone, groups } = buildGroups();
+
+  // Losse downloads
+  for (const j of standalone.sort((a, b) => b.id - a.id)) {
+    container.appendChild(renderJobItem(j, true));
+  }
+
+  // Gegroepeerde playlists
+  for (const g of groups) {
+    const s = groupStats(g);
+    const collapsed = state.collapsedGroups.has(g.id);
+    const donePct = g.jobs.length > 0 ? Math.round((s.done / g.jobs.length) * 100) : 0;
+
+    // Groepskop
+    const header = document.createElement('div');
+    header.className = 'group-header' + (collapsed ? ' collapsed' : '');
+    header.innerHTML = `
+      <div class="group-top-row">
+        <div class="group-name">
+          <span class="chevron">▼</span>
+          📋 ${esc(g.name)}
+        </div>
+        <div class="group-actions">
+          ${s.queued ? `<button class="btn-sm btn-grp" data-action="cancel-queued" data-gid="${esc(g.id)}" title="Cancel alle wachtende">✕ ${s.queued}</button>` : ''}
+          ${s.failed ? `<button class="btn-sm btn-grp" data-action="retry-failed" data-gid="${esc(g.id)}" title="Retry alle mislukte">↻ ${s.failed}</button>` : ''}
+        </div>
+      </div>
+      <div class="group-stats">
+        <span>${s.total} video's</span>
+        <span style="color:var(--ok)">✅ ${s.done}</span>
+        ${s.running ? `<span style="color:var(--running)">⬇ ${s.running}</span>` : ''}
+        ${s.queued ? `<span style="color:var(--queued)">⏳ ${s.queued}</span>` : ''}
+        ${s.failed ? `<span style="color:var(--err)">❌ ${s.failed}</span>` : ''}
+      </div>
+      <div class="group-bar">
+        <div class="bar"><div class="bar-fill ${donePct === 100 ? 'done' : ''}" style="width:${donePct}%"></div></div>
+      </div>
+    `;
+    // Collapse toggle (op header, niet op knoppen)
+    header.addEventListener('click', (e) => {
+      if (e.target.closest('.btn-grp')) return; // niet collapen als knop geklikt
+      if (state.collapsedGroups.has(g.id)) state.collapsedGroups.delete(g.id);
+      else state.collapsedGroups.add(g.id);
+      renderList();
+    });
+    // Groep-actie knoppen
+    header.querySelectorAll('.btn-grp').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const action = btn.dataset.action;
+        const gid = btn.dataset.gid;
+        try {
+          const result = await api('POST', '/api/jobs/bulk', { action, groupId: gid });
+          setMsg(`${action}: ${result.affected} jobs bijgewerkt`, false, true);
+          await loadJobs();
+        } catch (err) { setMsg(err.message, true); }
+      });
+    });
+    container.appendChild(header);
+
+    // Individuele video-items (verborgen als collapsed)
+    if (!collapsed) {
+      for (const j of g.jobs) {
+        container.appendChild(renderJobItem(j, false));
+      }
+    }
+  }
+
+  updateStats();
+}
+
+function renderJobItem(job, isStandalone) {
+  const div = document.createElement('div');
+  div.className = 'job-item' + (isStandalone ? ' standalone' : '') +
+    (String(job.id) === String(state.selectedId) ? ' selected' : '');
+  div.dataset.id = job.id;
+
+  const pct = Math.round(job.progress_pct || 0);
+  const title = isStandalone ? videoTitle(job) : (job.options?.videoTitle || videoTitle(job));
+  const live = state.liveProgress.get(String(job.id));
+  const gallerySynced = job.options?.gallery_synced;
+
+  // Regel 2: meta-info afhankelijk van status
+  let metaHtml = '';
+  if (job.status === 'running') {
+    const speed = live?.speed || '';
+    const eta = live?.eta || '';
+    metaHtml = `<div class="job-meta">${job.adapter || ''} · ${job.lane || ''} · ${pct}%${speed ? ' · ' + speed : ''}${eta && eta !== 'Unknown' ? ' · ETA ' + eta : ''}</div>`;
+  } else if (job.status === 'failed' && job.error) {
+    metaHtml = `<div class="job-meta job-error">${esc(job.error).slice(0, 80)}</div>`;
+  } else if (job.status === 'done') {
+    metaHtml = `<div class="job-meta">${gallerySynced ? '🖼️ in gallery' : job.adapter || ''}</div>`;
+  } else if (job.status === 'queued') {
+    metaHtml = `<div class="job-meta">${job.lane || ''} · wachtrij</div>`;
+  }
+
+  // Progress bar bij running
+  const progressBar = job.status === 'running'
+    ? `<div class="job-progress-bar"><div class="job-progress-fill" style="width:${pct}%"></div></div>`
+    : '';
+
+  div.innerHTML = `
+    <span class="job-icon">${statusIcon(job.status)}${gallerySynced && job.status === 'done' ? '<span class="gallery-dot"></span>' : ''}</span>
+    <div class="job-body">
+      <div class="job-title-row">
+        <span class="job-title" title="${esc(job.url)}">${esc(title)}</span>
+        <span class="job-badge ${job.status}">${job.status === 'running' ? 'actief' : job.status === 'queued' ? 'wacht' : job.status === 'done' ? 'klaar' : job.status}</span>
+      </div>
+      ${metaHtml}
+      ${progressBar}
+    </div>
+  `;
+  div.onclick = () => selectJob(job.id);
+  return div;
+}
+
+// ─── Detail ───────────────────────────────────────────────────────────────────
 async function selectJob(id) {
   state.selectedId = id;
   renderList();
@@ -71,55 +263,135 @@ async function selectJob(id) {
   try {
     const { job, files, logs } = await api('GET', '/api/jobs/' + id);
     renderDetail(job, files, logs);
-  } catch (e) {
-    setMsg(e.message, true);
-  }
+  } catch (e) { setMsg(e.message, true); }
 }
 
 function renderDetail(job, files, logs) {
-  $('dTitle').textContent = jobTitle(job);
+  const title = job.options?.videoTitle || videoTitle(job);
+  $('dTitle').textContent = title;
   $('dUrl').textContent = job.url;
   $('dAdapter').textContent = job.adapter;
   $('dStatus').innerHTML = `<span class="badge ${job.status}">${job.status}</span>`;
-  $('dBar').style.width = Math.round(job.progress_pct || 0) + '%';
-  $('dPct').textContent = ' ' + (Math.round((job.progress_pct || 0) * 10) / 10) + '%';
+  const pct = Math.round(job.progress_pct || 0);
+  $('dBar').style.width = pct + '%';
+  $('dBar').className = 'bar-fill' + (job.status === 'done' ? ' done' : '');
+  $('dPct').textContent = pct + '%';
   $('dAttempts').textContent = `${job.attempts} / ${job.max_attempts}`;
+  $('dStarted').textContent = fmtTime(job.started_at);
+  $('dFinished').textContent = fmtTime(job.finished_at);
   $('dCreated').textContent = fmtTime(job.created_at);
+  $('dPriority').textContent = job.priority || 'normaal';
+  $('dWorker').textContent = job.worker || '—';
+
+  const hasError = job.error && job.error.length > 0;
+  $('dErrorRow').hidden = !hasError;
   $('dError').textContent = job.error || '';
-  $('btnRetry').disabled  = !['failed','cancelled'].includes(job.status);
-  $('btnCancel').disabled = !['queued','running'].includes(job.status);
 
-  const fUl = $('dFiles'); fUl.innerHTML = '';
-  for (const f of files) {
-    const li = document.createElement('li');
-    li.textContent = `${f.path}${f.size ? ' · ' + humanSize(Number(f.size)) : ''}`;
-    fUl.appendChild(li);
+  $('btnRetry').disabled = !['failed', 'cancelled'].includes(job.status);
+  $('btnCancel').disabled = !['queued', 'running'].includes(job.status);
+
+  // Media tab - show images/videos with thumbnails
+  const mediaFiles = files.filter(f => isMediaFile(f.path));
+  const mediaGrid = $('mediaGrid');
+  mediaGrid.innerHTML = '';
+  if (mediaFiles.length > 0) {
+    for (const f of mediaFiles) {
+      const div = document.createElement('div');
+      div.className = 'media-item';
+      const thumbUrl = `/api/files/${f.id}/serve`;
+      const isVideo = isVideoFile(f.path);
+      div.innerHTML = `
+        <a href="${thumbUrl}" target="_blank" class="media-link">
+          ${isVideo ? '<div class="media-badge video">▶</div>' : ''}
+          <img src="${thumbUrl}" alt="${esc(f.path)}" loading="lazy" class="media-thumb">
+        </a>
+        <div class="media-meta">
+          <div class="media-name" title="${esc(f.path)}">${esc(f.path.split('/').pop())}</div>
+          <div class="media-size">${f.size ? humanSize(Number(f.size)) : ''}</div>
+        </div>
+      `;
+      mediaGrid.appendChild(div);
+    }
+    $('noMedia').hidden = true;
+  } else {
+    $('noMedia').hidden = false;
   }
-  if (files.length === 0) fUl.innerHTML = '<li class="empty" style="padding:4px 8px">geen</li>';
 
-  const lOl = $('dLogs'); lOl.innerHTML = '';
+  // Hero thumbnail
+  const heroThumb = $('heroThumb');
+  if (mediaFiles.length > 0) {
+    heroThumb.src = `/api/files/${mediaFiles[0].id}/serve`;
+    $('mediaHero').hidden = false;
+  } else {
+    $('mediaHero').hidden = true;
+  }
+
+  // Hero status badge
+  const heroStatus = $('heroStatus');
+  heroStatus.textContent = job.status.toUpperCase();
+  heroStatus.className = `hero-badge ${job.status}`;
+
+  // Hero progress
+  const heroPct = $('heroPct');
+  const heroBar = $('heroBar');
+  heroPct.textContent = pct + '%';
+  heroBar.style.width = pct + '%';
+
+  // Files tab - distinguish media vs non-media
+  const filesList = $('filesList');
+  filesList.innerHTML = '';
+  const nonMediaFiles = files.filter(f => !isMediaFile(f.path));
+  if (nonMediaFiles.length > 0) {
+    for (const f of nonMediaFiles) {
+      const div = document.createElement('div');
+      div.className = 'file-row';
+      const basename = f.path.split('/').pop();
+      const ext = f.path.split('.').pop().toLowerCase();
+      div.innerHTML = `
+        <span class="file-name" title="${esc(f.path)}">${esc(basename)}</span>
+        <span class="file-type">${ext.toUpperCase()}</span>
+        <span class="file-size">${f.size ? humanSize(Number(f.size)) : ''}</span>
+      `;
+      filesList.appendChild(div);
+    }
+    $('noFiles').hidden = true;
+  } else {
+    $('noFiles').hidden = false;
+  }
+
+  // Logs
+  const logsList = $('logsList');
+  logsList.innerHTML = '';
   for (const l of logs) {
-    const li = document.createElement('li');
-    li.innerHTML = `<span class="ts">${fmtTime(l.ts)}</span><span class="lvl ${l.level}">${l.level}</span><span>${escapeHtml(l.msg)}</span>`;
-    lOl.appendChild(li);
+    const div = document.createElement('div');
+    div.className = 'log-entry';
+    div.innerHTML = `<span class="log-ts">${fmtTime(l.ts)}</span><span class="log-lvl ${l.level}">${l.level}</span><span class="log-msg">${esc(l.msg)}</span>`;
+    logsList.appendChild(div);
   }
+  if (!logs.length) $('noLogs').hidden = false;
+  else $('noLogs').hidden = true;
 }
 
-function humanSize(n) {
-  if (!Number.isFinite(n) || n <= 0) return '';
-  const u = ['B','KB','MB','GB','TB'];
-  let i = 0;
-  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
-  return n.toFixed(n >= 10 || i === 0 ? 0 : 1) + ' ' + u[i];
+function isMediaFile(path) {
+  const ext = path.split('.').pop().toLowerCase();
+  const mediaExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'svg', 'mp4', 'mkv', 'webm', 'mov', 'm4v', 'avi', 'flv'];
+  return mediaExts.includes(ext);
 }
 
-function setMsg(text, isErr = false) {
+function isVideoFile(path) {
+  const ext = path.split('.').pop().toLowerCase();
+  const videoExts = ['mp4', 'mkv', 'webm', 'mov', 'm4v', 'avi', 'flv'];
+  return videoExts.includes(ext);
+}
+
+// ─── Messages ─────────────────────────────────────────────────────────────────
+function setMsg(text, isErr = false, isOk = false) {
   const m = $('msg');
   m.textContent = text || '';
-  m.classList.toggle('err', !!isErr);
+  m.className = 'msg' + (isErr ? ' err' : '') + (isOk ? ' ok' : '');
 }
 
-// --- WebSocket ---
+// ─── WebSocket ────────────────────────────────────────────────────────────────
 let ws;
 function connectWs() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -132,6 +404,7 @@ function connectWs() {
     handleEvent(type, payload);
   };
 }
+
 function setStatus(s) {
   const el = $('status');
   el.className = 'status ' + s;
@@ -142,63 +415,112 @@ function handleEvent(type, payload) {
   if (!payload) return;
   if (type === 'job:progress') {
     const j = state.jobs.get(payload.id);
-    if (j) { j.progress_pct = payload.pct; upsertJob(j); }
+    if (j) { j.progress_pct = payload.pct; }
+    // Bewaar speed/eta voor weergave
+    state.liveProgress.set(String(payload.id), {
+      pct: payload.pct,
+      speed: payload.speed || null,
+      eta: payload.eta || null,
+    });
+    renderList();
+    if (String(state.selectedId) === String(payload.id)) selectJob(payload.id);
     return;
   }
   if (typeof payload === 'object' && payload.id) {
-    upsertJob(payload);
+    state.jobs.set(payload.id, { ...(state.jobs.get(payload.id) || {}), ...payload });
+    // Wis live progress als job niet meer running is
+    if (payload.status && payload.status !== 'running') {
+      state.liveProgress.delete(String(payload.id));
+    }
+    renderList();
+    if (String(state.selectedId) === String(payload.id)) selectJob(payload.id);
   }
 }
 
-function upsertJob(job) {
-  state.jobs.set(job.id, { ...(state.jobs.get(job.id) || {}), ...job });
-  renderList();
-  if (String(state.selectedId) === String(job.id)) selectJob(job.id);
-}
-
-// --- init ---
+// ─── Init ─────────────────────────────────────────────────────────────────────
 async function loadAdapters() {
   try {
     const { adapters } = await api('GET', '/api/adapters');
     state.adapters = adapters;
-    const sel = $('adapter');
-    for (const a of adapters) {
-      const opt = document.createElement('option');
-      opt.value = a.name; opt.textContent = a.name;
-      sel.appendChild(opt);
-    }
-  } catch (_e) { /* niet fataal */ }
+  } catch {}
 }
 
 async function loadJobs() {
-  const { jobs } = await api('GET', '/api/jobs?limit=200');
+  const { jobs } = await api('GET', '/api/jobs?limit=500');
   state.jobs = new Map(jobs.map((j) => [j.id, j]));
   renderList();
 }
 
 function bind() {
+  // Single download
   $('newJobForm').addEventListener('submit', async (ev) => {
     ev.preventDefault();
     const url = $('url').value.trim();
-    const adapter = $('adapter').value || undefined;
     if (!url) return;
-    const force = $('force') && $('force').checked;
+    const force = $('force')?.checked;
     try {
-      const job = await api('POST', '/api/jobs', { url, adapter, force });
-      upsertJob(job);
+      const job = await api('POST', '/api/jobs', { url, force });
+      state.jobs.set(job.id, job);
+      renderList();
       selectJob(job.id);
       if (job.duplicate) {
-        setMsg(`Duplicaat — bestaande job #${job.id} (${job.status}) hergebruikt. Vink "forceer" aan om opnieuw te downloaden.`);
+        setMsg(`Duplicaat — bestaande job #${job.id} (${job.status})`);
       } else {
         $('url').value = '';
-        setMsg(`Job #${job.id} aangemaakt (${job.adapter})`);
+        setMsg(`✅ Download #${job.id} gestart`, false, true);
       }
     } catch (e) { setMsg(e.message, true); }
   });
 
+  // Expand playlist
+  $('btnExpand').addEventListener('click', async () => {
+    const url = $('url').value.trim();
+    if (!url) { setMsg('Vul een playlist/kanaal URL in', true); return; }
+    const force = $('force')?.checked;
+    setMsg('⏳ Playlist uitpakken…');
+    $('btnExpand').disabled = true;
+    try {
+      const result = await api('POST', '/api/jobs/expand', { url, force });
+      $('url').value = '';
+      setMsg(`✅ ${result.total} video's → ${result.queued} ingepland, ${result.duplicates} overgeslagen${result.skipped ? `, ${result.skipped} verwijderd/privé geskipt` : ''}`, false, true);
+      await loadJobs();
+    } catch (e) {
+      setMsg(e.message, true);
+    } finally {
+      $('btnExpand').disabled = false;
+    }
+  });
+
   $('filter').addEventListener('change', (ev) => { state.filter = ev.target.value; renderList(); });
-  $('btnRetry').addEventListener('click',  () => state.selectedId && api('POST', `/api/jobs/${state.selectedId}/retry`).then((j)=>upsertJob(j)).catch((e)=>setMsg(e.message,true)));
-  $('btnCancel').addEventListener('click', () => state.selectedId && api('POST', `/api/jobs/${state.selectedId}/cancel`).then((j)=>upsertJob(j)).catch((e)=>setMsg(e.message,true)));
+
+  // Bulk-acties
+  async function doBulk(action) {
+    try {
+      const result = await api('POST', '/api/jobs/bulk', { action });
+      setMsg(`${action}: ${result.affected} jobs bijgewerkt`, false, true);
+      await loadJobs();
+    } catch (e) { setMsg(e.message, true); }
+  }
+  $('btnBulkCancel').addEventListener('click', () => doBulk('cancel-queued'));
+  $('btnBulkRetry').addEventListener('click', () => doBulk('retry-failed'));
+  $('btnBulkClear').addEventListener('click', () => doBulk('clear-done'));
+
+  $('btnRetry').addEventListener('click', () => state.selectedId && api('POST', `/api/jobs/${state.selectedId}/retry`).then(() => loadJobs()).catch((e) => setMsg(e.message, true)));
+  $('btnCancel').addEventListener('click', () => state.selectedId && api('POST', `/api/jobs/${state.selectedId}/cancel`).then(() => loadJobs()).catch((e) => setMsg(e.message, true)));
+
+  // Tab switching
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      const tabName = tab.dataset.tab;
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+      tab.classList.add('active');
+      document.querySelector(`[data-panel="${tabName}"]`).classList.add('active');
+    });
+  });
+
+  // Auto-refresh
+  setInterval(() => loadJobs().catch(() => {}), 5000);
 }
 
 (async function boot() {

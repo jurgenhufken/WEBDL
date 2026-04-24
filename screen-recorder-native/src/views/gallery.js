@@ -2173,6 +2173,7 @@ function getGalleryHTML() {
     });
     
     window.addEventListener('keydown', async (e) => {
+      console.log('[GALLERY KEY]', e.key, 'target:', e.target && e.target.tagName);
       const tag = e.target && e.target.tagName ? String(e.target.tagName).toUpperCase() : '';
       const isFormTarget = tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA';
       if (!elModal.classList.contains('open')) {
@@ -2207,6 +2208,47 @@ function getGalleryHTML() {
         e.preventDefault();
       }
       else if (e.key === 'Escape') { e.preventDefault(); closeModal(); }
+      else if (/^[0-9]$/.test(e.key)) {
+        e.preventDefault();
+        try {
+          const key = parseInt(e.key, 10);
+          const rating = (10 - key) / 2;
+          const idx = state.currentIndex;
+          const it = (idx != null && idx >= 0) ? state.items[idx] : null;
+          const ref = it ? getRatingRef(it) : null;
+          if (!ref) return;
+          const resp = await postApi('/api/rating', { kind: ref.kind, id: ref.id, rating });
+          if (!resp || !resp.success) throw new Error((resp && resp.error) ? resp.error : 'rating opslaan mislukt');
+          // update state
+          for (const item of state.items) {
+            const r2 = getRatingRef(item);
+            if (r2 && r2.kind === ref.kind && Number(r2.id) === Number(ref.id)) item.rating = rating;
+          }
+          // update modal rating UI
+          if (elMRating && elMRating.dataset && elMRating.dataset.kind === ref.kind && elMRating.dataset.id === String(ref.id)) {
+            setStars(elMRating, rating);
+          }
+          // update card rating UIs in grid
+          try {
+            const cards = Array.from(elGrid.querySelectorAll('.card'));
+            for (const c of cards) {
+              const k = c.dataset && c.dataset.key ? String(c.dataset.key) : '';
+              if (!k) continue;
+              const ii = state.items.findIndex((x) => itemKey(x) === k);
+              if (ii < 0) continue;
+              const r3 = getRatingRef(state.items[ii]);
+              if (!r3) continue;
+              if (r3.kind === ref.kind && Number(r3.id) === Number(ref.id)) {
+                const el = c.querySelector('.webdl-rating');
+                if (el) setStars(el, rating);
+              }
+            }
+          } catch (e2) {}
+          log('Rating ingesteld: ' + rating + ' (toets ' + key + ')');
+        } catch (err) {
+          try { log('Rating fout: ' + (err.message || String(err))); } catch (e3) {}
+        }
+      }
     });
 
     // Socket.io auto-refresh: reload gallery when new downloads complete

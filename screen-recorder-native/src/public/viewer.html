@@ -1094,6 +1094,28 @@
         resetZoom();
         e.preventDefault();
       }
+      else if (/^[0-9]$/.test(e.key)) {
+        const key = parseInt(e.key, 10);
+        const rating = (10 - key) / 2;
+        const it = currentItem();
+        if (it) {
+          const ref = getRatingRef(it);
+          if (ref) {
+            try {
+              const resp = await postApi('/api/rating', { kind: ref.kind, id: ref.id, rating });
+              if (!resp || !resp.success) throw new Error((resp && resp.error) ? resp.error : 'rating opslaan mislukt');
+              applyRatingToState(ref, rating);
+              updateAllRatingUIs(ref, rating);
+              showCurrent();
+              renderList();
+              log('Rating ingesteld: ' + rating + ' (toets ' + key + ')');
+            } catch (err) {
+              log('Rating fout: ' + (err.message || String(err)));
+            }
+          }
+        }
+        e.preventDefault();
+      }
     }, { capture: true });
 
     try {

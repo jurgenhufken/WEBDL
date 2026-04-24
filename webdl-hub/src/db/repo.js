@@ -6,6 +6,44 @@ const config = require('../config');
 
 const VALID_SCHEMA = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 
+// Lane classifier: bepaalt concurrency-bucket.
+//  - 'process-video': video + ffmpeg merge (YouTube, Vimeo, Twitch, TikTok, Reddit video),
+//    max 1 tegelijk wegens zware CPU (ffmpeg-merge + transcodes)
+//  - 'video':         directe video download zonder merge, max 2 tegelijk
+//  - 'image':         images/attachments, max 6 tegelijk (netwerk-bound)
+const IMAGE_URL_RE = /\.(jpe?g|png|webp|gif|avif|bmp|tiff?)(\?|$)/i;
+const DIRECT_VIDEO_RE = /\.(mp4|webm|mkv|mov|m4v|avi|flv|ts)(\?|$)/i;
+const MERGE_VIDEO_HOSTS = [
+  'youtube.com', 'youtu.be', 'vimeo.com', 'twitch.tv',
+  'tiktok.com', 'reddit.com', 'redd.it', 'v.redd.it',
+  'streamable.com', 'bitchute.com', 'rumble.com',
+];
+function classifyLane(url, adapter) {
+  const u = String(url || '').toLowerCase();
+  if (IMAGE_URL_RE.test(u)) return 'image';
+  if (adapter === 'gallerydl' || adapter === 'reddit-dl') {
+    // gallery-dl/reddit-dl zijn meestal images; videos in deze flow zijn zeldzaam.
+    return 'image';
+  }
+  if (adapter === 'ofscraper' || adapter === 'instaloader' || adapter === 'tdl') {
+    // Deze adapters downloaden mixed content; default naar video-lane (geen ffmpeg merge).
+    return 'video';
+  }
+  if (DIRECT_VIDEO_RE.test(u)) return 'video';
+  // yt-dlp met merge-hosts → process-video
+  if (adapter === 'ytdlp') {
+    try {
+      const parsed = new URL(url);
+      const host = parsed.hostname.replace(/^www\./, '');
+      if (MERGE_VIDEO_HOSTS.some((h) => host === h || host.endsWith('.' + h))) {
+        return 'process-video';
+      }
+    } catch (_) {}
+    return 'process-video';
+  }
+  return 'video';
+}
+
 function createRepo({ databaseUrl = config.databaseUrl, schema = config.dbSchema } = {}) {
   if (!VALID_SCHEMA.test(schema)) {
     throw new Error(`Ongeldige schema-naam: "${schema}"`);
@@ -25,12 +63,13 @@ function createRepo({ databaseUrl = config.databaseUrl, schema = config.dbSchema
     return rows[0].ok === 1;
   }
 
-  async function createJob({ url, adapter, priority = 0, options = {}, maxAttempts = 3 }) {
+  async function createJob({ url, adapter, priority = 0, options = {}, maxAttempts = 3, lane = null }) {
+    const finalLane = lane || classifyLane(url, adapter);
     const { rows } = await query(
-      `INSERT INTO ${T.jobs} (url, adapter, status, priority, options, max_attempts)
-       VALUES ($1, $2, 'queued', $3, $4::jsonb, $5)
+      `INSERT INTO ${T.jobs} (url, adapter, status, priority, options, max_attempts, lane)
+       VALUES ($1, $2, 'queued', $3, $4::jsonb, $5, $6)
        RETURNING *`,
-      [url, adapter, priority, JSON.stringify(options), maxAttempts],
+      [url, adapter, priority, JSON.stringify(options), maxAttempts, finalLane],
     );
     return rows[0];
   }
@@ -68,7 +107,9 @@ function createRepo({ databaseUrl = config.databaseUrl, schema = config.dbSchema
     return rows;
   }
 
-  async function claimNextJob(workerId) {
+  async function claimNextJob(workerId, { lane = null } = {}) {
+    const laneFilter = lane ? 'AND lane = $2' : '';
+    const params = lane ? [workerId, lane] : [workerId];
     const { rows } = await query(
       `UPDATE ${T.jobs}
           SET status     = 'running',
@@ -78,13 +119,13 @@ function createRepo({ databaseUrl = config.databaseUrl, schema = config.dbSchema
               started_at = COALESCE(started_at, now())
         WHERE id = (
           SELECT id FROM ${T.jobs}
-           WHERE status = 'queued'
+           WHERE status = 'queued' ${laneFilter}
            ORDER BY priority DESC, created_at ASC
            FOR UPDATE SKIP LOCKED
            LIMIT 1
         )
         RETURNING *`,
-      [workerId],
+      params,
     );
     return rows[0] || null;
   }
@@ -167,13 +208,20 @@ function createRepo({ databaseUrl = config.databaseUrl, schema = config.dbSchema
     await query(`TRUNCATE ${T.logs}, ${T.files}, ${T.jobs} RESTART IDENTITY CASCADE`);
   }
 
+  async function markGallerySynced(jobId) {
+    await query(
+      `UPDATE ${T.jobs} SET options = COALESCE(options, '{}'::jsonb) || '{"gallery_synced": true}'::jsonb WHERE id = $1`,
+      [jobId],
+    );
+  }
+
   return {
     pool, schema, close, ping,
     createJob, getJob, findRecentJobByUrl, listJobs,
     claimNextJob, completeJob, failJob, cancelJob, updateProgress,
     addFile, listFiles, appendLog, listLogs,
-    truncateAll,
+    truncateAll, markGallerySynced,
   };
 }
 
-module.exports = { createRepo };
+module.exports = { createRepo, classifyLane };

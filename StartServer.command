@@ -9,30 +9,36 @@
  echo "---------------------------------------------"
  echo ""
  
- echo "Controleren of poort 35729 al in gebruik is..."
- PORTPROC=$(lsof -ti:35729)
- if [ ! -z "$PORTPROC" ]; then
-     echo "Proces(sen) gevonden op poort 35729: $PORTPROC"
-     echo "Beëindigen van bestaande processen..."
-     kill -TERM $PORTPROC 2>/dev/null || true
-     for i in {1..40}; do
-         sleep 0.3
-         STILL=$(lsof -ti:35729)
-         if [ -z "$STILL" ]; then
-             break
+ function check_port_and_kill() {
+     local PORT=$1
+     echo "Controleren of poort $PORT al in gebruik is..."
+     local PORTPROC=$(lsof -ti:$PORT)
+     if [ ! -z "$PORTPROC" ]; then
+         echo "Proces(sen) gevonden op poort $PORT: $PORTPROC"
+         echo "Beëindigen van bestaande processen..."
+         kill -TERM $PORTPROC 2>/dev/null || true
+         for i in {1..40}; do
+             sleep 0.3
+             local STILL=$(lsof -ti:$PORT)
+             if [ -z "$STILL" ]; then
+                 break
+             fi
+         done
+         local STILL=$(lsof -ti:$PORT)
+         if [ ! -z "$STILL" ]; then
+             echo "Proces(sen) reageren niet, force kill..."
+             kill -KILL $STILL 2>/dev/null || true
+             sleep 1
          fi
-     done
-     STILL=$(lsof -ti:35729)
-     if [ ! -z "$STILL" ]; then
-         echo "Proces(sen) reageren niet, force kill..."
-         kill -KILL $STILL 2>/dev/null || true
-         sleep 1
+         echo "Oude proces(sen) beëindigd"
+     else
+         echo "Poort $PORT is vrij"
      fi
-     echo "Oude proces(sen) beëindigd"
- else
-     echo "Poort 35729 is vrij"
- fi
- echo ""
+     echo ""
+ }
+ check_port_and_kill 35729
+ check_port_and_kill 35730
+ check_port_and_kill 35731
  
  # Navigeer naar de applicatie directory
  cd screen-recorder-native
@@ -192,6 +198,8 @@
  
  (sleep 1; open "$HOME/Downloads/WEBDL") >/dev/null 2>&1 &
  (sleep 4; open "http://localhost:35729/addon/firefox-debug-controller.xpi?t=$(date +%s)") >/dev/null 2>&1 &
+ (sleep 5; open "http://localhost:35730/") >/dev/null 2>&1 &
+ (sleep 6; open "http://localhost:35731/") >/dev/null 2>&1 &
  SRC="src/simple-server.js"
  DST="src/simple-server.compiled.js"
  echo "Kopiëren van serverbron: $SRC -> $DST"
@@ -227,12 +235,35 @@
  echo "Runtime mtime: $DST_MTIME"
  echo "Runtime hash : $DST_HASH"
  fi
+ 
+ echo "webdl-hub starten op poort 35730..."
+ (
+   cd ../webdl-hub
+   if [ ! -d "node_modules" ]; then
+       echo "Dependencies webdl-hub installeren..."
+       npm install
+   fi
+   npm run dev
+ ) &
+ HUB_PID=$!
+
+ echo "webdl-gallery starten op poort 35731..."
+ (
+   cd ../webdl-gallery
+   if [ ! -d "node_modules" ]; then
+       echo "Dependencies webdl-gallery installeren..."
+       npm install
+   fi
+   node server.js
+ ) &
+ GALLERY_PID=$!
+ 
  echo "Server starten: node $DST"
  : "${WEBDL_DEV_AUTO_RESTART:=1}"
  if [ "${WEBDL_DEV_AUTO_RESTART}" = "1" ]; then
    echo "Dev auto-restart: aan (zet WEBDL_DEV_AUTO_RESTART=0 om uit te zetten)"
    PID=""
-   trap 'echo "Stoppen..."; if [ ! -z "${PID}" ]; then kill -TERM "${PID}" 2>/dev/null || true; for i in {1..25}; do sleep 0.1; kill -0 "${PID}" 2>/dev/null || break; done; kill -KILL "${PID}" 2>/dev/null || true; wait "${PID}" 2>/dev/null || true; fi; exit 0' INT TERM
+   trap 'echo "Stoppen..."; if [ ! -z "${HUB_PID}" ]; then kill -TERM "${HUB_PID}" 2>/dev/null || true; fi; if [ ! -z "${GALLERY_PID}" ]; then kill -TERM "${GALLERY_PID}" 2>/dev/null || true; fi; if [ ! -z "${PID}" ]; then kill -TERM "${PID}" 2>/dev/null || true; for i in {1..25}; do sleep 0.1; kill -0 "${PID}" 2>/dev/null || break; done; kill -KILL "${PID}" 2>/dev/null || true; wait "${PID}" 2>/dev/null || true; fi; exit 0' INT TERM
    LAST_SRC_MTIME=$(stat -f '%m' "$SRC" 2>/dev/null || echo '')
    while true; do
      RESTART_REQUESTED=0

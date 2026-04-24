@@ -20,11 +20,22 @@ CREATE TABLE IF NOT EXISTS __SCHEMA__.jobs (
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   started_at    TIMESTAMPTZ,
   finished_at   TIMESTAMPTZ,
-  error         TEXT
+  error         TEXT,
+  -- Lane voor concurrency-buckets:
+  --  'process-video': video + ffmpeg merge (YouTube enz.), max 1 tegelijk
+  --  'video':         directe video download zonder merge, max 2 tegelijk
+  --  'image':         images/attachments, max 6 tegelijk
+  lane          TEXT        NOT NULL DEFAULT 'video'
 );
+
+-- Voor oudere databases zonder 'lane' kolom:
+ALTER TABLE __SCHEMA__.jobs ADD COLUMN IF NOT EXISTS lane TEXT NOT NULL DEFAULT 'video';
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status_prio
   ON __SCHEMA__.jobs (status, priority DESC, created_at ASC);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_lane_status
+  ON __SCHEMA__.jobs (lane, status, priority DESC, created_at ASC);
 
 -- Voor URL-dedupe: snel bestaande actieve/klare job vinden per URL.
 CREATE INDEX IF NOT EXISTS idx_jobs_url ON __SCHEMA__.jobs (url);
