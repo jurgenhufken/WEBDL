@@ -97,11 +97,15 @@
     el.viewer.setAttribute('aria-hidden', 'false');
     document.body.style.overflow = 'hidden';
 
+    // Push history state zodat browser-back (en muis-back-knop) de viewer sluit
+    history.pushState({ page: 'viewer' }, '', location.href);
+
     renderSidebarList();
     showCurrent();
   }
 
-  function close() {
+  function close(skipHistory) {
+    if (!vs.open) return;
     vs.open = false;
     stopSlideshow();
     cleanupMedia();
@@ -112,6 +116,11 @@
     el.viewer.setAttribute('aria-hidden', 'true');
     document.body.style.overflow = '';
     vs.idx = -1;
+
+    // Pop de viewer history entry (tenzij we al via popstate kwamen)
+    if (!skipHistory) {
+      try { history.back(); } catch (_) {}
+    }
   }
 
   // ─── Huidige item tonen ────────────────────────────────────────────────────
@@ -593,23 +602,32 @@
     el.vStage.addEventListener('click', (e) => {
       if (el.vPrev.contains(e.target) || el.vNext.contains(e.target)) return;
       if (el.vHudLeft.contains(e.target) || el.vHudRight.contains(e.target)) return;
+      // Niet op progress bar
+      if (el.vProgressBar && el.vProgressBar.contains(e.target)) return;
       const v = el.vContent.querySelector('video');
       if (v) { v.paused ? v.play() : v.pause(); }
     });
 
-    // Dubbelklik stage → zoom toggle (niet sidebar)
-    el.vStage.addEventListener('dblclick', (e) => {
-      if (el.vPrev.contains(e.target) || el.vNext.contains(e.target)) return;
-      const v = el.vContent.querySelector('video');
-      // Zoom not implemented yet → placeholder
+    // Geen dubbelklik-zoom, geen scroll-wheel navigatie
+    // (Oude viewer: scroll wheel deed alleen zoom als al ingezoomd — maar user wil geen zoom)
+
+    // Muis-back-knop (button 3) → sluit viewer
+    window.addEventListener('mouseup', (e) => {
+      if (!vs.open) return;
+      // Button 3 = browser back knop op de muis
+      if (e.button === 3) {
+        e.preventDefault();
+        e.stopPropagation();
+        close();
+      }
     });
 
-    // Scroll wheel → next/prev
-    el.vStage.addEventListener('wheel', (e) => {
-      e.preventDefault();
-      if (e.deltaY > 0) navNext();
-      else navPrev();
-    }, { passive: false });
+    // Browser back (popstate) → sluit viewer
+    window.addEventListener('popstate', (e) => {
+      if (vs.open) {
+        close(true); // skipHistory=true want we zijn al terug
+      }
+    });
 
     // Muisbeweging → HUD tonen
     el.vStage.addEventListener('mousemove', () => showHUD());
@@ -617,6 +635,7 @@
     // Progress bar klik → seek
     if (el.vProgressBar) {
       el.vProgressBar.addEventListener('click', (e) => {
+        e.stopPropagation(); // niet triggeren play/pause
         const v = el.vContent.querySelector('video');
         if (!v || !v.duration) return;
         const rect = el.vProgressBar.getBoundingClientRect();
