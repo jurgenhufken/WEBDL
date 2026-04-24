@@ -12925,6 +12925,12 @@ function makeMediaItem(row) {
     dedupeKey = fp || '';
   }
 
+  // Deduplicate identical Youtube / 4K videos by title instead of file path
+  // This collapses duplicate imports of the exact same video
+  if (String(row.platform || '') === 'youtube' && row.channel && row.title) {
+    dedupeKey = `yt:${row.channel}:${row.title}`;
+  }
+
   const safeDecode = (v) => {
     try {
       const s = String(v == null ? '' : v);
@@ -13237,7 +13243,7 @@ function dedupeVideoThumbnailPairs(files) {
   }
 }
 
-function makePathMediaItem({ relPath, platform, channel, title, created_at, thumbTs, url, source_url, rating, rating_kind, rating_id }) {
+function makePathMediaItem({ relPath, platform, channel, title, created_at, ts, thumbTs, url, source_url, rating, rating_kind, rating_id }) {
   const absPath = path.resolve(BASE_DIR, relPath);
   if (isAuxiliaryMediaPath(absPath)) return null;
   const type = inferMediaType(absPath);
@@ -13285,7 +13291,7 @@ function makePathMediaItem({ relPath, platform, channel, title, created_at, thum
     title: combinedTitle,
     title_display: titleDisplay,
     created_at,
-    ts: thumbTs > 0 ? thumbTs : (created_at ? new Date(created_at).getTime() : 0),
+    ts: ts > 0 ? ts : (thumbTs > 0 ? thumbTs : (created_at ? new Date(created_at).getTime() : 0)),
     type,
     rating: (rating != null && rating !== '') ? Number(rating) : null,
     rating_kind: rating_kind || 'd',
@@ -13321,6 +13327,7 @@ function makeIndexedMediaItem(row) {
       channel: row.channel,
       title: row.title,
       created_at: row.created_at,
+      ts: row.ts ? Number(row.ts) : 0,
       thumbTs,
       url: row.url,
       source_url: row.source_url,
@@ -13527,8 +13534,7 @@ async function getDynamicHybridBatch(stmt, typeFilter, ...args) {
   if (needsSearchFilter) {
     const q = String(searchFilter.query).replace(/'/g, "''").replace(/%/g, '');
     const searchLike = `%${q}%`;
-    // Remove ID-window limits so we search the full database
-    sql = sql.replace(/AND\s+d\.id\s*>\s*\(SELECT\s+MAX\(id\)\s*-\s*\d+\s+FROM\s+downloads\)/gi, '');
+    // Add search ILIKE as outer filter wrapping the whole query
     // Add search ILIKE as outer filter wrapping the whole query
     const orderMatch = sql.match(/(ORDER\s+BY\s+ts\s+(?:DESC|ASC)\s*(?:NULLS\s+(?:FIRST|LAST)\s*)?LIMIT\s+\?\s*OFFSET\s+\?)\s*$/is);
     if (orderMatch) {
@@ -13538,13 +13544,16 @@ async function getDynamicHybridBatch(stmt, typeFilter, ...args) {
     }
   }
 
-  // Platform filter: replace ID-window with platform IN() directly in each subquery
+  // Platform filter: inject platform IN() directly in each subquery
   if (needsPlatformFilter) {
     const plats = platformFilter.platforms.map(p => `'${String(p).replace(/'/g, "''")}'`).join(',');
     const platClause = `AND d.platform IN (${plats})`;
-    // Replace "AND d.id > (SELECT MAX(id) - N FROM downloads)" with platform filter
-    sql = sql.replace(/AND\s+d\.id\s*>\s*\(SELECT\s+MAX\(id\)\s*-\s*\d+\s+FROM\s+downloads\)/gi, platClause);
-    // Also filter the screenshots subquery (uses s. prefix)
+    
+    // Inject into downloads and download_files subqueries
+    sql = sql.replace(/WHERE\s+d\.status\s+NOT\s+IN\s+\('pending',\s*'queued',\s*'downloading',\s*'postprocessing'\)/gi, 
+      `WHERE d.status NOT IN ('pending', 'queued', 'downloading', 'postprocessing') ${platClause}`);
+      
+    // Inject into screenshots subquery (uses s. prefix)
     sql = sql.replace(/(FROM\s+screenshots\s+s\s+WHERE)/gi, `$1 s.platform IN (${plats}) AND`);
   }
 
@@ -15554,7 +15563,7 @@ function shutdownGracefully(signal) {
     return Promise.all(promises);
   };
 
-  stopRecordingIfAny().finally(() => {
+  stopRecordings().finally(() => {
     for (const [id, proc] of activeProcesses) {
       try { proc.kill('SIGTERM'); } catch (e) { }
       console.log(`  Download #${id} gestopt`);
