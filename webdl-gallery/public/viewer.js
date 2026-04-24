@@ -184,14 +184,37 @@
 
     el.vContent.appendChild(mediaEl);
 
-    // Align progress bar op onderkant van media element
+    // Align progress bar exact op onderkant van de afgespeelde pixels
     function alignProgressBar() {
       const media = el.vContent.querySelector('video, img');
       if (!media || !el.vProgressBar) return;
+      
+      const isVid = media.tagName === 'VIDEO';
+      const w = isVid ? media.videoWidth : media.naturalWidth;
+      const h = isVid ? media.videoHeight : media.naturalHeight;
+      if (!w || !h) return;
+      
       const stageRect = el.vStage.getBoundingClientRect();
-      const mediaRect = media.getBoundingClientRect();
-      const bottomOffset = stageRect.bottom - mediaRect.bottom;
+      const stageRatio = stageRect.width / stageRect.height;
+      const mediaRatio = w / h;
+      
+      let actualHeight, actualWidth;
+      if (mediaRatio > stageRatio) {
+        // Breder dan stage: letterbox boven en onder
+        actualWidth = stageRect.width;
+        actualHeight = stageRect.width / mediaRatio;
+      } else {
+        // Hoger dan stage: letterbox links en rechts (portrait)
+        actualHeight = stageRect.height;
+        actualWidth = stageRect.height * mediaRatio;
+      }
+      
+      const bottomOffset = (stageRect.height - actualHeight) / 2;
+      const sideOffset = (stageRect.width - actualWidth) / 2;
+      
       el.vProgressBar.style.bottom = bottomOffset + 'px';
+      el.vProgressBar.style.left = sideOffset + 'px';
+      el.vProgressBar.style.right = sideOffset + 'px';
     }
     mediaEl.addEventListener(isVid ? 'loadedmetadata' : 'load', alignProgressBar);
     // Ook bij resize

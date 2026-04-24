@@ -283,10 +283,12 @@ input[type="range"]:disabled { opacity: 0.35; cursor: default; }
 .hud-pill.hud-hidden { opacity: 0; }
 .viewer-stage.hud-hidden .vprogressbar { opacity: 0; }
 
-.vprogressbar { position: absolute; bottom: 0; left: 0; right: 0; height: 3px; background: var(--accent-soft); cursor: pointer; z-index: 10; transition: height 0.2s ease, opacity 0.4s ease; }
-.vprogressbar:hover { height: 7px; }
-.vprogressbar-fill { height: 100%; background: var(--progress); width: 0%; transition: width 0.1s linear; pointer-events: none; border-radius: 0 2px 2px 0; box-shadow: 0 0 6px var(--accent-glow); }
-.vprogressbar-handle { position: absolute; top: 50%; width: 12px; height: 12px; border-radius: 50%; background: var(--accent); transform: translate(-50%, -50%); opacity: 0; transition: opacity 0.2s ease; pointer-events: none; left: 0%; box-shadow: 0 0 8px var(--accent-glow); }
+.vprogressbar { position: absolute; bottom: 0; left: 0; right: 0; height: 24px; background: transparent; cursor: pointer; z-index: 10; transition: opacity 0.4s ease; transform: translateY(50%); /* Center the 24px hit area exactly on the bottom edge */ }
+.vprogressbar::before { content: ''; position: absolute; top: 50%; left: 0; right: 0; height: 4px; transform: translateY(-50%); background: var(--accent-soft); transition: height 0.2s ease; }
+.vprogressbar:hover::before { height: 8px; }
+.vprogressbar-fill { position: absolute; top: 50%; left: 0; height: 4px; transform: translateY(-50%); background: var(--progress); width: 0%; transition: width 0.1s linear, height 0.2s ease; pointer-events: none; border-radius: 0 2px 2px 0; box-shadow: 0 0 6px var(--accent-glow); }
+.vprogressbar:hover .vprogressbar-fill { height: 8px; }
+.vprogressbar-handle { position: absolute; top: 50%; width: 14px; height: 14px; border-radius: 50%; background: var(--accent); transform: translate(-50%, -50%); opacity: 0; transition: opacity 0.2s ease; pointer-events: none; left: 0%; box-shadow: 0 0 8px var(--accent-glow); }
 .vprogressbar:hover .vprogressbar-handle { opacity: 1; }
 
 /* ─── Tag dialog ──────────────────────────────────────────────────────────── */
