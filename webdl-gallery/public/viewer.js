@@ -184,6 +184,26 @@
 
     el.vContent.appendChild(mediaEl);
 
+    // Align progress bar op onderkant van media element
+    function alignProgressBar() {
+      const media = el.vContent.querySelector('video, img');
+      if (!media || !el.vProgressBar) return;
+      const stageRect = el.vStage.getBoundingClientRect();
+      const mediaRect = media.getBoundingClientRect();
+      const bottomOffset = stageRect.bottom - mediaRect.bottom;
+      el.vProgressBar.style.bottom = bottomOffset + 'px';
+    }
+    mediaEl.addEventListener(isVid ? 'loadedmetadata' : 'load', alignProgressBar);
+    // Ook bij resize
+    if (!vs._resizeAlignBound) {
+      vs._resizeAlignBound = true;
+      window.addEventListener('resize', () => {
+        requestAnimationFrame(alignProgressBar);
+      });
+    }
+    // Na een kort moment voor layout
+    requestAnimationFrame(() => setTimeout(alignProgressBar, 50));
+
     // Mute-knop initieel syncen
     el.vBtnMute.textContent = vs.muted ? '🔇' : '🔊';
 
@@ -647,19 +667,24 @@
       setZoom(vs.scale + delta);
     }, { passive: false });
 
-    // Klik op content → toggle zoom (exact als oude viewer!)
-    // Als ingezoomd: reset. Als niet ingezoomd: zoom 2x.
-    // Na drag: niet triggeren (dragMoved check)
+    // Klik op content:
+    // - Video: play/pause
+    // - Afbeelding: toggle zoom (2x of reset)
+    // Scroll wheel zoomt altijd (voor beide)
     el.vContent.addEventListener('click', (e) => {
       if (el.vPrev.contains(e.target) || el.vNext.contains(e.target)) return;
       if (el.vHudLeft.contains(e.target) || el.vHudRight.contains(e.target)) return;
       if (el.vProgressBar && el.vProgressBar.contains(e.target)) return;
       if (vs.dragMoved) { vs.dragMoved = false; return; }
 
-      if (vs.scale > 1) {
-        resetZoom();
+      const v = el.vContent.querySelector('video');
+      if (v) {
+        // Video: play/pause
+        v.paused ? v.play() : v.pause();
       } else {
-        setZoom(2);
+        // Afbeelding: toggle zoom
+        if (vs.scale > 1) resetZoom();
+        else setZoom(2);
       }
     });
 
