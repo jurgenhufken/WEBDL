@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WebDL-Hub</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <h1>WebDL-Hub</h1>
+    <div id="status" class="status status-unknown">•</div>
+  </header>
+
+  <section class="composer">
+    <form id="newJobForm" autocomplete="off">
+      <input id="url" type="url" name="url" placeholder="URL om te downloaden…" required>
+      <select id="adapter" name="adapter" title="adapter">
+        <option value="">auto</option>
+      </select>
+      <button type="submit">Download</button>
+      <label class="force" title="Negeer dedupe — download ook als deze URL al een job heeft">
+        <input id="force" type="checkbox"> forceer
+      </label>
+    </form>
+    <div id="msg" class="msg"></div>
+  </section>
+
+  <main>
+    <aside class="jobs">
+      <div class="jobs-header">
+        <h2>Jobs</h2>
+        <select id="filter" title="filter">
+          <option value="">alle</option>
+          <option value="queued">queued</option>
+          <option value="running">running</option>
+          <option value="done">done</option>
+          <option value="failed">failed</option>
+          <option value="cancelled">cancelled</option>
+        </select>
+      </div>
+      <ul id="jobList"></ul>
+    </aside>
+
+    <section class="detail">
+      <div id="detailEmpty" class="empty">Selecteer een job om details te zien.</div>
+      <article id="detail" hidden>
+        <header class="detail-header">
+          <h2 id="dTitle"></h2>
+          <div class="actions">
+            <button id="btnRetry">Retry</button>
+            <button id="btnCancel">Cancel</button>
+          </div>
+        </header>
+        <dl class="kv">
+          <dt>URL</dt>      <dd id="dUrl"></dd>
+          <dt>Adapter</dt>  <dd id="dAdapter"></dd>
+          <dt>Status</dt>   <dd id="dStatus"></dd>
+          <dt>Progress</dt> <dd><div class="bar"><div id="dBar" class="bar-fill"></div></div><span id="dPct"></span></dd>
+          <dt>Attempts</dt> <dd id="dAttempts"></dd>
+          <dt>Aangemaakt</dt><dd id="dCreated"></dd>
+          <dt>Fout</dt>     <dd id="dError"></dd>
+        </dl>
+        <h3>Bestanden</h3>
+        <ul id="dFiles" class="files"></ul>
+        <h3>Logs</h3>
+        <ol id="dLogs" class="logs"></ol>
+      </article>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

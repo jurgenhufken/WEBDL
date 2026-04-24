@@ -187,30 +187,33 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
       
     case "startRecording":
       if (isConnected && socket) {
-        socket.emit('start-recording');
-        sendResponse({ success: true });
+        socket.emit('webdl:request', { action: 'start-recording', payload: message.payload }, (response) => {
+          sendResponse(response || { success: true });
+        });
       } else {
         sendResponse({ success: false, error: "Niet verbonden met native app" });
       }
-      break;
+      return true; // Keep message channel open for async sendResponse
       
     case "stopRecording":
       if (isConnected && socket) {
-        socket.emit('stop-recording');
-        sendResponse({ success: true });
+        socket.emit('webdl:request', { action: 'stop-recording', payload: message.payload }, (response) => {
+          sendResponse(response || { success: true });
+        });
       } else {
         sendResponse({ success: false, error: "Niet verbonden met native app" });
       }
-      break;
+      return true;
       
     case "takeScreenshot":
       if (isConnected && socket) {
-        socket.emit('take-screenshot', { videoOnly: message.videoOnly });
-        sendResponse({ success: true });
+        socket.emit('webdl:request', { action: 'screenshot', payload: { videoOnly: message.videoOnly, ...message.payload } }, (response) => {
+          sendResponse(response || { success: true });
+        });
       } else {
         sendResponse({ success: false, error: "Niet verbonden met native app" });
       }
-      break;
+      return true;
       
     case "saveToolbarState":
       if (message.state.collapsed !== undefined) {

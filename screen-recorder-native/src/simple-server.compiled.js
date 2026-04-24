@@ -1603,23 +1603,40 @@ const updateDownloadStatus = {
     // Auto-tagging hook when a download completes
     if (status === 'completed') {
       try {
-        const d = await db.prepare('SELECT title, filename, filepath FROM downloads WHERE id = ' + (db.isPostgres ? '$1' : '?')).get(id);
+        const d = await db.prepare('SELECT id, title, filepath, channel, platform FROM downloads WHERE id = ' + (db.isPostgres ? '$1' : '?')).get(id);
         if (d) {
-          const text = (d.title || '') + ' ' + (d.filename || '') + ' ' + (d.filepath || '');
-          extractAndSaveTags('d', String(id), text);
+          const { generateTagsForMedia } = require('./v2/services/auto-tagger');
+          const tags = generateTagsForMedia(d);
+          if (tags.length > 0) {
+            const values = [];
+            const placeholders = [];
+            let i = 1;
+            for (const tag of tags) {
+              if (db.isPostgres) {
+                placeholders.push(`($${i++}, $${i++})`);
+              } else {
+                placeholders.push(`(?, ?)`);
+              }
+              values.push(d.id, tag);
+            }
+            const q = `INSERT INTO download_tags (download_id, tag) VALUES ${placeholders.join(', ')} ON CONFLICT ON CONSTRAINT download_tags_download_id_tag_key DO NOTHING`;
+            await (db.readPool || db.pool || db).query ? (db.readPool || db.pool).query({ text: q, values }) : db.prepare(q).run(...values);
+          }
         }
       } catch (e) {
-        console.error('Error in auto-tag hook:', e);
+        console.error('[AUTO-TAG] Error in live auto-tag hook:', e.message);
       }
     }
     return out;
   }
 };
+// NOTE: 'error' en 'cancelled' staan bewust NIET in deze lijst.
+// Een mislukte/afgebroken download mag een nieuwe poging niet blokkeren.
 const findReusableDownloadByUrl = db.prepare(`
   SELECT id, url, platform, channel, title, status, progress, filepath, filename
   FROM downloads
   WHERE url=?
-    AND status IN ('completed', 'pending', 'queued', 'downloading', 'postprocessing', 'error')
+    AND status IN ('completed', 'pending', 'queued', 'downloading', 'postprocessing')
   ORDER BY
     CASE status
       WHEN 'completed' THEN 0
@@ -4634,6 +4651,20 @@ function runDownloadSchedulerSoon() {
 }
 
 async function runDownloadScheduler() {
+  // Postprocess-cap: als er al N jobs in 'postprocessing' zitten (merge/ffmpeg)
+  // starten we geen nieuwe downloads tot die klaar zijn. Voorkomt dat meerdere
+  // ffmpeg-merges gelijktijdig CPU/IO opslokken. Default N = 1.
+  try {
+    const counts = await getActiveDownloadStatusCounts.all();
+    const ppRow = Array.isArray(counts) ? counts.find((r) => r && r.status === 'postprocessing') : null;
+    const ppCount = ppRow ? Number(ppRow.n || ppRow.count || 0) : 0;
+    if (Number.isFinite(ppCount) && ppCount >= POSTPROCESS_CONCURRENCY) {
+      // Nog postprocessing bezig — laat die eerst klaar worden.
+      // runDownloadSchedulerSoon() wordt aangeroepen zodra een job klaar is.
+      return;
+    }
+  } catch (_e) { /* DB-hick: fall-through; niet fataal */ }
+
   const heavyLimit = Math.max(0, HEAVY_DOWNLOAD_CONCURRENCY);
   const lightLimit = Math.max(0, LIGHT_DOWNLOAD_CONCURRENCY);
 
@@ -6350,8 +6381,8 @@ async function autoEnqueueMissingThumbs() {
   try {
     // Only fetch a small batch to keep it fast and iterative
     const limit = Math.max(5, THUMB_GEN_MAX_QUEUE - thumbGenQueue.length);
-    // Exclude HDD paths (/Volumes/) — they're too slow and cause event loop + DB contention
-    const rows = await db.prepare("SELECT filepath FROM downloads WHERE status = 'completed' AND is_thumb_ready = false AND filepath IS NOT NULL AND filepath != '' AND filepath NOT LIKE '/Volumes/%' ORDER BY id DESC LIMIT ?").all(limit);
+    // Exclude nothing — we want thumbs for external HDD too now!
+    const rows = await db.prepare("SELECT filepath FROM downloads WHERE status = 'completed' AND is_thumb_ready = false AND filepath IS NOT NULL AND filepath != '' ORDER BY id DESC LIMIT ?").all(limit);
     if (rows && rows.length > 0) {
       let enqueued = 0;
       for (const row of rows) {
@@ -6383,11 +6414,7 @@ function scheduleThumbGeneration(targetPath) {
       thumbGenScheduleDenied.empty_path++;
       return 'empty_path';
     }
-    // Skip external HDD paths — they cause sync I/O stalls and DB contention
-    if (abs.startsWith('/Volumes/')) {
-      thumbGenScheduleDenied.hdd_path = (thumbGenScheduleDenied.hdd_path || 0) + 1;
-      return 'hdd_path';
-    }
+    // Removed external HDD skip logic to allow thumbs on /Volumes/
     if (!safeIsAllowedExistingPath(abs)) {
       thumbGenScheduleDenied.not_allowed++;
       return 'not_allowed';
@@ -8769,6 +8796,82 @@ expressApp.post('/stop-recording', (req, res) => {
 });
 
 // Download starten via yt-dlp
+// ───── YouTube auto-expand helpers ────────────────────────────────────────
+// Detecteert of een YouTube-URL meerdere videos bevat (playlist/kanaal/shorts-tab).
+function isYoutubeMultiItemUrl(url) {
+  try {
+    const u = new URL(url);
+    const host = String(u.hostname || '').toLowerCase();
+    if (!(host === 'youtube.com' || host.endsWith('.youtube.com'))) return false;
+    const p = u.pathname;
+    if (p === '/playlist') return u.searchParams.has('list');
+    if (p === '/watch' && u.searchParams.has('list')) return true;
+    if (/^\/@[^/]+(\/(shorts|videos|streams|featured|playlists))?\/?$/.test(p)) return true;
+    if (/^\/(channel|c|user)\/[^/]+(\/(shorts|videos|streams|featured|playlists))?\/?$/.test(p)) return true;
+    return false;
+  } catch { return false; }
+}
+
+// Roept yt-dlp --flat-playlist aan om alle items op te halen zonder te downloaden.
+function expandYoutubeUrl(url, { limit = 0, timeoutMs = 180000 } = {}) {
+  return new Promise((resolve, reject) => {
+    const cookieArgs = getYtDlpCookieArgs('metadata');
+    const args = [
+      ...cookieArgs,
+      '--flat-playlist',
+      '--ignore-errors',
+      '--no-warnings',
+      '--print', '%(url)s\t%(title).120s\t%(uploader)s',
+    ];
+    if (limit && Number.isFinite(limit) && limit > 0) args.push('--playlist-items', `1:${limit}`);
+    args.push(url);
+    const proc = spawnNice(YT_DLP, args);
+    let stdout = '';
+    let stderr = '';
+    let killed = false;
+    const timer = setTimeout(() => {
+      killed = true;
+      try { proc.kill('SIGTERM'); } catch (e) {}
+      setTimeout(() => { try { proc.kill('SIGKILL'); } catch (e) {} }, 2000);
+    }, Math.max(5000, timeoutMs));
+    proc.stdout.on('data', (d) => { stdout += d.toString(); });
+    proc.stderr.on('data', (d) => { stderr += d.toString(); });
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      if (killed) return reject(new Error(`yt-dlp expand timeout (>${timeoutMs}ms)`));
+      const items = [];
+      for (const line of stdout.split('\n')) {
+        const t = line.trim();
+        if (!t) continue;
+        const [u, title, uploader] = t.split('\t');
+        if (!u || !/^https?:/.test(u)) continue;
+        items.push({ url: u, title: title || '', uploader: uploader || '' });
+      }
+      if (items.length === 0 && code !== 0) {
+        return reject(new Error(String(stderr || '').trim().slice(0, 200) || `yt-dlp expand exit ${code}`));
+      }
+      resolve(items);
+    });
+    proc.on('error', reject);
+  });
+}
+
+// Normaliseert YouTube-URLs naar canonical form voor dedupe-lookup.
+function canonicalYoutubeUrl(url) {
+  try {
+    const parsed = new URL(url);
+    const host = String(parsed.hostname || '').toLowerCase();
+    if (host.includes('youtube.com')) {
+      const v = parsed.searchParams.get('v') || parsed.pathname.split('/').pop();
+      if (v) return `https://www.youtube.com/watch?v=${v}`;
+    } else if (host === 'youtu.be') {
+      const v = parsed.pathname.replace(/^\//, '').split('/')[0];
+      if (v) return `https://www.youtube.com/watch?v=${v}`;
+    }
+  } catch (e) { /* fall through */ }
+  return url;
+}
+
 expressApp.post('/download', async (req, res) => {
   const { url, metadata, force, lane, priority } = req.body || {};
   try {
@@ -8787,6 +8890,41 @@ expressApp.post('/download', async (req, res) => {
       if (_rm) effectiveUrl = `https://i.redd.it/${_rm[1]}`;
     }
   } catch (e) {}
+
+  // YouTube auto-expand: playlist / kanaal / shorts-tab in één POST afhandelen.
+  if (isYoutubeMultiItemUrl(effectiveUrl)) {
+    console.log(`[INGRESS] YouTube auto-expand: ${effectiveUrl}`);
+    let items;
+    try {
+      items = await expandYoutubeUrl(effectiveUrl);
+    } catch (e) {
+      return res.status(502).json({ success: false, error: `Expand mislukt: ${e.message}` });
+    }
+    if (!items.length) {
+      return res.status(404).json({ success: false, error: 'Geen items gevonden' });
+    }
+    const stats = { total: items.length, queued: 0, duplicates: 0, errors: 0, expanded: true };
+    for (const it of items) {
+      const lookupUrl = canonicalYoutubeUrl(it.url);
+      try {
+        if (!forceDuplicates) {
+          const existing = await findReusableDownloadByUrl.get(lookupUrl);
+          if (existing && existing.id) { stats.duplicates++; continue; }
+        }
+        const channelName = it.uploader || 'unknown';
+        const titleText = it.title || 'untitled';
+        const result = await insertDownload.run(lookupUrl, 'youtube', channelName, titleText);
+        const newId = result.lastInsertRowid;
+        enqueueDownloadJob(newId, lookupUrl, 'youtube', channelName, titleText, {}).catch(() => {});
+        stats.queued++;
+      } catch (e) {
+        stats.errors++;
+        console.warn(`[expand] insert fout voor ${lookupUrl}: ${e.message}`);
+      }
+    }
+    console.log(`[INGRESS] Expand klaar: ${stats.queued} nieuw, ${stats.duplicates} duplicaten, ${stats.errors} fouten (${stats.total} totaal)`);
+    return res.json({ success: true, ...stats, message: `${stats.queued} nieuw, ${stats.duplicates} bestaand van ${stats.total} items` });
+  }
   const isOnlyFansProfileUrl = /onlyfans\.com\//i.test(effectiveUrl) && !/onlyfans\.com\/[^\/\?#]+\/posts\//i.test(effectiveUrl);
 
   const isProfileUrl = (u) => {
@@ -9427,21 +9565,7 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
     return startOfscraperDownload(downloadId, url, platform, channel, title, metadata);
   }
 
-  if (platform === 'youtube') {
-    // Route YouTube downloads through 4K Video Downloader+ app
-    try {
-      const { execSync } = require('child_process');
-      const safeUrl = url.replace(/'/g, "'\\''");
-      execSync(`open 'fourkvd://${safeUrl}'`, { timeout: 5000 });
-      console.log(`[DL #${downloadId}] → 4K Video Downloader: ${url.slice(0, 80)}`);
-      await updateDownloadStatus.run('superseded', 0, '4K Video Downloader', downloadId);
-      emitDownloadEventActivity('completed', downloadId, { url, platform, channel, title, note: 'Handed off to 4K Video Downloader' }).catch(() => {});
-    } catch (e) {
-      console.log(`[DL #${downloadId}] 4K Downloader failed, falling back to yt-dlp: ${e.message}`);
-      return startYtDlpDownload(downloadId, url, platform, channel, title, metadata);
-    }
-    return;
-  }
+  // YouTube is handled by the default fallback (yt-dlp) at the bottom.
 
   if (platform === 'instagram') {
     return startInstaloaderDownload(downloadId, url, platform, channel, title, metadata);
@@ -11300,10 +11424,11 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
       }
     }
 
-    let cookieArgs = getYtDlpCookieArgs('download');
-    if (platform === 'youtube' || platform === 'youtube-shorts') {
-      cookieArgs = [];
-    }
+    // Cookies altijd gebruiken indien beschikbaar. Voor YouTube zijn ze nodig
+    // voor age-restricted / member-only content. De runOnce-retry hieronder
+    // valt automatisch terug op een tweede poging zonder cookies als ze
+    // ongeldig blijken ("cookies are no longer valid").
+    const cookieArgs = getYtDlpCookieArgs('download');
 
     const runOnce = (attemptCookieArgs, allowRetryNoCookies, attemptExtraArgs = [], allowRetryNoCheckCertificates = true) => {
       return new Promise((resolve) => {
@@ -13306,6 +13431,27 @@ function makePathMediaItem({ relPath, platform, channel, title, created_at, ts, 
   };
 }
 
+async function attachTagsToItems(items, db) {
+  try {
+    const downloadIds = items.filter(i => i.rating_kind === 'd' && i.rating_id != null).map(i => i.rating_id);
+    if (downloadIds.length > 0) {
+      const tagsRes = await (db.readPool || db.pool).query({
+        text: 'SELECT download_id, array_agg(tag) as tags FROM download_tags WHERE download_id = ANY($1::bigint[]) GROUP BY download_id',
+        values: [downloadIds]
+      });
+      const tagMap = new Map();
+      for (const r of tagsRes.rows) {
+        tagMap.set(String(r.download_id), r.tags);
+      }
+      for (const item of items) {
+        if (item.rating_kind === 'd' && item.rating_id != null) {
+          item.tags = tagMap.get(String(item.rating_id)) || [];
+        }
+      }
+    }
+  } catch (e) { console.error('Failed to attach tags:', e); }
+}
+
 function makeIndexedMediaItem(row) {
   const sourceUrl = row.source_url || '';
   if (!row || typeof row !== 'object') return null;
@@ -14062,6 +14208,9 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
       // Advance cursor past ALL scanned rows (including dupes) so the next
       // page's OFFSET jumps past the entire duplicate cluster.
       const nextRowOffset = rowOffset + pgResult.rows.length;
+      // Attach tags
+      await attachTagsToItems(items, db);
+
       const payload = {
         success: true,
         items,
@@ -14159,9 +14308,14 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
           
           const andConditions = [];
           for (const w of andWords) {
-            andConditions.push(`(d.channel ILIKE ? OR d.title ILIKE ? OR d.platform ILIKE ?)`);
-            const likeTerm = '%' + w + '%';
-            bindings.push(likeTerm, likeTerm, likeTerm);
+            if (w.startsWith('#') && w.length > 1) {
+              andConditions.push(`EXISTS (SELECT 1 FROM download_tags dt WHERE dt.download_id = d.id AND dt.tag = ?)`);
+              bindings.push(w.slice(1).toLowerCase());
+            } else {
+              andConditions.push(`(d.channel ILIKE ? OR d.title ILIKE ? OR d.platform ILIKE ?)`);
+              const likeTerm = '%' + w + '%';
+              bindings.push(likeTerm, likeTerm, likeTerm);
+            }
           }
           if (andConditions.length > 0) {
             conditions.push(`(${andConditions.join(' AND ')})`);
@@ -14314,6 +14468,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
 
     const nextCursor = encodeCursor({ activeOffset: nextActiveOffset, rowOffset, dir: '', fileIndex: 0 });
     const done = loopDone;
+    await attachTagsToItems(items, db);
     const payload = { success: true, items, next_cursor: nextCursor, done };
     const reqTime = Date.now() - reqStartTime;
     console.log(`📤 [${new Date().toISOString().substr(11, 8)}] Response /api/media/recent-files - ${items.length} items in ${reqTime}ms`);
@@ -15256,6 +15411,12 @@ async function startServer() {
       '/Volumes/HDD - One Touch/WEBDL/_4KDownloader',
     ];
     const _4K_VIDEO_EXTS = new Set(['.mp4', '.mkv', '.webm', '.mov', '.m4v']);
+    const _4K_IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.avif']);
+    // Combineer beide: watcher indexeert voortaan ook plaatjes uit hub-downloads.
+    const _4K_MEDIA_EXTS = new Set([..._4K_VIDEO_EXTS, ..._4K_IMAGE_EXTS]);
+    // Skip zelf-gegenereerde thumbnails/logos zodat de watcher deze niet als
+    // nieuwe content indexeert.
+    const _4K_SKIP_BASENAME_RE = /(_thumb(_v\d+)?|_logo|_preview)\.(jpe?g|png|webp|gif|bmp|avif)$/i;
     const _4K_MIN_AGE_MS = 10000; // wait 10s after last write before indexing
     const _4K_DEBOUNCE_MS = 8000;
     const _4K_STABLE_CHECK_MS = 5000; // re-check file size after 5s
@@ -15328,9 +15489,12 @@ async function startServer() {
       try {
         if (!fs.existsSync(absPath)) return;
         const ext = path.extname(absPath).toLowerCase();
-        if (!_4K_VIDEO_EXTS.has(ext)) return;
+        if (!_4K_MEDIA_EXTS.has(ext)) return;
+        if (_4K_SKIP_BASENAME_RE.test(path.basename(absPath))) return;
+        const isImage = _4K_IMAGE_EXTS.has(ext);
         const st = fs.statSync(absPath);
-        if (!st.isFile() || st.size < 1024) return;
+        // Minimum grootte: 1KB voor video, 256B voor images (kleine thumbs/icons toestaan).
+        if (!st.isFile() || st.size < (isImage ? 256 : 1024)) return;
         if (Date.now() - (st.mtimeMs || 0) < _4K_MIN_AGE_MS) return;
 
         // Look up source URL from 4K Video Downloader's internal database
@@ -15381,7 +15545,7 @@ async function startServer() {
           ext.replace('.', ''),
           'completed',
           100,
-          JSON.stringify({ webdl_kind: 'imported_video', importer: '4k-watcher', source_platform: realPlatform, source_url: sourceUrl || null })
+          JSON.stringify({ webdl_kind: isImage ? 'imported_image' : 'imported_video', importer: '4k-watcher', source_platform: realPlatform, source_url: sourceUrl || null })
         );
 
         // Use file mtime as timestamp so imports don't flood the gallery with today's date
@@ -15465,7 +15629,8 @@ async function startServer() {
         fs.watch(watchDir, { recursive: true }, (eventType, filename) => {
           if (!filename) return;
           const ext = path.extname(filename).toLowerCase();
-          if (!_4K_VIDEO_EXTS.has(ext)) return;
+          if (!_4K_MEDIA_EXTS.has(ext)) return;
+          if (_4K_SKIP_BASENAME_RE.test(path.basename(filename))) return;
           const absPath = path.join(watchDir, filename);
           _4kPendingFiles.add(absPath);
           if (_4kIndexTimer) clearTimeout(_4kIndexTimer);
@@ -15490,7 +15655,9 @@ async function startServer() {
               if (e.name.startsWith('.')) continue;
               const full = path.join(dir, e.name);
               if (e.isDirectory()) results.push(...scanDir(full, depth + 1));
-              else if (e.isFile() && _4K_VIDEO_EXTS.has(path.extname(e.name).toLowerCase())) {
+              else if (e.isFile()
+                       && _4K_MEDIA_EXTS.has(path.extname(e.name).toLowerCase())
+                       && !_4K_SKIP_BASENAME_RE.test(e.name)) {
                 results.push(full);
               }
             }
@@ -15575,99 +15742,60 @@ function shutdownGracefully(signal) {
 
 process.on('SIGINT', () => shutdownGracefully('SIGINT'));
 
-// Tags API
-expressApp.get('/api/tags', async (req, res) => {
-  try {
-    const rows = await db.prepare('SELECT * FROM tags ORDER BY name ASC').all();
-    res.json({ success: true, tags: rows });
-  } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
-  }
-});
-
-expressApp.post('/api/tags', async (req, res) => {
-  try {
-    const name = String(req.body.name || '').trim().toLowerCase();
-    if (!name) throw new Error('Name required');
-    if (db.isPostgres) await db.prepare('INSERT INTO tags (name) VALUES ($1) ON CONFLICT (name) DO NOTHING').run(name); else await db.prepare('INSERT OR IGNORE INTO tags (name) VALUES (?)').run(name);
-    const tag = await db.prepare(db.isPostgres ? 'SELECT * FROM tags WHERE name = $1' : 'SELECT * FROM tags WHERE name = ?').get(name);
-    res.json({ success: true, tag });
-  } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
-  }
-});
-
-expressApp.delete('/api/tags/:id', async (req, res) => {
+// Tags API (download_tags based)
+expressApp.get('/api/downloads/:id/tags', async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
-    await db.prepare(db.isPostgres ? 'DELETE FROM tags WHERE id = $1' : 'DELETE FROM tags WHERE id = ?').run(id);
-    res.json({ success: true });
+    if (!Number.isFinite(id)) return res.status(400).json({ success: false, error: 'Invalid ID' });
+    const rows = await (db.readPool || db.pool).query({
+      text: 'SELECT tag FROM download_tags WHERE download_id = $1 ORDER BY tag ASC',
+      values: [id]
+    });
+    res.json({ success: true, tags: rows.rows.map(r => r.tag) });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }
 });
 
-expressApp.get('/api/media/:kind/:id/tags', async (req, res) => {
+expressApp.post('/api/downloads/:id/tags', async (req, res) => {
   try {
-    const { kind, id } = req.params;
-    const rows = await db.prepare(db.isPostgres ? 'SELECT t.* FROM tags t JOIN media_tags mt ON t.id = mt.tag_id WHERE mt.kind = $1 AND mt.media_id = $2' : 'SELECT t.* FROM tags t JOIN media_tags mt ON t.id = mt.tag_id WHERE mt.kind = ? AND mt.media_id = ?').all(kind, id);
-    res.json({ success: true, tags: rows });
+    const id = parseInt(req.params.id, 10);
+    const tag = String(req.body.tag || '').trim().toLowerCase().replace(/[^a-z0-9_]/g, '');
+    if (!Number.isFinite(id) || !tag || tag.length < 2) return res.status(400).json({ success: false, error: 'Invalid ID or tag' });
+    await (db.readPool || db.pool).query({
+      text: 'INSERT INTO download_tags (download_id, tag) VALUES ($1, $2) ON CONFLICT ON CONSTRAINT download_tags_download_id_tag_key DO NOTHING',
+      values: [id, tag]
+    });
+    // Return updated tag list
+    const rows = await (db.readPool || db.pool).query({
+      text: 'SELECT tag FROM download_tags WHERE download_id = $1 ORDER BY tag ASC',
+      values: [id]
+    });
+    res.json({ success: true, tags: rows.rows.map(r => r.tag) });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }
 });
 
-expressApp.post('/api/media/:kind/:id/tags', async (req, res) => {
+expressApp.delete('/api/downloads/:id/tags/:tag', async (req, res) => {
   try {
-    const { kind, id } = req.params;
-    const tagId = parseInt(req.body.tag_id, 10);
-    if (!tagId) throw new Error('Tag ID required');
-    if (db.isPostgres) await db.prepare('INSERT INTO media_tags (kind, media_id, tag_id) VALUES ($1, $2, $3) ON CONFLICT ON CONSTRAINT media_tags_pkey DO NOTHING').run(kind, id, tagId); else await db.prepare('INSERT OR IGNORE INTO media_tags (kind, media_id, tag_id) VALUES (?, ?, ?)').run(kind, id, tagId);
-    res.json({ success: true });
+    const id = parseInt(req.params.id, 10);
+    const tag = String(req.params.tag || '').trim().toLowerCase();
+    if (!Number.isFinite(id) || !tag) return res.status(400).json({ success: false, error: 'Invalid ID or tag' });
+    await (db.readPool || db.pool).query({
+      text: 'DELETE FROM download_tags WHERE download_id = $1 AND tag = $2',
+      values: [id, tag]
+    });
+    // Return updated tag list
+    const rows = await (db.readPool || db.pool).query({
+      text: 'SELECT tag FROM download_tags WHERE download_id = $1 ORDER BY tag ASC',
+      values: [id]
+    });
+    res.json({ success: true, tags: rows.rows.map(r => r.tag) });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }
 });
-
-expressApp.delete('/api/media/:kind/:id/tags/:tagId', async (req, res) => {
-  try {
-    const { kind, id, tagId } = req.params;
-    await db.prepare(db.isPostgres ? 'DELETE FROM media_tags WHERE kind = $1 AND media_id = $2 AND tag_id = $3' : 'DELETE FROM media_tags WHERE kind = ? AND media_id = ? AND tag_id = ?').run(kind, id, parseInt(tagId, 10));
-    res.json({ success: true });
-  } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
-  }
-});
-
-
-async function extractAndSaveTags(kind, media_id, text) {
-  if (!text) return;
-  const tags = [];
-  const hashMatches = text.match(/#([a-zA-Z0-9_]+)/g);
-  if (hashMatches) tags.push(...hashMatches.map(t => t.slice(1).toLowerCase()));
-
-  const bracketMatches = text.match(/\[([^\]]+)\]/g);
-  if (bracketMatches) tags.push(...bracketMatches.map(t => t.slice(1, -1).toLowerCase().replace(/\s+/g, '_')));
-
-  for (const tag of tags) {
-    if (!tag) continue;
-    try {
-      if (db.isPostgres) {
-        await db.prepare('INSERT INTO tags (name) VALUES ($1) ON CONFLICT (name) DO NOTHING').run(tag);
-        const tagRow = await db.prepare('SELECT id FROM tags WHERE name = $1').get(tag);
-        if (tagRow) {
-          await db.prepare('INSERT INTO media_tags (kind, media_id, tag_id) VALUES ($1, $2, $3) ON CONFLICT ON CONSTRAINT media_tags_pkey DO NOTHING').run(kind, media_id, tagRow.id);
-        }
-      } else {
-        await db.prepare('INSERT OR IGNORE INTO tags (name) VALUES (?)').run(tag);
-        const tagRow = await db.prepare('SELECT id FROM tags WHERE name = ?').get(tag);
-        if (tagRow) {
-          await db.prepare('INSERT OR IGNORE INTO media_tags (kind, media_id, tag_id) VALUES (?, ?, ?)').run(kind, media_id, tagRow.id);
-        }
-      }
-    } catch (e) { console.error('Error auto-tagging:', e); }
-  }
-}
 
 
 // ========================

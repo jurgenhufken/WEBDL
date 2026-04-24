@@ -23,7 +23,7 @@ function createDb({ engine, sqlitePath, databaseUrl }) {
   if (isPostgres) {
     const connStr = String(databaseUrl || '');
     const pool = new Pool({ connectionString: connStr, max: 20, idleTimeoutMillis: 30000 });
-    const readPool = new Pool({ connectionString: connStr, max: 10, idleTimeoutMillis: 15000 });
+    const readPool = new Pool({ connectionString: connStr, max: 5, idleTimeoutMillis: 15000 });
     return {
       engine: 'postgres',
       isPostgres: true,

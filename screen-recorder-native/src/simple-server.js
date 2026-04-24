@@ -1630,11 +1630,13 @@ const updateDownloadStatus = {
     return out;
   }
 };
+// NOTE: 'error' en 'cancelled' staan bewust NIET in deze lijst.
+// Een mislukte/afgebroken download mag een nieuwe poging niet blokkeren.
 const findReusableDownloadByUrl = db.prepare(`
   SELECT id, url, platform, channel, title, status, progress, filepath, filename
   FROM downloads
   WHERE url=?
-    AND status IN ('completed', 'pending', 'queued', 'downloading', 'postprocessing', 'error')
+    AND status IN ('completed', 'pending', 'queued', 'downloading', 'postprocessing')
   ORDER BY
     CASE status
       WHEN 'completed' THEN 0
@@ -4649,6 +4651,20 @@ function runDownloadSchedulerSoon() {
 }
 
 async function runDownloadScheduler() {
+  // Postprocess-cap: als er al N jobs in 'postprocessing' zitten (merge/ffmpeg)
+  // starten we geen nieuwe downloads tot die klaar zijn. Voorkomt dat meerdere
+  // ffmpeg-merges gelijktijdig CPU/IO opslokken. Default N = 1.
+  try {
+    const counts = await getActiveDownloadStatusCounts.all();
+    const ppRow = Array.isArray(counts) ? counts.find((r) => r && r.status === 'postprocessing') : null;
+    const ppCount = ppRow ? Number(ppRow.n || ppRow.count || 0) : 0;
+    if (Number.isFinite(ppCount) && ppCount >= POSTPROCESS_CONCURRENCY) {
+      // Nog postprocessing bezig — laat die eerst klaar worden.
+      // runDownloadSchedulerSoon() wordt aangeroepen zodra een job klaar is.
+      return;
+    }
+  } catch (_e) { /* DB-hick: fall-through; niet fataal */ }
+
   const heavyLimit = Math.max(0, HEAVY_DOWNLOAD_CONCURRENCY);
   const lightLimit = Math.max(0, LIGHT_DOWNLOAD_CONCURRENCY);
 
@@ -8780,6 +8796,82 @@ expressApp.post('/stop-recording', (req, res) => {
 });
 
 // Download starten via yt-dlp
+// ───── YouTube auto-expand helpers ────────────────────────────────────────
+// Detecteert of een YouTube-URL meerdere videos bevat (playlist/kanaal/shorts-tab).
+function isYoutubeMultiItemUrl(url) {
+  try {
+    const u = new URL(url);
+    const host = String(u.hostname || '').toLowerCase();
+    if (!(host === 'youtube.com' || host.endsWith('.youtube.com'))) return false;
+    const p = u.pathname;
+    if (p === '/playlist') return u.searchParams.has('list');
+    if (p === '/watch' && u.searchParams.has('list')) return true;
+    if (/^\/@[^/]+(\/(shorts|videos|streams|featured|playlists))?\/?$/.test(p)) return true;
+    if (/^\/(channel|c|user)\/[^/]+(\/(shorts|videos|streams|featured|playlists))?\/?$/.test(p)) return true;
+    return false;
+  } catch { return false; }
+}
+
+// Roept yt-dlp --flat-playlist aan om alle items op te halen zonder te downloaden.
+function expandYoutubeUrl(url, { limit = 0, timeoutMs = 180000 } = {}) {
+  return new Promise((resolve, reject) => {
+    const cookieArgs = getYtDlpCookieArgs('metadata');
+    const args = [
+      ...cookieArgs,
+      '--flat-playlist',
+      '--ignore-errors',
+      '--no-warnings',
+      '--print', '%(url)s\t%(title).120s\t%(uploader)s',
+    ];
+    if (limit && Number.isFinite(limit) && limit > 0) args.push('--playlist-items', `1:${limit}`);
+    args.push(url);
+    const proc = spawnNice(YT_DLP, args);
+    let stdout = '';
+    let stderr = '';
+    let killed = false;
+    const timer = setTimeout(() => {
+      killed = true;
+      try { proc.kill('SIGTERM'); } catch (e) {}
+      setTimeout(() => { try { proc.kill('SIGKILL'); } catch (e) {} }, 2000);
+    }, Math.max(5000, timeoutMs));
+    proc.stdout.on('data', (d) => { stdout += d.toString(); });
+    proc.stderr.on('data', (d) => { stderr += d.toString(); });
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      if (killed) return reject(new Error(`yt-dlp expand timeout (>${timeoutMs}ms)`));
+      const items = [];
+      for (const line of stdout.split('\n')) {
+        const t = line.trim();
+        if (!t) continue;
+        const [u, title, uploader] = t.split('\t');
+        if (!u || !/^https?:/.test(u)) continue;
+        items.push({ url: u, title: title || '', uploader: uploader || '' });
+      }
+      if (items.length === 0 && code !== 0) {
+        return reject(new Error(String(stderr || '').trim().slice(0, 200) || `yt-dlp expand exit ${code}`));
+      }
+      resolve(items);
+    });
+    proc.on('error', reject);
+  });
+}
+
+// Normaliseert YouTube-URLs naar canonical form voor dedupe-lookup.
+function canonicalYoutubeUrl(url) {
+  try {
+    const parsed = new URL(url);
+    const host = String(parsed.hostname || '').toLowerCase();
+    if (host.includes('youtube.com')) {
+      const v = parsed.searchParams.get('v') || parsed.pathname.split('/').pop();
+      if (v) return `https://www.youtube.com/watch?v=${v}`;
+    } else if (host === 'youtu.be') {
+      const v = parsed.pathname.replace(/^\//, '').split('/')[0];
+      if (v) return `https://www.youtube.com/watch?v=${v}`;
+    }
+  } catch (e) { /* fall through */ }
+  return url;
+}
+
 expressApp.post('/download', async (req, res) => {
   const { url, metadata, force, lane, priority } = req.body || {};
   try {
@@ -8798,6 +8890,41 @@ expressApp.post('/download', async (req, res) => {
       if (_rm) effectiveUrl = `https://i.redd.it/${_rm[1]}`;
     }
   } catch (e) {}
+
+  // YouTube auto-expand: playlist / kanaal / shorts-tab in één POST afhandelen.
+  if (isYoutubeMultiItemUrl(effectiveUrl)) {
+    console.log(`[INGRESS] YouTube auto-expand: ${effectiveUrl}`);
+    let items;
+    try {
+      items = await expandYoutubeUrl(effectiveUrl);
+    } catch (e) {
+      return res.status(502).json({ success: false, error: `Expand mislukt: ${e.message}` });
+    }
+    if (!items.length) {
+      return res.status(404).json({ success: false, error: 'Geen items gevonden' });
+    }
+    const stats = { total: items.length, queued: 0, duplicates: 0, errors: 0, expanded: true };
+    for (const it of items) {
+      const lookupUrl = canonicalYoutubeUrl(it.url);
+      try {
+        if (!forceDuplicates) {
+          const existing = await findReusableDownloadByUrl.get(lookupUrl);
+          if (existing && existing.id) { stats.duplicates++; continue; }
+        }
+        const channelName = it.uploader || 'unknown';
+        const titleText = it.title || 'untitled';
+        const result = await insertDownload.run(lookupUrl, 'youtube', channelName, titleText);
+        const newId = result.lastInsertRowid;
+        enqueueDownloadJob(newId, lookupUrl, 'youtube', channelName, titleText, {}).catch(() => {});
+        stats.queued++;
+      } catch (e) {
+        stats.errors++;
+        console.warn(`[expand] insert fout voor ${lookupUrl}: ${e.message}`);
+      }
+    }
+    console.log(`[INGRESS] Expand klaar: ${stats.queued} nieuw, ${stats.duplicates} duplicaten, ${stats.errors} fouten (${stats.total} totaal)`);
+    return res.json({ success: true, ...stats, message: `${stats.queued} nieuw, ${stats.duplicates} bestaand van ${stats.total} items` });
+  }
   const isOnlyFansProfileUrl = /onlyfans\.com\//i.test(effectiveUrl) && !/onlyfans\.com\/[^\/\?#]+\/posts\//i.test(effectiveUrl);
 
   const isProfileUrl = (u) => {
@@ -9438,21 +9565,7 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
     return startOfscraperDownload(downloadId, url, platform, channel, title, metadata);
   }
 
-  if (platform === 'youtube') {
-    // Route YouTube downloads through 4K Video Downloader+ app
-    try {
-      const { execSync } = require('child_process');
-      const safeUrl = url.replace(/'/g, "'\\''");
-      execSync(`open 'fourkvd://${safeUrl}'`, { timeout: 5000 });
-      console.log(`[DL #${downloadId}] → 4K Video Downloader: ${url.slice(0, 80)}`);
-      await updateDownloadStatus.run('superseded', 0, '4K Video Downloader', downloadId);
-      emitDownloadEventActivity('completed', downloadId, { url, platform, channel, title, note: 'Handed off to 4K Video Downloader' }).catch(() => {});
-    } catch (e) {
-      console.log(`[DL #${downloadId}] 4K Downloader failed, falling back to yt-dlp: ${e.message}`);
-      return startYtDlpDownload(downloadId, url, platform, channel, title, metadata);
-    }
-    return;
-  }
+  // YouTube is handled by the default fallback (yt-dlp) at the bottom.
 
   if (platform === 'instagram') {
     return startInstaloaderDownload(downloadId, url, platform, channel, title, metadata);
@@ -11311,10 +11424,11 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
       }
     }
 
-    let cookieArgs = getYtDlpCookieArgs('download');
-    if (platform === 'youtube' || platform === 'youtube-shorts') {
-      cookieArgs = [];
-    }
+    // Cookies altijd gebruiken indien beschikbaar. Voor YouTube zijn ze nodig
+    // voor age-restricted / member-only content. De runOnce-retry hieronder
+    // valt automatisch terug op een tweede poging zonder cookies als ze
+    // ongeldig blijken ("cookies are no longer valid").
+    const cookieArgs = getYtDlpCookieArgs('download');
 
     const runOnce = (attemptCookieArgs, allowRetryNoCookies, attemptExtraArgs = [], allowRetryNoCheckCertificates = true) => {
       return new Promise((resolve) => {
@@ -15297,6 +15411,12 @@ async function startServer() {
       '/Volumes/HDD - One Touch/WEBDL/_4KDownloader',
     ];
     const _4K_VIDEO_EXTS = new Set(['.mp4', '.mkv', '.webm', '.mov', '.m4v']);
+    const _4K_IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.avif']);
+    // Combineer beide: watcher indexeert voortaan ook plaatjes uit hub-downloads.
+    const _4K_MEDIA_EXTS = new Set([..._4K_VIDEO_EXTS, ..._4K_IMAGE_EXTS]);
+    // Skip zelf-gegenereerde thumbnails/logos zodat de watcher deze niet als
+    // nieuwe content indexeert.
+    const _4K_SKIP_BASENAME_RE = /(_thumb(_v\d+)?|_logo|_preview)\.(jpe?g|png|webp|gif|bmp|avif)$/i;
     const _4K_MIN_AGE_MS = 10000; // wait 10s after last write before indexing
     const _4K_DEBOUNCE_MS = 8000;
     const _4K_STABLE_CHECK_MS = 5000; // re-check file size after 5s
@@ -15369,9 +15489,12 @@ async function startServer() {
       try {
         if (!fs.existsSync(absPath)) return;
         const ext = path.extname(absPath).toLowerCase();
-        if (!_4K_VIDEO_EXTS.has(ext)) return;
+        if (!_4K_MEDIA_EXTS.has(ext)) return;
+        if (_4K_SKIP_BASENAME_RE.test(path.basename(absPath))) return;
+        const isImage = _4K_IMAGE_EXTS.has(ext);
         const st = fs.statSync(absPath);
-        if (!st.isFile() || st.size < 1024) return;
+        // Minimum grootte: 1KB voor video, 256B voor images (kleine thumbs/icons toestaan).
+        if (!st.isFile() || st.size < (isImage ? 256 : 1024)) return;
         if (Date.now() - (st.mtimeMs || 0) < _4K_MIN_AGE_MS) return;
 
         // Look up source URL from 4K Video Downloader's internal database
@@ -15422,7 +15545,7 @@ async function startServer() {
           ext.replace('.', ''),
           'completed',
           100,
-          JSON.stringify({ webdl_kind: 'imported_video', importer: '4k-watcher', source_platform: realPlatform, source_url: sourceUrl || null })
+          JSON.stringify({ webdl_kind: isImage ? 'imported_image' : 'imported_video', importer: '4k-watcher', source_platform: realPlatform, source_url: sourceUrl || null })
         );
 
         // Use file mtime as timestamp so imports don't flood the gallery with today's date
@@ -15506,7 +15629,8 @@ async function startServer() {
         fs.watch(watchDir, { recursive: true }, (eventType, filename) => {
           if (!filename) return;
           const ext = path.extname(filename).toLowerCase();
-          if (!_4K_VIDEO_EXTS.has(ext)) return;
+          if (!_4K_MEDIA_EXTS.has(ext)) return;
+          if (_4K_SKIP_BASENAME_RE.test(path.basename(filename))) return;
           const absPath = path.join(watchDir, filename);
           _4kPendingFiles.add(absPath);
           if (_4kIndexTimer) clearTimeout(_4kIndexTimer);
@@ -15531,7 +15655,9 @@ async function startServer() {
               if (e.name.startsWith('.')) continue;
               const full = path.join(dir, e.name);
               if (e.isDirectory()) results.push(...scanDir(full, depth + 1));
-              else if (e.isFile() && _4K_VIDEO_EXTS.has(path.extname(e.name).toLowerCase())) {
+              else if (e.isFile()
+                       && _4K_MEDIA_EXTS.has(path.extname(e.name).toLowerCase())
+                       && !_4K_SKIP_BASENAME_RE.test(e.name)) {
                 results.push(full);
               }
             }

@@ -1,0 +1,95 @@
+:root {
+  --bg:        #0f1115;
+  --panel:     #161a22;
+  --panel-2:   #1c212c;
+  --border:    #262c3a;
+  --fg:        #e6e8ee;
+  --fg-dim:    #a0a6b4;
+  --accent:    #6aa9ff;
+  --ok:        #5bd38a;
+  --warn:      #f0b132;
+  --err:       #f0636a;
+  --running:   #6aa9ff;
+  --queued:    #a0a6b4;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.45 -apple-system, system-ui, Segoe UI, sans-serif; }
+
+header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel);
+}
+header h1 { margin: 0; font-size: 16px; letter-spacing: 0.3px; }
+
+.status { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--panel-2); color: var(--fg-dim); }
+.status.up { color: var(--ok); }
+.status.down { color: var(--err); }
+
+.composer {
+  padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel);
+  display: flex; flex-direction: column; gap: 6px;
+}
+.composer form { display: flex; gap: 8px; }
+.composer input[type=url] { flex: 1; min-width: 0; }
+.msg { font-size: 12px; color: var(--fg-dim); min-height: 16px; }
+.msg.err { color: var(--err); }
+
+input, select, button {
+  background: var(--panel-2); color: var(--fg); border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 10px; font: inherit;
+}
+input:focus, select:focus { outline: 1px solid var(--accent); }
+button { cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button:disabled { opacity: 0.5; cursor: default; }
+
+main {
+  display: grid; grid-template-columns: 320px 1fr; height: calc(100% - 95px);
+}
+aside.jobs { border-right: 1px solid var(--border); overflow: auto; }
+.jobs-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--bg); }
+.jobs-header h2 { margin: 0; font-size: 13px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: 1px; }
+
+ul#jobList { list-style: none; margin: 0; padding: 0; }
+#jobList li {
+  padding: 10px 12px; border-bottom: 1px solid var(--border); cursor: pointer;
+  display: grid; grid-template-columns: 1fr auto; gap: 4px;
+}
+#jobList li:hover { background: var(--panel); }
+#jobList li.selected { background: var(--panel-2); }
+#jobList .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#jobList .meta { font-size: 11px; color: var(--fg-dim); }
+#jobList .bar { grid-column: 1 / -1; margin-top: 4px; }
+
+.badge {
+  font-size: 10px; padding: 2px 6px; border-radius: 999px; letter-spacing: 0.3px; text-transform: uppercase;
+  background: var(--panel-2); border: 1px solid var(--border);
+}
+.badge.queued    { color: var(--queued); }
+.badge.running   { color: var(--running); border-color: var(--running); }
+.badge.done      { color: var(--ok); border-color: var(--ok); }
+.badge.failed    { color: var(--err); border-color: var(--err); }
+.badge.cancelled { color: var(--fg-dim); }
+
+.bar { background: var(--panel-2); border: 1px solid var(--border); height: 6px; border-radius: 3px; overflow: hidden; }
+.bar-fill { background: var(--accent); height: 100%; width: 0%; transition: width 0.2s; }
+
+.detail { overflow: auto; padding: 16px; }
+.empty { color: var(--fg-dim); padding: 40px; text-align: center; }
+.detail-header { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.detail-header h2 { margin: 0; font-size: 16px; }
+.actions { display: flex; gap: 6px; }
+
+dl.kv { display: grid; grid-template-columns: 120px 1fr; gap: 4px 14px; margin: 12px 0; }
+dl.kv dt { color: var(--fg-dim); }
+dl.kv dd { margin: 0; word-break: break-all; }
+
+ul.files, ol.logs { list-style: none; margin: 8px 0; padding: 0; }
+ul.files li { padding: 4px 8px; border: 1px solid var(--border); border-radius: 4px; margin-bottom: 4px; font-family: ui-monospace, monospace; font-size: 12px; }
+ol.logs { counter-reset: logs; font-family: ui-monospace, monospace; font-size: 12px; }
+ol.logs li { padding: 3px 8px; border-bottom: 1px solid var(--border); display: grid; grid-template-columns: 140px 60px 1fr; gap: 8px; }
+ol.logs .ts { color: var(--fg-dim); }
+ol.logs .lvl.info { color: var(--fg-dim); }
+ol.logs .lvl.warn { color: var(--warn); }
+ol.logs .lvl.error { color: var(--err); }

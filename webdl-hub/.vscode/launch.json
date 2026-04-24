@@ -1,0 +1,32 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Hub: dev server",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/server.js",
+      "envFile": "${workspaceFolder}/.env",
+      "skipFiles": ["<node_internals>/**"],
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Hub: run all tests",
+      "type": "node",
+      "request": "launch",
+      "runtimeArgs": ["--test"],
+      "args": ["${workspaceFolder}/test/"],
+      "skipFiles": ["<node_internals>/**"],
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Hub: run current test file",
+      "type": "node",
+      "request": "launch",
+      "runtimeArgs": ["--test"],
+      "args": ["${file}"],
+      "skipFiles": ["<node_internals>/**"],
+      "console": "integratedTerminal"
+    }
+  ]
+}
