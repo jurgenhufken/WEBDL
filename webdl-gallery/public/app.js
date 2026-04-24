@@ -34,13 +34,6 @@
     return html;
   }
 
-  function platformColor(p) {
-    const map = {
-      youtube: '#ff3b3b', instagram: '#e1306c', onlyfans: '#00aff0',
-      footfetishforum: '#8a5d2f', gallerydl: '#6b7280',
-    };
-    return map[String(p || '').toLowerCase()] || '#4b5563';
-  }
 
   function thumbUrl(it) { return `/thumb/${it.id}?v=${it.is_thumb_ready ? 1 : 0}`; }
 
@@ -50,7 +43,7 @@
     c.className = 'card';
     c.dataset.idx = String(idx);
     c.dataset.id  = String(it.id);
-    const badge = `<span class="card-badge" style="background:${platformColor(it.platform)}aa">${it.platform || '?'}</span>`;
+    const badge = `<span class="card-badge">${it.platform || '?'}</span>`;
     const vmark = it.type === 'video' ? '<span class="card-video-mark">▶ video</span>' : '';
     const title = (it.title || it.filename || '').replace(/</g, '&lt;');
     const sub   = (it.channel && it.channel !== 'unknown') ? it.channel : '';
@@ -281,7 +274,7 @@
   autoBtn.textContent = '🔴 Live';
   autoBtn.title = 'Auto-refresh aan (klik om uit te zetten)';
   autoBtn.className = 'auto-toggle';
-  autoBtn.style.cssText = 'background:#1f6feb;border-color:#1f6feb;color:#fff';
+  autoBtn.style.cssText = '';
   autoBtn.addEventListener('click', () => {
     state.autoRefresh = !state.autoRefresh;
     if (state.autoRefresh) {
