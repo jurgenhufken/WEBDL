@@ -133,6 +133,105 @@
     .qf-btn:hover { background: #1e2548; color: #c4caf0; border-color: #3a4575; }
     .qf-btn.active { background: #1a3a6a; color: #5daaff; border-color: #2a6ac4; box-shadow: 0 0 8px rgba(45,120,220,0.25); }
     .qf-btn .qf-icon { margin-right: 4px; }
+    .card-tags {
+      margin-top: 4px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+    .card-tag {
+      background: #1e293b;
+      color: #94a3b8;
+      font-size: 10px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      cursor: pointer;
+      white-space: nowrap;
+      border: 1px solid #334155;
+    }
+    .card-tag:hover {
+      background: #3b82f6;
+      color: #fff;
+      border-color: #60a5fa;
+    }
+    #tagChips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 8px 16px;
+      background: #111;
+      border-bottom: 1px solid #333;
+    }
+    .top-tag-chip {
+      background: #222;
+      color: #aaa;
+      font-size: 12px;
+      padding: 4px 10px;
+      border-radius: 12px;
+      cursor: pointer;
+      border: 1px solid #444;
+      transition: all 0.15s ease;
+    }
+    .top-tag-chip:hover, .top-tag-chip.active {
+      background: #3b82f6;
+      color: #fff;
+      border-color: #60a5fa;
+    }
+    /* Tag Editor in Modal */
+    .modal-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+      padding: 6px 12px;
+      background: #0d1117;
+      border-bottom: 1px solid #1e293b;
+      min-height: 32px;
+    }
+    .modal-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: #1e293b;
+      color: #94a3b8;
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 6px;
+      border: 1px solid #334155;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .modal-tag:hover {
+      background: #3b82f6;
+      color: #fff;
+      border-color: #60a5fa;
+    }
+    .modal-tag .tag-x {
+      font-size: 13px;
+      color: #ef4444;
+      cursor: pointer;
+      margin-left: 2px;
+      font-weight: bold;
+    }
+    .modal-tag .tag-x:hover {
+      color: #ff6b6b;
+    }
+    .modal-tag-input {
+      background: #0d1117;
+      color: #e2e8f0;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      padding: 3px 8px;
+      font-size: 11px;
+      outline: none;
+      width: 100px;
+    }
+    .modal-tag-input::placeholder {
+      color: #475569;
+    }
+    .modal-tag-input:focus {
+      border-color: #3b82f6;
+    }
   </style>
 </head>
 <body>
@@ -193,6 +292,20 @@
       <div class="spacer"></div>
       <div class="hint" id="hint">-</div>
     </div>
+
+    <!-- Filter Chips for Top Tags -->
+    <div id="tagChips">
+      <span class="top-tag-chip" onclick="document.getElementById('inpSearch').value='#footfetishforum'; document.getElementById('btnReload').click();">#footfetishforum</span>
+      <span class="top-tag-chip" onclick="document.getElementById('inpSearch').value='#feet'; document.getElementById('btnReload').click();">#feet</span>
+      <span class="top-tag-chip" onclick="document.getElementById('inpSearch').value='#foot'; document.getElementById('btnReload').click();">#foot</span>
+      <span class="top-tag-chip" onclick="document.getElementById('inpSearch').value='#zishy'; document.getElementById('btnReload').click();">#zishy</span>
+      <span class="top-tag-chip" onclick="document.getElementById('inpSearch').value='#full'; document.getElementById('btnReload').click();">#full</span>
+      <span class="top-tag-chip" onclick="document.getElementById('inpSearch').value='#4kdownloader'; document.getElementById('btnReload').click();">#4kdownloader</span>
+      <span class="top-tag-chip" onclick="document.getElementById('inpSearch').value='#toes'; document.getElementById('btnReload').click();">#toes</span>
+      <span class="top-tag-chip" onclick="document.getElementById('inpSearch').value='#soles'; document.getElementById('btnReload').click();">#soles</span>
+      <span class="top-tag-chip" onclick="document.getElementById('inpSearch').value='#elitebabes'; document.getElementById('btnReload').click();">#elitebabes</span>
+    </div>
+
     <div class="quick-filters" id="quickFilters">
       <button class="qf-btn active" data-qf="all"><span class="qf-icon">🌐</span>Alles</button>
       <button class="qf-btn" data-qf="recordings"><span class="qf-icon">🔴</span>Opnames</button>
@@ -272,6 +385,9 @@
         <button id="btnFinder" class="btn">Finder</button>
         <button id="btnSource" class="btn">Bron</button>
       </header>
+      <div class="modal-tags" id="mTags">
+        <span style="color:#475569;font-size:11px">Tags laden...</span>
+      </div>
       <div class="body" id="mBody"></div>
     </div>
   </div>
@@ -1367,6 +1483,29 @@
         meta.appendChild(ratingEl);
       } catch (e) {}
 
+      if (it.tags && Array.isArray(it.tags) && it.tags.length > 0) {
+        const tagsContainer = document.createElement('div');
+        tagsContainer.className = 'card-tags';
+        for (const tag of it.tags.slice(0, 4)) {
+          const tEl = document.createElement('span');
+          tEl.className = 'card-tag';
+          tEl.textContent = '#' + tag;
+          tEl.addEventListener('click', (e) => {
+            e.stopPropagation();
+            document.getElementById('inpSearch').value = '#' + tag;
+            document.getElementById('btnReload').click();
+          });
+          tagsContainer.appendChild(tEl);
+        }
+        if (it.tags.length > 4) {
+          const tEl = document.createElement('span');
+          tEl.className = 'card-tag';
+          tEl.textContent = '+' + (it.tags.length - 4);
+          tagsContainer.appendChild(tEl);
+        }
+        meta.appendChild(tagsContainer);
+      }
+
       card.appendChild(img);
       card.appendChild(b1);
       card.appendChild(b2);
@@ -1599,6 +1738,8 @@
           setStars(elMRating, it && it.rating != null ? it.rating : 0);
         }
       } catch (e) {}
+      // Load tags for this item
+      loadModalTags(it);
       elMBody.innerHTML = '';
 
       if (!isReady) {
@@ -1695,6 +1836,105 @@
       };
       elMBody.addEventListener('mousemove', showHeader);
       elMBody.addEventListener('click', showHeader);
+    }
+
+    // ═══ TAG EDITOR FUNCTIONS ═══
+    const elMTags = document.getElementById('mTags');
+
+    function renderModalTags(downloadId, tags) {
+      if (!elMTags) return;
+      elMTags.innerHTML = '';
+      if (tags && tags.length > 0) {
+        for (const tag of tags) {
+          const span = document.createElement('span');
+          span.className = 'modal-tag';
+          span.innerHTML = '#' + tag + ' <span class="tag-x" title="Verwijder tag">×</span>';
+          span.querySelector('.tag-x').addEventListener('click', (e) => {
+            e.stopPropagation();
+            deleteModalTag(downloadId, tag);
+          });
+          span.addEventListener('click', (e) => {
+            if (e.target.classList.contains('tag-x')) return;
+            e.stopPropagation();
+            document.getElementById('inpSearch').value = '#' + tag;
+            closeModal();
+            document.getElementById('btnReload').click();
+          });
+          elMTags.appendChild(span);
+        }
+      }
+      // Add input field
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'modal-tag-input';
+      input.placeholder = '+ tag...';
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          const val = input.value.trim().toLowerCase().replace(/^#/, '').replace(/[^a-z0-9_]/g, '');
+          if (val && val.length >= 2) {
+            addModalTag(downloadId, val);
+            input.value = '';
+          }
+        }
+      });
+      input.addEventListener('click', (e) => e.stopPropagation());
+      elMTags.appendChild(input);
+    }
+
+    async function loadModalTags(it) {
+      if (!elMTags) return;
+      const downloadId = it.rating_kind === 'd' && it.rating_id != null ? it.rating_id : null;
+      if (!downloadId) {
+        elMTags.innerHTML = '<span style="color:#475569;font-size:11px">Geen tags (screenshot)</span>';
+        return;
+      }
+      // Show tags from item cache first (instant)
+      if (it.tags && Array.isArray(it.tags) && it.tags.length > 0) {
+        renderModalTags(downloadId, it.tags);
+      } else {
+        elMTags.innerHTML = '<span style="color:#475569;font-size:11px">Tags laden...</span>';
+      }
+      // Fetch fresh from API
+      try {
+        const res = await fetch('/api/downloads/' + downloadId + '/tags');
+        const data = await res.json();
+        if (data.success) {
+          renderModalTags(downloadId, data.tags);
+          // Update item cache
+          it.tags = data.tags;
+        }
+      } catch (e) {}
+    }
+
+    async function addModalTag(downloadId, tag) {
+      try {
+        const res = await fetch('/api/downloads/' + downloadId + '/tags', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tag })
+        });
+        const data = await res.json();
+        if (data.success) {
+          renderModalTags(downloadId, data.tags);
+          // Update item cache
+          if (state.current) state.current.tags = data.tags;
+        }
+      } catch (e) { console.error('addModalTag error:', e); }
+    }
+
+    async function deleteModalTag(downloadId, tag) {
+      try {
+        const res = await fetch('/api/downloads/' + downloadId + '/tags/' + encodeURIComponent(tag), {
+          method: 'DELETE'
+        });
+        const data = await res.json();
+        if (data.success) {
+          renderModalTags(downloadId, data.tags);
+          // Update item cache
+          if (state.current) state.current.tags = data.tags;
+        }
+      } catch (e) { console.error('deleteModalTag error:', e); }
     }
 
     function closeModal(fromHistory = false) {

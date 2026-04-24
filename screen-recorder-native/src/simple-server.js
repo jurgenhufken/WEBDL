@@ -1603,13 +1603,28 @@ const updateDownloadStatus = {
     // Auto-tagging hook when a download completes
     if (status === 'completed') {
       try {
-        const d = await db.prepare('SELECT title, filename, filepath FROM downloads WHERE id = ' + (db.isPostgres ? '$1' : '?')).get(id);
+        const d = await db.prepare('SELECT id, title, filepath, channel, platform FROM downloads WHERE id = ' + (db.isPostgres ? '$1' : '?')).get(id);
         if (d) {
-          const text = (d.title || '') + ' ' + (d.filename || '') + ' ' + (d.filepath || '');
-          extractAndSaveTags('d', String(id), text);
+          const { generateTagsForMedia } = require('./v2/services/auto-tagger');
+          const tags = generateTagsForMedia(d);
+          if (tags.length > 0) {
+            const values = [];
+            const placeholders = [];
+            let i = 1;
+            for (const tag of tags) {
+              if (db.isPostgres) {
+                placeholders.push(`($${i++}, $${i++})`);
+              } else {
+                placeholders.push(`(?, ?)`);
+              }
+              values.push(d.id, tag);
+            }
+            const q = `INSERT INTO download_tags (download_id, tag) VALUES ${placeholders.join(', ')} ON CONFLICT ON CONSTRAINT download_tags_download_id_tag_key DO NOTHING`;
+            await (db.readPool || db.pool || db).query ? (db.readPool || db.pool).query({ text: q, values }) : db.prepare(q).run(...values);
+          }
         }
       } catch (e) {
-        console.error('Error in auto-tag hook:', e);
+        console.error('[AUTO-TAG] Error in live auto-tag hook:', e.message);
       }
     }
     return out;
@@ -13302,6 +13317,27 @@ function makePathMediaItem({ relPath, platform, channel, title, created_at, ts, 
   };
 }
 
+async function attachTagsToItems(items, db) {
+  try {
+    const downloadIds = items.filter(i => i.rating_kind === 'd' && i.rating_id != null).map(i => i.rating_id);
+    if (downloadIds.length > 0) {
+      const tagsRes = await (db.readPool || db.pool).query({
+        text: 'SELECT download_id, array_agg(tag) as tags FROM download_tags WHERE download_id = ANY($1::bigint[]) GROUP BY download_id',
+        values: [downloadIds]
+      });
+      const tagMap = new Map();
+      for (const r of tagsRes.rows) {
+        tagMap.set(String(r.download_id), r.tags);
+      }
+      for (const item of items) {
+        if (item.rating_kind === 'd' && item.rating_id != null) {
+          item.tags = tagMap.get(String(item.rating_id)) || [];
+        }
+      }
+    }
+  } catch (e) { console.error('Failed to attach tags:', e); }
+}
+
 function makeIndexedMediaItem(row) {
   const sourceUrl = row.source_url || '';
   if (!row || typeof row !== 'object') return null;
@@ -14058,6 +14094,9 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
       // Advance cursor past ALL scanned rows (including dupes) so the next
       // page's OFFSET jumps past the entire duplicate cluster.
       const nextRowOffset = rowOffset + pgResult.rows.length;
+      // Attach tags
+      await attachTagsToItems(items, db);
+
       const payload = {
         success: true,
         items,
@@ -14155,9 +14194,14 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
           
           const andConditions = [];
           for (const w of andWords) {
-            andConditions.push(`(d.channel ILIKE ? OR d.title ILIKE ? OR d.platform ILIKE ?)`);
-            const likeTerm = '%' + w + '%';
-            bindings.push(likeTerm, likeTerm, likeTerm);
+            if (w.startsWith('#') && w.length > 1) {
+              andConditions.push(`EXISTS (SELECT 1 FROM download_tags dt WHERE dt.download_id = d.id AND dt.tag = ?)`);
+              bindings.push(w.slice(1).toLowerCase());
+            } else {
+              andConditions.push(`(d.channel ILIKE ? OR d.title ILIKE ? OR d.platform ILIKE ?)`);
+              const likeTerm = '%' + w + '%';
+              bindings.push(likeTerm, likeTerm, likeTerm);
+            }
           }
           if (andConditions.length > 0) {
             conditions.push(`(${andConditions.join(' AND ')})`);
@@ -14310,6 +14354,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
 
     const nextCursor = encodeCursor({ activeOffset: nextActiveOffset, rowOffset, dir: '', fileIndex: 0 });
     const done = loopDone;
+    await attachTagsToItems(items, db);
     const payload = { success: true, items, next_cursor: nextCursor, done };
     const reqTime = Date.now() - reqStartTime;
     console.log(`📤 [${new Date().toISOString().substr(11, 8)}] Response /api/media/recent-files - ${items.length} items in ${reqTime}ms`);
@@ -15571,99 +15616,60 @@ function shutdownGracefully(signal) {
 
 process.on('SIGINT', () => shutdownGracefully('SIGINT'));
 
-// Tags API
-expressApp.get('/api/tags', async (req, res) => {
-  try {
-    const rows = await db.prepare('SELECT * FROM tags ORDER BY name ASC').all();
-    res.json({ success: true, tags: rows });
-  } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
-  }
-});
-
-expressApp.post('/api/tags', async (req, res) => {
-  try {
-    const name = String(req.body.name || '').trim().toLowerCase();
-    if (!name) throw new Error('Name required');
-    if (db.isPostgres) await db.prepare('INSERT INTO tags (name) VALUES ($1) ON CONFLICT (name) DO NOTHING').run(name); else await db.prepare('INSERT OR IGNORE INTO tags (name) VALUES (?)').run(name);
-    const tag = await db.prepare(db.isPostgres ? 'SELECT * FROM tags WHERE name = $1' : 'SELECT * FROM tags WHERE name = ?').get(name);
-    res.json({ success: true, tag });
-  } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
-  }
-});
-
-expressApp.delete('/api/tags/:id', async (req, res) => {
+// Tags API (download_tags based)
+expressApp.get('/api/downloads/:id/tags', async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
-    await db.prepare(db.isPostgres ? 'DELETE FROM tags WHERE id = $1' : 'DELETE FROM tags WHERE id = ?').run(id);
-    res.json({ success: true });
+    if (!Number.isFinite(id)) return res.status(400).json({ success: false, error: 'Invalid ID' });
+    const rows = await (db.readPool || db.pool).query({
+      text: 'SELECT tag FROM download_tags WHERE download_id = $1 ORDER BY tag ASC',
+      values: [id]
+    });
+    res.json({ success: true, tags: rows.rows.map(r => r.tag) });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }
 });
 
-expressApp.get('/api/media/:kind/:id/tags', async (req, res) => {
+expressApp.post('/api/downloads/:id/tags', async (req, res) => {
   try {
-    const { kind, id } = req.params;
-    const rows = await db.prepare(db.isPostgres ? 'SELECT t.* FROM tags t JOIN media_tags mt ON t.id = mt.tag_id WHERE mt.kind = $1 AND mt.media_id = $2' : 'SELECT t.* FROM tags t JOIN media_tags mt ON t.id = mt.tag_id WHERE mt.kind = ? AND mt.media_id = ?').all(kind, id);
-    res.json({ success: true, tags: rows });
+    const id = parseInt(req.params.id, 10);
+    const tag = String(req.body.tag || '').trim().toLowerCase().replace(/[^a-z0-9_]/g, '');
+    if (!Number.isFinite(id) || !tag || tag.length < 2) return res.status(400).json({ success: false, error: 'Invalid ID or tag' });
+    await (db.readPool || db.pool).query({
+      text: 'INSERT INTO download_tags (download_id, tag) VALUES ($1, $2) ON CONFLICT ON CONSTRAINT download_tags_download_id_tag_key DO NOTHING',
+      values: [id, tag]
+    });
+    // Return updated tag list
+    const rows = await (db.readPool || db.pool).query({
+      text: 'SELECT tag FROM download_tags WHERE download_id = $1 ORDER BY tag ASC',
+      values: [id]
+    });
+    res.json({ success: true, tags: rows.rows.map(r => r.tag) });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }
 });
 
-expressApp.post('/api/media/:kind/:id/tags', async (req, res) => {
+expressApp.delete('/api/downloads/:id/tags/:tag', async (req, res) => {
   try {
-    const { kind, id } = req.params;
-    const tagId = parseInt(req.body.tag_id, 10);
-    if (!tagId) throw new Error('Tag ID required');
-    if (db.isPostgres) await db.prepare('INSERT INTO media_tags (kind, media_id, tag_id) VALUES ($1, $2, $3) ON CONFLICT ON CONSTRAINT media_tags_pkey DO NOTHING').run(kind, id, tagId); else await db.prepare('INSERT OR IGNORE INTO media_tags (kind, media_id, tag_id) VALUES (?, ?, ?)').run(kind, id, tagId);
-    res.json({ success: true });
+    const id = parseInt(req.params.id, 10);
+    const tag = String(req.params.tag || '').trim().toLowerCase();
+    if (!Number.isFinite(id) || !tag) return res.status(400).json({ success: false, error: 'Invalid ID or tag' });
+    await (db.readPool || db.pool).query({
+      text: 'DELETE FROM download_tags WHERE download_id = $1 AND tag = $2',
+      values: [id, tag]
+    });
+    // Return updated tag list
+    const rows = await (db.readPool || db.pool).query({
+      text: 'SELECT tag FROM download_tags WHERE download_id = $1 ORDER BY tag ASC',
+      values: [id]
+    });
+    res.json({ success: true, tags: rows.rows.map(r => r.tag) });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }
 });
-
-expressApp.delete('/api/media/:kind/:id/tags/:tagId', async (req, res) => {
-  try {
-    const { kind, id, tagId } = req.params;
-    await db.prepare(db.isPostgres ? 'DELETE FROM media_tags WHERE kind = $1 AND media_id = $2 AND tag_id = $3' : 'DELETE FROM media_tags WHERE kind = ? AND media_id = ? AND tag_id = ?').run(kind, id, parseInt(tagId, 10));
-    res.json({ success: true });
-  } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
-  }
-});
-
-
-async function extractAndSaveTags(kind, media_id, text) {
-  if (!text) return;
-  const tags = [];
-  const hashMatches = text.match(/#([a-zA-Z0-9_]+)/g);
-  if (hashMatches) tags.push(...hashMatches.map(t => t.slice(1).toLowerCase()));
-
-  const bracketMatches = text.match(/\[([^\]]+)\]/g);
-  if (bracketMatches) tags.push(...bracketMatches.map(t => t.slice(1, -1).toLowerCase().replace(/\s+/g, '_')));
-
-  for (const tag of tags) {
-    if (!tag) continue;
-    try {
-      if (db.isPostgres) {
-        await db.prepare('INSERT INTO tags (name) VALUES ($1) ON CONFLICT (name) DO NOTHING').run(tag);
-        const tagRow = await db.prepare('SELECT id FROM tags WHERE name = $1').get(tag);
-        if (tagRow) {
-          await db.prepare('INSERT INTO media_tags (kind, media_id, tag_id) VALUES ($1, $2, $3) ON CONFLICT ON CONSTRAINT media_tags_pkey DO NOTHING').run(kind, media_id, tagRow.id);
-        }
-      } else {
-        await db.prepare('INSERT OR IGNORE INTO tags (name) VALUES (?)').run(tag);
-        const tagRow = await db.prepare('SELECT id FROM tags WHERE name = ?').get(tag);
-        if (tagRow) {
-          await db.prepare('INSERT OR IGNORE INTO media_tags (kind, media_id, tag_id) VALUES (?, ?, ?)').run(kind, media_id, tagRow.id);
-        }
-      }
-    } catch (e) { console.error('Error auto-tagging:', e); }
-  }
-}
 
 
 // ========================
