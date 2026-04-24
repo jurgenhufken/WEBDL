@@ -6350,8 +6350,8 @@ async function autoEnqueueMissingThumbs() {
   try {
     // Only fetch a small batch to keep it fast and iterative
     const limit = Math.max(5, THUMB_GEN_MAX_QUEUE - thumbGenQueue.length);
-    // Exclude HDD paths (/Volumes/) — they're too slow and cause event loop + DB contention
-    const rows = await db.prepare("SELECT filepath FROM downloads WHERE status = 'completed' AND is_thumb_ready = false AND filepath IS NOT NULL AND filepath != '' AND filepath NOT LIKE '/Volumes/%' ORDER BY id DESC LIMIT ?").all(limit);
+    // Exclude nothing — we want thumbs for external HDD too now!
+    const rows = await db.prepare("SELECT filepath FROM downloads WHERE status = 'completed' AND is_thumb_ready = false AND filepath IS NOT NULL AND filepath != '' ORDER BY id DESC LIMIT ?").all(limit);
     if (rows && rows.length > 0) {
       let enqueued = 0;
       for (const row of rows) {
@@ -6383,11 +6383,7 @@ function scheduleThumbGeneration(targetPath) {
       thumbGenScheduleDenied.empty_path++;
       return 'empty_path';
     }
-    // Skip external HDD paths — they cause sync I/O stalls and DB contention
-    if (abs.startsWith('/Volumes/')) {
-      thumbGenScheduleDenied.hdd_path = (thumbGenScheduleDenied.hdd_path || 0) + 1;
-      return 'hdd_path';
-    }
+    // Removed external HDD skip logic to allow thumbs on /Volumes/
     if (!safeIsAllowedExistingPath(abs)) {
       thumbGenScheduleDenied.not_allowed++;
       return 'not_allowed';
