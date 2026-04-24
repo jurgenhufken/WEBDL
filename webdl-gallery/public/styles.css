@@ -251,8 +251,8 @@ input[type="range"]:disabled { opacity: 0.35; cursor: default; }
 .vtop-title { font-size: 13px; font-weight: 600; color: var(--title-color); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-shadow: 0 0 12px var(--accent-neon), 0 0 24px var(--accent-glow); }
 .vtop-sub { font-size: 11px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .vtop-center { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-.vtop-rating { font-size: 20px; letter-spacing: 1px; color: var(--star-on); cursor: pointer; user-select: none; white-space: nowrap; flex-shrink: 0; filter: drop-shadow(0 0 4px rgba(255,208,96,0.5)); }
-.vtop-rating .off { color: var(--star-off); filter: none; }
+.vtop-rating { font-size: 20px; letter-spacing: 1px; color: var(--star-on); cursor: pointer; user-select: none; white-space: nowrap; flex-shrink: 0; text-shadow: 0 0 8px rgba(255,208,96,0.6); }
+.vtop-rating .off { color: var(--star-off); text-shadow: none; }
 .vtop-rating .rating-val { font-size: 11px; color: var(--text-secondary); margin-left: 4px; vertical-align: middle; }
 .vtop-right { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
 .vtop-btn { background: var(--btn-bg); color: #fff; border: 1px solid var(--btn-border); border-radius: 5px; padding: 4px 8px; font-size: 11px; cursor: pointer; white-space: nowrap; transition: all .2s ease; font-weight: 500; }
