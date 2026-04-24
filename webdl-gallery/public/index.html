@@ -27,6 +27,7 @@
         <option value="1">★</option>
       </select>
       <button id="refresh">Ververs</button>
+      <button id="themeBtn" class="theme-btn" title="Thema wisselen">💎</button>
       <span id="stats" class="stats"></span>
     </div>
   </header>
@@ -113,6 +114,7 @@
           <button id="vBtnFinder" class="vtop-btn" title="Bestand tonen in Finder">📁 Finder</button>
           <button id="vBtnTags" class="vtop-btn" title="Tags beheren">🏷 Tags</button>
           <button id="vBtnLog" class="vtop-btn" title="Activiteitenlog tonen (L)">📋 Log</button>
+          <button id="vBtnTheme" class="vtop-btn" title="Thema wisselen">💎</button>
           <button id="vClose" class="vtop-close" title="Viewer sluiten (Esc)">✕</button>
         </div>
       </div>
@@ -158,5 +160,44 @@
 
   <script src="/app.js"></script>
   <script src="/viewer.js"></script>
+  <script>
+  // ─── Thema switcher ─────────────────────────────────────────────────────
+  (function() {
+    const THEMES = [
+      { key: 'amethyst', icon: '💎', label: 'Deep Amethyst' },
+      { key: 'arctic',   icon: '❄️', label: 'Arctic Slate' },
+      { key: 'pearl',    icon: '⚪', label: 'Pearl & Onyx' },
+    ];
+
+    function getThemeIdx() {
+      const saved = localStorage.getItem('webdl_theme') || 'amethyst';
+      const idx = THEMES.findIndex(t => t.key === saved);
+      return idx >= 0 ? idx : 0;
+    }
+
+    function applyTheme(idx) {
+      const theme = THEMES[idx];
+      document.documentElement.setAttribute('data-theme', theme.key);
+      localStorage.setItem('webdl_theme', theme.key);
+      // Update alle thema-knoppen
+      document.querySelectorAll('#themeBtn, #vBtnTheme').forEach(btn => {
+        btn.textContent = theme.icon;
+        btn.title = theme.label;
+      });
+    }
+
+    function cycleTheme() {
+      const next = (getThemeIdx() + 1) % THEMES.length;
+      applyTheme(next);
+    }
+
+    // Apply saved theme on load
+    applyTheme(getThemeIdx());
+
+    // Bind buttons
+    document.getElementById('themeBtn')?.addEventListener('click', cycleTheme);
+    document.getElementById('vBtnTheme')?.addEventListener('click', cycleTheme);
+  })();
+  </script>
 </body>
 </html>
