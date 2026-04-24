@@ -168,8 +168,8 @@
     // Mute-knop initieel syncen
     el.vBtnMute.textContent = vs.muted ? '🔇' : '🔊';
 
-    // Titel / sub
-    el.vNowTitle.textContent = it.title || it.filename || '(untitled)';
+    // Titel — alleen titel, geen bestandsnaam
+    el.vNowTitle.textContent = it.title || '(zonder titel)';
     el.vNowSub.textContent = [
       it.platform,
       (it.channel && it.channel !== 'unknown') ? it.channel : '',
@@ -336,6 +336,9 @@
     el.vHudLeft.classList.remove('hud-hidden');
     el.vHudRight.classList.remove('hud-hidden');
     el.vStage.classList.remove('hud-hidden');
+    // Topbar mee tonen
+    const topbar = document.querySelector('.viewer-topbar');
+    if (topbar) topbar.style.opacity = '';
     clearTimeout(vs.hudTimer);
     vs.hudTimer = setTimeout(hideHUD, 3000);
   }
@@ -344,6 +347,9 @@
     el.vHudLeft.classList.add('hud-hidden');
     el.vHudRight.classList.add('hud-hidden');
     el.vStage.classList.add('hud-hidden');
+    // Topbar mee verbergen
+    const topbar = document.querySelector('.viewer-topbar');
+    if (topbar) topbar.style.opacity = '0';
   }
 
   // ─── Slideshow ────────────────────────────────────────────────────────────

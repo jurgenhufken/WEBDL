@@ -48,7 +48,7 @@ input[type="range"]:disabled { opacity: 0.35; cursor: default; }
 /* ─── VIEWER — fullscreen overlay (oude layout: sidebar als overlay) ──── */
 .viewer {
   position: fixed; inset: 0; z-index: 100;
-  background: #0b1020; overflow: hidden;
+  background: #141a2e; overflow: hidden;
 }
 .viewer.hidden { display: none !important; }
 
@@ -56,11 +56,12 @@ input[type="range"]:disabled { opacity: 0.35; cursor: default; }
 .vsidebar {
   position: fixed; left: 0; top: 0; bottom: 0;
   width: 320px; max-width: 92vw;
-  background: #121a33; border-right: 1px solid #1f2a52;
+  background: rgba(18,24,42,0.96); border-right: 1px solid rgba(60,80,120,0.3);
   display: flex; flex-direction: column;
   transform: translateX(-102%);
   transition: transform 0.22s ease;
   z-index: 200;
+  backdrop-filter: blur(8px);
 }
 /* Sidebar open: schuift naar rechts */
 .viewer.viewer--sidebar-open .vsidebar { transform: translateX(0); }
@@ -118,69 +119,70 @@ input[type="range"]:disabled { opacity: 0.35; cursor: default; }
   display: flex; flex-direction: column;
 }
 
-/* Topbar */
+/* ─── Topbar — zelfde kleurenfamilie als stage ────────────────────────── */
 .viewer-topbar {
   display: flex; align-items: center; gap: 6px;
   padding: 6px 10px;
-  background: #141c2e; border-bottom: 1px solid #1f2a52;
+  background: rgba(22,30,50,0.92); backdrop-filter: blur(8px);
+  border-bottom: 1px solid rgba(80,100,140,0.25);
   flex-shrink: 0; min-height: 44px;
+  transition: opacity .5s ease;
 }
 .vtop-left {
   display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1;
 }
 .vtop-info { min-width: 0; flex: 1; }
-.vtop-title { font-size: 12px; font-weight: 500; color: #00d4ff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.vtop-sub { font-size: 11px; color: #9aa4b2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vtop-title { font-size: 12px; font-weight: 500; color: #7ec8e3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vtop-sub { font-size: 11px; color: #8a9bb5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .vtop-center { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 
 .vtop-rating {
-  font-size: 22px; letter-spacing: 2px; color: #ffd700; cursor: pointer;
+  font-size: 20px; letter-spacing: 1px; color: #f0c850; cursor: pointer;
   user-select: none; white-space: nowrap; flex-shrink: 0;
 }
-.vtop-rating .off { color: #2c3240; }
-.vtop-rating .rating-val { font-size: 12px; color: #8a92a6; margin-left: 6px; vertical-align: middle; }
+.vtop-rating .off { color: #3a4260; }
+.vtop-rating .rating-val { font-size: 11px; color: #8a9bb5; margin-left: 4px; vertical-align: middle; }
 
 .vtop-right {
   display: flex; align-items: center; gap: 4px; flex-shrink: 0;
 }
 
-/* Universele topbar-knop */
+/* Alle knoppen: zelfde stijl */
 .vtop-btn {
-  background: #1a2540; color: #c8d0e0; border: 1px solid #2a3555;
+  background: rgba(40,55,85,0.7); color: #b8c4da; border: 1px solid rgba(70,90,130,0.4);
   border-radius: 5px; padding: 4px 8px; font-size: 11px;
-  cursor: pointer; white-space: nowrap; transition: all .15s;
+  cursor: pointer; white-space: nowrap; transition: all .2s ease;
 }
-.vtop-btn:hover { background: #243050; border-color: #3a5080; color: #fff; }
-.vtop-btn.active { background: #1a3a2a; border-color: #2a6a4a; color: #5bd38a; }
+.vtop-btn:hover { background: rgba(50,70,110,0.8); border-color: rgba(90,120,170,0.5); color: #e0e8f5; }
+.vtop-btn.active { background: rgba(30,70,50,0.7); border-color: rgba(60,140,90,0.5); color: #7ade9a; }
 
-.vtop-ctrl { display: flex; align-items: center; gap: 4px; font-size: 11px; color: #8a92a6; }
+.vtop-ctrl { display: flex; align-items: center; gap: 4px; font-size: 11px; color: #8a9bb5; }
 .vtop-ctrl input[type="range"] { width: 80px; }
-.vtop-sep { width: 1px; height: 20px; background: #2a3555; margin: 0 2px; flex-shrink: 0; }
+.vtop-sep { width: 1px; height: 18px; background: rgba(70,90,130,0.3); margin: 0 2px; flex-shrink: 0; }
 
 .vtop-close {
-  background: transparent; border: 0; color: #8a92a6; font-size: 18px;
+  background: transparent; border: 0; color: #8a9bb5; font-size: 18px;
   width: 28px; height: 28px; border-radius: 50%; padding: 0;
-  cursor: pointer; transition: all .15s;
+  cursor: pointer; transition: all .2s ease;
 }
-.vtop-close:hover { background: #3a1a1a; color: #ff6b6b; }
+.vtop-close:hover { background: rgba(180,50,50,0.3); color: #ff7070; }
 
-/* ─── Stage: flex centered, vult rest van viewport ────────────────────── */
+/* ─── Stage ──────────────────────────────────────────────────────────── */
 .viewer-stage {
   flex: 1 1 auto; position: relative;
   display: flex; justify-content: center; align-items: center;
-  background: #0b1020; overflow: hidden; min-height: 0;
+  background: #141a2e; overflow: hidden; min-height: 0;
 }
 
 /* Content wrapper */
 .vcontent {
   position: relative;
   display: flex; align-items: center; justify-content: center;
-  width: 100%; height: 100%;
-  overflow: hidden;
+  max-width: 100%; max-height: 100%;
 }
 
-/* Media: vult stage, behoudt proportie */
+/* Media */
 .vcontent img, .vcontent video {
   max-width: 100%;
   max-height: 100%;
@@ -190,57 +192,60 @@ input[type="range"]:disabled { opacity: 0.35; cursor: default; }
 }
 .vcontent video { background: #000; }
 
+/* ─── Alle overlays: samen tonen/verbergen ────────────────────────────── */
+
 /* Nav pijlen */
 .viewer-nav {
   position: absolute; top: 50%; transform: translateY(-50%);
   width: 44px; height: 80px;
   display: flex; align-items: center; justify-content: center;
-  background: rgba(0,0,0,.3); color: #fff; font-size: 30px;
+  background: rgba(20,26,46,0.6); color: #b8c4da; font-size: 28px;
   border: 0; cursor: pointer; z-index: 2;
-  opacity: .4; transition: opacity .15s;
+  opacity: .5; transition: opacity .4s ease;
   border-radius: 4px;
 }
-.viewer-nav:hover { opacity: 1; background: rgba(0,0,0,.6); }
+.viewer-nav:hover { opacity: 1; background: rgba(20,26,46,0.85); color: #fff; }
 .viewer-nav.prev { left: 0; border-radius: 0 6px 6px 0; }
 .viewer-nav.next { right: 0; border-radius: 6px 0 0 6px; }
 
-/* HUD pills — auto-hide na 3s */
+/* HUD pills */
 .hud-pill {
   position: absolute; bottom: 28px;
-  background: rgba(15,52,96,0.85); color: #d7e6ff;
-  padding: 6px 10px; border-radius: 999px; border: 1px solid rgba(31,42,82,0.8);
+  background: rgba(20,26,46,0.8); color: #c0d0e8;
+  padding: 5px 10px; border-radius: 999px; border: 1px solid rgba(60,80,120,0.35);
   font-size: 11px; pointer-events: none;
   white-space: nowrap; max-width: 50%;
   overflow: hidden; text-overflow: ellipsis;
-  transition: opacity 0.4s;
+  backdrop-filter: blur(4px);
+  transition: opacity 0.4s ease;
 }
-.hud-pill.hud-hidden { opacity: 0; }
 .hud-left  { left: 12px; }
 .hud-right { right: 12px; }
 
-/* Nav pijlen auto-hide */
-.viewer-nav { transition: opacity .3s; }
+/* Alles verbergen bij hud-hidden */
 .viewer-stage.hud-hidden .viewer-nav { opacity: 0; pointer-events: none; }
+.hud-pill.hud-hidden { opacity: 0; }
+.viewer-stage.hud-hidden .vprogressbar { opacity: 0; }
 
-/* YouTube-stijl progress bar — onderaan de stage */
+/* Progress bar — op snijvlak video/rand */
 .vprogressbar {
   position: absolute; bottom: 0; left: 0; right: 0;
-  height: 4px; background: rgba(255,255,255,0.15);
+  height: 3px; background: rgba(255,255,255,0.12);
   cursor: pointer; z-index: 10;
-  transition: height 0.15s;
+  transition: height 0.2s ease, opacity 0.4s ease;
 }
-.vprogressbar:hover { height: 8px; }
+.vprogressbar:hover { height: 7px; }
 .vprogressbar-fill {
-  height: 100%; background: #ff0033; width: 0%;
+  height: 100%; background: #e8364a; width: 0%;
   transition: width 0.1s linear;
-  pointer-events: none;
+  pointer-events: none; border-radius: 0 2px 2px 0;
 }
 .vprogressbar-handle {
-  position: absolute; top: 50%; right: 0;
-  width: 14px; height: 14px; border-radius: 50%;
-  background: #ff0033; transform: translate(50%, -50%);
-  opacity: 0; transition: opacity 0.15s;
-  pointer-events: none;
+  position: absolute; top: 50%;
+  width: 12px; height: 12px; border-radius: 50%;
+  background: #e8364a; transform: translate(-50%, -50%);
+  opacity: 0; transition: opacity 0.2s ease;
+  pointer-events: none; left: 0%;
 }
 .vprogressbar:hover .vprogressbar-handle { opacity: 1; }
 

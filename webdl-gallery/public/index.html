@@ -119,16 +119,17 @@
 
       <!-- Stage -->
       <div class="viewer-stage" id="vStage">
-        <div id="vContent" class="vcontent"></div>
+        <div id="vContent" class="vcontent">
+          <!-- Progress bar zit IN vcontent → onderrand van de video -->
+          <div class="vprogressbar" id="vProgressBar">
+            <div class="vprogressbar-fill" id="vProgressFill"></div>
+            <div class="vprogressbar-handle" id="vProgressHandle"></div>
+          </div>
+        </div>
         <button class="viewer-nav prev" id="vPrev" title="Vorige (←)">‹</button>
         <button class="viewer-nav next" id="vNext" title="Volgende (→)">›</button>
         <div class="hud-pill hud-left" id="vHudLeft"></div>
         <div class="hud-pill hud-right" id="vHudRight"></div>
-        <!-- YouTube-stijl progress bar -->
-        <div class="vprogressbar" id="vProgressBar">
-          <div class="vprogressbar-fill" id="vProgressFill"></div>
-          <div class="vprogressbar-handle" id="vProgressHandle"></div>
-        </div>
       </div>
 
     </div><!-- /viewer-main -->
