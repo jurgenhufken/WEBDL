@@ -103,7 +103,7 @@
   function trackNewest() {
     for (const it of state.items) {
       if (it.id != null) state.knownIds.add(String(it.id));
-      const t = it.finished_at || it.created_at;
+      const t = it.sort_ts || it.finished_at || it.created_at;
       if (t && (!state.newestFinishedAt || t > state.newestFinishedAt)) {
         state.newestFinishedAt = t;
       }

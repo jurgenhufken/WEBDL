@@ -273,7 +273,7 @@
     scrollListToActive();
 
     // Tags prefetch
-    loadItemTags(it.id).catch(() => {});
+    loadItemTags(it.rating_id || it.id).catch(() => {});
   }
 
   function cleanupMedia() {
@@ -584,7 +584,7 @@
   async function openTagDialog() {
     const it = vs.items[vs.idx];
     if (!it) return;
-    await loadItemTags(it.id);
+    await loadItemTags(it.rating_id || it.id);
     renderTagDialog();
     el.vTagDialog.classList.remove('hidden');
   }
@@ -596,6 +596,7 @@
   function renderTagDialog() {
     const it = vs.items[vs.idx];
     if (!it) return;
+    const itemId = it.rating_id || it.id;
     const currentIds = new Set(vs.currentItemTags.map(t => t.id));
 
     el.vTagList.innerHTML = '';
@@ -614,15 +615,15 @@
         const isHas  = e.currentTarget.dataset.has === '1';
         try {
           if (isHas) {
-            await api(`/api/items/${it.id}/tags/${tagId}`, { method: 'DELETE' });
+            await api(`/api/items/${itemId}/tags/${tagId}`, { method: 'DELETE' });
           } else {
-            await api(`/api/items/${it.id}/tags`, {
+            await api(`/api/items/${itemId}/tags`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ tag_id: tagId }),
             });
           }
-          await loadItemTags(it.id);
+          await loadItemTags(itemId);
           renderTagDialog();
         } catch (err) { log('Tag fout: ' + err.message); }
       });
@@ -633,7 +634,7 @@
         try {
           await api(`/api/tags/${tagId}`, { method: 'DELETE' });
           await loadTags();
-          await loadItemTags(it.id);
+          await loadItemTags(itemId);
           renderTagDialog();
         } catch (err) { log('Tag del fout: ' + err.message); }
       });
@@ -1185,14 +1186,15 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name }),
         });
-        await api(`/api/items/${it.id}/tags`, {
+        const itemId = it.rating_id || it.id;
+        await api(`/api/items/${itemId}/tags`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ tag_id: result.tag.id }),
         });
         el.vNewTagInput.value = '';
         await loadTags();
-        await loadItemTags(it.id);
+        await loadItemTags(itemId);
         renderTagDialog();
         log(`Tag toegevoegd: ${name}`);
       } catch (e) { log('Tag add fout: ' + e.message); }

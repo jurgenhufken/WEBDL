@@ -28,6 +28,7 @@ const VIDEO_EXTS = ['mp4','webm','mkv','mov','m4v','avi','flv','ts'];
 const IMAGE_EXTS = ['jpg','jpeg','png','gif','webp','avif','bmp'];
 const MEDIA_EXTS = [...VIDEO_EXTS, ...IMAGE_EXTS];
 const AUX_RELPATH_RE = String.raw`(_thumb(_v[0-9]+)?\.(jpe?g|png|webp)$|_logo\.(jpe?g|png|webp)$|\.(json|part|tmp|ytdl)$)`;
+const MEDIA_EXT_SQL = MEDIA_EXTS.map(e => `'${e}'`).join(',');
 
 function fileExt(filePath, format) {
   return format ? String(format).toLowerCase() : path.extname(filePath || '').replace('.', '').toLowerCase();
@@ -115,6 +116,7 @@ app.get('/api/items', async (req, res) => {
     const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 100));
     const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
     const sort = String(req.query.sort || 'recent'); // recent | random | rating
+    const sourceLimit = limit + offset;
     const params = [];
     const directWhere = buildItemFilters({
       req, params,
@@ -125,7 +127,7 @@ app.get('/api/items', async (req, res) => {
       SELECT 1 FROM download_files mf
        WHERE mf.download_id = d.id
          AND mf.relpath !~* '${AUX_RELPATH_RE}'
-         AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})
+         AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
     )`);
     const fileWhere = buildItemFilters({
       req, params,
@@ -133,27 +135,40 @@ app.get('/api/items', async (req, res) => {
       extExpr: "regexp_replace(df.relpath, '^.*\\.', '')",
     });
     fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
-    fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})`);
+    fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
 
+    const directOrder = sort === 'random'
+      ? 'RANDOM()'
+      : sort === 'rating'
+        ? 'd.rating DESC NULLS LAST, d.id DESC'
+        : 'd.id DESC';
+    const fileOrder = sort === 'random'
+      ? 'RANDOM()'
+      : sort === 'rating'
+        ? 'd.rating DESC NULLS LAST, df.id DESC'
+        : 'df.id DESC';
     const orderBy = sort === 'random'
       ? 'RANDOM()'
       : sort === 'rating'
-        ? 'rating DESC NULLS LAST, sort_ts DESC, id DESC'
-        : 'sort_ts DESC, id DESC';
+        ? 'rating DESC NULLS LAST, source_order DESC'
+        : 'source_order DESC';
 
-    params.push(limit, offset);
+    params.push(sourceLimit, limit, offset);
     const sql = `
-      SELECT *
-        FROM (
+      WITH direct_items AS (
           SELECT 'download' AS item_kind,
                  d.id::text AS id, d.id AS rating_id,
                  d.url, d.source_url, d.platform, d.channel, d.title, d.filename,
                  d.filepath, d.filesize, d.format, d.rating, d.is_thumb_ready,
                  d.finished_at, d.created_at,
-                 COALESCE(d.finished_at, d.updated_at, d.created_at) AS sort_ts
+                 COALESCE(d.finished_at, d.updated_at, d.created_at) AS sort_ts,
+                 d.id::bigint AS source_order
             FROM downloads d
            WHERE ${directWhere.join(' AND ')}
-          UNION ALL
+           ORDER BY ${directOrder}
+           LIMIT $${params.length - 2}
+      ),
+      file_items AS (
           SELECT 'file' AS item_kind,
                  'file-' || df.id::text AS id, d.id AS rating_id,
                  d.url, d.source_url, d.platform, d.channel, d.title,
@@ -162,10 +177,19 @@ app.get('/api/items', async (req, res) => {
                  regexp_replace(df.relpath, '^.*\\.', '') AS format,
                  d.rating, COALESCE(df.is_thumb_ready, d.is_thumb_ready) AS is_thumb_ready,
                  d.finished_at, d.created_at,
-                 COALESCE(to_timestamp(NULLIF(df.mtime_ms,0) / 1000.0)::timestamp, df.updated_at, d.finished_at, d.updated_at, d.created_at) AS sort_ts
+                 COALESCE(to_timestamp(NULLIF(df.mtime_ms,0) / 1000.0)::timestamp, df.updated_at, d.finished_at, d.updated_at, d.created_at) AS sort_ts,
+                 (1000000000000 + df.id)::bigint AS source_order
             FROM download_files df
             JOIN downloads d ON d.id = df.download_id
            WHERE ${fileWhere.join(' AND ')}
+           ORDER BY ${fileOrder}
+           LIMIT $${params.length - 2}
+      )
+      SELECT *
+        FROM (
+          SELECT * FROM direct_items
+          UNION ALL
+          SELECT * FROM file_items
         ) media_items
       ORDER BY ${orderBy}
       LIMIT $${params.length - 1} OFFSET $${params.length}`;
@@ -443,11 +467,10 @@ app.delete('/api/items/:id/tags/:tagId', async (req, res) => {
 // ─── Finder: open bestand in macOS Finder ──────────────────────────────────
 app.post('/api/finder', async (req, res) => {
   try {
-    const id = parseInt(req.body.id, 10);
-    if (!Number.isFinite(id)) return res.status(400).json({ error: 'id vereist' });
-    const { rows } = await pool.query('SELECT filepath FROM downloads WHERE id=$1', [id]);
-    if (!rows.length || !rows[0].filepath) return res.status(404).json({ error: 'niet gevonden' });
-    const fp = rows[0].filepath;
+    const id = String(req.body.id || '');
+    if (!id) return res.status(400).json({ error: 'id vereist' });
+    const fp = await resolveMediaPath(id);
+    if (!fp) return res.status(404).json({ error: 'niet gevonden' });
     require('node:child_process').execFile('open', ['-R', fp], { timeout: 5000 }, (err) => {
       if (err) return res.status(500).json({ error: err.message });
       res.json({ success: true });
