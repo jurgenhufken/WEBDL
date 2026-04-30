@@ -412,15 +412,21 @@
   async function setRating(r) {
     const it = vs.items[vs.idx];
     if (!it) return;
+    const activeId = String(it.id);
     try {
       await api('/api/rating', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: it.id, rating_id: it.rating_id || null, rating: r }),
+        body: JSON.stringify({ id: it.id, rating: r }),
       });
       it.rating = r;
-      updateRatingDisplay(r);
-      gal().updateCardRating(it.rating_id || it.id, r);
+      for (const item of vs.items) {
+        if (String(item.id) === activeId) item.rating = r;
+      }
+      if (vs.items[vs.idx] && String(vs.items[vs.idx].id) === activeId) {
+        updateRatingDisplay(r);
+      }
+      gal().updateCardRating(activeId, r);
       log(`Rating: ${r != null ? r : 'gewist'}`);
     } catch (e) {
       log('Rating fout: ' + e.message);

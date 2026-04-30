@@ -30,6 +30,10 @@ const MEDIA_EXTS = [...VIDEO_EXTS, ...IMAGE_EXTS];
 const AUX_RELPATH_RE = String.raw`(_thumb(_v[0-9]+)?\.(jpe?g|png|webp)$|_logo\.(jpe?g|png|webp)$|\.(json|part|tmp|ytdl)$)`;
 const MEDIA_EXT_SQL = MEDIA_EXTS.map(e => `'${e}'`).join(',');
 
+async function ensureSchema() {
+  await pool.query('ALTER TABLE download_files ADD COLUMN IF NOT EXISTS rating double precision');
+}
+
 function fileExt(filePath, format) {
   return format ? String(format).toLowerCase() : path.extname(filePath || '').replace('.', '').toLowerCase();
 }
@@ -62,7 +66,7 @@ async function resolveMediaPath(idRaw) {
   return rows.length ? rows[0].filepath : null;
 }
 
-function buildItemFilters({ req, params, fileExpr, extExpr }) {
+function buildItemFilters({ req, params, fileExpr, extExpr, ratingExpr }) {
   const platform = req.query.platform ? String(req.query.platform) : null;
   const channel = req.query.channel ? String(req.query.channel) : null;
   const q = req.query.q ? String(req.query.q).trim() : null;
@@ -77,7 +81,7 @@ function buildItemFilters({ req, params, fileExpr, extExpr }) {
     params.push('%' + q.toLowerCase() + '%');
     where.push(`(LOWER(COALESCE(d.title, d.filename, '')) LIKE $${params.length} OR LOWER(${fileExpr}) LIKE $${params.length})`);
   }
-  if (Number.isFinite(minRating)) { params.push(minRating); where.push(`d.rating >= $${params.length}`); }
+  if (Number.isFinite(minRating)) { params.push(minRating); where.push(`${ratingExpr} >= $${params.length}`); }
   if (mediaType === 'video') { where.push(`lower(${extExpr}) IN (${VIDEO_EXTS.map(e=>`'${e}'`).join(',')})`); }
   if (mediaType === 'image') { where.push(`lower(${extExpr}) IN (${IMAGE_EXTS.map(e=>`'${e}'`).join(',')})`); }
   if (Number.isFinite(tagId)) {
@@ -122,6 +126,7 @@ app.get('/api/items', async (req, res) => {
       req, params,
       fileExpr: 'd.filepath',
       extExpr: "COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))",
+      ratingExpr: 'd.rating',
     });
     directWhere.push(`NOT EXISTS (
       SELECT 1 FROM download_files mf
@@ -133,6 +138,7 @@ app.get('/api/items', async (req, res) => {
       req, params,
       fileExpr: 'df.relpath',
       extExpr: "regexp_replace(df.relpath, '^.*\\.', '')",
+      ratingExpr: 'df.rating',
     });
     fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
     fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
@@ -145,7 +151,7 @@ app.get('/api/items', async (req, res) => {
     const fileOrder = sort === 'random'
       ? 'RANDOM()'
       : sort === 'rating'
-        ? 'd.rating DESC NULLS LAST, df.id DESC'
+        ? 'df.rating DESC NULLS LAST, df.id DESC'
         : 'df.id DESC';
     const orderBy = sort === 'random'
       ? 'RANDOM()'
@@ -175,7 +181,7 @@ app.get('/api/items', async (req, res) => {
                  regexp_replace(df.relpath, '^.*/', '') AS filename,
                  df.relpath AS filepath, df.filesize,
                  regexp_replace(df.relpath, '^.*\\.', '') AS format,
-                 d.rating, COALESCE(df.is_thumb_ready, d.is_thumb_ready) AS is_thumb_ready,
+                 df.rating, COALESCE(df.is_thumb_ready, d.is_thumb_ready) AS is_thumb_ready,
                  d.finished_at, d.created_at,
                  COALESCE(to_timestamp(NULLIF(df.mtime_ms,0) / 1000.0)::timestamp, df.updated_at, d.finished_at, d.updated_at, d.created_at) AS sort_ts,
                  (1000000000000 + df.id)::bigint AS source_order
@@ -213,6 +219,7 @@ app.get('/api/items-since', async (req, res) => {
       req, params,
       fileExpr: 'd.filepath',
       extExpr: "COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))",
+      ratingExpr: 'd.rating',
     });
     directWhere.push(`NOT EXISTS (
       SELECT 1 FROM download_files mf
@@ -224,6 +231,7 @@ app.get('/api/items-since', async (req, res) => {
       req, params,
       fileExpr: 'df.relpath',
       extExpr: "regexp_replace(df.relpath, '^.*\\.', '')",
+      ratingExpr: 'df.rating',
     });
     fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
     fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})`);
@@ -251,7 +259,7 @@ app.get('/api/items-since', async (req, res) => {
                  regexp_replace(df.relpath, '^.*/', '') AS filename,
                  df.relpath AS filepath, df.filesize,
                  regexp_replace(df.relpath, '^.*\\.', '') AS format,
-                 d.rating, COALESCE(df.is_thumb_ready, d.is_thumb_ready) AS is_thumb_ready,
+                 df.rating, COALESCE(df.is_thumb_ready, d.is_thumb_ready) AS is_thumb_ready,
                  d.finished_at, d.created_at,
                  COALESCE(to_timestamp(NULLIF(df.mtime_ms,0) / 1000.0)::timestamp, df.updated_at, d.finished_at, d.updated_at, d.created_at) AS sort_ts
             FROM download_files df
@@ -342,12 +350,9 @@ app.get('/api/channels', async (req, res) => {
 // ─── Rating bijwerken ──────────────────────────────────────────────────────
 app.post('/api/rating', async (req, res) => {
   try {
-    let id = parseInt(req.body.rating_id || req.body.id, 10);
-    const fileMatch = String(req.body.id || '').match(/^file-(\d+)$/);
-    if ((!Number.isFinite(id) || id <= 0) && fileMatch) {
-      const fileRow = await pool.query('SELECT download_id FROM download_files WHERE id=$1', [fileMatch[1]]);
-      if (fileRow.rows[0]) id = Number(fileRow.rows[0].download_id);
-    }
+    const rawId = String(req.body.id || '');
+    const fileMatch = rawId.match(/^file-(\d+)$/);
+    const id = fileMatch ? Number(fileMatch[1]) : parseInt(rawId, 10);
     if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: 'id vereist' });
     let rating = null;
     if (req.body.rating !== null && req.body.rating !== '') {
@@ -355,8 +360,11 @@ app.post('/api/rating', async (req, res) => {
       if (!Number.isFinite(r)) return res.status(400).json({ error: 'rating ongeldig' });
       rating = Math.max(0, Math.min(5, Math.round(r * 2) / 2));
     }
-    await pool.query('UPDATE downloads SET rating=$1, updated_at=now() WHERE id=$2', [rating, id]);
-    res.json({ success: true, id, rating });
+    const result = fileMatch
+      ? await pool.query('UPDATE download_files SET rating=$1, updated_at=now() WHERE id=$2', [rating, id])
+      : await pool.query('UPDATE downloads SET rating=$1, updated_at=now() WHERE id=$2', [rating, id]);
+    if (!result.rowCount) return res.status(404).json({ error: 'niet gevonden' });
+    res.json({ success: true, id: fileMatch ? `file-${id}` : id, rating });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -483,6 +491,13 @@ app.post('/api/finder', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.listen(PORT, () => {
-  console.log(`webdl-gallery listening on http://localhost:${PORT}`);
-});
+ensureSchema()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`webdl-gallery listening on http://localhost:${PORT}`);
+    });
+  })
+  .catch((e) => {
+    console.error('webdl-gallery schema init failed:', e);
+    process.exit(1);
+  });

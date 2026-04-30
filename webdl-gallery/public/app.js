@@ -236,8 +236,9 @@
   // updateCardRating — bijwerken van ster-weergave in de grid
   function updateCardRating(itemId, rating) {
     const card = grid.querySelector(`.card[data-id="${itemId}"]`);
-    // Bijwerken in state.items ook
-    const changed = state.items.filter(x => String(x.id) === String(itemId) || String(x.rating_id || '') === String(itemId));
+    // Bijwerken in state.items ook. File-items hebben een eigen rating;
+    // parent rating_id mag dus niet alle siblings meekleuren.
+    const changed = state.items.filter(x => String(x.id) === String(itemId));
     for (const it of changed) it.rating = rating;
     const cards = changed.length
       ? changed.map(it => grid.querySelector(`.card[data-id="${it.id}"]`)).filter(Boolean)
