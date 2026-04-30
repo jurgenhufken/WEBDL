@@ -12,7 +12,9 @@ const HTTP_TIMEOUT_MS = 6000;
 const PROBE_FAILURES_BEFORE_DISCONNECT = 2; // Reduced so it detects faster
 const PROBE_DISCONNECT_GRACE_MS = 12000; // Drop after 12s of no heartbeat
 const SOCKET_ENABLED = false;
-const BACKGROUND_BUILD = 'simple-background-2026-02-27-02-29';
+const BACKGROUND_BUILD = 'simple-background-v2-hub-proxy';
+const HUB_URL = 'http://localhost:35730';
+
 
 console.log(`[WEBDL] background loaded ${BACKGROUND_BUILD} socket=${SOCKET_ENABLED ? 'on' : 'off-http-only'}`);
 
@@ -442,7 +444,24 @@ browser.contextMenus.onClicked.addListener(async (info, tab) => {
   }
 
   metadata.sourceUrl = url;
-  const resp = await sendCommand('download', { url, metadata }, 'download');
+  
+  // Stuur direct naar V2 Hub API
+  let resp = {};
+  try {
+    const res = await fetch(`${HUB_URL}/api/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, options: metadata })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      resp = { success: false, error: data.error || `HTTP ${res.status}` };
+    } else {
+      resp = { success: true, downloadId: data.id, duplicate: data.duplicate, message: 'Added to V2 Hub' };
+    }
+  } catch (e) {
+    resp = { success: false, error: e.message };
+  }
 
   try {
     if (tab && tab.id != null) {
@@ -504,16 +523,40 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (action === 'queueDownload') {
-    sendCommand('download', (message && message.payload) || {}, 'download')
-      .then((result) => sendResponse(result))
-      .catch((error) => sendResponse({ success: false, error: error.message }));
+    const payload = (message && message.payload) || {};
+    const url = payload.url;
+    const metadata = payload.metadata || payload;
+    
+    fetch(`${HUB_URL}/api/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, options: metadata })
+    }).then(async r => {
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || 'HTTP ' + r.status);
+      sendResponse({ success: true, downloadId: data.id, duplicate: data.duplicate, message: 'Added to V2 Hub' });
+    }).catch(e => sendResponse({ success: false, error: e.message }));
     return true;
   }
 
   if (action === 'queueBatchDownload') {
-    postJson('download/batch', (message && message.payload) || {})
-      .then((result) => sendResponse(result))
-      .catch((error) => sendResponse({ success: false, error: error.message }));
+    const payload = (message && message.payload) || {};
+    const urls = payload.urls || [];
+    const metadata = payload.metadata || {};
+    
+    // Stuur alle URLs 1 voor 1 naar V2 Hub
+    Promise.all(urls.map(url => 
+      fetch(`${HUB_URL}/api/jobs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url, options: metadata })
+      }).then(r => r.json()).catch(e => ({ error: e.message }))
+    )).then((results) => {
+      const queued = results.filter(r => !r.error && !r.duplicate).length;
+      const duplicates = results.filter(r => r.duplicate).length;
+      const errors = results.filter(r => r.error).length;
+      sendResponse({ success: true, queued, duplicates, errors });
+    }).catch(e => sendResponse({ success: false, error: e.message }));
     return true;
   }
 
