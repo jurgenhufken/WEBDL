@@ -338,16 +338,99 @@ function startWorkerPool({
         } catch (e) {
           await repo.appendLog(job.id, 'warn', `gallery sync mislukt: ${e.message}`);
         }
+        return true; // success
       } else {
         const retry = job.attempts < job.max_attempts;
         await queue.fail(job.id, `exit ${code}`, { retry });
         await repo.appendLog(job.id, retry ? 'warn' : 'error', `exit ${code}${retry ? ' (retry)' : ''}`);
         logger.warn('job.failed', { job: job.id, code, retry });
+        return false; // failure
       }
     } catch (err) {
       const retry = job.attempts < job.max_attempts;
       await queue.fail(job.id, String(err.message || err), { retry });
       logger.error('job.error', { job: job.id, err: String(err.message || err) });
+      return false; // failure
+    }
+  }
+
+  // ─── Per-domain rate limiting ────────────────────────────────────────────────
+  // Houdt per domein bij wanneer de laatste download startte en hoeveel
+  // opeenvolgende failures er waren. Bij failures groeit de wachttijd
+  // exponentieel (backoff). Bij successen reset de backoff.
+  const domainState = new Map(); // domain → { lastStartMs, consecutiveFails }
+
+  // Configuratie per domein-patroon (defaults voor onbekende domeinen)
+  const DOMAIN_THROTTLE = {
+    'youtube':   { baseSpacingMs: 5000,  maxBackoffMs: 60000, jitterMs: 2000 },
+    'tiktok':    { baseSpacingMs: 3000,  maxBackoffMs: 30000, jitterMs: 1500 },
+    'instagram': { baseSpacingMs: 4000,  maxBackoffMs: 45000, jitterMs: 2000 },
+    'reddit':    { baseSpacingMs: 2000,  maxBackoffMs: 20000, jitterMs: 1000 },
+    '_default':  { baseSpacingMs: 500,   maxBackoffMs: 10000, jitterMs: 500  },
+  };
+
+  function domainKey(url) {
+    try {
+      const h = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+      if (h.includes('youtube') || h.includes('youtu.be')) return 'youtube';
+      if (h.includes('tiktok')) return 'tiktok';
+      if (h.includes('instagram')) return 'instagram';
+      if (h.includes('reddit')) return 'reddit';
+      return h;
+    } catch { return 'unknown'; }
+  }
+
+  function getThrottleConfig(domain) {
+    return DOMAIN_THROTTLE[domain] || DOMAIN_THROTTLE._default;
+  }
+
+  function getDomainState(domain) {
+    if (!domainState.has(domain)) {
+      domainState.set(domain, { lastStartMs: 0, consecutiveFails: 0 });
+    }
+    return domainState.get(domain);
+  }
+
+  function computeWaitMs(domain) {
+    const conf = getThrottleConfig(domain);
+    const ds = getDomainState(domain);
+    const elapsed = Date.now() - ds.lastStartMs;
+
+    // Backoff: spacing verdubbelt per opeenvolgende failure, met plafond
+    const backoffMultiplier = Math.min(Math.pow(2, ds.consecutiveFails), 32);
+    const spacing = Math.min(conf.baseSpacingMs * backoffMultiplier, conf.maxBackoffMs);
+    const jitter = Math.floor(Math.random() * conf.jitterMs);
+    const needed = spacing + jitter;
+
+    return Math.max(0, needed - elapsed);
+  }
+
+  function markDomainStarted(domain) {
+    getDomainState(domain).lastStartMs = Date.now();
+  }
+
+  function markDomainSuccess(domain) {
+    const ds = getDomainState(domain);
+    ds.consecutiveFails = 0;
+  }
+
+  function markDomainFailed(domain) {
+    const ds = getDomainState(domain);
+    ds.consecutiveFails++;
+    const conf = getThrottleConfig(domain);
+    const backoff = Math.min(conf.baseSpacingMs * Math.pow(2, ds.consecutiveFails), conf.maxBackoffMs);
+    logger.info('throttle.backoff', { domain, fails: ds.consecutiveFails, nextDelayMs: backoff });
+  }
+
+  // Wrap runOne om domain throttle te beheren
+  async function runOneThrottled(job) {
+    const domain = domainKey(job.url);
+    markDomainStarted(domain);
+    const ok = await runOne(job);
+    if (ok === false) {
+      markDomainFailed(domain);
+    } else {
+      markDomainSuccess(domain);
     }
   }
 
@@ -367,12 +450,24 @@ function startWorkerPool({
     const laneSet = laneActive.get(lane);
     while (!stopping) {
       if (laneSet.size >= maxConcurrency) { await sleep(pollMs); continue; }
+
       const job = await queue.claimNext(workerId, { lane }).catch((e) => {
         logger.error('queue.claim.error', { lane, err: String(e.message || e) });
         return null;
       });
       if (!job) { await sleep(pollMs); continue; }
-      const p = runOne(job).finally(() => laneSet.delete(p));
+
+      // Per-domain rate limiting: wacht indien nodig
+      const domain = domainKey(job.url);
+      const waitMs = computeWaitMs(domain);
+      if (waitMs > 0) {
+        logger.info('throttle.wait', { job: job.id, domain, waitMs, lane });
+        await sleep(waitMs);
+      }
+
+      const p = runOneThrottled(job)
+        .catch(() => { /* errors handled inside runOneThrottled */ })
+        .finally(() => laneSet.delete(p));
       laneSet.add(p);
     }
     await Promise.all(laneSet);
@@ -388,6 +483,15 @@ function startWorkerPool({
   function stats() {
     const out = {};
     for (const l of LANES) out[l.name] = { active: laneActive.get(l.name).size, limit: l.concurrency };
+    // Voeg throttle-info toe
+    const throttle = {};
+    for (const [domain, ds] of domainState) {
+      throttle[domain] = {
+        consecutiveFails: ds.consecutiveFails,
+        nextWaitMs: computeWaitMs(domain),
+      };
+    }
+    out._throttle = throttle;
     return out;
   }
 
