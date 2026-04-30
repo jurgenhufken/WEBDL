@@ -215,20 +215,24 @@
   // updateCardRating — bijwerken van ster-weergave in de grid
   function updateCardRating(itemId, rating) {
     const card = grid.querySelector(`.card[data-id="${itemId}"]`);
-    if (!card) return;
     // Bijwerken in state.items ook
-    const it = state.items.find(x => String(x.id) === String(itemId));
-    if (it) it.rating = rating;
-    const starsEl = card.querySelector('.card-stars');
-    if (starsEl) {
-      starsEl.innerHTML = rating != null ? starHtml(rating) : '';
-    } else if (rating != null) {
-      const info = card.querySelector('.card-info');
-      if (info) {
-        const s = document.createElement('div');
-        s.className = 'card-stars';
-        s.innerHTML = starHtml(rating);
-        info.appendChild(s);
+    const changed = state.items.filter(x => String(x.id) === String(itemId) || String(x.rating_id || '') === String(itemId));
+    for (const it of changed) it.rating = rating;
+    const cards = changed.length
+      ? changed.map(it => grid.querySelector(`.card[data-id="${it.id}"]`)).filter(Boolean)
+      : (card ? [card] : []);
+    for (const c of cards) {
+      const starsEl = c.querySelector('.card-stars');
+      if (starsEl) {
+        starsEl.innerHTML = rating != null ? starHtml(rating) : '';
+      } else if (rating != null) {
+        const info = c.querySelector('.card-info');
+        if (info) {
+          const s = document.createElement('div');
+          s.className = 'card-stars';
+          s.innerHTML = starHtml(rating);
+          info.appendChild(s);
+        }
       }
     }
   }

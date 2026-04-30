@@ -269,6 +269,9 @@ input[type="range"]:disabled { opacity: 0.35; cursor: default; }
 .viewer-stage.zoomed .vcontent { cursor: grab; }
 .vcontent img, .vcontent video { max-width: 100%; max-height: 100%; display: block; user-select: none; object-fit: contain; }
 .vcontent video { background: #000; }
+.vcontent .zoom-media { cursor: zoom-in; transform-origin: center center; will-change: transform; }
+.vcontent .zoom-media.zoomed { cursor: grab; max-width: none; max-height: none; }
+.vcontent .zoom-media.dragging { cursor: grabbing; }
 
 .viewer-nav { position: absolute; top: 50%; transform: translateY(-50%); width: 44px; height: 80px; display: flex; align-items: center; justify-content: center; background: var(--nav-bg); color: #fff; font-size: 28px; border: 1px solid var(--border); cursor: pointer; z-index: 2; opacity: .5; transition: all .3s ease; border-radius: 4px; }
 .viewer-nav:hover { opacity: 1; background: var(--bg-glass); color: var(--title-color); border-color: var(--accent); box-shadow: 0 0 12px var(--accent-glow); }

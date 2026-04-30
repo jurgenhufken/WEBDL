@@ -23,6 +23,74 @@ const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
+const BASE_DIR = process.env.WEBDL_BASE_DIR || '/Users/jurgen/Downloads/WEBDL';
+const VIDEO_EXTS = ['mp4','webm','mkv','mov','m4v','avi','flv','ts'];
+const IMAGE_EXTS = ['jpg','jpeg','png','gif','webp','avif','bmp'];
+const MEDIA_EXTS = [...VIDEO_EXTS, ...IMAGE_EXTS];
+const AUX_RELPATH_RE = String.raw`(_thumb(_v[0-9]+)?\.(jpe?g|png|webp)$|_logo\.(jpe?g|png|webp)$|\.(json|part|tmp|ytdl)$)`;
+
+function fileExt(filePath, format) {
+  return format ? String(format).toLowerCase() : path.extname(filePath || '').replace('.', '').toLowerCase();
+}
+
+function mapItem(row) {
+  const ext = fileExt(row.filepath, row.format);
+  const isVideo = VIDEO_EXTS.includes(ext);
+  const filename = row.filename || path.basename(row.filepath || '');
+  return {
+    ...row,
+    id: String(row.id),
+    rating_id: row.rating_id || row.id,
+    filename,
+    ext,
+    type: isVideo ? 'video' : 'image',
+  };
+}
+
+async function resolveMediaPath(idRaw) {
+  const id = String(idRaw || '');
+  const fileMatch = id.match(/^file-(\d+)$/);
+  if (fileMatch) {
+    const { rows } = await pool.query('SELECT relpath FROM download_files WHERE id=$1', [fileMatch[1]]);
+    if (!rows.length || !rows[0].relpath) return null;
+    return path.resolve(BASE_DIR, rows[0].relpath);
+  }
+  const numericId = parseInt(id, 10);
+  if (!Number.isFinite(numericId) || numericId <= 0) return null;
+  const { rows } = await pool.query('SELECT filepath FROM downloads WHERE id=$1', [numericId]);
+  return rows.length ? rows[0].filepath : null;
+}
+
+function buildItemFilters({ req, params, fileExpr, extExpr }) {
+  const platform = req.query.platform ? String(req.query.platform) : null;
+  const channel = req.query.channel ? String(req.query.channel) : null;
+  const q = req.query.q ? String(req.query.q).trim() : null;
+  const minRating = req.query.min_rating != null ? Number(req.query.min_rating) : null;
+  const mediaType = req.query.media_type ? String(req.query.media_type) : null;
+  const tagId = req.query.tag_id ? parseInt(req.query.tag_id, 10) : null;
+
+  const where = [`d.status = 'completed'`, `${fileExpr} IS NOT NULL`, `${fileExpr} <> ''`];
+  if (platform) { params.push(platform); where.push(`d.platform = $${params.length}`); }
+  if (channel)  { params.push(channel);  where.push(`d.channel = $${params.length}`); }
+  if (q) {
+    params.push('%' + q.toLowerCase() + '%');
+    where.push(`(LOWER(COALESCE(d.title, d.filename, '')) LIKE $${params.length} OR LOWER(${fileExpr}) LIKE $${params.length})`);
+  }
+  if (Number.isFinite(minRating)) { params.push(minRating); where.push(`d.rating >= $${params.length}`); }
+  if (mediaType === 'video') { where.push(`lower(${extExpr}) IN (${VIDEO_EXTS.map(e=>`'${e}'`).join(',')})`); }
+  if (mediaType === 'image') { where.push(`lower(${extExpr}) IN (${IMAGE_EXTS.map(e=>`'${e}'`).join(',')})`); }
+  if (Number.isFinite(tagId)) {
+    params.push(tagId);
+    where.push(`d.id IN (
+      SELECT dt.download_id
+        FROM download_tags dt
+        JOIN tags t ON t.name = dt.tag
+       WHERE t.id = $${params.length}
+    )`);
+  }
+  return where;
+}
+
 // Voorkom dat de browser API-responses cached of samenvoegt tussen tabs
 app.use('/api', (_req, res, next) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
@@ -46,61 +114,64 @@ app.get('/api/items', async (req, res) => {
   try {
     const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 100));
     const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
-    const platform = req.query.platform ? String(req.query.platform) : null;
-    const channel = req.query.channel ? String(req.query.channel) : null;
-    const q = req.query.q ? String(req.query.q).trim() : null;
     const sort = String(req.query.sort || 'recent'); // recent | random | rating
-    const minRating = req.query.min_rating != null ? Number(req.query.min_rating) : null;
-
-    const mediaType = req.query.media_type ? String(req.query.media_type) : null; // 'video'|'image'
-    const tagId = req.query.tag_id ? parseInt(req.query.tag_id, 10) : null;
-    const VIDEO_EXTS = ['mp4','webm','mkv','mov','m4v','avi','flv','ts'];
-
-    const where = [`status = 'completed'`, `filepath IS NOT NULL`];
     const params = [];
-    if (platform) { params.push(platform); where.push(`platform = $${params.length}`); }
-    if (channel)  { params.push(channel);  where.push(`channel = $${params.length}`); }
-    if (q)        { params.push('%' + q.toLowerCase() + '%'); where.push(`LOWER(COALESCE(title, filename, '')) LIKE $${params.length}`); }
-    if (Number.isFinite(minRating)) { params.push(minRating); where.push(`rating >= $${params.length}`); }
-    if (mediaType === 'video') { where.push(`lower(COALESCE(format,'')) IN (${VIDEO_EXTS.map(e=>`'${e}'`).join(',')})`); }
-    if (mediaType === 'image') { where.push(`lower(COALESCE(format,'')) NOT IN (${VIDEO_EXTS.map(e=>`'${e}'`).join(',')})`); }
-    if (Number.isFinite(tagId)) {
-      params.push(tagId);
-      where.push(`id IN (
-        SELECT dt.download_id
-          FROM download_tags dt
-          JOIN tags t ON t.name = dt.tag
-         WHERE t.id = $${params.length}
-      )`);
-    }
+    const directWhere = buildItemFilters({
+      req, params,
+      fileExpr: 'd.filepath',
+      extExpr: "COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))",
+    });
+    directWhere.push(`NOT EXISTS (
+      SELECT 1 FROM download_files mf
+       WHERE mf.download_id = d.id
+         AND mf.relpath !~* '${AUX_RELPATH_RE}'
+         AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})
+    )`);
+    const fileWhere = buildItemFilters({
+      req, params,
+      fileExpr: 'df.relpath',
+      extExpr: "regexp_replace(df.relpath, '^.*\\.', '')",
+    });
+    fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
+    fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})`);
 
     const orderBy = sort === 'random'
       ? 'RANDOM()'
       : sort === 'rating'
-        ? 'rating DESC NULLS LAST, COALESCE(finished_at, created_at) DESC'
-        : 'COALESCE(finished_at, created_at) DESC, id DESC';
+        ? 'rating DESC NULLS LAST, sort_ts DESC, id DESC'
+        : 'sort_ts DESC, id DESC';
 
     params.push(limit, offset);
     const sql = `
-      SELECT * FROM (
-        SELECT DISTINCT ON (filepath)
-               id, url, source_url, platform, channel, title, filename, filepath, filesize,
-               format, rating, is_thumb_ready, finished_at, created_at
-          FROM downloads
-         WHERE ${where.join(' AND ')}
-         ORDER BY filepath, COALESCE(finished_at, created_at) DESC, id DESC
-      ) deduped
+      SELECT *
+        FROM (
+          SELECT 'download' AS item_kind,
+                 d.id::text AS id, d.id AS rating_id,
+                 d.url, d.source_url, d.platform, d.channel, d.title, d.filename,
+                 d.filepath, d.filesize, d.format, d.rating, d.is_thumb_ready,
+                 d.finished_at, d.created_at,
+                 COALESCE(d.finished_at, d.updated_at, d.created_at) AS sort_ts
+            FROM downloads d
+           WHERE ${directWhere.join(' AND ')}
+          UNION ALL
+          SELECT 'file' AS item_kind,
+                 'file-' || df.id::text AS id, d.id AS rating_id,
+                 d.url, d.source_url, d.platform, d.channel, d.title,
+                 regexp_replace(df.relpath, '^.*/', '') AS filename,
+                 df.relpath AS filepath, df.filesize,
+                 regexp_replace(df.relpath, '^.*\\.', '') AS format,
+                 d.rating, COALESCE(df.is_thumb_ready, d.is_thumb_ready) AS is_thumb_ready,
+                 d.finished_at, d.created_at,
+                 COALESCE(to_timestamp(NULLIF(df.mtime_ms,0) / 1000.0)::timestamp, df.updated_at, d.finished_at, d.updated_at, d.created_at) AS sort_ts
+            FROM download_files df
+            JOIN downloads d ON d.id = df.download_id
+           WHERE ${fileWhere.join(' AND ')}
+        ) media_items
       ORDER BY ${orderBy}
       LIMIT $${params.length - 1} OFFSET $${params.length}`;
     const { rows } = await pool.query(sql, params);
 
-    // Detecteer type (image/video) op ext
-    const items = rows.map((r) => {
-      const ext = r.format ? String(r.format).toLowerCase() : path.extname(r.filepath || '').replace('.', '').toLowerCase();
-      const isVideo = ['mp4','webm','mkv','mov','m4v','avi','flv','ts'].includes(ext);
-      return { ...r, ext, type: isVideo ? 'video' : 'image' };
-    });
-
+    const items = rows.map(mapItem);
     res.json({ items, limit, offset, count: items.length });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -113,40 +184,60 @@ app.get('/api/items', async (req, res) => {
 app.get('/api/items-since', async (req, res) => {
   try {
     const since = req.query.since ? String(req.query.since) : null;
-    const platform = req.query.platform ? String(req.query.platform) : null;
-    const channel = req.query.channel ? String(req.query.channel) : null;
-    const q = req.query.q ? String(req.query.q).trim() : null;
-    const minRating = req.query.min_rating != null ? Number(req.query.min_rating) : null;
-
-    const where = [`status = 'completed'`, `filepath IS NOT NULL`];
     const params = [];
+    const directWhere = buildItemFilters({
+      req, params,
+      fileExpr: 'd.filepath',
+      extExpr: "COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))",
+    });
+    directWhere.push(`NOT EXISTS (
+      SELECT 1 FROM download_files mf
+       WHERE mf.download_id = d.id
+         AND mf.relpath !~* '${AUX_RELPATH_RE}'
+         AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})
+    )`);
+    const fileWhere = buildItemFilters({
+      req, params,
+      fileExpr: 'df.relpath',
+      extExpr: "regexp_replace(df.relpath, '^.*\\.', '')",
+    });
+    fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
+    fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})`);
     if (since) {
       params.push(since);
-      where.push(`COALESCE(finished_at, created_at) > $${params.length}::timestamp`);
+      directWhere.push(`COALESCE(d.finished_at, d.updated_at, d.created_at) > $${params.length}::timestamp`);
+      fileWhere.push(`COALESCE(to_timestamp(NULLIF(df.mtime_ms,0) / 1000.0)::timestamp, df.updated_at, d.finished_at, d.updated_at, d.created_at) > $${params.length}::timestamp`);
     }
-    if (platform) { params.push(platform); where.push(`platform = $${params.length}`); }
-    if (channel)  { params.push(channel);  where.push(`channel = $${params.length}`); }
-    if (q)        { params.push('%' + q.toLowerCase() + '%'); where.push(`LOWER(COALESCE(title, filename, '')) LIKE $${params.length}`); }
-    if (Number.isFinite(minRating)) { params.push(minRating); where.push(`rating >= $${params.length}`); }
 
     const sql = `
-      SELECT * FROM (
-        SELECT DISTINCT ON (filepath)
-               id, url, source_url, platform, channel, title, filename, filepath, filesize,
-               format, rating, is_thumb_ready, finished_at, created_at
-          FROM downloads
-         WHERE ${where.join(' AND ')}
-         ORDER BY filepath, COALESCE(finished_at, created_at) DESC, id DESC
-      ) deduped
-      ORDER BY COALESCE(finished_at, created_at) DESC, id DESC
+      SELECT *
+        FROM (
+          SELECT 'download' AS item_kind,
+                 d.id::text AS id, d.id AS rating_id,
+                 d.url, d.source_url, d.platform, d.channel, d.title, d.filename,
+                 d.filepath, d.filesize, d.format, d.rating, d.is_thumb_ready,
+                 d.finished_at, d.created_at,
+                 COALESCE(d.finished_at, d.updated_at, d.created_at) AS sort_ts
+            FROM downloads d
+           WHERE ${directWhere.join(' AND ')}
+          UNION ALL
+          SELECT 'file' AS item_kind,
+                 'file-' || df.id::text AS id, d.id AS rating_id,
+                 d.url, d.source_url, d.platform, d.channel, d.title,
+                 regexp_replace(df.relpath, '^.*/', '') AS filename,
+                 df.relpath AS filepath, df.filesize,
+                 regexp_replace(df.relpath, '^.*\\.', '') AS format,
+                 d.rating, COALESCE(df.is_thumb_ready, d.is_thumb_ready) AS is_thumb_ready,
+                 d.finished_at, d.created_at,
+                 COALESCE(to_timestamp(NULLIF(df.mtime_ms,0) / 1000.0)::timestamp, df.updated_at, d.finished_at, d.updated_at, d.created_at) AS sort_ts
+            FROM download_files df
+            JOIN downloads d ON d.id = df.download_id
+           WHERE ${fileWhere.join(' AND ')}
+        ) media_items
+      ORDER BY sort_ts DESC, id DESC
       LIMIT 200`;
     const { rows } = await pool.query(sql, params);
-
-    const items = rows.map((r) => {
-      const ext = r.format ? String(r.format).toLowerCase() : path.extname(r.filepath || '').replace('.', '').toLowerCase();
-      const isVideo = ['mp4','webm','mkv','mov','m4v','avi','flv','ts'].includes(ext);
-      return { ...r, ext, type: isVideo ? 'video' : 'image' };
-    });
+    const items = rows.map(mapItem);
     res.json({ items, since, count: items.length });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -157,13 +248,26 @@ app.get('/api/items-since', async (req, res) => {
 app.get('/api/platforms', async (_req, res) => {
   try {
     const { rows } = await pool.query(`
-      SELECT platform, COUNT(*) AS count FROM (
-        SELECT DISTINCT ON (filepath)
-               platform
-          FROM downloads
-         WHERE status = 'completed' AND filepath IS NOT NULL
-         ORDER BY filepath, COALESCE(finished_at, created_at) DESC, id DESC
-      ) deduped
+      SELECT platform, COUNT(*) AS count
+      FROM (
+        SELECT d.platform
+          FROM downloads d
+         WHERE d.status = 'completed'
+           AND d.filepath IS NOT NULL AND d.filepath <> ''
+           AND NOT EXISTS (
+             SELECT 1 FROM download_files mf
+              WHERE mf.download_id = d.id
+                AND mf.relpath !~* '${AUX_RELPATH_RE}'
+                AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})
+           )
+        UNION ALL
+        SELECT d.platform
+          FROM download_files df
+          JOIN downloads d ON d.id = df.download_id
+         WHERE d.status = 'completed'
+           AND df.relpath !~* '${AUX_RELPATH_RE}'
+           AND lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})
+      ) media_items
       GROUP BY platform
       ORDER BY count DESC`);
     res.json({ platforms: rows });
@@ -177,16 +281,31 @@ app.get('/api/channels', async (req, res) => {
   try {
     const platform = req.query.platform ? String(req.query.platform) : null;
     const params = [];
-    let where = `WHERE status = 'completed' AND filepath IS NOT NULL`;
-    if (platform) { params.push(platform); where += ` AND platform = $1`; }
+    const platformClause = platform ? `AND d.platform = $1` : '';
+    if (platform) params.push(platform);
     const { rows } = await pool.query(`
-      SELECT channel, platform, COUNT(*) AS count FROM (
-        SELECT DISTINCT ON (filepath)
-               channel, platform
-          FROM downloads
-          ${where}
-         ORDER BY filepath, COALESCE(finished_at, created_at) DESC, id DESC
-      ) deduped
+      SELECT channel, platform, COUNT(*) AS count
+      FROM (
+        SELECT d.channel, d.platform
+          FROM downloads d
+         WHERE d.status = 'completed'
+           AND d.filepath IS NOT NULL AND d.filepath <> ''
+           ${platformClause}
+           AND NOT EXISTS (
+             SELECT 1 FROM download_files mf
+              WHERE mf.download_id = d.id
+                AND mf.relpath !~* '${AUX_RELPATH_RE}'
+                AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})
+           )
+        UNION ALL
+        SELECT d.channel, d.platform
+          FROM download_files df
+          JOIN downloads d ON d.id = df.download_id
+         WHERE d.status = 'completed'
+           ${platformClause}
+           AND df.relpath !~* '${AUX_RELPATH_RE}'
+           AND lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})
+      ) media_items
       GROUP BY channel, platform
       ORDER BY count DESC
       LIMIT 500`, params);
@@ -199,7 +318,7 @@ app.get('/api/channels', async (req, res) => {
 // ─── Rating bijwerken ──────────────────────────────────────────────────────
 app.post('/api/rating', async (req, res) => {
   try {
-    const id = parseInt(req.body.id, 10);
+    const id = parseInt(req.body.rating_id || req.body.id, 10);
     if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: 'id vereist' });
     let rating = null;
     if (req.body.rating !== null && req.body.rating !== '') {
@@ -217,10 +336,8 @@ app.post('/api/rating', async (req, res) => {
 // ─── File stream: serveert bestanden van disk ──────────────────────────────
 app.get('/media/:id', async (req, res) => {
   try {
-    const id = parseInt(req.params.id, 10);
-    const { rows } = await pool.query('SELECT filepath FROM downloads WHERE id=$1', [id]);
-    if (!rows.length || !rows[0].filepath) return res.status(404).send('not found');
-    const fp = rows[0].filepath;
+    const fp = await resolveMediaPath(req.params.id);
+    if (!fp) return res.status(404).send('not found');
     if (!fs.existsSync(fp)) return res.status(404).send('file missing');
     res.setHeader('Cache-Control', 'public, max-age=3600');
     res.sendFile(fp);
@@ -232,10 +349,8 @@ app.get('/media/:id', async (req, res) => {
 // ─── Thumbnail stream: _thumb.jpg of fallback naar origineel ───────────────
 app.get('/thumb/:id', async (req, res) => {
   try {
-    const id = parseInt(req.params.id, 10);
-    const { rows } = await pool.query('SELECT filepath FROM downloads WHERE id=$1', [id]);
-    if (!rows.length || !rows[0].filepath) return res.status(404).send('not found');
-    const fp = rows[0].filepath;
+    const fp = await resolveMediaPath(req.params.id);
+    if (!fp) return res.status(404).send('not found');
     const dir = path.dirname(fp);
     const base = path.basename(fp, path.extname(fp));
     // Probeer meerdere thumb-varianten

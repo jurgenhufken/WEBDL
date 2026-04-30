@@ -51,6 +51,7 @@
     scale: 1,
     panX: 0,
     panY: 0,
+    currentMediaEl: null,
     dragging: false,
     dragMoved: false,
     dragStart: null,
@@ -86,6 +87,7 @@
       'vSlideshow','vSlideshowSec','vWrap','vRandom','vVideoWait',
       'vNowTitle','vNowSub','vNowRating',
       'vBtnSidebar','vBtnOpen','vBtnFinder',
+      'vZoomRange','vZoomReset',
       'vVol','vBtnMute','vSeek',
       'vBtnTags','vBtnLog','vClose',
       'vSlideshow2','vRandom2',
@@ -205,7 +207,11 @@
       el.vSeek.value = '0';
     }
 
+    mediaEl.classList.add('zoom-media');
+    mediaEl.style.transition = 'transform 120ms ease-out';
+    vs.currentMediaEl = mediaEl;
     el.vContent.appendChild(mediaEl);
+    attachZoomHandlers(mediaEl);
 
     // Align progress bar exact op onderkant van de afgespeelde pixels
     function alignProgressBar() {
@@ -277,6 +283,7 @@
     const v = el.vContent.querySelector('video');
     if (v) { v.pause(); v.src = ''; v.load(); }
     el.vContent.innerHTML = '';
+    vs.currentMediaEl = null;
     el.vSeek.value = '0';
   }
 
@@ -419,7 +426,7 @@
       await api('/api/rating', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: it.id, rating: r }),
+        body: JSON.stringify({ id: it.rating_id || it.id, rating: r }),
       });
       it.rating = r;
       updateRatingDisplay(r);
@@ -837,11 +844,23 @@
 
   // ─── Zoom (exact als oude viewer: attachZoomHandlers) ──────────────────────
   function applyTransform() {
-    const mediaEl = el.vContent.querySelector('video, img');
+    const mediaEl = vs.currentMediaEl || el.vContent.querySelector('video, img');
     if (mediaEl) {
-      mediaEl.style.transform = 'translate(' + vs.panX + 'px, ' + vs.panY + 'px) scale(' + vs.scale + ')';
-      mediaEl.style.transformOrigin = '0 0';
+      const transforms = [];
+      if (vs.scale > 1) {
+        transforms.push('scale(' + vs.scale + ')');
+        transforms.push('translate(' + vs.panX + 'px, ' + vs.panY + 'px)');
+      }
+      mediaEl.style.transform = transforms.join(' ');
+      mediaEl.classList.toggle('zoomed', vs.scale > 1);
+      if (vs.scale <= 1) mediaEl.classList.remove('dragging');
     }
+    syncZoomUi();
+  }
+
+  function syncZoomUi() {
+    if (el.vZoomRange) el.vZoomRange.value = String(Math.round(vs.scale * 100));
+    if (el.vZoomReset) el.vZoomReset.disabled = vs.scale <= 1;
   }
 
   function setZoom(z) {
@@ -860,14 +879,46 @@
     vs.dragging = false;
     vs.dragStart = null;
     el.vStage.classList.remove('zoomed');
-    const mediaEl = el.vContent.querySelector('video, img');
+    const mediaEl = vs.currentMediaEl || el.vContent.querySelector('video, img');
     if (mediaEl) {
       mediaEl.style.transform = '';
-      mediaEl.style.transformOrigin = '';
+      mediaEl.classList.remove('zoomed', 'dragging');
     }
+    syncZoomUi();
   }
 
   // ─── Muis (exact als oude viewer: attachZoomHandlers) ──────────────────────
+  function attachZoomHandlers(mediaEl) {
+    if (!mediaEl) return;
+    mediaEl.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const delta = e.deltaY > 0 ? -0.1 : 0.1;
+      setZoom(vs.scale + delta);
+    }, { passive: false });
+
+    mediaEl.addEventListener('mousedown', (e) => {
+      if (e.button !== 0 || vs.scale <= 1) return;
+      e.stopPropagation();
+      vs.dragging = true;
+      vs.dragMoved = false;
+      vs.dragStart = { x: e.clientX, y: e.clientY, panX: vs.panX, panY: vs.panY };
+      mediaEl.classList.add('dragging');
+      e.preventDefault();
+    });
+
+    mediaEl.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (vs.dragMoved) { vs.dragMoved = false; return; }
+      if (mediaEl.tagName === 'VIDEO') {
+        mediaEl.paused ? mediaEl.play() : mediaEl.pause();
+        return;
+      }
+      if (vs.scale > 1) resetZoom();
+      else setZoom(2);
+    });
+  }
+
   function bindMouse() {
     // Klik op viewer overlay (buiten stage) → sluit
     el.viewer.addEventListener('click', (e) => {
@@ -915,6 +966,8 @@
       vs.dragging = true;
       vs.dragMoved = false;
       vs.dragStart = { x: e.clientX, y: e.clientY, panX: vs.panX, panY: vs.panY };
+      const mediaEl = vs.currentMediaEl || el.vContent.querySelector('video, img');
+      if (mediaEl) mediaEl.classList.add('dragging');
       e.preventDefault();
     });
 
@@ -934,6 +987,8 @@
       if (!vs.open) return;
       vs.dragging = false;
       vs.dragStart = null;
+      const mediaEl = vs.currentMediaEl || el.vContent.querySelector('video, img');
+      if (mediaEl) mediaEl.classList.remove('dragging');
 
       // Muis-back-knop (button 3) → sluit viewer
       if (e.button === 3) {
@@ -1066,6 +1121,16 @@
       el.vVideoWait.textContent = `⏳ Wacht: ${vs.videoWait ? 'aan' : 'uit'}`;
       el.vVideoWait.classList.toggle('active', vs.videoWait);
     });
+
+    if (el.vZoomRange) {
+      el.vZoomRange.addEventListener('input', () => {
+        setZoom(Number(el.vZoomRange.value || '100') / 100);
+      });
+    }
+    if (el.vZoomReset) {
+      el.vZoomReset.addEventListener('click', () => resetZoom());
+      el.vZoomReset.disabled = true;
+    }
 
     // Topbar slideshow/random knoppen (spiegelen sidebar)
     if (el.vSlideshow2) {

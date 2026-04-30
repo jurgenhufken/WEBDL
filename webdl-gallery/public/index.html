@@ -107,6 +107,8 @@
           <div class="vtop-rating" id="vNowRating"></div>
           <button id="vSlideshow2" class="vtop-btn" title="Diashow starten/stoppen (spatiebalk)">▶ Dia</button>
           <button id="vRandom2" class="vtop-btn" title="Willekeurige volgorde aan/uit">🔀 Rand</button>
+          <label class="vtop-ctrl" title="Zoom"><span>Zoom</span> <input id="vZoomRange" type="range" min="100" max="600" step="10" value="100"></label>
+          <button id="vZoomReset" class="vtop-btn" title="Zoom resetten">Reset</button>
         </div>
 
         <!-- Rechts: media-controls + tools -->
@@ -163,8 +165,8 @@
 
   </div><!-- /viewer -->
 
-  <script src="/app.js"></script>
-  <script src="/viewer.js"></script>
+  <script src="/app.js?v=20260430-2"></script>
+  <script src="/viewer.js?v=20260430-2"></script>
   <script>
   // ─── Thema switcher ─────────────────────────────────────────────────────
   (function() {
