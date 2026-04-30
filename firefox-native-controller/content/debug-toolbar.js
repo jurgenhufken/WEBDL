@@ -31,7 +31,7 @@
       if (forced) return true;
     } catch (e) {}
     try {
-      if (isFootFetishForumThreadPage()) return true;
+      if (isFootFetishForumThreadPage() || isFootFetishForumForumPage()) return true;
     } catch (e) {}
     try {
       if (isAmateurVoyeurForumThreadPage()) return true;
@@ -414,6 +414,140 @@
     return '';
   }
 
+  function collectFootFetishForumThreadLinksFromForumDocument(doc, baseHref, maxThreads = 200) {
+    const out = [];
+    const seen = new Set();
+    const push = (raw) => {
+      try {
+        if (out.length >= maxThreads) return;
+        const u = new URL(String(raw || ''), baseHref);
+        u.hash = '';
+        const host = String(u.hostname || '').toLowerCase();
+        if (!(host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com'))) return;
+        const m = String(u.pathname || '').match(/\/threads\/[^\/\?#]*\.(\d+)(?:\/|\?|#|$)/i);
+        if (!m || !m[1]) return;
+        u.search = '';
+        const final = u.toString();
+        const key = m[1];
+        if (seen.has(key)) return;
+        seen.add(key);
+        out.push(final);
+      } catch (e) {}
+    };
+
+    try {
+      const roots = Array.from(doc.querySelectorAll(
+        '.structItemContainer, .discussionList, .block-container, .block-body, main, body'
+      )).filter(Boolean);
+      for (const root of (roots.length ? roots : [doc.body || doc.documentElement])) {
+        if (!root) continue;
+        for (const a of Array.from(root.querySelectorAll('a[href]'))) {
+          push(a.getAttribute('href'));
+          if (out.length >= maxThreads) break;
+        }
+        if (out.length >= maxThreads) break;
+      }
+    } catch (e) {}
+    return out;
+  }
+
+  function findNextFootFetishForumForumPageUrl(doc, baseHref) {
+    return findNextFootFetishForumThreadPageUrl(doc, baseHref);
+  }
+
+  async function fetchFootFetishForumForumCandidates(startUrl, options = {}) {
+    const opt = options && typeof options === 'object' ? options : {};
+    const maxForumPages = Math.max(1, Math.min(100, parseInt(opt.maxForumPages || '5', 10) || 5));
+    const maxThreadPages = Math.max(1, Math.min(250, parseInt(opt.maxThreadPages || opt.maxPages || '30', 10) || 30));
+    const maxThreads = Math.max(1, Math.min(1000, parseInt(opt.maxThreads || '100', 10) || 100));
+    const maxItems = Math.max(1, Math.min(12000, parseInt(opt.maxItems || '8000', 10) || 8000));
+    const delayMs = Math.max(0, Math.min(3000, parseInt(opt.delayMs || '250', 10) || 250));
+    const timeoutMs = Math.max(3000, Math.min(60000, parseInt(opt.timeoutMs || '20000', 10) || 20000));
+
+    const fetchHtml = async (url) => {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => {
+        try { ctrl.abort(); } catch (e) {}
+      }, timeoutMs);
+      try {
+        const resp = await fetch(url, { method: 'GET', credentials: 'include', cache: 'no-store', signal: ctrl.signal });
+        const text = await resp.text();
+        return { ok: resp.ok, status: resp.status, text };
+      } finally {
+        clearTimeout(t);
+      }
+    };
+
+    const threadLinks = [];
+    const seenThreads = new Set();
+    let forumUrl = String(startUrl || '').trim();
+    try {
+      const u0 = new URL(forumUrl, window.location.href);
+      u0.hash = '';
+      forumUrl = u0.toString();
+    } catch (e) {}
+
+    let forumPages = 0;
+    while (forumUrl && forumPages < maxForumPages && threadLinks.length < maxThreads) {
+      forumPages++;
+      let doc = null;
+      try {
+        const r = await fetchHtml(forumUrl);
+        if (!r || !r.ok || !r.text) break;
+        doc = new DOMParser().parseFromString(r.text, 'text/html');
+      } catch (e) {
+        break;
+      }
+      if (!doc) break;
+
+      const links = collectFootFetishForumThreadLinksFromForumDocument(doc, forumUrl, maxThreads - threadLinks.length);
+      for (const link of links) {
+        try {
+          const m = String(link || '').match(/\/threads\/[^\/\?#]*\.(\d+)(?:\/|\?|#|$)/i);
+          const key = m && m[1] ? m[1] : link;
+          if (seenThreads.has(key)) continue;
+          seenThreads.add(key);
+          threadLinks.push(link);
+        } catch (e) {}
+      }
+
+      const nextUrl = findNextFootFetishForumForumPageUrl(doc, forumUrl);
+      if (!nextUrl || nextUrl === forumUrl) break;
+      forumUrl = nextUrl;
+      if (delayMs > 0) {
+        try { await delay(delayMs); } catch (e) {}
+      }
+    }
+
+    const seenItems = new Set();
+    const out = [];
+    let threadPages = 0;
+    for (const threadUrl of threadLinks) {
+      if (out.length >= maxItems) break;
+      const remaining = Math.max(0, maxItems - out.length);
+      const res = await fetchFootFetishForumThreadCandidates(threadUrl, {
+        maxPages: maxThreadPages,
+        maxItems: remaining,
+        delayMs,
+        timeoutMs,
+      });
+      threadPages += Number(res && res.pages) || 0;
+      for (const c of (res && Array.isArray(res.candidates) ? res.candidates : [])) {
+        if (!c || !c.url) continue;
+        const s = String(c.url || '').trim();
+        if (!s || seenItems.has(s)) continue;
+        seenItems.add(s);
+        out.push(c);
+        if (out.length >= maxItems) break;
+      }
+      if (delayMs > 0) {
+        try { await delay(delayMs); } catch (e) {}
+      }
+    }
+
+    return { candidates: out, pages: threadPages, forumPages, threads: threadLinks.length };
+  }
+
   async function fetchFootFetishForumThreadCandidates(startUrl, options = {}) {
     const opt = options && typeof options === 'object' ? options : {};
     const maxPages = Math.max(1, Math.min(250, parseInt(opt.maxPages || '60', 10) || 60));
@@ -756,6 +890,8 @@
       meta.platform = 'footfetishforum';
       const tm = url.match(/footfetishforum\.com\/threads\/[^\/\?#]*\.(\d+)(?:\/|\?|#|$)/i);
       if (tm && tm[1]) meta.channel = `thread_${tm[1]}`;
+      const fm = url.match(/footfetishforum\.com\/forums\/[^\/\?#]*\.(\d+)(?:\/|\?|#|$)/i);
+      if (fm && fm[1]) meta.channel = `forum_${fm[1]}`;
     }
 
     else if (/amateurvoyeurforum\.com/i.test(url)) {
@@ -845,6 +981,17 @@
       const host = String(u.hostname || '').toLowerCase();
       if (!(host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com'))) return false;
       return /\/threads\//i.test(String(u.pathname || ''));
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function isFootFetishForumForumPage() {
+    try {
+      const u = new URL(window.location.href);
+      const host = String(u.hostname || '').toLowerCase();
+      if (!(host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com'))) return false;
+      return /\/forums\/[^\/\?#]*\.\d+(?:\/|\?|#|$)/i.test(String(u.pathname || '') + String(u.search || '') + String(u.hash || ''));
     } catch (e) {
       return false;
     }
@@ -2033,7 +2180,7 @@
     if (m.url) checkUrlStatus(m.url);
     try {
       if (threadBatchDownloadBtn) {
-        const ok = isFootFetishForumThreadPage();
+        const ok = isFootFetishForumThreadPage() || isFootFetishForumForumPage();
         try { threadBatchDownloadBtn.disabled = !ok; } catch (e) {}
         try { threadBatchDownloadBtn.style.opacity = ok ? '1' : '0.55'; } catch (e) {}
         try { threadBatchDownloadBtn.style.cursor = ok ? 'pointer' : 'not-allowed'; } catch (e) {}
@@ -3534,8 +3681,10 @@
 
     if (!(await ensureServerReachable(true))) return;
 
-    if (!isFootFetishForumThreadPage()) {
-      showNotification('Hele thread: alleen voor FootFetishForum thread pagina\'s', true);
+    const isForumPage = isFootFetishForumForumPage();
+    const isThreadPage = isFootFetishForumThreadPage();
+    if (!isThreadPage && !isForumPage) {
+      showNotification('Hele thread: alleen voor FootFetishForum thread/forum pagina\'s', true);
       return;
     }
 
@@ -3550,8 +3699,12 @@
 
       let maxPages = 60;
       let maxItems = 5000;
+      let maxForumPages = 5;
       try {
-        maxPages = parseInt(localStorage.getItem('WEBDL_FFF_THREAD_MAX_PAGES') || '60', 10) || 60;
+        maxPages = parseInt(localStorage.getItem(isForumPage ? 'WEBDL_FFF_FORUM_MAX_THREAD_PAGES' : 'WEBDL_FFF_THREAD_MAX_PAGES') || (isForumPage ? '30' : '60'), 10) || (isForumPage ? 30 : 60);
+      } catch (e) {}
+      try {
+        maxForumPages = parseInt(localStorage.getItem('WEBDL_FFF_FORUM_MAX_PAGES') || '5', 10) || 5;
       } catch (e) {}
       try {
         maxItems = parseInt(localStorage.getItem('WEBDL_FFF_THREAD_MAX_ITEMS') || '5000', 10) || 5000;
@@ -3559,8 +3712,16 @@
 
       const wantsSettings = !!(clickEvent && (clickEvent.metaKey || clickEvent.ctrlKey));
       if (wantsSettings) {
+        if (isForumPage) {
+          try {
+            const fIn = window.prompt('Forum: max forum-pagina\'s scannen? (1-100)', String(maxForumPages));
+            if (fIn === null) return;
+            const n = parseInt(String(fIn || '').trim(), 10);
+            if (Number.isFinite(n) && n > 0) maxForumPages = n;
+          } catch (e) {}
+        }
         try {
-          const pIn = window.prompt('Hele thread: max pagina\'s scannen? (1-250)', String(maxPages));
+          const pIn = window.prompt(isForumPage ? 'Forum: max pagina\'s per thread scannen? (1-250)' : 'Hele thread: max pagina\'s scannen? (1-250)', String(maxPages));
           if (pIn === null) return;
           const n = parseInt(String(pIn || '').trim(), 10);
           if (Number.isFinite(n) && n > 0) maxPages = n;
@@ -3573,16 +3734,19 @@
         } catch (e) {}
       }
 
-      try { localStorage.setItem('WEBDL_FFF_THREAD_MAX_PAGES', String(maxPages)); } catch (e) {}
+      try { if (isForumPage) localStorage.setItem('WEBDL_FFF_FORUM_MAX_PAGES', String(maxForumPages)); } catch (e) {}
+      try { localStorage.setItem(isForumPage ? 'WEBDL_FFF_FORUM_MAX_THREAD_PAGES' : 'WEBDL_FFF_THREAD_MAX_PAGES', String(maxPages)); } catch (e) {}
       try { localStorage.setItem('WEBDL_FFF_THREAD_MAX_ITEMS', String(maxItems)); } catch (e) {}
 
       try {
         const hint = wantsSettings ? '' : ' (Cmd/Ctrl-klik om limieten te wijzigen)';
-        showNotification(`Thread scannen: max ${maxPages} pagina's, max ${maxItems} items${hint}`, false);
+        showNotification(`${isForumPage ? `Forum scannen: max ${maxForumPages} forum-pagina's, ` : 'Thread scannen: '}max ${maxPages} pagina's/thread, max ${maxItems} items${hint}`, false);
       } catch (e) {}
 
       const startUrl = String(window.location.href || '').replace(/#.*$/, '');
-      const res = await fetchFootFetishForumThreadCandidates(startUrl, { maxPages, maxItems });
+      const res = isForumPage
+        ? await fetchFootFetishForumForumCandidates(startUrl, { maxForumPages, maxThreadPages: maxPages, maxItems })
+        : await fetchFootFetishForumThreadCandidates(startUrl, { maxPages, maxItems });
       const candidates = uniqueCandidates(res && res.candidates ? res.candidates : []);
 
       try {
@@ -3592,12 +3756,15 @@
       } catch (e2) {}
 
       if (!candidates.length) {
-        showNotification('Hele thread: geen URLs gevonden', true);
+        showNotification(`${isForumPage ? 'Forum' : 'Hele thread'}: geen URLs gevonden`, true);
         return;
       }
 
-      try { addLog(`Thread pages: ${res && Number.isFinite(Number(res.pages)) ? res.pages : '?'} | items: ${candidates.length}`); } catch (e) {}
-      try { showNotification(`Thread: ${candidates.length} items (${res && Number.isFinite(Number(res.pages)) ? res.pages : '?'} pagina\'s)`, false); } catch (e) {}
+      try {
+        const extra = isForumPage ? ` | forum=${res && res.forumPages ? res.forumPages : '?'} | threads=${res && res.threads ? res.threads : '?'}` : '';
+        addLog(`${isForumPage ? 'Forum' : 'Thread'} pages: ${res && Number.isFinite(Number(res.pages)) ? res.pages : '?'}${extra} | items: ${candidates.length}`);
+      } catch (e) {}
+      try { showNotification(`${isForumPage ? 'Forum' : 'Thread'}: ${candidates.length} items (${res && Number.isFinite(Number(res.pages)) ? res.pages : '?'} threadpagina's)`, false); } catch (e) {}
 
       let selected = null;
       let selectedDirectHints = null;
@@ -3615,14 +3782,14 @@
       else {
       }
 
-      const ok = confirmBatchStart({ count: urls.length, force, label: 'Hele thread download' });
+      const ok = confirmBatchStart({ count: urls.length, force, label: isForumPage ? 'Forum download' : 'Hele thread download' });
       if (!ok) return;
 
-      addLog(force ? `Force thread batch: ${urls.length} items` : `Thread batch: ${urls.length} items`);
+      addLog(force ? `Force ${isForumPage ? 'forum' : 'thread'} batch: ${urls.length} items` : `${isForumPage ? 'Forum' : 'Thread'} batch: ${urls.length} items`);
       const result = await queueBatchDownloadRequest(urls, meta, { force, directHints: selectedDirectHints });
       if (result && result.success) {
         const stats = summarizeBatchResult(result);
-        const label = force ? 'Force thread' : 'Thread';
+        const label = force ? `Force ${isForumPage ? 'forum' : 'thread'}` : (isForumPage ? 'Forum' : 'Thread');
         showNotification(`${label}: ${stats.queued} nieuw, ${stats.duplicates} bestaand (${stats.total} totaal)`);
         addLog(`${label} gestart: nieuw=${stats.queued}, bestaand=${stats.duplicates}, totaal=${stats.total}`);
       } else {

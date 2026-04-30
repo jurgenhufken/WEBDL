@@ -39,3 +39,10 @@ test('parseProgress pakt X/Y media', () => {
   assert.deepEqual(a.parseProgress('Processed 4/20 media'), { pct: 20 });
   assert.equal(a.parseProgress('hello'), null);
 });
+
+test('ofscraper collect filter negeert tijdelijke bestanden', () => {
+  assert.equal(a._isFinalMediaFile('/tmp/x/foo.jpg'), true);
+  assert.equal(a._isFinalMediaFile('/tmp/x/foo.mp4'), true);
+  assert.equal(a._isFinalMediaFile('/tmp/x/foo.jpg.part'), false);
+  assert.equal(a._isFinalMediaFile('/tmp/x/.foo.jpg'), false);
+});

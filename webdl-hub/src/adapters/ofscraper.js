@@ -36,6 +36,15 @@ function urlToUsername(url) {
   return parts[0];
 }
 
+function isFinalMediaFile(filePath) {
+  const base = path.basename(filePath);
+  const ext = path.extname(base).toLowerCase();
+  if (base.startsWith('.')) return false;
+  if (base.endsWith('.part')) return false;
+  if (base.endsWith('.temp') || base.endsWith('.tmp')) return false;
+  return ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.mp4', '.m4v', '.mov', '.webm', '.mkv'].includes(ext);
+}
+
 function plan(url, opts = {}) {
   const user = urlToUsername(url);
   // ofscraper heeft geen generieke --output flag; we laten het z'n eigen
@@ -58,7 +67,15 @@ function plan(url, opts = {}) {
     OFSCRAPER_CONFIG_DIR: DEFAULT_CONFIG_DIR,
     OFSCRAPER_PROFILE: DEFAULT_PROFILE,
   };
-  return { cmd: 'ofscraper', args, cwd: opts.cwd, env };
+  return {
+    cmd: 'ofscraper',
+    args,
+    cwd: opts.cwd,
+    env,
+    logStdout: true,
+    timeoutMs: 45 * 60 * 1000,
+    idleTimeoutMs: 10 * 60 * 1000,
+  };
 }
 
 async function collectOutputs(workdir, opts = {}) {
@@ -67,6 +84,7 @@ async function collectOutputs(workdir, opts = {}) {
   async function addFiles(files, minMtimeMs = 0) {
     for (const file of files) {
       if (!file?.path || seen.has(file.path)) continue;
+      if (!isFinalMediaFile(file.path)) continue;
       if (minMtimeMs) {
         try {
           const st = await fs.promises.stat(file.path);
@@ -84,7 +102,9 @@ async function collectOutputs(workdir, opts = {}) {
 
   const saveLocation = readSaveLocation();
   if (saveLocation && path.resolve(saveLocation) !== path.resolve(workdir)) {
-    await addFiles(await collectOutputsRecursive(saveLocation), opts.startedAtMs || 0);
+    const user = opts.job?.url ? urlToUsername(opts.job.url) : null;
+    const userDir = user ? path.join(saveLocation, user) : saveLocation;
+    await addFiles(await collectOutputsRecursive(userDir), opts.startedAtMs || 0);
   }
   return out;
 }
@@ -110,3 +130,4 @@ module.exports = defineAdapter({
 });
 module.exports._urlToUsername = urlToUsername;
 module.exports._readSaveLocation = readSaveLocation;
+module.exports._isFinalMediaFile = isFinalMediaFile;

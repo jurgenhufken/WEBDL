@@ -292,6 +292,9 @@ function startWorkerPool({
       } else if (stream === 'stdout') {
         // Log yt-dlp [download] en [info] regels voor zichtbaarheid
         const trimmed = line.trim();
+        if (planned.logStdout && trimmed) {
+          try { await repo.appendLog(job.id, 'info', trimmed.slice(0, 500)); } catch (_) {}
+        }
         if (trimmed.startsWith('[download] Downloading') || trimmed.startsWith('[download] Destination')) {
           try { await repo.appendLog(job.id, 'info', trimmed.slice(0, 300)); } catch (_) {}
         }
@@ -310,7 +313,7 @@ function startWorkerPool({
     });
 
     try {
-      const { code } = await proc.done;
+      const { code, signal, timedOut, idleTimedOut } = await proc.done;
       if (code === 0) {
         const outs = await adapter.collectOutputs(workdir, { job, startedAtMs });
 
@@ -342,9 +345,14 @@ function startWorkerPool({
         return true; // success
       } else {
         const retry = job.attempts < job.max_attempts;
-        await queue.fail(job.id, `exit ${code}`, { retry });
-        await repo.appendLog(job.id, retry ? 'warn' : 'error', `exit ${code}${retry ? ' (retry)' : ''}`);
-        logger.warn('job.failed', { job: job.id, code, retry });
+        const reason = idleTimedOut
+          ? `idle timeout (${Math.round((planned.idleTimeoutMs || 0) / 1000)}s zonder output)`
+          : timedOut
+            ? `timeout (${Math.round((planned.timeoutMs || 0) / 1000)}s)`
+            : `exit ${code}${signal ? ` (${signal})` : ''}`;
+        await queue.fail(job.id, reason, { retry });
+        await repo.appendLog(job.id, retry ? 'warn' : 'error', `${reason}${retry ? ' (retry)' : ''}`);
+        logger.warn('job.failed', { job: job.id, code, signal, retry, timedOut, idleTimedOut });
         return false; // failure
       }
     } catch (err) {

@@ -30,7 +30,11 @@ function classifyLane(url, adapter) {
     // gallery-dl/reddit-dl zijn meestal images; videos in deze flow zijn zeldzaam.
     return 'image';
   }
-  if (adapter === 'ofscraper' || adapter === 'instaloader' || adapter === 'tdl') {
+  if (adapter === 'ofscraper') {
+    // ofscraper gebruikt een gedeeld profiel/cache; parallelle runs raken elkaar.
+    return 'process-video';
+  }
+  if (adapter === 'instaloader' || adapter === 'tdl') {
     // Deze adapters downloaden mixed content; default naar video-lane (geen ffmpeg merge).
     return 'video';
   }

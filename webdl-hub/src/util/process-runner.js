@@ -22,19 +22,41 @@ function createLineSplitter(onLine) {
   };
 }
 
-function runProcess({ cmd, args = [], cwd, env, stdin = 'ignore' }) {
+function runProcess({ cmd, args = [], cwd, env, stdin = 'ignore', timeoutMs = 0, idleTimeoutMs = 0 }) {
   const ee = new EventEmitter();
+  let timedOut = false;
+  let idleTimedOut = false;
   const child = spawn(cmd, args, {
     cwd,
     env: env ? { ...process.env, ...env } : process.env,
     stdio: [stdin, 'pipe', 'pipe'],
   });
 
+  let idleTimer = null;
+  function clearIdleTimer() {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = null;
+  }
+  function bumpIdleTimer() {
+    if (!idleTimeoutMs) return;
+    clearIdleTimer();
+    idleTimer = setTimeout(() => {
+      idleTimedOut = true;
+      try { child.kill('SIGTERM'); } catch (_) {}
+    }, idleTimeoutMs);
+  }
+
   const stdoutSplitter = createLineSplitter((line) => ee.emit('line', { stream: 'stdout', line }));
   const stderrSplitter = createLineSplitter((line) => ee.emit('line', { stream: 'stderr', line }));
 
-  child.stdout.on('data', (chunk) => stdoutSplitter.feed(chunk));
-  child.stderr.on('data', (chunk) => stderrSplitter.feed(chunk));
+  child.stdout.on('data', (chunk) => { bumpIdleTimer(); stdoutSplitter.feed(chunk); });
+  child.stderr.on('data', (chunk) => { bumpIdleTimer(); stderrSplitter.feed(chunk); });
+  bumpIdleTimer();
+
+  const timeoutTimer = timeoutMs ? setTimeout(() => {
+    timedOut = true;
+    try { child.kill('SIGTERM'); } catch (_) {}
+  }, timeoutMs) : null;
 
   // No-op 'error' listener voorkomt dat een ontbrekende binary (ENOENT) of
   // andere spawn-fout uitbreekt naar een uncaught exception. De echte fout
@@ -44,10 +66,12 @@ function runProcess({ cmd, args = [], cwd, env, stdin = 'ignore' }) {
   const done = new Promise((resolve, reject) => {
     child.on('error', (err) => { ee.emit('error', err); reject(err); });
     child.on('close', (code, signal) => {
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      clearIdleTimer();
       stdoutSplitter.flush();
       stderrSplitter.flush();
-      ee.emit('exit', { code, signal });
-      resolve({ code, signal });
+      ee.emit('exit', { code, signal, timedOut, idleTimedOut });
+      resolve({ code, signal, timedOut, idleTimedOut });
     });
   });
 
