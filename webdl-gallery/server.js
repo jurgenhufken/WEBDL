@@ -158,7 +158,7 @@ app.get('/api/items', async (req, res) => {
       ? 'RANDOM()'
       : sort === 'rating'
         ? 'rating DESC NULLS LAST, source_order DESC'
-        : 'source_order DESC';
+        : 'sort_ts DESC NULLS LAST, source_order DESC';
 
     params.push(sourceLimit, limit, offset);
     const sql = `
