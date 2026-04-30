@@ -455,6 +455,18 @@
     return findNextFootFetishForumThreadPageUrl(doc, baseHref);
   }
 
+  function sameFootFetishForumPageUrl(a, b) {
+    try {
+      const ua = new URL(String(a || ''), window.location.href);
+      const ub = new URL(String(b || ''), window.location.href);
+      ua.hash = '';
+      ub.hash = '';
+      return ua.toString() === ub.toString();
+    } catch (e) {
+      return false;
+    }
+  }
+
   async function fetchFootFetishForumForumCandidates(startUrl, options = {}) {
     const opt = options && typeof options === 'object' ? options : {};
     const maxForumPages = Math.max(1, Math.min(100, parseInt(opt.maxForumPages || '5', 10) || 5));
@@ -492,9 +504,13 @@
       forumPages++;
       let doc = null;
       try {
-        const r = await fetchHtml(forumUrl);
-        if (!r || !r.ok || !r.text) break;
-        doc = new DOMParser().parseFromString(r.text, 'text/html');
+        if (forumPages === 1 && sameFootFetishForumPageUrl(forumUrl, window.location.href)) {
+          doc = document;
+        } else {
+          const r = await fetchHtml(forumUrl);
+          if (!r || !r.ok || !r.text) break;
+          doc = new DOMParser().parseFromString(r.text, 'text/html');
+        }
       } catch (e) {
         break;
       }
@@ -583,19 +599,25 @@
     while (url && pages < maxPages && out.length < maxItems) {
       pages++;
       let html = '';
+      let doc = null;
       try {
-        const r = await fetchHtml(url);
-        if (!r || !r.ok || !r.text) break;
-        html = r.text;
+        if (pages === 1 && sameFootFetishForumPageUrl(url, window.location.href)) {
+          doc = document;
+        } else {
+          const r = await fetchHtml(url);
+          if (!r || !r.ok || !r.text) break;
+          html = r.text;
+        }
       } catch (e) {
         break;
       }
 
-      let doc = null;
-      try {
-        doc = new DOMParser().parseFromString(html, 'text/html');
-      } catch (e) {
-        doc = null;
+      if (!doc) {
+        try {
+          doc = new DOMParser().parseFromString(html, 'text/html');
+        } catch (e) {
+          doc = null;
+        }
       }
       if (!doc) break;
 
