@@ -11,11 +11,25 @@ const { Pool } = require('pg');
 const PORT = Number(process.env.PORT || 35731);
 const DATABASE_URL = process.env.DATABASE_URL || 'postgres://localhost/webdl';
 
-const pool = new Pool({ connectionString: DATABASE_URL, max: 10 });
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  max: 20,                        // meer ruimte voor meerdere tabs
+  idleTimeoutMillis: 30000,       // idle verbindingen na 30s sluiten
+  connectionTimeoutMillis: 5000,  // max 5s wachten op verbinding uit pool
+  statement_timeout: 10000,       // queries langer dan 10s afbreken
+});
 
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Voorkom dat de browser API-responses cached of samenvoegt tussen tabs
+app.use('/api', (_req, res, next) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+  next();
+});
 
 // ─── Health ────────────────────────────────────────────────────────────────
 app.get('/api/health', async (_req, res) => {
@@ -60,12 +74,17 @@ app.get('/api/items', async (req, res) => {
 
     params.push(limit, offset);
     const sql = `
-      SELECT id, url, source_url, platform, channel, title, filename, filepath, filesize,
-             format, rating, is_thumb_ready, finished_at, created_at
-        FROM downloads
-       WHERE ${where.join(' AND ')}
-       ORDER BY ${orderBy}
-       LIMIT $${params.length - 1} OFFSET $${params.length}`;
+      SELECT * FROM (
+        SELECT DISTINCT ON (COALESCE(title, filename, filepath), COALESCE(filesize, 0))
+               id, url, source_url, platform, channel, title, filename, filepath, filesize,
+               format, rating, is_thumb_ready, finished_at, created_at
+          FROM downloads
+         WHERE ${where.join(' AND ')}
+         ORDER BY COALESCE(title, filename, filepath), COALESCE(filesize, 0),
+                  COALESCE(finished_at, created_at) DESC, id DESC
+      ) deduped
+      ORDER BY ${orderBy}
+      LIMIT $${params.length - 1} OFFSET $${params.length}`;
     const { rows } = await pool.query(sql, params);
 
     // Detecteer type (image/video) op ext
@@ -104,12 +123,17 @@ app.get('/api/items-since', async (req, res) => {
     if (Number.isFinite(minRating)) { params.push(minRating); where.push(`rating >= $${params.length}`); }
 
     const sql = `
-      SELECT id, url, source_url, platform, channel, title, filename, filepath, filesize,
-             format, rating, is_thumb_ready, finished_at, created_at
-        FROM downloads
-       WHERE ${where.join(' AND ')}
-       ORDER BY COALESCE(finished_at, created_at) DESC, id DESC
-       LIMIT 200`;
+      SELECT * FROM (
+        SELECT DISTINCT ON (COALESCE(title, filename, filepath), COALESCE(filesize, 0))
+               id, url, source_url, platform, channel, title, filename, filepath, filesize,
+               format, rating, is_thumb_ready, finished_at, created_at
+          FROM downloads
+         WHERE ${where.join(' AND ')}
+         ORDER BY COALESCE(title, filename, filepath), COALESCE(filesize, 0),
+                  COALESCE(finished_at, created_at) DESC, id DESC
+      ) deduped
+      ORDER BY COALESCE(finished_at, created_at) DESC, id DESC
+      LIMIT 200`;
     const { rows } = await pool.query(sql, params);
 
     const items = rows.map((r) => {
@@ -127,11 +151,16 @@ app.get('/api/items-since', async (req, res) => {
 app.get('/api/platforms', async (_req, res) => {
   try {
     const { rows } = await pool.query(`
-      SELECT platform, COUNT(*) AS count
-        FROM downloads
-       WHERE status = 'completed' AND filepath IS NOT NULL
-       GROUP BY platform
-       ORDER BY count DESC`);
+      SELECT platform, COUNT(*) AS count FROM (
+        SELECT DISTINCT ON (COALESCE(title, filename, filepath), COALESCE(filesize, 0))
+               platform
+          FROM downloads
+         WHERE status = 'completed' AND filepath IS NOT NULL
+         ORDER BY COALESCE(title, filename, filepath), COALESCE(filesize, 0),
+                  COALESCE(finished_at, created_at) DESC, id DESC
+      ) deduped
+      GROUP BY platform
+      ORDER BY count DESC`);
     res.json({ platforms: rows });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -146,12 +175,17 @@ app.get('/api/channels', async (req, res) => {
     let where = `WHERE status = 'completed' AND filepath IS NOT NULL`;
     if (platform) { params.push(platform); where += ` AND platform = $1`; }
     const { rows } = await pool.query(`
-      SELECT channel, platform, COUNT(*) AS count
-        FROM downloads
-        ${where}
-       GROUP BY channel, platform
-       ORDER BY count DESC
-       LIMIT 500`, params);
+      SELECT channel, platform, COUNT(*) AS count FROM (
+        SELECT DISTINCT ON (COALESCE(title, filename, filepath), COALESCE(filesize, 0))
+               channel, platform
+          FROM downloads
+          ${where}
+         ORDER BY COALESCE(title, filename, filepath), COALESCE(filesize, 0),
+                  COALESCE(finished_at, created_at) DESC, id DESC
+      ) deduped
+      GROUP BY channel, platform
+      ORDER BY count DESC
+      LIMIT 500`, params);
     res.json({ channels: rows });
   } catch (e) {
     res.status(500).json({ error: e.message });
