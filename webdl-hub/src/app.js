@@ -11,6 +11,7 @@ const { detect } = require('./router/detect');
 const { createJobsRouter } = require('./api/routes-jobs');
 const { createAdminRouter } = require('./api/routes-admin');
 const { createFilesRouter } = require('./api/routes-files');
+const { createLegacyRouter } = require('./api/routes-legacy');
 const { attachWs } = require('./api/ws');
 
 function buildApp({ repo, adapters, logger }) {
@@ -20,6 +21,7 @@ function buildApp({ repo, adapters, logger }) {
   app.use(express.json({ limit: '256kb' }));
   app.use('/api/jobs', createJobsRouter({ repo, queue, adapters, detect }));
   app.use('/api/files', createFilesRouter({ repo }));
+  app.use('/api/downloads', createLegacyRouter({ repo }));
   app.use('/api', createAdminRouter({ repo, adapters }));
   app.use(express.static(path.join(__dirname, 'public')));
   app.use((err, _req, res, _next) => {

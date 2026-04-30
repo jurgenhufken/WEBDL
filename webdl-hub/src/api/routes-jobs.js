@@ -222,6 +222,7 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
   r.get('/:id', async (req, res, next) => {
     try {
       const id = parseInt(req.params.id, 10);
+      if (!Number.isFinite(id)) return res.status(400).json({ error: 'ongeldig ID' });
       const job = await repo.getJob(id);
       if (!job) return res.status(404).json({ error: 'niet gevonden' });
       const [files, logs] = await Promise.all([repo.listFiles(id), repo.listLogs(id, { limit: 100 })]);
@@ -232,6 +233,7 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
   r.post('/:id/retry', async (req, res, next) => {
     try {
       const id = parseInt(req.params.id, 10);
+      if (!Number.isFinite(id)) return res.status(400).json({ error: 'ongeldig ID' });
       const j = await repo.failJob(id, null, { retry: true });
       if (!j) return res.status(404).json({ error: 'niet gevonden' });
       res.json(j);

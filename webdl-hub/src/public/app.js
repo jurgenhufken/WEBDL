@@ -2,6 +2,10 @@
 'use strict';
 
 const $ = (id) => document.getElementById(id);
+const setText = (id, value) => {
+  const el = $(id);
+  if (el) el.textContent = value ?? '';
+};
 
 const state = {
   jobs: new Map(),
@@ -268,20 +272,25 @@ async function selectJob(id) {
 
 function renderDetail(job, files, logs) {
   const title = job.options?.videoTitle || videoTitle(job);
-  $('dTitle').textContent = title;
-  $('dUrl').textContent = job.url;
-  $('dAdapter').textContent = job.adapter;
+  setText('dTitle', title);
+  setText('dUrl', job.url);
+  $('dUrl').href = job.url || '#';
+  setText('dAdapter', job.adapter);
+  setText('dPlatformBadge', job.adapter || '');
+  setText('dChannelBadge', job.options?.expandName || '');
+  setText('dChannel', job.options?.expandName || job.options?.playlistTitle || '—');
+  setText('dFilesize', files.reduce((sum, f) => sum + (Number(f.size) || 0), 0) ? humanSize(files.reduce((sum, f) => sum + (Number(f.size) || 0), 0)) : '—');
   $('dStatus').innerHTML = `<span class="badge ${job.status}">${job.status}</span>`;
   const pct = Math.round(job.progress_pct || 0);
   $('dBar').style.width = pct + '%';
   $('dBar').className = 'bar-fill' + (job.status === 'done' ? ' done' : '');
-  $('dPct').textContent = pct + '%';
-  $('dAttempts').textContent = `${job.attempts} / ${job.max_attempts}`;
-  $('dStarted').textContent = fmtTime(job.started_at);
-  $('dFinished').textContent = fmtTime(job.finished_at);
-  $('dCreated').textContent = fmtTime(job.created_at);
-  $('dPriority').textContent = job.priority || 'normaal';
-  $('dWorker').textContent = job.worker || '—';
+  setText('dPct', pct + '%');
+  setText('dAttempts', `${job.attempts} / ${job.max_attempts}`);
+  setText('dStarted', fmtTime(job.started_at));
+  setText('dFinished', fmtTime(job.finished_at));
+  setText('dCreated', fmtTime(job.created_at));
+  setText('dPriority', job.priority || 'normaal');
+  setText('dWorker', job.locked_by || job.worker || '—');
 
   const hasError = job.error && job.error.length > 0;
   $('dErrorRow').hidden = !hasError;

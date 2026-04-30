@@ -271,6 +271,12 @@ Standalone gallery server op `http://localhost:35731`. Leest direct uit PostgreS
 
 Centrale download-orchestrator op `http://localhost:35730`.
 
+**Dashboard Features:**
+- **Unified View:** Beheert zowel eigen Hub downloads (`webdl.jobs`) als legacy Main Server downloads (`public.downloads`).
+- **Inline Media Viewer:** Bekijk direct gedownloade afbeeldingen en video's.
+- **Volledige Controle:** Cancel en retry jobs voor beide systemen direct vanuit de UI.
+- **Slimme Rate Limiting:** Voorkomt bans (bijv. YouTube) door per-domein backoff en jitter toe te passen.
+
 **Adapters:**
 - `yt-dlp` — YouTube, TikTok, etc.
 - `gallery-dl` — diverse image sites
@@ -437,3 +443,18 @@ Als je nog steeds lage resolutie krijgt:
 
 - De server luistert op `localhost`.
 - Installeer de add-on alleen als je deze repo vertrouwt; de add-on draait op `<all_urls>`.
+
+## 🚀 Huidige Status & Plannen
+
+We zijn momenteel bezig met het stabiliseren van de download pipelines en het unificeren van de dashboards.
+
+**Recent Voltooid:**
+1. **Hub Unified Dashboard**: De Hub interface toont nu media inline en beheert zowel nieuwe Hub jobs als oude Main Server queues.
+2. **Rate Limiting**: Hub heeft nu robuuste per-domain rate limiting met exponential backoff (voorkomt YouTube `exit 1` errors).
+3. **Gallery Integratie**: Gallery leest direct uit de gedeelde PostgreSQL database.
+
+**Volgende Stappen (Gepland):**
+1. **Rechtermuisklik Routing Fix**: De Firefox extension (via rechtermuisklik op media) stuurt requests mogelijk nog naar de verkeerde server of wordt niet goed afgevangen. Dit moet centraal naar de Hub gerouteerd worden.
+2. **Gallery Zichtbaarheid Fix**: De nieuwe gallery toont momenteel niet álle gedownloade bestanden van de Main Server. De queries of status-filters moeten worden nagekeken zodat alles wat gedownload is ook zichtbaar is.
+3. **Prioritering in Hub**: Enkele/individuele video downloads moeten voorrang krijgen in de wachtrij boven grote playlists/batches.
+4. **Encoding/HTML Entities Fix**: Titels in de Hub vertonen soms HTML entities (gecodeerde tekens); dit moet netjes gedecodeerd worden weergegeven.

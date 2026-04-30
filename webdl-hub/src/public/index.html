@@ -15,10 +15,21 @@
       <div id="status" class="status status-unknown">•</div>
     </div>
     <div class="queue-stats" id="queueStats">
-      <div class="stat"><div class="dot queued"></div> <span id="statQueued">0</span> wachtrij</div>
-      <div class="stat"><div class="dot running"></div> <span id="statRunning">0</span> actief</div>
-      <div class="stat"><div class="dot done"></div> <span id="statDone">0</span> klaar</div>
-      <div class="stat"><div class="dot failed"></div> <span id="statFailed">0</span> mislukt</div>
+      <div class="stats-row">
+        <span class="stats-label">Hub</span>
+        <div class="stat"><div class="dot queued"></div> <span id="statQueued">0</span> wachtrij</div>
+        <div class="stat"><div class="dot running"></div> <span id="statRunning">0</span> actief</div>
+        <div class="stat"><div class="dot done"></div> <span id="statDone">0</span> klaar</div>
+        <div class="stat"><div class="dot failed"></div> <span id="statFailed">0</span> mislukt</div>
+      </div>
+      <div class="stats-row">
+        <span class="stats-label">Server</span>
+        <div class="stat"><div class="dot pending"></div> <span id="srvPending">0</span> pending</div>
+        <div class="stat"><div class="dot queued"></div> <span id="srvQueued">0</span> queued</div>
+        <div class="stat"><div class="dot running"></div> <span id="srvDownloading">0</span> actief</div>
+        <div class="stat"><div class="dot done"></div> <span id="srvCompleted">0</span> klaar</div>
+        <div class="stat"><div class="dot failed"></div> <span id="srvError">0</span> fout</div>
+      </div>
     </div>
   </header>
 
@@ -44,6 +55,10 @@
       <div class="panel-header">
         <h2>Jobs</h2>
         <div class="panel-actions">
+          <select id="source" title="bron">
+            <option value="hub">Hub</option>
+            <option value="server">Server</option>
+          </select>
           <select id="filter" title="filter">
             <option value="">alle</option>
             <option value="queued">wachtrij</option>
@@ -51,10 +66,15 @@
             <option value="done">klaar</option>
             <option value="failed">mislukt</option>
           </select>
-          <button id="btnBulkCancel" class="btn-sm" title="Cancel alle wachtende">✕ wacht</button>
-          <button id="btnBulkRetry" class="btn-sm" title="Retry alle mislukte">↻ failed</button>
-          <button id="btnBulkClear" class="btn-sm" title="Wis voltooide">🧹 klaar</button>
+          <select id="platformFilter" title="platform">
+            <option value="">alle platforms</option>
+          </select>
         </div>
+      </div>
+      <div class="panel-bulk-actions" id="bulkActions">
+        <button id="btnBulkCancel" class="btn-sm" title="Cancel alle wachtende">✕ wacht</button>
+        <button id="btnBulkRetry" class="btn-sm" title="Retry alle mislukte">↻ failed</button>
+        <button id="btnBulkClear" class="btn-sm" title="Wis voltooide">🧹 klaar</button>
       </div>
       <div id="jobList" class="job-list"></div>
     </aside>
@@ -71,12 +91,25 @@
         <div class="detail-header">
           <div class="detail-title-block">
             <h2 id="dTitle"></h2>
-            <a id="dUrl" class="detail-url" href="#" target="_blank" rel="noopener"></a>
+            <div class="detail-meta-row">
+              <span id="dPlatformBadge" class="platform-badge"></span>
+              <span id="dChannelBadge" class="channel-badge"></span>
+              <a id="dUrl" class="detail-url" href="#" target="_blank" rel="noopener"></a>
+            </div>
           </div>
           <div class="detail-actions">
             <button id="btnRetry" class="btn-action" title="Opnieuw proberen">⟳ Retry</button>
             <button id="btnCancel" class="btn-action btn-danger" title="Annuleren">✕ Stop</button>
           </div>
+        </div>
+
+        <!-- Media Viewer -->
+        <div id="mediaViewer" class="media-viewer" hidden>
+          <div class="viewer-controls">
+            <button id="btnCloseViewer" class="btn-sm" title="Sluiten">✕ Sluiten</button>
+          </div>
+          <video id="viewerVideo" class="viewer-video" controls preload="metadata" hidden></video>
+          <img id="viewerImage" class="viewer-image" hidden>
         </div>
 
         <!-- Tabs -->
@@ -122,12 +155,16 @@
                 </div>
               </div>
               <div class="param-row">
-                <span class="param-label">Adapter</span>
+                <span class="param-label">Adapter / Platform</span>
                 <span id="dAdapter" class="param-value"></span>
               </div>
               <div class="param-row">
-                <span class="param-label">Prioriteit</span>
-                <span id="dPriority" class="param-value"></span>
+                <span class="param-label">Kanaal</span>
+                <span id="dChannel" class="param-value"></span>
+              </div>
+              <div class="param-row">
+                <span class="param-label">Bestandsgrootte</span>
+                <span id="dFilesize" class="param-value"></span>
               </div>
             </div>
             <div class="param-group">

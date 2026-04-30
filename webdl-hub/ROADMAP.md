@@ -1,120 +1,184 @@
-# WebDL-Hub — Roadmap
+# WebDL-Hub roadmap - 30 april 2026
 
-Planmatige opbouw in fases. Per fase: duidelijk doel, kleine bestanden, eerst tests, dan uitbreiden.
-Pas naar de volgende fase als de **acceptatiecriteria** groen zijn.
+Hub is niet meer in de skeleton-fase. Dit document beschrijft de huidige,
+praktische roadmap voor de download-master op port `35730`.
 
----
+## Huidige status
 
-## Fase 0 — Skeleton & afspraken  *(nu)*
+| Onderdeel | Status |
+|---|---|
+| Express app + static dashboard | klaar |
+| PostgreSQL schema `webdl.jobs/files/logs` | klaar |
+| Queue claim met `FOR UPDATE SKIP LOCKED` | klaar |
+| Lane workers: `process-video`, `video`, `image` | klaar |
+| WebSocket progress events | klaar |
+| Adapters: `ytdlp`, `gallerydl`, `instaloader`, `ofscraper`, `tdl` | basis klaar |
+| YouTube playlist/channel expand | klaar |
+| Slave delegation naar simple-server | klaar |
+| Slave poller terugkoppeling | klaar |
+| Gallery sync naar `public.downloads` | klaar |
+| Domain throttle/backoff | basis klaar |
+| Unified dashboard voor hub + legacy downloads | in uitvoering |
+| Firefox contextmenu direct naar hub | nog te doen |
+| Tool health/status in UI | nog te doen |
 
-**Doel:** lege projectstructuur, docs, VS Code-config, `package.json`, geen runtime-code.
+## P0 - huidige sprint
 
-- [ ] `webdl-hub/` aangemaakt met mappenstructuur uit ARCHITECTURE §4
-- [ ] `package.json` met scripts (`dev`, `test`, `lint`)
-- [ ] `.eslintrc.json`, `.prettierrc`, `.editorconfig`
-- [ ] `.vscode/launch.json` (debug server + tests)
-- [ ] `README.md` (quickstart, 1 scherm)
-- [ ] `.env.example`
+### 1. Unified dashboard afronden
 
-**Klaar als:** project opent schoon in VS Code, `npm install` werkt, structuur zichtbaar.
+De backend-route `src/api/routes-legacy.js` is toegevoegd onder
+`/api/downloads`. De HTML bevat al controls voor `source=hub/server`, server
+stats, platformfilter en inline media viewer. De clientlogica moet nog
+consistent worden gemaakt.
 
----
+Taken:
 
-## Fase 1 — Kern: DB + Queue + API + yt-dlp-adapter
+- Voeg client state toe voor `source`, `serverDownloads`, `serverStats` en
+  `platformFilter`.
+- Laat `loadJobs()` schakelen tussen `/api/jobs` en `/api/downloads`.
+- Implementeer server-list rendering voor `public.downloads` records.
+- Implementeer server-detail rendering met `/api/downloads/:id`,
+  `/api/downloads/:id/serve` en `/api/downloads/:id/thumb`.
+- Laat bulk cancel/retry schakelen tussen `/api/jobs/bulk` en
+  `/api/downloads/bulk`.
+- Vul serverstats via `/api/downloads/meta/stats`.
+- Vul platformfilter via `/api/downloads/meta/platforms`.
 
-**Doel:** je kunt via `POST /api/jobs { url }` een YouTube-video downloaden en het resultaat terugzien.
+Acceptatie:
 
-- [ ] `src/db/schema.sql` + `migrate.js` (better-sqlite3)
-- [ ] `src/db/repo.js` — `createJob`, `updateStatus`, `appendLog`, `addFile`
-- [ ] `src/util/process-runner.js` — spawn-wrapper met line-emitter
-- [ ] `src/queue/queue.js` + `worker.js` — 1 concurrent job
-- [ ] `src/adapters/base.js` + `ytdlp.js`
-- [ ] `src/router/detect.js`
-- [ ] `src/api/routes-jobs.js` (POST, GET list, GET detail)
-- [ ] `src/api/ws.js` — event-broadcast
-- [ ] `src/server.js` — bootstrap
+- Hub dashboard toont hub-jobs en legacy server-downloads via dezelfde UI.
+- Cancel/retry werkt voor beide bronnen.
+- Media preview werkt voor images en videos.
+- Er zijn geen dode DOM-referenties naar velden die niet bestaan.
 
-**Tests (`test/`):**
-- [ ] `router.detect` met 10 URL-cases
-- [ ] `ytdlp.parseProgress` met fixture-stdout
-- [ ] `queue` met fake-adapter (sleep-mock)
-- [ ] `repo` CRUD
-- [ ] **Integratie (optioneel, `--online`):** 1 tiny public video download
+### 2. Route-volgorde legacy API bewaken
 
-**Klaar als:** `npm test` groen, handmatige smoke-download lukt, WS stuurt progress.
+Dit is in deze ronde gecorrigeerd: `/meta/platforms` en `/meta/stats` staan
+nu voor `/:id`, met een regressietest.
 
----
+Nog te controleren met echte data:
 
-## Fase 2 — Web-dashboard
+- `GET /api/downloads/meta/stats`
+- `GET /api/downloads/meta/platforms`
+- `GET /api/downloads?limit=10`
+- `GET /api/downloads/:id`
 
-**Doel:** zichtbaar wat de hub doet zonder curl.
+Acceptatie:
 
-- [ ] `src/public/index.html` — job-lijst + "Nieuwe download"-form
-- [ ] `src/public/app.js` — vanilla JS, fetch + WS, geen bundler
-- [ ] `src/public/styles.css` — donker thema, compact
-- [ ] Live progress-balk per job
-- [ ] Detailpaneel: logs, bestanden (met `computer://` links)
+- Meta endpoints geven JSON terug en worden niet opgegeten door `/:id`.
+- De queries passen bij de echte `public.downloads` kolommen.
 
-**Klaar als:** je kunt volledig vanuit browser een URL plakken → download zien verschijnen → file openen.
+Handmatige smoke:
 
----
+  - `GET /api/downloads/meta/stats`
+  - `GET /api/downloads/meta/platforms`
+  - `GET /api/downloads?limit=10`
+  - `GET /api/downloads/:id`
 
-## Fase 3 — Overige adapters
+### 3. Contextmenu routing naar hub
 
-Per adapter: eigen bestand, eigen fixture-tests, eigen priority.
+De Firefox background gebruikt nog simple-server als primaire endpoint voor
+status/recording. Dat is goed voor REC/screenshot, maar download-intake moet
+naar hub.
 
-- [ ] `gallerydl.js` (priority 60)
-- [ ] `reddit.js` (wrapt `.tools/reddit-dl`, priority 80)
-- [ ] `instaloader.js` (priority 80)
-- [ ] `ofscraper.js` (priority 80)
-- [ ] `tdl.js` (priority 90)
-- [ ] `direct.js` — fallback voor .mp4/.zip/… (priority 10)
+Taken:
 
-**Per adapter acceptatiecriteria:**
-1. `matches()` test met 5+ URL-cases (positief + negatief)
-2. `parseProgress()` test met fixture
-3. `plan()` test (argv-samenstelling)
-4. Health-check: tool detecteerbaar via `which <tool>`
+- Houd `SERVER_URL` voor status/recording/screenshot.
+- Gebruik `HUB_URL` voor contextmenu download en toolbar download.
+- Fallback: als hub niet bereikbaar is, toon foutmelding; niet stil terugvallen
+  naar oude `/download` tenzij expliciet gewenst.
 
----
+Acceptatie:
 
-## Fase 4 — Firefox-extensie hook
+- Rechtermuisklik op link/image/video maakt een hub-job aan.
+- Slave-platforms verschijnen als hub-job met `adapter='slave-delegate'`.
 
-**Doel:** één klik vanuit pagina → job in hub.
+### 4. Titels en HTML entities
 
-- [ ] Nieuwe knop in `firefox-native-controller`: "Download via WebDL-Hub"
-- [ ] Context-menu op links
-- [ ] POST naar `http://localhost:35730/api/jobs`
-- [ ] Badge/notificatie als job klaar is (via long-poll of eigen WS-client)
+Taken:
 
-**Klaar als:** rechtermuis op willekeurige videolink → "Download" → verschijnt in dashboard.
+- Decodeer titels in de dashboard-rendering of bij `videoTitle()` fallback.
+- Voorkom dubbele decode door de data in de DB ongemoeid te laten totdat er een
+  duidelijke ingest-policy is.
 
----
+Acceptatie:
 
-## Fase 5 — Integratie met bestaande stack
+- Dashboard toont leesbare titels bij `&amp;`, `&#39;`, `&quot;`.
 
-- [ ] Optie: output-root delen met `screen-recorder-native/gallery`
-- [ ] Optie: schakelbaar naar PostgreSQL (zelfde schema, delen met simple-server)
-- [ ] `simple-server` krijgt ondersteuning om downloads door te sturen naar de hub
-- [ ] Audit: welke helper-scripts in `screen-recorder-native/src/fix_*` kunnen weg zodra de hub ze overneemt?
+## P1 - queuekwaliteit
 
----
+### 5. Interactieve downloads voorrang geven
 
-## Fase 6 — Kwaliteit & onderhoud
+Probleem: grote expanded playlist-groepen kunnen losse downloads verdringen.
 
-- [ ] Health-endpoint laat zien welke tools ontbreken (→ install-instructies)
-- [ ] Retry met exponentiële backoff
-- [ ] Dedup op URL + checksum
-- [ ] Tagging (zoals `auto-tagger.js` in simple-server)
-- [ ] Backup-script voor DB
+Voorkeursoplossing:
 
----
+- Single jobs krijgen default priority `10`.
+- Expanded playlist-items krijgen default priority `0` of lager.
+- Bestaande expliciete `priority` uit API blijft leidend.
 
-## Teststrategie (geldt elke fase)
+Acceptatie:
 
-1. **Unit** — adapters/router/queue met fixtures, zonder netwerk
-2. **Integratie (lokaal)** — in-memory DB, fake-adapter
-3. **Smoke (online, opt-in)** — met `TEST_ONLINE=1 npm test` een echte yt-dlp-run
-4. **Manueel** — per fase 1 korte checklist in de PR-beschrijving / commit
+- Een nieuwe single URL start voor reeds wachtende playlist-items in dezelfde
+  lane.
+- Tests voor `expandAndEnqueue`/priority of repo-claim volgorde.
 
-Geen fase wordt afgesloten zonder dat de tests lokaal groen draaien.
+### 6. Health endpoint voor externe tools
+
+Taken:
+
+- Check binaries: `yt-dlp`, `gallery-dl`, `instaloader`, `ofscraper`, `tdl`,
+  `ffmpeg`.
+- Toon versie waar goedkoop beschikbaar.
+- Dashboard badge per adapter.
+
+Acceptatie:
+
+- Ontbrekende tools zijn zichtbaar voordat een job faalt.
+
+### 7. Adapter-testdekking uitbreiden
+
+Per adapter:
+
+- `matches()` positieve en negatieve URL cases.
+- `plan()` argv-samenstelling.
+- `parseProgress()` fixtures waar relevant.
+- Online smoke blijft opt-in.
+
+## P2 - legacy verminderen
+
+### 8. Forum-platforms hub-native
+
+Pas doen nadat dashboard en gallery visibility stabiel zijn.
+
+Volgorde:
+
+1. Footfetishforum direct HTTP attachment downloader.
+2. Wikifeet.
+3. Aznudefeet.
+4. Amateurvoyeurforum.
+5. Pornpics.
+
+Acceptatie per adapter:
+
+- Kan bestaande cookies/referrer/user-agent policy overnemen.
+- Schrijft outputs naar hub download root.
+- Sync naar `public.downloads` geeft zichtbaarheid in webdl-gallery.
+
+### 9. Simple-server download scheduler afbouwen
+
+Niet in een keer verwijderen.
+
+Stappen:
+
+1. Nieuwe intake naar hub.
+2. Oude pending batches per platform migreren.
+3. Simple-server houdt recording/screenshot/4K-watcher totdat die apart zijn.
+4. Oude gallery/viewer redirecten naar `webdl-gallery`.
+
+## Teststrategie
+
+- Run lokaal: `cd /Users/jurgen/WEBDL/webdl-hub && npm test`.
+- Voeg route-smoke toe voor nieuwe legacy endpoints.
+- Online downloads alleen met `TEST_ONLINE=1`.
+- Voor UI: handmatige browsercheck op port `35730` na elke dashboardwijziging.
