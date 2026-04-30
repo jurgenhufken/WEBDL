@@ -74,7 +74,7 @@ function buildItemFilters({ req, params, fileExpr, extExpr, ratingExpr }) {
   const mediaType = req.query.media_type ? String(req.query.media_type) : null;
   const tagId = req.query.tag_id ? parseInt(req.query.tag_id, 10) : null;
 
-  const where = [`d.status = 'completed'`, `${fileExpr} IS NOT NULL`, `${fileExpr} <> ''`];
+  const where = [`${fileExpr} IS NOT NULL`, `${fileExpr} <> ''`];
   if (platform) { params.push(platform); where.push(`d.platform = $${params.length}`); }
   if (channel)  { params.push(channel);  where.push(`d.channel = $${params.length}`); }
   if (q) {
@@ -134,6 +134,7 @@ app.get('/api/items', async (req, res) => {
          AND mf.relpath !~* '${AUX_RELPATH_RE}'
          AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
     )`);
+    directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
     const fileWhere = buildItemFilters({
       req, params,
       fileExpr: 'df.relpath',
@@ -227,6 +228,7 @@ app.get('/api/items-since', async (req, res) => {
          AND mf.relpath !~* '${AUX_RELPATH_RE}'
          AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})
     )`);
+    directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
     const fileWhere = buildItemFilters({
       req, params,
       fileExpr: 'df.relpath',
@@ -284,8 +286,8 @@ app.get('/api/platforms', async (_req, res) => {
       FROM (
         SELECT d.platform
           FROM downloads d
-         WHERE d.status = 'completed'
-           AND d.filepath IS NOT NULL AND d.filepath <> ''
+         WHERE d.filepath IS NOT NULL AND d.filepath <> ''
+           AND lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})
            AND NOT EXISTS (
              SELECT 1 FROM download_files mf
               WHERE mf.download_id = d.id
@@ -296,8 +298,7 @@ app.get('/api/platforms', async (_req, res) => {
         SELECT d.platform
           FROM download_files df
           JOIN downloads d ON d.id = df.download_id
-         WHERE d.status = 'completed'
-           AND df.relpath !~* '${AUX_RELPATH_RE}'
+         WHERE df.relpath !~* '${AUX_RELPATH_RE}'
            AND lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})
       ) media_items
       GROUP BY platform
@@ -320,8 +321,8 @@ app.get('/api/channels', async (req, res) => {
       FROM (
         SELECT d.channel, d.platform
           FROM downloads d
-         WHERE d.status = 'completed'
-           AND d.filepath IS NOT NULL AND d.filepath <> ''
+         WHERE d.filepath IS NOT NULL AND d.filepath <> ''
+           AND lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})
            ${platformClause}
            AND NOT EXISTS (
              SELECT 1 FROM download_files mf
@@ -333,7 +334,7 @@ app.get('/api/channels', async (req, res) => {
         SELECT d.channel, d.platform
           FROM download_files df
           JOIN downloads d ON d.id = df.download_id
-         WHERE d.status = 'completed'
+         WHERE 1=1
            ${platformClause}
            AND df.relpath !~* '${AUX_RELPATH_RE}'
            AND lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})
