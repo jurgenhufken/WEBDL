@@ -127,6 +127,7 @@
 
     renderSidebarList();
     showCurrent();
+    showHUD();
   }
 
   function close(skipHistory) {
@@ -439,7 +440,6 @@
     if (el.vProgressHandle) el.vProgressHandle.style.left = '0%';
     // Show progress bar alleen bij video
     if (el.vProgressBar) el.vProgressBar.style.display = it.type === 'video' ? '' : 'none';
-    showHUD();
   }
 
   function showHUD() {
