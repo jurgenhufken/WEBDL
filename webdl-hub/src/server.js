@@ -11,6 +11,7 @@ const { startSlavePoller } = require('./queue/slave-poller');
 const { buildApp } = require('./app');
 
 const adapters = [
+  require('./adapters/vbulletin'),
   require('./adapters/tdl'),
   require('./adapters/ofscraper'),
   require('./adapters/instaloader'),

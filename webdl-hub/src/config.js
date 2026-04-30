@@ -38,6 +38,7 @@ const config = Object.freeze({
   downloadRoot: DOWNLOAD_ROOT,
   workerConcurrency: intEnv('WORKER_CONCURRENCY', 2),
   logLevel: required('LOG_LEVEL', 'info'),
+  avfCookie: process.env.AVF_COOKIE || '',
 });
 
 module.exports = config;
