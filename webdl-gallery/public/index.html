@@ -105,6 +105,19 @@
         <!-- Midden: rating + afspeelknoppen -->
         <div class="vtop-center">
           <div class="vtop-rating" id="vNowRating"></div>
+          <select id="vRatingSelect" class="vtop-select" title="Rating instellen">
+            <option value="">—</option>
+            <option value="0.5">0.5</option>
+            <option value="1">1</option>
+            <option value="1.5">1.5</option>
+            <option value="2">2</option>
+            <option value="2.5">2.5</option>
+            <option value="3">3</option>
+            <option value="3.5">3.5</option>
+            <option value="4">4</option>
+            <option value="4.5">4.5</option>
+            <option value="5">5</option>
+          </select>
           <button id="vSlideshow2" class="vtop-btn" title="Diashow starten/stoppen (spatiebalk)">▶ Dia</button>
           <button id="vRandom2" class="vtop-btn" title="Willekeurige volgorde aan/uit">🔀 Rand</button>
           <label class="vtop-ctrl" title="Zoom"><span>Zoom</span> <input id="vZoomRange" type="range" min="100" max="600" step="10" value="100"></label>
@@ -165,8 +178,8 @@
 
   </div><!-- /viewer -->
 
-  <script src="/app.js?v=20260430-5"></script>
-  <script src="/viewer.js?v=20260430-5"></script>
+  <script src="/app.js?v=20260430-8"></script>
+  <script src="/viewer.js?v=20260430-8"></script>
   <script>
   // ─── Thema switcher ─────────────────────────────────────────────────────
   (function() {

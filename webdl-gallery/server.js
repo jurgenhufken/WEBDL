@@ -342,7 +342,12 @@ app.get('/api/channels', async (req, res) => {
 // ─── Rating bijwerken ──────────────────────────────────────────────────────
 app.post('/api/rating', async (req, res) => {
   try {
-    const id = parseInt(req.body.rating_id || req.body.id, 10);
+    let id = parseInt(req.body.rating_id || req.body.id, 10);
+    const fileMatch = String(req.body.id || '').match(/^file-(\d+)$/);
+    if ((!Number.isFinite(id) || id <= 0) && fileMatch) {
+      const fileRow = await pool.query('SELECT download_id FROM download_files WHERE id=$1', [fileMatch[1]]);
+      if (fileRow.rows[0]) id = Number(fileRow.rows[0].download_id);
+    }
     if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: 'id vereist' });
     let rating = null;
     if (req.body.rating !== null && req.body.rating !== '') {

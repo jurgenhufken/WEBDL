@@ -252,13 +252,22 @@ input[type="range"]:disabled { opacity: 0.35; cursor: default; }
 .vtop-title { font-size: 13px; font-weight: 600; color: var(--title-color); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-shadow: 0 0 12px var(--accent-neon), 0 0 24px var(--accent-glow); }
 .vtop-sub { font-size: 11px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .vtop-center { display: flex; align-items: center; justify-content: center; gap: 6px; flex-shrink: 0; flex-wrap: wrap; }
-.vtop-rating { font-size: 20px; letter-spacing: 2px; color: var(--star-on); cursor: pointer; user-select: none; white-space: nowrap; flex-shrink: 0; display: flex; align-items: center; text-shadow: 0 0 8px rgba(255,208,96,0.6); }
+.vtop-rating { font-size: 20px; letter-spacing: 0; color: var(--star-on); user-select: none; white-space: nowrap; flex-shrink: 0; display: flex; align-items: center; gap: 1px; text-shadow: 0 0 8px rgba(255,208,96,0.6); }
 .vtop-rating .off { color: rgba(255, 255, 255, 0.3); text-shadow: none; }
 .vtop-rating .rating-val { font-size: 11px; color: var(--text-secondary); margin-left: 8px; font-weight: 600; }
+.rating-star-btn {
+  width: 24px; height: 28px; padding: 0; border: 0; border-radius: 3px;
+  background: transparent; color: rgba(255,255,255,.25);
+  font-size: 20px; line-height: 1; text-align: center;
+}
+.rating-star-btn.on { color: var(--star-on); text-shadow: 0 0 6px rgba(255,208,96,.6); }
+.rating-star-btn:hover { transform: scale(1.18); background: rgba(255,255,255,.08); box-shadow: none; }
+.rating-value { font-size: 11px; color: rgba(255,255,255,.55); margin-left: 6px; font-weight: 600; }
 .vtop-right { display: flex; align-items: center; justify-content: flex-end; gap: 4px; flex-shrink: 0; flex-wrap: wrap; }
 .vtop-btn { background: var(--btn-bg); color: #fff; border: 1px solid var(--btn-border); border-radius: 5px; padding: 4px 8px; font-size: 11px; cursor: pointer; white-space: nowrap; transition: all .2s ease; font-weight: 500; }
 .vtop-btn:hover { background: var(--btn-hover); border-color: var(--accent); color: var(--title-color); box-shadow: 0 0 8px var(--accent-glow); }
 .vtop-btn.active { background: var(--btn-active-bg); border-color: var(--btn-active-border); color: var(--btn-active-color); box-shadow: 0 0 10px rgba(112,240,144,0.15); }
+.vtop-select { height: 28px; padding: 3px 6px; font-size: 11px; max-width: 64px; }
 .vtop-ctrl { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-secondary); }
 .vtop-ctrl input[type="range"] { width: 80px; }
 .vtop-sep { width: 1px; height: 18px; background: var(--border); margin: 0 2px; flex-shrink: 0; }

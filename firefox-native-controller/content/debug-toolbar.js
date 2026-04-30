@@ -3039,6 +3039,20 @@
 
   function summarizeBatchResult(result) {
     const rows = Array.isArray(result && result.downloads) ? result.downloads : [];
+    if (result && result.expanded) {
+      return {
+        total: Number(result.total) || 0,
+        queued: Number(result.queued) || 0,
+        duplicates: Number(result.duplicates) || 0
+      };
+    }
+    if (!rows.length && result && Array.isArray(result.jobs)) {
+      return {
+        total: Number(result.total) || result.jobs.length,
+        queued: Number(result.queued) || result.jobs.length,
+        duplicates: Number(result.duplicates) || 0
+      };
+    }
     const duplicates = rows.filter((d) => !!(d && d.duplicate)).length;
     const queued = Math.max(0, rows.length - duplicates);
     return { total: rows.length, queued, duplicates };

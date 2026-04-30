@@ -86,6 +86,7 @@
       'vMode','vFilter','vTagFilter','vReload',
       'vSlideshow','vSlideshowSec','vWrap','vRandom','vVideoWait',
       'vNowTitle','vNowSub','vNowRating',
+      'vRatingSelect',
       'vBtnSidebar','vBtnOpen','vBtnFinder',
       'vZoomRange','vZoomReset',
       'vVol','vBtnMute','vSeek',
@@ -381,42 +382,30 @@
     const r = Number(rating) || 0;
 
     for (let i = 1; i <= 5; i++) {
-      const s = document.createElement('span');
-      s.style.cssText = 'cursor:pointer; font-size:20px; padding:0 1px; transition:transform .1s;';
+      const s = document.createElement('button');
+      s.type = 'button';
+      s.className = 'rating-star-btn';
+      s.dataset.index = String(i);
 
       if (r >= i) {
         s.textContent = '★';
-        s.style.color = '#ffd060';
-        s.style.textShadow = '0 0 6px rgba(255,208,96,.6)';
+        s.classList.add('on');
       } else if (r >= i - 0.5) {
         s.textContent = '⯪';
-        s.style.color = '#ffd060';
-        s.style.textShadow = '0 0 6px rgba(255,208,96,.6)';
+        s.classList.add('on');
       } else {
         s.textContent = '★';
-        s.style.color = 'rgba(255,255,255,.25)';
       }
-
-      s.addEventListener('mouseenter', () => { s.style.transform = 'scale(1.3)'; });
-      s.addEventListener('mouseleave', () => { s.style.transform = ''; });
-
-      s.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const rect = s.getBoundingClientRect();
-        const half = (e.clientX - rect.left) < rect.width / 2;
-        let val = half ? i - 0.5 : i;
-        if (val === rating) val = null;   // toggle wist
-        setRating(val);
-      });
 
       el.vNowRating.appendChild(s);
     }
 
     // Cijfer-label
     const lbl = document.createElement('span');
-    lbl.style.cssText = 'font-size:11px; color:rgba(255,255,255,.5); margin-left:6px; font-weight:600;';
+    lbl.className = 'rating-value';
     lbl.textContent = rating != null ? String(rating) : '—';
     el.vNowRating.appendChild(lbl);
+    if (el.vRatingSelect) el.vRatingSelect.value = rating != null ? String(rating) : '';
   }
 
   async function setRating(r) {
@@ -426,11 +415,11 @@
       await api('/api/rating', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: it.rating_id || it.id, rating: r }),
+        body: JSON.stringify({ id: it.id, rating_id: it.rating_id || null, rating: r }),
       });
       it.rating = r;
       updateRatingDisplay(r);
-      gal().updateCardRating(it.id, r);
+      gal().updateCardRating(it.rating_id || it.id, r);
       log(`Rating: ${r != null ? r : 'gewist'}`);
     } catch (e) {
       log('Rating fout: ' + e.message);
@@ -1048,6 +1037,24 @@
     el.vPrev.addEventListener('click', (e) => { e.stopPropagation(); navPrev(); });
     el.vNext.addEventListener('click', (e) => { e.stopPropagation(); navNext(); });
     el.vBtnSidebar.addEventListener('click', () => toggleSidebar());
+    el.vNowRating.addEventListener('click', (e) => {
+      const btn = e.target && e.target.closest ? e.target.closest('.rating-star-btn') : null;
+      if (!btn || !el.vNowRating.contains(btn)) return;
+      e.stopPropagation();
+      const idx = Number(btn.dataset.index);
+      if (!Number.isFinite(idx)) return;
+      const rect = btn.getBoundingClientRect();
+      const half = (e.clientX - rect.left) < rect.width / 2;
+      const current = vs.items[vs.idx] ? vs.items[vs.idx].rating : null;
+      let val = half ? idx - 0.5 : idx;
+      if (Number(current) === val) val = null;
+      setRating(val);
+    });
+    el.vRatingSelect.addEventListener('change', () => {
+      const raw = el.vRatingSelect.value;
+      const val = raw === '' ? null : Number(raw);
+      setRating(Number.isFinite(val) ? val : null);
+    });
 
     el.vBtnOpen.addEventListener('click', () => {
       const it = vs.items[vs.idx];
