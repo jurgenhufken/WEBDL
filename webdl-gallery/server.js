@@ -75,13 +75,12 @@ app.get('/api/items', async (req, res) => {
     params.push(limit, offset);
     const sql = `
       SELECT * FROM (
-        SELECT DISTINCT ON (COALESCE(title, filename, filepath), COALESCE(filesize, 0))
+        SELECT DISTINCT ON (filepath)
                id, url, source_url, platform, channel, title, filename, filepath, filesize,
                format, rating, is_thumb_ready, finished_at, created_at
           FROM downloads
          WHERE ${where.join(' AND ')}
-         ORDER BY COALESCE(title, filename, filepath), COALESCE(filesize, 0),
-                  COALESCE(finished_at, created_at) DESC, id DESC
+         ORDER BY filepath, COALESCE(finished_at, created_at) DESC, id DESC
       ) deduped
       ORDER BY ${orderBy}
       LIMIT $${params.length - 1} OFFSET $${params.length}`;
@@ -124,13 +123,12 @@ app.get('/api/items-since', async (req, res) => {
 
     const sql = `
       SELECT * FROM (
-        SELECT DISTINCT ON (COALESCE(title, filename, filepath), COALESCE(filesize, 0))
+        SELECT DISTINCT ON (filepath)
                id, url, source_url, platform, channel, title, filename, filepath, filesize,
                format, rating, is_thumb_ready, finished_at, created_at
           FROM downloads
          WHERE ${where.join(' AND ')}
-         ORDER BY COALESCE(title, filename, filepath), COALESCE(filesize, 0),
-                  COALESCE(finished_at, created_at) DESC, id DESC
+         ORDER BY filepath, COALESCE(finished_at, created_at) DESC, id DESC
       ) deduped
       ORDER BY COALESCE(finished_at, created_at) DESC, id DESC
       LIMIT 200`;
@@ -152,12 +150,11 @@ app.get('/api/platforms', async (_req, res) => {
   try {
     const { rows } = await pool.query(`
       SELECT platform, COUNT(*) AS count FROM (
-        SELECT DISTINCT ON (COALESCE(title, filename, filepath), COALESCE(filesize, 0))
+        SELECT DISTINCT ON (filepath)
                platform
           FROM downloads
          WHERE status = 'completed' AND filepath IS NOT NULL
-         ORDER BY COALESCE(title, filename, filepath), COALESCE(filesize, 0),
-                  COALESCE(finished_at, created_at) DESC, id DESC
+         ORDER BY filepath, COALESCE(finished_at, created_at) DESC, id DESC
       ) deduped
       GROUP BY platform
       ORDER BY count DESC`);
@@ -176,12 +173,11 @@ app.get('/api/channels', async (req, res) => {
     if (platform) { params.push(platform); where += ` AND platform = $1`; }
     const { rows } = await pool.query(`
       SELECT channel, platform, COUNT(*) AS count FROM (
-        SELECT DISTINCT ON (COALESCE(title, filename, filepath), COALESCE(filesize, 0))
+        SELECT DISTINCT ON (filepath)
                channel, platform
           FROM downloads
           ${where}
-         ORDER BY COALESCE(title, filename, filepath), COALESCE(filesize, 0),
-                  COALESCE(finished_at, created_at) DESC, id DESC
+         ORDER BY filepath, COALESCE(finished_at, created_at) DESC, id DESC
       ) deduped
       GROUP BY channel, platform
       ORDER BY count DESC

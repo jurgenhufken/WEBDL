@@ -23,13 +23,22 @@ Dit plan focust daarom op verificatie, polish en ontbrekende randgevallen.
 | Slideshow / Wrap / Random / Video-wait | aanwezig, testen |
 | Sidebar, tag dialog, HUD, keyboard/mouse controls | aanwezig, testen |
 | Browser/mobile smoke tests | nog te doen |
-| Gallery visibility audit | nog te doen |
+| Gallery visibility audit | eerste fix klaar |
 
 ## Eerstvolgende werk
 
 ### 1. Gallery visibility audit
 
 Doel: verklaren waarom "niet alle downloads" zichtbaar zijn.
+
+Stand na audit:
+
+- `completed`: 74.360 records.
+- `completed` zonder `filepath`: 54 records.
+- Oude gallery-dedup op `title/filename/filepath + filesize`: 65.539 zichtbare items.
+- Dedup op `filepath`: 71.103 zichtbare items.
+- Fix: queries deduppen nu op `filepath`, zodat verschillende bestanden met
+  toevallig dezelfde titel en grootte niet meer verdwijnen.
 
 Te controleren SQL-categorieen:
 
