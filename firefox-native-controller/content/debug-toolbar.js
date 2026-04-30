@@ -468,6 +468,90 @@
     }
   }
 
+  function isCloudflareChallengeDocument(doc) {
+    try {
+      const title = String(doc && doc.title || '').trim().toLowerCase();
+      if (title.includes('just a moment')) return true;
+      const text = String(doc && doc.body && doc.body.textContent || '').toLowerCase();
+      return text.includes('enable javascript and cookies to continue') || text.includes('cloudflare');
+    } catch (e) {
+      return false;
+    }
+  }
+
+  async function loadFootFetishForumDocument(url, options = {}) {
+    const opt = options && typeof options === 'object' ? options : {};
+    const timeoutMs = Math.max(3000, Math.min(60000, parseInt(opt.timeoutMs || '20000', 10) || 20000));
+    const useCurrent = opt.useCurrent === true && sameFootFetishForumPageUrl(url, window.location.href);
+    if (useCurrent) return document;
+
+    const parseHtml = (html) => {
+      try {
+        const doc = new DOMParser().parseFromString(String(html || ''), 'text/html');
+        if (doc && !isCloudflareChallengeDocument(doc)) return doc;
+      } catch (e) {}
+      return null;
+    };
+
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => {
+        try { ctrl.abort(); } catch (e) {}
+      }, timeoutMs);
+      try {
+        const resp = await fetch(url, { method: 'GET', credentials: 'include', cache: 'no-store', signal: ctrl.signal });
+        const text = await resp.text();
+        if (resp && resp.ok) {
+          const doc = parseHtml(text);
+          if (doc) return doc;
+        }
+      } finally {
+        clearTimeout(t);
+      }
+    } catch (e) {}
+
+    return new Promise((resolve) => {
+      let done = false;
+      const frame = document.createElement('iframe');
+      const cleanup = (doc) => {
+        if (done) return;
+        done = true;
+        let safeDoc = doc || null;
+        if (safeDoc && safeDoc.documentElement) {
+          try {
+            safeDoc = new DOMParser().parseFromString(safeDoc.documentElement.outerHTML, 'text/html');
+          } catch (e) {}
+        }
+        try { frame.remove(); } catch (e) {}
+        resolve(safeDoc || null);
+      };
+      const timer = setTimeout(() => cleanup(null), timeoutMs);
+      frame.style.cssText = 'position:fixed;width:1px;height:1px;left:-10000px;top:-10000px;opacity:0;pointer-events:none;';
+      frame.setAttribute('aria-hidden', 'true');
+      frame.onload = () => {
+        setTimeout(() => {
+          try {
+            const doc = frame.contentDocument || (frame.contentWindow && frame.contentWindow.document);
+            if (doc && !isCloudflareChallengeDocument(doc)) {
+              clearTimeout(timer);
+              cleanup(doc);
+              return;
+            }
+          } catch (e) {}
+          clearTimeout(timer);
+          cleanup(null);
+        }, 800);
+      };
+      try {
+        frame.src = String(url || '');
+        (document.body || document.documentElement).appendChild(frame);
+      } catch (e) {
+        clearTimeout(timer);
+        cleanup(null);
+      }
+    });
+  }
+
   async function fetchFootFetishForumForumCandidates(startUrl, options = {}) {
     const opt = options && typeof options === 'object' ? options : {};
     const maxForumPages = Math.max(1, Math.min(100, parseInt(opt.maxForumPages || '5', 10) || 5));
@@ -476,20 +560,6 @@
     const maxItems = Math.max(1, Math.min(12000, parseInt(opt.maxItems || '8000', 10) || 8000));
     const delayMs = Math.max(0, Math.min(3000, parseInt(opt.delayMs || '250', 10) || 250));
     const timeoutMs = Math.max(3000, Math.min(60000, parseInt(opt.timeoutMs || '20000', 10) || 20000));
-
-    const fetchHtml = async (url) => {
-      const ctrl = new AbortController();
-      const t = setTimeout(() => {
-        try { ctrl.abort(); } catch (e) {}
-      }, timeoutMs);
-      try {
-        const resp = await fetch(url, { method: 'GET', credentials: 'include', cache: 'no-store', signal: ctrl.signal });
-        const text = await resp.text();
-        return { ok: resp.ok, status: resp.status, text };
-      } finally {
-        clearTimeout(t);
-      }
-    };
 
     const threadLinks = [];
     const seenThreads = new Set();
@@ -505,13 +575,10 @@
       forumPages++;
       let doc = null;
       try {
-        if (forumPages === 1 && sameFootFetishForumPageUrl(forumUrl, window.location.href)) {
-          doc = document;
-        } else {
-          const r = await fetchHtml(forumUrl);
-          if (!r || !r.ok || !r.text) break;
-          doc = new DOMParser().parseFromString(r.text, 'text/html');
-        }
+        doc = await loadFootFetishForumDocument(forumUrl, {
+          timeoutMs,
+          useCurrent: forumPages === 1,
+        });
       } catch (e) {
         break;
       }
@@ -575,20 +642,6 @@
     const seen = new Set();
     const out = [];
 
-    const fetchHtml = async (url) => {
-      const ctrl = new AbortController();
-      const t = setTimeout(() => {
-        try { ctrl.abort(); } catch (e) {}
-      }, timeoutMs);
-      try {
-        const resp = await fetch(url, { method: 'GET', credentials: 'include', cache: 'no-store', signal: ctrl.signal });
-        const text = await resp.text();
-        return { ok: resp.ok, status: resp.status, text };
-      } finally {
-        clearTimeout(t);
-      }
-    };
-
     let url = String(startUrl || '').trim();
     try {
       const u0 = new URL(url, window.location.href);
@@ -599,26 +652,14 @@
     let pages = 0;
     while (url && pages < maxPages && out.length < maxItems) {
       pages++;
-      let html = '';
       let doc = null;
       try {
-        if (pages === 1 && sameFootFetishForumPageUrl(url, window.location.href)) {
-          doc = document;
-        } else {
-          const r = await fetchHtml(url);
-          if (!r || !r.ok || !r.text) break;
-          html = r.text;
-        }
+        doc = await loadFootFetishForumDocument(url, {
+          timeoutMs,
+          useCurrent: pages === 1,
+        });
       } catch (e) {
         break;
-      }
-
-      if (!doc) {
-        try {
-          doc = new DOMParser().parseFromString(html, 'text/html');
-        } catch (e) {
-          doc = null;
-        }
       }
       if (!doc) break;
 
@@ -3770,13 +3811,7 @@
       const res = isForumPage
         ? await fetchFootFetishForumForumCandidates(startUrl, { maxForumPages, maxThreadPages: maxPages, maxItems })
         : await fetchFootFetishForumThreadCandidates(startUrl, { maxPages, maxItems });
-      let candidates = uniqueCandidates(res && res.candidates ? res.candidates : []);
-      if (isForumPage && !candidates.length && res && Array.isArray(res.threadLinks) && res.threadLinks.length) {
-        candidates = uniqueCandidates(res.threadLinks.map((url) => ({ url, el: null, kind: 'thread_page' })));
-        try {
-          addLog(`Forum fallback: ${candidates.length} thread-URLs doorsturen omdat directe media-scan niets vond`, 'warn');
-        } catch (e) {}
-      }
+      const candidates = uniqueCandidates(res && res.candidates ? res.candidates : []);
 
       try {
         if (shouldDebugBatch(meta, clickEvent)) {
@@ -3785,7 +3820,7 @@
       } catch (e2) {}
 
       if (!candidates.length) {
-        const detail = isForumPage && res && Number(res.threads) > 0 ? ` (${res.threads} threads gevonden, 0 media)` : '';
+        const detail = isForumPage && res && Number(res.threads) > 0 ? ` (${res.threads} threads gevonden, 0 media; geen thread-URLs als download gestart)` : '';
         showNotification(`${isForumPage ? 'Forum' : 'Hele thread'}: geen URLs gevonden${detail}`, true);
         return;
       }
@@ -3794,10 +3829,7 @@
         const extra = isForumPage ? ` | forum=${res && res.forumPages ? res.forumPages : '?'} | threads=${res && res.threads ? res.threads : '?'}` : '';
         addLog(`${isForumPage ? 'Forum' : 'Thread'} pages: ${res && Number.isFinite(Number(res.pages)) ? res.pages : '?'}${extra} | items: ${candidates.length}`);
       } catch (e) {}
-      try {
-        const label = isForumPage && candidates.some((c) => c && c.kind === 'thread_page') ? 'thread-URLs' : 'items';
-        showNotification(`${isForumPage ? 'Forum' : 'Thread'}: ${candidates.length} ${label} (${res && Number.isFinite(Number(res.pages)) ? res.pages : '?'} threadpagina's)`, false);
-      } catch (e) {}
+      try { showNotification(`${isForumPage ? 'Forum' : 'Thread'}: ${candidates.length} items (${res && Number.isFinite(Number(res.pages)) ? res.pages : '?'} threadpagina's)`, false); } catch (e) {}
 
       let selected = null;
       let selectedDirectHints = null;
