@@ -562,7 +562,7 @@
       }
     }
 
-    return { candidates: out, pages: threadPages, forumPages, threads: threadLinks.length };
+    return { candidates: out, threadLinks: threadLinks.slice(), pages: threadPages, forumPages, threads: threadLinks.length };
   }
 
   async function fetchFootFetishForumThreadCandidates(startUrl, options = {}) {
@@ -3770,7 +3770,13 @@
       const res = isForumPage
         ? await fetchFootFetishForumForumCandidates(startUrl, { maxForumPages, maxThreadPages: maxPages, maxItems })
         : await fetchFootFetishForumThreadCandidates(startUrl, { maxPages, maxItems });
-      const candidates = uniqueCandidates(res && res.candidates ? res.candidates : []);
+      let candidates = uniqueCandidates(res && res.candidates ? res.candidates : []);
+      if (isForumPage && !candidates.length && res && Array.isArray(res.threadLinks) && res.threadLinks.length) {
+        candidates = uniqueCandidates(res.threadLinks.map((url) => ({ url, el: null, kind: 'thread_page' })));
+        try {
+          addLog(`Forum fallback: ${candidates.length} thread-URLs doorsturen omdat directe media-scan niets vond`, 'warn');
+        } catch (e) {}
+      }
 
       try {
         if (shouldDebugBatch(meta, clickEvent)) {
@@ -3779,7 +3785,8 @@
       } catch (e2) {}
 
       if (!candidates.length) {
-        showNotification(`${isForumPage ? 'Forum' : 'Hele thread'}: geen URLs gevonden`, true);
+        const detail = isForumPage && res && Number(res.threads) > 0 ? ` (${res.threads} threads gevonden, 0 media)` : '';
+        showNotification(`${isForumPage ? 'Forum' : 'Hele thread'}: geen URLs gevonden${detail}`, true);
         return;
       }
 
@@ -3787,7 +3794,10 @@
         const extra = isForumPage ? ` | forum=${res && res.forumPages ? res.forumPages : '?'} | threads=${res && res.threads ? res.threads : '?'}` : '';
         addLog(`${isForumPage ? 'Forum' : 'Thread'} pages: ${res && Number.isFinite(Number(res.pages)) ? res.pages : '?'}${extra} | items: ${candidates.length}`);
       } catch (e) {}
-      try { showNotification(`${isForumPage ? 'Forum' : 'Thread'}: ${candidates.length} items (${res && Number.isFinite(Number(res.pages)) ? res.pages : '?'} threadpagina's)`, false); } catch (e) {}
+      try {
+        const label = isForumPage && candidates.some((c) => c && c.kind === 'thread_page') ? 'thread-URLs' : 'items';
+        showNotification(`${isForumPage ? 'Forum' : 'Thread'}: ${candidates.length} ${label} (${res && Number.isFinite(Number(res.pages)) ? res.pages : '?'} threadpagina's)`, false);
+      } catch (e) {}
 
       let selected = null;
       let selectedDirectHints = null;
