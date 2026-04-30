@@ -211,17 +211,21 @@ function createLegacyRouter({ repo }) {
       const { action, platform } = req.body || {};
       let result;
 
-      const platformFilter = platform ? ` AND platform = '${platform.replace(/'/g, "''")}'` : '';
+      const params = [];
+      const platformFilter = platform ? ' AND platform = $1' : '';
+      if (platform) params.push(platform);
 
       switch (action) {
         case 'cancel-pending':
           result = await repo.pool.query(
-            `UPDATE public.downloads SET status = 'cancelled', updated_at = now() WHERE status IN ('pending', 'queued')${platformFilter}`
+            `UPDATE public.downloads SET status = 'cancelled', updated_at = now() WHERE status IN ('pending', 'queued')${platformFilter}`,
+            params,
           );
           break;
         case 'retry-failed':
           result = await repo.pool.query(
-            `UPDATE public.downloads SET status = 'pending', progress = 0, updated_at = now() WHERE status IN ('error', 'failed')${platformFilter}`
+            `UPDATE public.downloads SET status = 'pending', progress = 0, updated_at = now() WHERE status IN ('error', 'failed')${platformFilter}`,
+            params,
           );
           break;
         default:

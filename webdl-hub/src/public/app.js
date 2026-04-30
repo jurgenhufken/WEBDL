@@ -8,9 +8,13 @@ const setText = (id, value) => {
 };
 
 const state = {
+  source: 'hub',
   jobs: new Map(),
+  serverDownloads: new Map(),
+  serverPlatforms: [],
   selectedId: null,
   filter: '',
+  platformFilter: '',
   adapters: [],
   collapsedGroups: new Set(),
   // Live progress data van WebSocket (speed/eta)
@@ -36,12 +40,25 @@ function fmtTime(iso) {
   return d.toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
+function fmtDateTime(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return d.toLocaleString('nl-NL', {
+    day: '2-digit', month: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+}
+
 function humanSize(n) {
   if (!Number.isFinite(n) || n <= 0) return '';
   const u = ['B', 'KB', 'MB', 'GB'];
   let i = 0;
   while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
   return n.toFixed(i === 0 ? 0 : 1) + ' ' + u[i];
+}
+
+function sumSizes(files) {
+  return files.reduce((sum, f) => sum + (Number(f.size || f.filesize) || 0), 0);
 }
 
 function esc(s) {
@@ -51,12 +68,33 @@ function esc(s) {
 
 function statusIcon(status) {
   switch (status) {
+    case 'pending':   return '⏳';
     case 'queued':    return '⏳';
+    case 'downloading':
     case 'running':   return '⬇️';
+    case 'postprocessing': return '⚙';
+    case 'completed':
     case 'done':      return '✅';
+    case 'error':
     case 'failed':    return '❌';
     case 'cancelled': return '⊘';
     default:          return '•';
+  }
+}
+
+function displayStatus(status) {
+  switch (status) {
+    case 'pending': return 'pending';
+    case 'queued': return 'wachtrij';
+    case 'running':
+    case 'downloading': return 'actief';
+    case 'postprocessing': return 'verwerkt';
+    case 'done':
+    case 'completed': return 'klaar';
+    case 'failed':
+    case 'error': return 'fout';
+    case 'cancelled': return 'cancelled';
+    default: return status || '—';
   }
 }
 
@@ -73,6 +111,20 @@ function videoTitle(job) {
   } catch { return job.url; }
 }
 
+function downloadTitle(download) {
+  return download.title || download.filename || download.url || `Download #${download.id}`;
+}
+
+function serverStatusToFilter(status) {
+  switch (status) {
+    case 'active': return ['downloading', 'postprocessing'];
+    case 'failed': return ['error', 'failed'];
+    case 'done': return ['completed'];
+    case 'queued': return ['pending', 'queued'];
+    default: return status ? [status] : [];
+  }
+}
+
 // ─── Queue stats ──────────────────────────────────────────────────────────────
 function updateStats() {
   let q = 0, r = 0, d = 0, f = 0;
@@ -86,6 +138,49 @@ function updateStats() {
   $('statRunning').textContent = r;
   $('statDone').textContent = d;
   $('statFailed').textContent = f;
+}
+
+function updateServerStats(stats = {}) {
+  const legacy = stats.legacy || {};
+  setText('srvPending', legacy.pending || 0);
+  setText('srvQueued', legacy.queued || 0);
+  setText('srvDownloading', (legacy.downloading || 0) + (legacy.postprocessing || 0));
+  setText('srvCompleted', legacy.completed || 0);
+  setText('srvError', (legacy.error || 0) + (legacy.failed || 0));
+}
+
+function setFilterOptions() {
+  const filter = $('filter');
+  const current = filter.value;
+  if (state.source === 'server') {
+    filter.innerHTML = `
+      <option value="">alle</option>
+      <option value="queued">wachtrij</option>
+      <option value="active">actief</option>
+      <option value="completed">klaar</option>
+      <option value="error">fout</option>
+      <option value="cancelled">cancelled</option>
+    `;
+  } else {
+    filter.innerHTML = `
+      <option value="">alle</option>
+      <option value="queued">wachtrij</option>
+      <option value="running">actief</option>
+      <option value="done">klaar</option>
+      <option value="failed">mislukt</option>
+    `;
+  }
+  filter.value = [...filter.options].some((o) => o.value === current) ? current : '';
+  state.filter = filter.value;
+}
+
+function updateSourceControls() {
+  $('source').value = state.source;
+  $('platformFilter').hidden = state.source !== 'server';
+  $('btnBulkClear').hidden = state.source === 'server';
+  $('btnBulkCancel').textContent = state.source === 'server' ? '✕ pending' : '✕ wacht';
+  $('btnBulkRetry').textContent = state.source === 'server' ? '↻ error' : '↻ failed';
+  setFilterOptions();
 }
 
 // ─── Groepering ───────────────────────────────────────────────────────────────
@@ -141,6 +236,10 @@ function groupStats(group) {
 function renderList() {
   const container = $('jobList');
   container.innerHTML = '';
+  if (state.source === 'server') {
+    renderServerList(container);
+    return;
+  }
 
   const { standalone, groups } = buildGroups();
 
@@ -213,6 +312,25 @@ function renderList() {
   updateStats();
 }
 
+function renderServerList(container) {
+  const statuses = serverStatusToFilter(state.filter);
+  const items = [...state.serverDownloads.values()]
+    .filter((d) => statuses.length === 0 || statuses.includes(d.status))
+    .filter((d) => !state.platformFilter || d.platform === state.platformFilter)
+    .sort((a, b) => Number(b.id) - Number(a.id));
+
+  for (const download of items) {
+    container.appendChild(renderServerItem(download));
+  }
+
+  if (items.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-inline';
+    empty.textContent = 'Geen server-downloads voor dit filter';
+    container.appendChild(empty);
+  }
+}
+
 function renderJobItem(job, isStandalone) {
   const div = document.createElement('div');
   div.className = 'job-item' + (isStandalone ? ' standalone' : '') +
@@ -258,8 +376,41 @@ function renderJobItem(job, isStandalone) {
   return div;
 }
 
+function renderServerItem(download) {
+  const div = document.createElement('div');
+  div.className = 'job-item standalone' +
+    (String(download.id) === String(state.selectedId) ? ' selected' : '');
+  div.dataset.id = download.id;
+
+  const progress = Math.round(Number(download.progress) || 0);
+  const title = downloadTitle(download);
+  const status = download.status || '';
+  let meta = `${download.platform || 'unknown'} · ${download.channel || 'unknown'}`;
+  if (['downloading', 'postprocessing'].includes(status)) meta += ` · ${progress}%`;
+  if (download.filesize) meta += ` · ${humanSize(Number(download.filesize))}`;
+
+  const progressBar = ['downloading', 'postprocessing'].includes(status)
+    ? `<div class="job-progress-bar"><div class="job-progress-fill" style="width:${progress}%"></div></div>`
+    : '';
+
+  div.innerHTML = `
+    <span class="job-icon">${statusIcon(status)}</span>
+    <div class="job-body">
+      <div class="job-title-row">
+        <span class="job-title" title="${esc(download.url || download.filepath)}">${esc(title)}</span>
+        <span class="job-badge ${esc(status)}">${esc(displayStatus(status))}</span>
+      </div>
+      <div class="job-meta">${esc(meta)}</div>
+      ${progressBar}
+    </div>
+  `;
+  div.onclick = () => selectServerDownload(download.id);
+  return div;
+}
+
 // ─── Detail ───────────────────────────────────────────────────────────────────
 async function selectJob(id) {
+  state.source = 'hub';
   state.selectedId = id;
   renderList();
   $('detailEmpty').hidden = true;
@@ -270,8 +421,21 @@ async function selectJob(id) {
   } catch (e) { setMsg(e.message, true); }
 }
 
+async function selectServerDownload(id) {
+  state.source = 'server';
+  state.selectedId = id;
+  renderList();
+  $('detailEmpty').hidden = true;
+  $('detail').hidden = false;
+  try {
+    const { download } = await api('GET', '/api/downloads/' + id);
+    renderServerDetail(download);
+  } catch (e) { setMsg(e.message, true); }
+}
+
 function renderDetail(job, files, logs) {
   const title = job.options?.videoTitle || videoTitle(job);
+  closeInlineViewer();
   setText('dTitle', title);
   setText('dUrl', job.url);
   $('dUrl').href = job.url || '#';
@@ -279,7 +443,8 @@ function renderDetail(job, files, logs) {
   setText('dPlatformBadge', job.adapter || '');
   setText('dChannelBadge', job.options?.expandName || '');
   setText('dChannel', job.options?.expandName || job.options?.playlistTitle || '—');
-  setText('dFilesize', files.reduce((sum, f) => sum + (Number(f.size) || 0), 0) ? humanSize(files.reduce((sum, f) => sum + (Number(f.size) || 0), 0)) : '—');
+  const totalSize = sumSizes(files);
+  setText('dFilesize', totalSize ? humanSize(totalSize) : '—');
   $('dStatus').innerHTML = `<span class="badge ${job.status}">${job.status}</span>`;
   const pct = Math.round(job.progress_pct || 0);
   $('dBar').style.width = pct + '%';
@@ -381,6 +546,157 @@ function renderDetail(job, files, logs) {
   else $('noLogs').hidden = true;
 }
 
+function renderServerDetail(download) {
+  closeInlineViewer();
+  const title = downloadTitle(download);
+  const status = download.status || '';
+  const progress = Math.round(Number(download.progress) || 0);
+  const sourceUrl = download.source_url || download.url || '#';
+  const mediaUrl = `/api/downloads/${download.id}/serve`;
+  const thumbUrl = `/api/downloads/${download.id}/thumb`;
+  const fileName = download.filename || (download.filepath ? download.filepath.split('/').pop() : '');
+  const mediaFile = download.filepath ? [{ path: download.filepath, size: download.filesize, id: download.id }] : [];
+
+  setText('dTitle', title);
+  setText('dUrl', sourceUrl);
+  $('dUrl').href = sourceUrl;
+  setText('dAdapter', download.platform || 'server');
+  setText('dPlatformBadge', download.platform || 'server');
+  setText('dChannelBadge', download.channel || '');
+  setText('dChannel', download.channel || '—');
+  setText('dFilesize', download.filesize ? humanSize(Number(download.filesize)) : '—');
+  $('dStatus').innerHTML = `<span class="badge ${esc(status)}">${esc(displayStatus(status))}</span>`;
+  $('dBar').style.width = progress + '%';
+  $('dBar').className = 'bar-fill' + (status === 'completed' ? ' done' : '');
+  setText('dPct', progress + '%');
+  setText('dAttempts', '—');
+  setText('dStarted', fmtDateTime(download.created_at));
+  setText('dFinished', fmtDateTime(download.finished_at));
+  setText('dCreated', fmtDateTime(download.created_at));
+  setText('dPriority', download.priority || 'normaal');
+  setText('dWorker', 'simple-server');
+
+  const hasError = download.error && String(download.error).length > 0;
+  $('dErrorRow').hidden = !hasError;
+  setText('dError', download.error || '');
+
+  $('btnRetry').disabled = !['error', 'failed', 'cancelled'].includes(status);
+  $('btnCancel').disabled = !['pending', 'queued', 'downloading', 'postprocessing'].includes(status);
+
+  const heroThumb = $('heroThumb');
+  if (download.filepath) {
+    heroThumb.src = thumbUrl;
+    $('mediaHero').hidden = false;
+  } else {
+    $('mediaHero').hidden = true;
+  }
+  $('heroStatus').textContent = displayStatus(status).toUpperCase();
+  $('heroStatus').className = `hero-badge ${esc(status)}`;
+  $('heroPct').textContent = progress + '%';
+  $('heroBar').style.width = progress + '%';
+
+  const mediaGrid = $('mediaGrid');
+  mediaGrid.innerHTML = '';
+  if (download.filepath && isMediaFile(download.filepath)) {
+    const div = document.createElement('div');
+    div.className = 'media-item';
+    const isVideo = isVideoFile(download.filepath);
+    div.innerHTML = `
+      <button type="button" class="media-link media-button" data-media-url="${esc(mediaUrl)}" data-media-type="${isVideo ? 'video' : 'image'}">
+        ${isVideo ? '<div class="media-badge video">▶</div>' : ''}
+        <img src="${esc(thumbUrl)}" alt="${esc(download.filepath)}" loading="lazy" class="media-thumb">
+      </button>
+      <div class="media-meta">
+        <div class="media-name" title="${esc(download.filepath)}">${esc(fileName)}</div>
+        <div class="media-size">${download.filesize ? humanSize(Number(download.filesize)) : ''}</div>
+      </div>
+    `;
+    div.querySelector('.media-button').addEventListener('click', () => openInlineViewer(mediaUrl, isVideo ? 'video' : 'image'));
+    mediaGrid.appendChild(div);
+    $('noMedia').hidden = true;
+  } else {
+    $('noMedia').hidden = false;
+  }
+
+  renderFiles(mediaFile, true);
+  renderLogs([], true);
+}
+
+function renderFiles(files, includeMedia = false) {
+  const filesList = $('filesList');
+  filesList.innerHTML = '';
+  const shown = includeMedia ? files : files.filter(f => !isMediaFile(f.path));
+  if (shown.length > 0) {
+    for (const f of shown) {
+      const div = document.createElement('div');
+      div.className = 'file-row';
+      const basename = f.path.split('/').pop();
+      const ext = f.path.split('.').pop().toLowerCase();
+      div.innerHTML = `
+        <span class="file-name" title="${esc(f.path)}">${esc(basename)}</span>
+        <span class="file-type">${esc(ext.toUpperCase())}</span>
+        <span class="file-size">${f.size ? humanSize(Number(f.size)) : ''}</span>
+      `;
+      filesList.appendChild(div);
+    }
+    $('noFiles').hidden = true;
+  } else {
+    $('noFiles').hidden = false;
+  }
+}
+
+function renderLogs(logs, serverSource = false) {
+  const logsList = $('logsList');
+  logsList.innerHTML = '';
+  for (const l of logs) {
+    const div = document.createElement('div');
+    div.className = 'log-entry';
+    div.innerHTML = `<span class="log-ts">${fmtTime(l.ts)}</span><span class="log-lvl ${esc(l.level)}">${esc(l.level)}</span><span class="log-msg">${esc(l.msg)}</span>`;
+    logsList.appendChild(div);
+  }
+  if (!logs.length && serverSource) {
+    const div = document.createElement('div');
+    div.className = 'log-entry';
+    div.innerHTML = '<span class="log-ts">—</span><span class="log-lvl info">info</span><span class="log-msg">Logs staan in simple-server, niet in webdl.jobs.</span>';
+    logsList.appendChild(div);
+  }
+  $('noLogs').hidden = logsList.children.length > 0;
+}
+
+function openInlineViewer(url, type) {
+  const box = $('mediaViewer');
+  const video = $('viewerVideo');
+  const img = $('viewerImage');
+  video.pause();
+  video.hidden = true;
+  img.hidden = true;
+  if (type === 'video') {
+    video.src = url;
+    video.hidden = false;
+  } else {
+    img.src = url;
+    img.hidden = false;
+  }
+  box.hidden = false;
+}
+
+function closeInlineViewer() {
+  const box = $('mediaViewer');
+  const video = $('viewerVideo');
+  const img = $('viewerImage');
+  if (video) {
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+    video.hidden = true;
+  }
+  if (img) {
+    img.removeAttribute('src');
+    img.hidden = true;
+  }
+  if (box) box.hidden = true;
+}
+
 function isMediaFile(path) {
   const ext = path.split('.').pop().toLowerCase();
   const mediaExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'svg', 'mp4', 'mkv', 'webm', 'mov', 'm4v', 'avi', 'flv'];
@@ -431,8 +747,8 @@ function handleEvent(type, payload) {
       speed: payload.speed || null,
       eta: payload.eta || null,
     });
-    renderList();
-    if (String(state.selectedId) === String(payload.id)) selectJob(payload.id);
+    if (state.source === 'hub') renderList();
+    if (state.source === 'hub' && String(state.selectedId) === String(payload.id)) selectJob(payload.id);
     return;
   }
   if (typeof payload === 'object' && payload.id) {
@@ -441,8 +757,8 @@ function handleEvent(type, payload) {
     if (payload.status && payload.status !== 'running') {
       state.liveProgress.delete(String(payload.id));
     }
-    renderList();
-    if (String(state.selectedId) === String(payload.id)) selectJob(payload.id);
+    if (state.source === 'hub') renderList();
+    if (state.source === 'hub' && String(state.selectedId) === String(payload.id)) selectJob(payload.id);
   }
 }
 
@@ -457,6 +773,63 @@ async function loadAdapters() {
 async function loadJobs() {
   const { jobs } = await api('GET', '/api/jobs?limit=500');
   state.jobs = new Map(jobs.map((j) => [j.id, j]));
+  if (state.source === 'hub') renderList();
+  updateStats();
+}
+
+async function loadServerStats() {
+  try {
+    const stats = await api('GET', '/api/downloads/meta/stats');
+    updateServerStats(stats);
+  } catch {}
+}
+
+async function loadServerPlatforms() {
+  try {
+    const { platforms } = await api('GET', '/api/downloads/meta/platforms');
+    state.serverPlatforms = platforms || [];
+    const counts = new Map();
+    for (const row of state.serverPlatforms) {
+      counts.set(row.platform || 'unknown', (counts.get(row.platform || 'unknown') || 0) + Number(row.count || 0));
+    }
+    const select = $('platformFilter');
+    const current = select.value;
+    select.innerHTML = '<option value="">alle platforms</option>' +
+      [...counts.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([platform, count]) => `<option value="${esc(platform)}">${esc(platform)} (${count})</option>`)
+        .join('');
+    select.value = [...select.options].some((o) => o.value === current) ? current : '';
+    state.platformFilter = select.value;
+  } catch {}
+}
+
+async function loadServerDownloads() {
+  const params = new URLSearchParams({ limit: '500' });
+  const statuses = serverStatusToFilter(state.filter);
+  if (statuses.length === 1) params.set('status', statuses[0]);
+  if (state.platformFilter) params.set('platform', state.platformFilter);
+  const { downloads } = await api('GET', '/api/downloads?' + params.toString());
+  state.serverDownloads = new Map((downloads || []).map((d) => [d.id, d]));
+  if (state.source === 'server') renderList();
+}
+
+async function refreshCurrentSource() {
+  if (state.source === 'server') {
+    await Promise.all([loadServerStats(), loadServerPlatforms(), loadServerDownloads()]);
+  } else {
+    await Promise.all([loadJobs(), loadServerStats()]);
+  }
+}
+
+async function switchSource(source) {
+  state.source = source;
+  state.selectedId = null;
+  $('detail').hidden = true;
+  $('detailEmpty').hidden = false;
+  closeInlineViewer();
+  updateSourceControls();
+  await refreshCurrentSource();
   renderList();
 }
 
@@ -469,6 +842,8 @@ function bind() {
     const force = $('force')?.checked;
     try {
       const job = await api('POST', '/api/jobs', { url, force });
+      state.source = 'hub';
+      updateSourceControls();
       state.jobs.set(job.id, job);
       renderList();
       selectJob(job.id);
@@ -500,22 +875,48 @@ function bind() {
     }
   });
 
-  $('filter').addEventListener('change', (ev) => { state.filter = ev.target.value; renderList(); });
+  $('source').addEventListener('change', (ev) => switchSource(ev.target.value).catch((e) => setMsg(e.message, true)));
+  $('filter').addEventListener('change', async (ev) => {
+    state.filter = ev.target.value;
+    if (state.source === 'server') await loadServerDownloads().catch((e) => setMsg(e.message, true));
+    renderList();
+  });
+  $('platformFilter').addEventListener('change', async (ev) => {
+    state.platformFilter = ev.target.value;
+    await loadServerDownloads().catch((e) => setMsg(e.message, true));
+    renderList();
+  });
 
   // Bulk-acties
   async function doBulk(action) {
     try {
-      const result = await api('POST', '/api/jobs/bulk', { action });
+      const serverAction = action === 'cancel-queued' ? 'cancel-pending'
+        : action === 'retry-failed' ? 'retry-failed'
+          : action;
+      const path = state.source === 'server' ? '/api/downloads/bulk' : '/api/jobs/bulk';
+      const body = state.source === 'server'
+        ? { action: serverAction, platform: state.platformFilter || undefined }
+        : { action };
+      const result = await api('POST', path, body);
       setMsg(`${action}: ${result.affected} jobs bijgewerkt`, false, true);
-      await loadJobs();
+      await refreshCurrentSource();
     } catch (e) { setMsg(e.message, true); }
   }
   $('btnBulkCancel').addEventListener('click', () => doBulk('cancel-queued'));
   $('btnBulkRetry').addEventListener('click', () => doBulk('retry-failed'));
   $('btnBulkClear').addEventListener('click', () => doBulk('clear-done'));
 
-  $('btnRetry').addEventListener('click', () => state.selectedId && api('POST', `/api/jobs/${state.selectedId}/retry`).then(() => loadJobs()).catch((e) => setMsg(e.message, true)));
-  $('btnCancel').addEventListener('click', () => state.selectedId && api('POST', `/api/jobs/${state.selectedId}/cancel`).then(() => loadJobs()).catch((e) => setMsg(e.message, true)));
+  $('btnRetry').addEventListener('click', () => {
+    if (!state.selectedId) return;
+    const path = state.source === 'server' ? `/api/downloads/${state.selectedId}/retry` : `/api/jobs/${state.selectedId}/retry`;
+    api('POST', path).then(() => refreshCurrentSource()).catch((e) => setMsg(e.message, true));
+  });
+  $('btnCancel').addEventListener('click', () => {
+    if (!state.selectedId) return;
+    const path = state.source === 'server' ? `/api/downloads/${state.selectedId}/cancel` : `/api/jobs/${state.selectedId}/cancel`;
+    api('POST', path).then(() => refreshCurrentSource()).catch((e) => setMsg(e.message, true));
+  });
+  $('btnCloseViewer').addEventListener('click', closeInlineViewer);
 
   // Tab switching
   document.querySelectorAll('.tab').forEach(tab => {
@@ -529,12 +930,13 @@ function bind() {
   });
 
   // Auto-refresh
-  setInterval(() => loadJobs().catch(() => {}), 5000);
+  setInterval(() => refreshCurrentSource().catch(() => {}), 5000);
 }
 
 (async function boot() {
   bind();
+  updateSourceControls();
   await loadAdapters();
-  await loadJobs();
+  await refreshCurrentSource();
   connectWs();
 })();

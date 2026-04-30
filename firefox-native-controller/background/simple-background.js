@@ -12,7 +12,7 @@ const HTTP_TIMEOUT_MS = 6000;
 const PROBE_FAILURES_BEFORE_DISCONNECT = 2; // Reduced so it detects faster
 const PROBE_DISCONNECT_GRACE_MS = 12000; // Drop after 12s of no heartbeat
 const SOCKET_ENABLED = false;
-const BACKGROUND_BUILD = 'simple-background-v2-hub-proxy';
+const BACKGROUND_BUILD = 'simple-background-v3-hub-downloads';
 const HUB_URL = 'http://localhost:35730';
 
 
@@ -69,6 +69,46 @@ async function postJson(endpoint, body) {
     }
   }
   return { success: false, error: lastError || 'Server niet bereikbaar' };
+}
+
+async function postHubJob(url, metadata = {}) {
+  if (!url || typeof url !== 'string') {
+    return { success: false, error: 'Geen URL om naar WebDL-Hub te sturen' };
+  }
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
+    const response = await fetch(`${HUB_URL}/api/jobs`, {
+      method: 'POST',
+      mode: 'cors',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url,
+        options: {
+          ...(metadata || {}),
+          queued_from: 'firefox-extension',
+        },
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      return { success: false, error: data.error || `Hub fout: HTTP ${response.status}` };
+    }
+    return {
+      success: true,
+      downloadId: data.id || null,
+      expanded: !!data.expanded,
+      queued: Number.isFinite(Number(data.queued)) ? Number(data.queued) : undefined,
+      duplicate: !!data.duplicate,
+      delegated: !!data.delegated,
+      message: data.expanded ? 'Expanded in WebDL-Hub' : 'Added to WebDL-Hub',
+      raw: data,
+    };
+  } catch (e) {
+    return { success: false, error: e && e.message ? e.message : String(e) };
+  }
 }
 
 async function getJson(endpoint) {
@@ -445,23 +485,7 @@ browser.contextMenus.onClicked.addListener(async (info, tab) => {
 
   metadata.sourceUrl = url;
   
-  // Stuur direct naar V2 Hub API
-  let resp = {};
-  try {
-    const res = await fetch(`${HUB_URL}/api/jobs`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, options: metadata })
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      resp = { success: false, error: data.error || `HTTP ${res.status}` };
-    } else {
-      resp = { success: true, downloadId: data.id, duplicate: data.duplicate, message: 'Added to V2 Hub' };
-    }
-  } catch (e) {
-    resp = { success: false, error: e.message };
-  }
+  const resp = await postHubJob(url, metadata);
 
   try {
     if (tab && tab.id != null) {
@@ -526,16 +550,7 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const payload = (message && message.payload) || {};
     const url = payload.url;
     const metadata = payload.metadata || payload;
-    
-    fetch(`${HUB_URL}/api/jobs`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, options: metadata })
-    }).then(async r => {
-      const data = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(data.error || 'HTTP ' + r.status);
-      sendResponse({ success: true, downloadId: data.id, duplicate: data.duplicate, message: 'Added to V2 Hub' });
-    }).catch(e => sendResponse({ success: false, error: e.message }));
+    postHubJob(url, metadata).then(sendResponse);
     return true;
   }
 
@@ -544,17 +559,10 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const urls = payload.urls || [];
     const metadata = payload.metadata || {};
     
-    // Stuur alle URLs 1 voor 1 naar V2 Hub
-    Promise.all(urls.map(url => 
-      fetch(`${HUB_URL}/api/jobs`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, options: metadata })
-      }).then(r => r.json()).catch(e => ({ error: e.message }))
-    )).then((results) => {
-      const queued = results.filter(r => !r.error && !r.duplicate).length;
+    Promise.all(urls.map(url => postHubJob(url, metadata))).then((results) => {
+      const queued = results.filter(r => r.success && !r.duplicate).reduce((sum, r) => sum + (Number(r.queued) || 1), 0);
       const duplicates = results.filter(r => r.duplicate).length;
-      const errors = results.filter(r => r.error).length;
+      const errors = results.filter(r => !r.success).length;
       sendResponse({ success: true, queued, duplicates, errors });
     }).catch(e => sendResponse({ success: false, error: e.message }));
     return true;
