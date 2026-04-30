@@ -6,7 +6,7 @@
 //   - matches(url) → boolean
 //   - plan(url, opts) → { cmd, args, cwd, env }
 //   - parseProgress(line) → { pct?, speed?, eta? } | null
-//   - collectOutputs(workdir) → [{ path, size?, mime? }]
+//   - collectOutputs(workdir, opts?) → [{ path, size?, mime? }]
 'use strict';
 
 function defineAdapter(spec) {

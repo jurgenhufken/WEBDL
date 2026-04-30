@@ -44,6 +44,11 @@
 
 
   function thumbUrl(it) { return `/thumb/${it.id}?v=${it.is_thumb_ready ? 1 : 0}`; }
+  function escHtml(s) {
+    return String(s || '').replace(/[&<>"']/g, (ch) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[ch]));
+  }
 
   // ─── Card rendering ───────────────────────────────────────────────────────
   function cardEl(it, idx) {
@@ -53,7 +58,7 @@
     c.dataset.id  = String(it.id);
     const badge = `<span class="card-badge">${it.platform || '?'}</span>`;
     const vmark = it.type === 'video' ? '<span class="card-video-mark">▶ video</span>' : '';
-    const title = (it.title || it.filename || '').replace(/</g, '&lt;');
+    const title = escHtml(it.title || it.filename || '');
     const sub   = (it.channel && it.channel !== 'unknown') ? it.channel : '';
     c.innerHTML = `
       <div class="card-thumb" style="background-image:url('${thumbUrl(it)}')">
@@ -61,9 +66,22 @@
       </div>
       <div class="card-info">
         <div class="card-title">${title}</div>
-        ${sub ? `<div class="card-sub">${sub}</div>` : ''}
+        ${sub ? `<div class="card-sub">${escHtml(sub)}</div>` : ''}
         ${it.rating != null ? `<div class="card-stars">${starHtml(it.rating)}</div>` : ''}
       </div>`;
+    const sourceUrl = it.source_url || it.url || '';
+    if (sourceUrl) {
+      const srcBtn = document.createElement('button');
+      srcBtn.type = 'button';
+      srcBtn.className = 'src-btn';
+      srcBtn.textContent = 'Source';
+      srcBtn.title = 'Open bron';
+      srcBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        window.open(sourceUrl, '_blank', 'noopener');
+      });
+      c.appendChild(srcBtn);
+    }
     c.addEventListener('click', () => {
       if (window.__viewer) window.__viewer.open(idx);
     });

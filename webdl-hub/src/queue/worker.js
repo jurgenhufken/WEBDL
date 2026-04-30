@@ -271,6 +271,7 @@ function startWorkerPool({
     }
 
     const planned = adapter.plan(job.url, { ...job.options, cwd: workdir });
+    const startedAtMs = Date.now();
     await repo.appendLog(job.id, 'info', `start ${adapter.name}: ${planned.cmd} ${planned.args.join(' ')}`);
     logger.info('job.start', { job: job.id, adapter: adapter.name });
 
@@ -311,7 +312,7 @@ function startWorkerPool({
     try {
       const { code } = await proc.done;
       if (code === 0) {
-        const outs = await adapter.collectOutputs(workdir);
+        const outs = await adapter.collectOutputs(workdir, { job, startedAtMs });
 
         // Thumbnails genereren
         for (const f of outs) {

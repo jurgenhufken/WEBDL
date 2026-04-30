@@ -3,8 +3,23 @@
 // alleen "scrape van één gebruiker". URL of `of/<username>` is input.
 'use strict';
 
+const fs = require('node:fs');
+const path = require('node:path');
 const { defineAdapter } = require('./base');
 const { collectOutputsRecursive } = require('./_fs');
+
+const DEFAULT_CONFIG_DIR = process.env.OFSCRAPER_CONFIG_DIR || '/Users/jurgen/.config/ofscraper';
+const DEFAULT_PROFILE = process.env.OFSCRAPER_PROFILE || 'main_profile';
+
+function readSaveLocation() {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(DEFAULT_CONFIG_DIR, 'config.json'), 'utf8'));
+    const saveLocation = cfg?.file_options?.save_location;
+    return typeof saveLocation === 'string' && saveLocation.trim() ? saveLocation : null;
+  } catch {
+    return null;
+  }
+}
 
 function matches(url) {
   try {
@@ -27,16 +42,51 @@ function plan(url, opts = {}) {
   // download-dir schrijven naar opts.cwd via env. Veel builds honoreren
   // OFSCRAPER_METADATA/OFSCRAPER_SAVE_PATH; we zetten beide + cwd als fallback.
   const args = [
+    '-cg', DEFAULT_CONFIG_DIR,
+    '-r', DEFAULT_PROFILE,
     '--no-live',
+    '--auth-fail',
     '-u', user,
+    '-a', 'download',
+    '-da', 'all',
     '-p', 'low',
     '-l', 'off',
   ];
   const env = {
     OFSCRAPER_SAVE_PATH: opts.cwd,
     OFSCRAPER_METADATA: opts.cwd,
+    OFSCRAPER_CONFIG_DIR: DEFAULT_CONFIG_DIR,
+    OFSCRAPER_PROFILE: DEFAULT_PROFILE,
   };
   return { cmd: 'ofscraper', args, cwd: opts.cwd, env };
+}
+
+async function collectOutputs(workdir, opts = {}) {
+  const seen = new Set();
+  const out = [];
+  async function addFiles(files, minMtimeMs = 0) {
+    for (const file of files) {
+      if (!file?.path || seen.has(file.path)) continue;
+      if (minMtimeMs) {
+        try {
+          const st = await fs.promises.stat(file.path);
+          if (st.mtimeMs + 1000 < minMtimeMs) continue;
+        } catch {
+          continue;
+        }
+      }
+      seen.add(file.path);
+      out.push(file);
+    }
+  }
+
+  await addFiles(await collectOutputsRecursive(workdir));
+
+  const saveLocation = readSaveLocation();
+  if (saveLocation && path.resolve(saveLocation) !== path.resolve(workdir)) {
+    await addFiles(await collectOutputsRecursive(saveLocation), opts.startedAtMs || 0);
+  }
+  return out;
 }
 
 // ofscraper toont variabele UI; we parsen simpele "X/Y" regels als die komen.
@@ -56,6 +106,7 @@ module.exports = defineAdapter({
   matches,
   plan,
   parseProgress,
-  collectOutputs: collectOutputsRecursive,
+  collectOutputs,
 });
 module.exports._urlToUsername = urlToUsername;
+module.exports._readSaveLocation = readSaveLocation;

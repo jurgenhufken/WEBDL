@@ -84,6 +84,7 @@ async function postHubJob(url, metadata = {}) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         url,
+        priority: 10,
         options: {
           ...(metadata || {}),
           queued_from: 'firefox-extension',

@@ -97,10 +97,15 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
   // ─── Enqueue single URL ─────────────────────────────────────────────────────
   r.post('/', async (req, res, next) => {
     try {
-      const { url, adapter: hint, priority = 0, options = {}, maxAttempts = 3, force = false } = req.body || {};
+      const { url, adapter: hint, options = {}, maxAttempts = 3, force = false } = req.body || {};
       if (!url || typeof url !== 'string') {
         return res.status(400).json({ error: 'url ontbreekt' });
       }
+      const requestedPriority = Number(req.body && req.body.priority);
+      const isExpandedRequest = !hint && isMultiItemUrl(url);
+      const priority = Number.isFinite(requestedPriority)
+        ? requestedPriority
+        : (isExpandedRequest ? 0 : 10);
 
       // Master/slave routing: sommige hosts worden door simple-server
       // afgehandeld. Hub inserteert dan een pending download rij; de
@@ -158,7 +163,7 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
 
       // Auto-expand: als URL een playlist/kanaal/shorts-tab is, expanden
       // we 'm automatisch naar losse jobs ipv één enkele queue-entry.
-      if (!hint && isMultiItemUrl(url)) {
+      if (isExpandedRequest) {
         try {
           const result = await expandAndEnqueue({
             repo, queue, adapters, url, priority, options, maxAttempts, force,

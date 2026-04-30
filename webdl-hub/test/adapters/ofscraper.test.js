@@ -25,6 +25,12 @@ test('plan zet SAVE_PATH en cwd', () => {
   assert.equal(p.cmd, 'ofscraper');
   assert.equal(p.cwd, '/tmp/of');
   assert.equal(p.env.OFSCRAPER_SAVE_PATH, '/tmp/of');
+  assert.ok(p.args.includes('-cg'));
+  assert.ok(p.args.includes('-r'));
+  assert.ok(p.args.includes('--auth-fail'));
+  assert.ok(p.args.includes('download'));
+  assert.ok(p.args.includes('-da'));
+  assert.ok(p.args.includes('all'));
   assert.ok(p.args.includes('-u'));
   assert.ok(p.args.includes('johndoe'));
 });

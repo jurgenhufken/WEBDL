@@ -3039,6 +3039,12 @@
 
   function summarizeBatchResult(result) {
     const rows = Array.isArray(result && result.downloads) ? result.downloads : [];
+    if (!rows.length && result && (result.queued != null || result.duplicates != null || result.errors != null)) {
+      const queued = Number(result.queued) || 0;
+      const duplicates = Number(result.duplicates) || 0;
+      const errors = Number(result.errors) || 0;
+      return { total: queued + duplicates + errors, queued, duplicates };
+    }
     if (result && result.expanded) {
       return {
         total: Number(result.total) || 0,
