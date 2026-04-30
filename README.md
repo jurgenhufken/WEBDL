@@ -1,17 +1,18 @@
-# WEBDL — Media Downloader & Recorder
+# WEBDL — Media Downloader, Gallery & Recorder
 
-**Firefox Add-on + Lokale Node.js Server**
+**Firefox Add-on + Lokale Node.js Servers + PostgreSQL**
 
-WEBDL is een lokale media downloader en screen recorder die je bedient vanuit Firefox. De Firefox add-on toont een toolbar met knoppen (download / screenshot / opnemen / batch) en communiceert met een lokale Node.js server op `localhost:35729`.
+WEBDL is een lokaal media-ecosysteem: downloaden, opnemen, organiseren en bekijken van media vanuit Firefox. Het bestaat uit meerdere services die samenwerken via een gedeelde PostgreSQL database.
 
 ## 🎯 Concept & Doel
 
 WEBDL verzamelt media van diverse platforms in één centrale plek:
 
-- **Downloads**: YouTube, OnlyFans, Reddit, Instagram, TikTok, forums, en meer
+- **Downloads**: YouTube, OnlyFans, Reddit, Instagram, TikTok, vBulletin forums, Keep2Share, en meer
 - **Screen Recording**: Direct opnemen van je scherm (macOS avfoundation)
 - **Screenshots**: Snelle captures van webpagina's
-- **Gallery/Viewer**: Doorzoekbare interface voor al je verzamelde media
+- **Gallery**: Premium media-viewer met filters, rating, tags, afspeelsnelheid, loop-secties
+- **Hub**: Centrale download-orchestrator met web-dashboard
 - **Batch Processing**: Meerdere URLs in één keer downloaden
 
 De server regelt:
@@ -46,22 +47,39 @@ Firefox tab
   content script (firefox-native-controller/content/debug-toolbar.js)
     |  HTTP fetch (localhost)
     v
-WEBDL Server (Node.js) — localhost:35729
-  ├─ Express HTTP API
-  │   ├─ /download — Enqueue downloads
-  │   ├─ /download/batch — Batch downloads
-  │   ├─ /start-recording — Screen recording
-  │   ├─ /screenshot — Save screenshots
-  │   ├─ /dashboard — Web UI
-  │   └─ /viewer — Media viewer
-  ├─ Download Queue Manager (Heavy/Light lanes)
-  ├─ Media Resolution Engine
-  │   ├─ HTML wrapper → direct URL resolving
-  │   ├─ Thumbnail → full-size upgrading
-  │   └─ Attachment ID matching (FootFetishForum)
-  └─ Storage
-      ├─ PostgreSQL/SQLite: webdl.db
-      └─ Files: ~/Downloads/WEBDL/<platform>/<channel>/...
+┌─────────────────────────────────────────────────────────────────┐
+│  WEBDL Server (Node.js) — localhost:35729                      │
+│  ├─ Express HTTP API                                           │
+│  │   ├─ /download — Enqueue downloads                          │
+│  │   ├─ /download/batch — Batch downloads                      │
+│  │   ├─ /start-recording — Screen recording                    │
+│  │   ├─ /screenshot — Save screenshots                         │
+│  │   └─ /dashboard — Web UI                                    │
+│  ├─ Download Queue Manager (Heavy/Light lanes)                 │
+│  └─ Media Resolution Engine                                    │
+│      ├─ HTML wrapper → direct URL resolving                    │
+│      ├─ Thumbnail → full-size upgrading                        │
+│      └─ Attachment ID matching (FFF, AVF)                      │
+└────────────────────┬────────────────────────────────────────────┘
+                     │
+              ┌──────┴──────┐
+              │  PostgreSQL │  (gedeelde database: webdl)
+              └──────┬──────┘
+          ┌──────────┼──────────┐
+          v          v          v
+┌─────────────┐ ┌──────────┐ ┌─────────────────────────────┐
+│ webdl-hub   │ │ webdl-   │ │ screen-recorder-native      │
+│ :35730      │ │ gallery  │ │ :35729 (main server)        │
+│             │ │ :35731   │ │                             │
+│ Download    │ │          │ │ Download queue, recording,  │
+│ orchestrator│ │ Premium  │ │ screenshots, auto-import,   │
+│ + adapters  │ │ media    │ │ thumbnail generation        │
+│ (vBulletin, │ │ viewer   │ │                             │
+│  yt-dlp,    │ │ + gallery│ │                             │
+│  gallery-dl)│ │          │ │                             │
+└─────────────┘ └──────────┘ └─────────────────────────────┘
+
+Opslag: ~/Downloads/WEBDL/<platform>/<channel>/...
 ```
 
 ## Repository indeling
@@ -71,9 +89,9 @@ WEBDL Server (Node.js) — localhost:35729
 | `StartServer.command` | Start server + open `/addon` pagina |
 | `firefox-native-controller/` | Firefox add-on (toolbar UI) |
 | `screen-recorder-native/` | Node.js server + database + ffmpeg |
-| `screen-recorder-native/src/simple-server.pg.refactored.js` | Main server (runtime) |
-| `screen-recorder-native/src/simple-server.js.pg.refactored` | Source server (master) |
-| `screen-recorder-native/src/sync-onlyfans-auth-from-firefox.py` | **OnlyFans auth helper** |
+| `screen-recorder-native/import-keep2share.js` | **Keep2Share import** — handmatig indexeren van lokale bestanden |
+| `webdl-gallery/` | **Gallery & Viewer** — doorzoekbare media-interface (port 35731) |
+| `webdl-hub/` | **Download Hub** — orchestrator met adapters (port 35730) |
 | `STATUS.md` | Huidige ontwikkelingsstatus & TODO |
 
 ## Opslag & mappenstructuur
@@ -202,13 +220,66 @@ Output: https://.../data/attachments/56789/.../full_image.jpg
 
 **Ondersteunde sites:**
 - FootFetishForum attachments
-- AmateurVoyeurForum attachments  
+- AmateurVoyeurForum attachments (vBulletin scraper met cookie-auth)
 - Pixhost.to thumbnails → full images
 - Imgur/RedGifs via gallery-dl
 - Externe hosts (jpg.pet, pixeldrain, etc.)
+- Keep2Share (handmatige import via `import-keep2share.js`)
 
 **Batch Preview:**
 De add-on detecteert automatisch attachment links en toont ze bovenaan in de preview modal.
+
+## 🖼️ Gallery & Viewer (`webdl-gallery`)
+
+Standalone gallery server op `http://localhost:35731`. Leest direct uit PostgreSQL.
+
+**Gallery features:**
+- Gefilterd grid met kaarten (platform, kanaal, zoeken, media-type, min. rating)
+- Platform ↔ kanaal dropdown-linking (kanalen filteren op gekozen platform)
+- Deduplicatie: bestanden op meerdere schijven worden slechts 1× getoond
+- Auto-refresh polling (elke 10s)
+- Multi-tab ondersteuning (unieke tab-ID's, no-cache headers)
+- Infinite scroll
+
+**Viewer features:**
+- ★ Rating (0.5 - 5 sterren, klik links/rechts voor half/heel)
+- 🏷️ Tags systeem (toevoegen, verwijderen, filteren)
+- 🎬 Afspeelsnelheid (`[` / `]` toetsen, stappen: -2× tot 4×)
+- ⏪ Achteruit afspelen (negatieve snelheden via requestAnimationFrame)
+- 🔄 Loop secties (`I` = begin, `O` = einde, `P` = wis, visuele overlay op progress bar)
+- 📺 Diashow met kanaal-navigatie (pijltjes omhoog/omlaag)
+- 🔍 Zoom + pan (scrollwiel + slepen)
+- 📁 Open in Finder
+
+**Keyboard shortcuts (viewer):**
+
+| Toets | Actie |
+|-------|-------|
+| `←` `→` | Vorige / volgende |
+| `↑` `↓` | Vorig / volgend kanaal |
+| `Spatie` | Play / pause |
+| `[` `]` | Langzamer / sneller |
+| `\` | Reset snelheid naar 1× |
+| `I` | Loop start markeren |
+| `O` | Loop einde markeren |
+| `P` | Loop wissen |
+| `M` | Mute toggle |
+| `S` | Sidebar toggle |
+| `0-9` | Rating instellen |
+
+## 🔧 Download Hub (`webdl-hub`)
+
+Centrale download-orchestrator op `http://localhost:35730`.
+
+**Adapters:**
+- `yt-dlp` — YouTube, TikTok, etc.
+- `gallery-dl` — diverse image sites
+- `ofscraper` — OnlyFans
+- `reddit-dl` — Reddit
+- `instaloader` — Instagram
+- `vbulletin` — AmateurVoyeurForum (cookie-auth via `AVF_COOKIE` in `.env`)
+
+Zie [webdl-hub/ARCHITECTURE.md](./webdl-hub/ARCHITECTURE.md) en [webdl-hub/ROADMAP.md](./webdl-hub/ROADMAP.md) voor details.
 
 ## OnlyFans (ofscraper)
 
