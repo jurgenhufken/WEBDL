@@ -10,8 +10,10 @@ const MIME_MAP = {
   '.gif': 'image/gif', '.webp': 'image/webp', '.avif': 'image/avif',
   '.mp4': 'video/mp4', '.mkv': 'video/x-matroska', '.webm': 'video/webm',
   '.mov': 'video/quicktime', '.m4v': 'video/x-m4v', '.avi': 'video/x-msvideo',
-  '.flv': 'video/x-flv',
+  '.flv': 'video/x-flv', '.ts': 'video/mp2t',
 };
+
+const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.avif']);
 
 function createLegacyRouter({ repo }) {
   const r = express.Router();
@@ -49,10 +51,14 @@ function createLegacyRouter({ repo }) {
           CASE d.status
             WHEN 'downloading' THEN 0
             WHEN 'postprocessing' THEN 1
-            WHEN 'queued' THEN 2
-            WHEN 'pending' THEN 3
+            WHEN 'completed' THEN 2
+            WHEN 'queued' THEN 3
+            WHEN 'pending' THEN 4
+            WHEN 'error' THEN 5
+            WHEN 'cancelled' THEN 6
             ELSE 4
           END,
+          CASE WHEN d.filepath IS NOT NULL THEN 0 ELSE 1 END,
           d.updated_at DESC NULLS LAST,
           d.id DESC
         LIMIT $${idx++} OFFSET $${idx++}
@@ -156,8 +162,24 @@ function createLegacyRouter({ repo }) {
       );
       if (!rows[0]) return res.status(404).json({ error: 'niet gevonden' });
 
-      const thumbPath = rows[0].thumbnail;
-      if (thumbPath && fs.existsSync(thumbPath)) {
+      const row = rows[0];
+      const candidates = [];
+      if (row.thumbnail) candidates.push(row.thumbnail);
+      if (row.filepath) {
+        const dir = path.dirname(row.filepath);
+        const base = path.basename(row.filepath, path.extname(row.filepath));
+        candidates.push(
+          path.join(dir, `${base}_thumb_v3.jpg`),
+          path.join(dir, `${base}_thumb.jpg`),
+          path.join(dir, `${base}.webp`),
+        );
+        if (IMAGE_EXTS.has(path.extname(row.filepath).toLowerCase())) {
+          candidates.push(row.filepath);
+        }
+      }
+
+      const thumbPath = candidates.find((candidate) => candidate && fs.existsSync(candidate));
+      if (thumbPath) {
         const ext = path.extname(thumbPath).toLowerCase();
         res.setHeader('Content-Type', MIME_MAP[ext] || 'image/jpeg');
         res.setHeader('Cache-Control', 'public, max-age=600');

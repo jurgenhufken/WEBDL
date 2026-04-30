@@ -125,6 +125,7 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
           url,
           platform: slave.platform,
           metadata: { delegated_from_hub: true, hub_job_id: bookJob.id },
+          priority,
         });
         // Markeer hub-job als 'running' en sla simple_server_download_id op.
         await repo.pool.query(

@@ -20,6 +20,11 @@ const MERGE_VIDEO_HOSTS = [
 ];
 function classifyLane(url, adapter) {
   const u = String(url || '').toLowerCase();
+  if (adapter === 'slave-delegate') {
+    // Slave-delegated hosts are handled by simple-server; in the hub they
+    // should be grouped with lightweight media, not shown as video work.
+    return 'image';
+  }
   if (IMAGE_URL_RE.test(u)) return 'image';
   if (adapter === 'gallerydl' || adapter === 'reddit-dl') {
     // gallery-dl/reddit-dl zijn meestal images; videos in deze flow zijn zeldzaam.

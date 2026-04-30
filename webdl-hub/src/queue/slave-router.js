@@ -33,7 +33,7 @@ function isSlaveUrl(url) {
  * Delegeer naar simple-server door een rij in public.downloads aan te maken.
  * Returns { downloadId } on success.
  */
-async function delegateToSlave(pool, { url, platform, metadata = {} }) {
+async function delegateToSlave(pool, { url, platform, metadata = {}, priority = 0 }) {
   // Dedup: als URL al in downloads staat, geen nieuwe rij maken.
   const dup = await pool.query(
     `SELECT id, status FROM downloads
@@ -48,10 +48,10 @@ async function delegateToSlave(pool, { url, platform, metadata = {} }) {
   }
 
   const { rows } = await pool.query(
-    `INSERT INTO downloads (url, platform, status, metadata, source_url, created_at, updated_at)
-     VALUES ($1, $2, 'pending', $3, $1, now(), now())
+    `INSERT INTO downloads (url, platform, status, metadata, source_url, priority, created_at, updated_at)
+     VALUES ($1, $2, 'pending', $3, $1, $4, now(), now())
      RETURNING id`,
-    [url, platform, JSON.stringify({ ...metadata, origin: 'webdl-hub' })],
+    [url, platform, JSON.stringify({ ...metadata, origin: 'webdl-hub' }), Math.max(Number(priority) || 0, 10)],
   );
   return { downloadId: rows[0].id, duplicate: false };
 }

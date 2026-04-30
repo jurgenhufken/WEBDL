@@ -64,7 +64,15 @@ app.get('/api/items', async (req, res) => {
     if (Number.isFinite(minRating)) { params.push(minRating); where.push(`rating >= $${params.length}`); }
     if (mediaType === 'video') { where.push(`lower(COALESCE(format,'')) IN (${VIDEO_EXTS.map(e=>`'${e}'`).join(',')})`); }
     if (mediaType === 'image') { where.push(`lower(COALESCE(format,'')) NOT IN (${VIDEO_EXTS.map(e=>`'${e}'`).join(',')})`); }
-    if (Number.isFinite(tagId)) { params.push(tagId); where.push(`id IN (SELECT download_id FROM download_tags WHERE tag_id = $${params.length})`); }
+    if (Number.isFinite(tagId)) {
+      params.push(tagId);
+      where.push(`id IN (
+        SELECT dt.download_id
+          FROM download_tags dt
+          JOIN tags t ON t.name = dt.tag
+         WHERE t.id = $${params.length}
+      )`);
+    }
 
     const orderBy = sort === 'random'
       ? 'RANDOM()'
@@ -252,7 +260,7 @@ app.get('/thumb/:id', async (req, res) => {
 // ─── Tags CRUD ─────────────────────────────────────────────────────────────
 app.get('/api/tags', async (_req, res) => {
   try {
-    const { rows } = await pool.query('SELECT id, name, created_at FROM tags ORDER BY name ASC');
+    const { rows } = await pool.query('SELECT id, name FROM tags ORDER BY name ASC');
     res.json({ tags: rows });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -271,7 +279,10 @@ app.post('/api/tags', async (req, res) => {
 app.delete('/api/tags/:id', async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
-    await pool.query('DELETE FROM download_tags WHERE tag_id=$1', [id]);
+    const tag = await pool.query('SELECT name FROM tags WHERE id=$1', [id]);
+    if (tag.rows[0]) {
+      await pool.query('DELETE FROM download_tags WHERE tag=$1', [tag.rows[0].name]);
+    }
     await pool.query('DELETE FROM tags WHERE id=$1', [id]);
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -282,7 +293,7 @@ app.get('/api/items/:id/tags', async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
     const { rows } = await pool.query(
-      'SELECT t.id, t.name FROM tags t JOIN download_tags dt ON t.id=dt.tag_id WHERE dt.download_id=$1 ORDER BY t.name',
+      'SELECT t.id, t.name FROM tags t JOIN download_tags dt ON t.name=dt.tag WHERE dt.download_id=$1 ORDER BY t.name',
       [id]);
     res.json({ tags: rows });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -293,9 +304,11 @@ app.post('/api/items/:id/tags', async (req, res) => {
     const itemId = parseInt(req.params.id, 10);
     const tagId = parseInt(req.body.tag_id, 10);
     if (!Number.isFinite(tagId)) return res.status(400).json({ error: 'tag_id vereist' });
+    const tag = await pool.query('SELECT name FROM tags WHERE id=$1', [tagId]);
+    if (!tag.rows[0]) return res.status(404).json({ error: 'tag niet gevonden' });
     await pool.query(
-      'INSERT INTO download_tags (download_id, tag_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
-      [itemId, tagId]);
+      'INSERT INTO download_tags (download_id, tag) VALUES ($1,$2) ON CONFLICT ON CONSTRAINT download_tags_download_id_tag_key DO NOTHING',
+      [itemId, tag.rows[0].name]);
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -304,7 +317,10 @@ app.delete('/api/items/:id/tags/:tagId', async (req, res) => {
   try {
     const itemId = parseInt(req.params.id, 10);
     const tagId = parseInt(req.params.tagId, 10);
-    await pool.query('DELETE FROM download_tags WHERE download_id=$1 AND tag_id=$2', [itemId, tagId]);
+    const tag = await pool.query('SELECT name FROM tags WHERE id=$1', [tagId]);
+    if (tag.rows[0]) {
+      await pool.query('DELETE FROM download_tags WHERE download_id=$1 AND tag=$2', [itemId, tag.rows[0].name]);
+    }
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
