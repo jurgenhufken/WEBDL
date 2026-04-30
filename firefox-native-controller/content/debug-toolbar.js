@@ -424,11 +424,12 @@
         u.hash = '';
         const host = String(u.hostname || '').toLowerCase();
         if (!(host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com'))) return;
-        const m = String(u.pathname || '').match(/\/threads\/[^\/\?#]*\.(\d+)(?:\/|\?|#|$)/i);
+        const m = String(u.pathname || '').match(/\/threads\/([^\/\?#]+)\.(\d+)(?:\/[^\/\?#]*)?\/?$/i);
         if (!m || !m[1]) return;
+        u.pathname = `/threads/${m[1]}.${m[2]}/`;
         u.search = '';
         const final = u.toString();
-        const key = m[1];
+        const key = m[2];
         if (seen.has(key)) return;
         seen.add(key);
         out.push(final);
@@ -519,7 +520,7 @@
       const links = collectFootFetishForumThreadLinksFromForumDocument(doc, forumUrl, maxThreads - threadLinks.length);
       for (const link of links) {
         try {
-          const m = String(link || '').match(/\/threads\/[^\/\?#]*\.(\d+)(?:\/|\?|#|$)/i);
+          const m = String(link || '').match(/\/threads\/[^\/\?#]+\.(\d+)(?:\/[^\/\?#]*)?(?:\/|\?|#|$)/i);
           const key = m && m[1] ? m[1] : link;
           if (seenThreads.has(key)) continue;
           seenThreads.add(key);
@@ -910,7 +911,7 @@
 
     else if (/footfetishforum\.com/i.test(url)) {
       meta.platform = 'footfetishforum';
-      const tm = url.match(/footfetishforum\.com\/threads\/[^\/\?#]*\.(\d+)(?:\/|\?|#|$)/i);
+      const tm = url.match(/footfetishforum\.com\/threads\/[^\/\?#]+\.(\d+)(?:\/[^\/\?#]*)?(?:\/|\?|#|$)/i);
       if (tm && tm[1]) meta.channel = `thread_${tm[1]}`;
       const fm = url.match(/footfetishforum\.com\/forums\/[^\/\?#]*\.(\d+)(?:\/|\?|#|$)/i);
       if (fm && fm[1]) meta.channel = `forum_${fm[1]}`;

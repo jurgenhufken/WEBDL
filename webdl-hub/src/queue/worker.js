@@ -212,17 +212,30 @@ function startWorkerPool({
           WHERE status='running' AND progress_pct >= 100
         RETURNING id`,
       );
+      const { rows: failedRows } = await repo.pool.query(
+        `UPDATE ${repo.schema}.jobs
+            SET status='failed',
+                error=COALESCE(error, 'stale running job exceeded max attempts'),
+                finished_at=now(),
+                locked_by=NULL, locked_at=NULL
+          WHERE status='running'
+            AND attempts >= max_attempts
+            AND (locked_at IS NULL OR locked_at < NOW() - INTERVAL '10 minutes')
+        RETURNING id`,
+      );
       const { rows: requeuedRows } = await repo.pool.query(
         `UPDATE ${repo.schema}.jobs
             SET status='queued',
                 locked_by=NULL, locked_at=NULL, started_at=NULL
           WHERE status='running'
+            AND attempts < max_attempts
             AND (locked_at IS NULL OR locked_at < NOW() - INTERVAL '10 minutes')
         RETURNING id`,
       );
-      if (doneRows.length || requeuedRows.length) {
+      if (doneRows.length || failedRows.length || requeuedRows.length) {
         logger.info('worker.startup.reclaim', {
           markedDone: doneRows.map((r) => r.id),
+          markedFailed: failedRows.map((r) => r.id),
           requeued: requeuedRows.map((r) => r.id),
         });
       }

@@ -93,7 +93,7 @@ function parseAvfoundationDeviceList(text) {
 function parseFootFetishForumThreadInfo(inputUrl) {
   try {
     const u = String(inputUrl || '');
-    const m = u.match(/footfetishforum\.com\/threads\/([^\/\?#]+)\.(\d+)(?:\/|\?|#|$)/i);
+    const m = u.match(/footfetishforum\.com\/threads\/([^\/\?#]+)\.(\d+)(?:\/[^\/\?#]*)?(?:\/|\?|#|$)/i);
     if (!m) return null;
     const slug = String(m[1] || '').trim();
     const id = String(m[2] || '').trim();
@@ -7381,7 +7381,7 @@ function isFootfetishforumThreadUrl(input) {
     const u = new URL(String(input || ''));
     const host = String(u.hostname || '').toLowerCase();
     if (!(host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com'))) return false;
-    return /\/threads\/[^\/\?#]*\.(\d+)(?:\/|\?|#|$)/i.test(String(u.pathname || '') + String(u.search || '') + String(u.hash || ''));
+    return /\/threads\/[^\/\?#]+\.(\d+)(?:\/[^\/\?#]*)?(?:\/|\?|#|$)/i.test(String(u.pathname || '') + String(u.search || '') + String(u.hash || ''));
   } catch (e) {
     return false;
   }
