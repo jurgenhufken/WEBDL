@@ -140,6 +140,7 @@
       params.set('offset', String(state.offset));
       for (const [k, v] of Object.entries(state.filters)) if (v) params.set(k, v);
       const resp = await apiFetch('/api/items?' + params.toString());
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
       if (!data.items) throw new Error(data.error || 'geen items');
       state.items.push(...data.items);
@@ -165,10 +166,11 @@
   async function loadFilterDropdowns() {
     try {
       const platformsResp = await apiFetch('/api/platforms').then(r => r.json());
+      const platforms = Array.isArray(platformsResp.platforms) ? platformsResp.platforms : [];
       const pSel = $('platform');
-      const total = platformsResp.platforms.reduce((s, p) => s + Number(p.count), 0);
+      const total = platforms.reduce((s, p) => s + Number(p.count), 0);
       pSel.innerHTML = `<option value="">Alle platforms (${total})</option>`;
-      for (const p of platformsResp.platforms) {
+      for (const p of platforms) {
         const o = document.createElement('option');
         o.value = p.platform;
         o.textContent = `${p.platform} (${p.count})`;
@@ -185,10 +187,11 @@
         ? '/api/channels?platform=' + encodeURIComponent(plat)
         : '/api/channels';
       const channelsResp = await apiFetch(url).then(r => r.json());
+      const channels = Array.isArray(channelsResp.channels) ? channelsResp.channels : [];
       const cSel = $('channel');
       const prev = cSel.value;
       cSel.innerHTML = '<option value="">Alle kanalen</option>';
-      for (const c of channelsResp.channels.slice(0, 300)) {
+      for (const c of channels.slice(0, 300)) {
         if (!c.channel || c.channel === 'unknown') continue;
         const o = document.createElement('option');
         o.value = c.channel;

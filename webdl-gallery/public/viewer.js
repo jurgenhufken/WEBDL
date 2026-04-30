@@ -245,7 +245,7 @@
       el.vProgressBar.style.left = sideOffset + 'px';
       el.vProgressBar.style.right = sideOffset + 'px';
     }
-    mediaEl.addEventListener(isVid ? 'loadedmetadata' : 'load', alignProgressBar);
+    mediaEl.addEventListener(mediaEl.tagName === 'VIDEO' ? 'loadedmetadata' : 'load', alignProgressBar);
     // Ook bij resize
     if (!vs._resizeAlignBound) {
       vs._resizeAlignBound = true;
