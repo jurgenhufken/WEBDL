@@ -19,6 +19,8 @@ const upload = multer({ dest: path.join(os.tmpdir(), 'webdl-uploads') });
 const config = require('./config');
 const logger = require('./utils/logger'); // Overschrijft console.log globaal automatisch via require
 
+const FOOTFETISHFORUM_FIREFOX_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:150.0) Gecko/20100101 Firefox/150.0';
+
 // ========================
 // VIEW MODULES (GEEXTRAHEERD)
 // ========================
@@ -783,6 +785,110 @@ function shouldSkipMetadataFetchForUrl(inputUrl, platform) {
   } catch (e) {
     return false;
   }
+}
+
+function getRegistrableCookieDomain(hostname) {
+  const host = String(hostname || '').toLowerCase().replace(/^\.+/, '');
+  if (!host) return '';
+  if (host === 'localhost' || /^\d+\.\d+\.\d+\.\d+$/.test(host)) return host;
+  const parts = host.split('.').filter(Boolean);
+  if (parts.length <= 2) return host;
+  return parts.slice(-2).join('.');
+}
+
+function findFirefoxCookieSqliteFiles() {
+  const roots = [
+    path.join(os.homedir(), 'Library/Application Support/Firefox/Profiles'),
+    path.join(os.homedir(), '.mozilla/firefox')
+  ];
+  const out = [];
+  for (const root of roots) {
+    try {
+      if (!fs.existsSync(root)) continue;
+      for (const entry of fs.readdirSync(root)) {
+        const p = path.join(root, entry, 'cookies.sqlite');
+        if (fs.existsSync(p)) out.push(p);
+      }
+    } catch (e) { }
+  }
+  return out;
+}
+
+function sqliteSingleQuote(value) {
+  return String(value || '').replace(/'/g, "''");
+}
+
+function runSqliteQuery(sqlitePath, sql, timeoutMs = 4000) {
+  return new Promise((resolve, reject) => {
+    let tmpDir = '';
+    try {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'webdl-cookies-'));
+      const tmpDb = path.join(tmpDir, 'cookies.sqlite');
+      fs.copyFileSync(sqlitePath, tmpDb);
+      const proc = spawn('/usr/bin/sqlite3', ['-separator', '\t', tmpDb, sql], { stdio: ['ignore', 'pipe', 'pipe'] });
+      let stdout = '';
+      let stderr = '';
+      const timer = setTimeout(() => {
+        try { proc.kill('SIGKILL'); } catch (e) { }
+      }, Math.max(1000, timeoutMs));
+      proc.stdout.on('data', (d) => { stdout += d.toString(); });
+      proc.stderr.on('data', (d) => { stderr += d.toString(); });
+      proc.on('close', (code) => {
+        clearTimeout(timer);
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (e) { }
+        if (code === 0) resolve(stdout);
+        else reject(new Error(stderr.trim() || `sqlite3 exit code: ${code}`));
+      });
+      proc.on('error', (err) => {
+        clearTimeout(timer);
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (e) { }
+        reject(err);
+      });
+    } catch (e) {
+      try { if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) { }
+      reject(e);
+    }
+  });
+}
+
+const browserCookieCache = new Map();
+async function loadCookiesForDomain(hostname) {
+  const host = String(hostname || '').toLowerCase().replace(/^\.+/, '');
+  if (!host) return '';
+  const cached = browserCookieCache.get(host);
+  if (cached && Date.now() - cached.at < 60000) return cached.value || '';
+  const base = getRegistrableCookieDomain(host);
+  const hostLit = sqliteSingleQuote(host);
+  const baseLit = sqliteSingleQuote(base);
+  const sql = `
+    SELECT name, value
+      FROM moz_cookies
+     WHERE (
+       host = '${hostLit}'
+       OR host = '.${hostLit}'
+       OR host = '${baseLit}'
+       OR host = '.${baseLit}'
+       OR host LIKE '%.${baseLit}'
+     )
+       AND (expiry IS NULL OR expiry = 0 OR expiry > strftime('%s','now') OR expiry > (strftime('%s','now') * 1000))
+     ORDER BY host DESC, name ASC;
+  `;
+  const cookies = new Map();
+  for (const sqlitePath of findFirefoxCookieSqliteFiles()) {
+    try {
+      const text = await runSqliteQuery(sqlitePath, sql);
+      for (const line of String(text || '').split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        const parts = line.split('\t');
+        const name = parts.shift();
+        const value = parts.join('\t');
+        if (name) cookies.set(name, value || '');
+      }
+    } catch (e) { }
+  }
+  const value = Array.from(cookies.entries()).map(([name, value]) => `${name}=${value}`).join('; ');
+  browserCookieCache.set(host, { at: Date.now(), value });
+  return value;
 }
 
 // Geeft het absolute pad terug van het eerste (alfabetisch) geïndexeerde bestand
@@ -9740,6 +9846,8 @@ function looksLikeDirectFileUrl(url) {
     if (host.includes('cdninstagram.com') || host.includes('fbcdn.net')) return true;
 
     const p = (u.pathname || '').toLowerCase();
+    if ((host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) && /^\/attachments\/(?:[^\/]+\.)?\d+\/?$/i.test(p)) return true;
+    if ((host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) && /\/data\/attachments\//i.test(p)) return true;
     const m = p.match(/\.([a-z0-9]{1,8})($|\?|#)/i); // Added query/hash support
     if (!m) {
       const suffix = p.match(/[-_](zip|rar|7z|tar|gz|jpg|jpeg|png|gif|webp|bmp|mp4|mov|m4v|webm|mkv|mp3|m4a|wav|flac|pdf)($|\?|#)/i);
@@ -9793,13 +9901,22 @@ async function fetchTextWithTimeout(url, timeoutMs = 15000, referer = '') {
     try { ctrl.abort(); } catch (e) { }
   }, Math.max(1000, timeoutMs));
   try {
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      ...(referer ? { 'Referer': referer } : {})
+    };
+    try {
+      const host = new URL(String(url || '')).hostname.toLowerCase();
+      if (host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) {
+        headers['User-Agent'] = FOOTFETISHFORUM_FIREFOX_UA;
+        const cookieStr = await loadCookiesForDomain(host);
+        if (cookieStr) headers.Cookie = cookieStr;
+      }
+    } catch (e) { }
     const res = await fetch(String(url || ''), {
       method: 'GET',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        ...(referer ? { 'Referer': referer } : {})
-      },
+      headers,
       signal: ctrl.signal
     });
     const text = await res.text();
@@ -10286,12 +10403,20 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
     if (!referer && platform === 'elitebabes') referer = 'https://www.elitebabes.com/';
     if (!referer && platform === 'erome') referer = 'https://www.erome.com/';
     if (!referer && platform === 'zishy') referer = 'https://www.zishy.com/';
+    let curlUserAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
+    let curlHost = '';
+    try {
+      curlHost = new URL(String(url || '')).hostname.toLowerCase();
+      if (curlHost === 'footfetishforum.com' || curlHost.endsWith('.footfetishforum.com')) {
+        curlUserAgent = FOOTFETISHFORUM_FIREFOX_UA;
+      }
+    } catch (e) { }
     const curlArgs = [
       '-L',
       '--fail',
       '--silent',
       '--show-error',
-      '-A', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+      '-A', curlUserAgent
     ];
     // For zishy: use Firefox cookies (user is logged in)
     if (platform === 'zishy') {
@@ -10299,6 +10424,12 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
         const cookieStr = await loadCookiesForDomain('zishy.com');
         if (cookieStr) curlArgs.push('-b', cookieStr);
       } catch (e) {}
+    }
+    if (curlHost === 'footfetishforum.com' || curlHost.endsWith('.footfetishforum.com')) {
+      try {
+        const cookieStr = await loadCookiesForDomain(curlHost);
+        if (cookieStr) curlArgs.push('-b', cookieStr);
+      } catch (e) { }
     }
     if (referer) curlArgs.push('-e', referer);
     curlArgs.push('-D', headerFilepath);

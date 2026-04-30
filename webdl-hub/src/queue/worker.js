@@ -219,6 +219,7 @@ function startWorkerPool({
                 finished_at=now(),
                 locked_by=NULL, locked_at=NULL
           WHERE status='running'
+            AND adapter <> 'slave-delegate'
             AND attempts >= max_attempts
             AND (locked_at IS NULL OR locked_at < NOW() - INTERVAL '10 minutes')
         RETURNING id`,
@@ -228,6 +229,7 @@ function startWorkerPool({
             SET status='queued',
                 locked_by=NULL, locked_at=NULL, started_at=NULL
           WHERE status='running'
+            AND adapter <> 'slave-delegate'
             AND attempts < max_attempts
             AND (locked_at IS NULL OR locked_at < NOW() - INTERVAL '10 minutes')
         RETURNING id`,
