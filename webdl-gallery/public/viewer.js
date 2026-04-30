@@ -37,6 +37,15 @@
     muted: false,
     seekDragging: false,
 
+    // Afspeelsnelheid
+    playbackRate: 1.0,
+    reverseRAF: null,      // requestAnimationFrame ID voor achteruit
+    reverseLastT: 0,
+
+    // Loop sectie
+    loopStart: null,       // in seconden
+    loopEnd: null,
+
     // Zoom (exact als oude viewer)
     zoomed: false,
     scale: 1,
@@ -59,8 +68,12 @@
   // Gecachede DOM refs
   const el = {};
 
+  // Uniek per tabblad — voorkomt dat de browser requests van verschillende tabs samenvoegt
+  const VIEWER_TAB_ID = Math.random().toString(36).slice(2, 8);
+
   async function api(url, opts) {
-    const r = await fetch(url, opts);
+    const sep = url.includes('?') ? '&' : '?';
+    const r = await fetch(url + sep + '_t=' + VIEWER_TAB_ID, opts);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     return r.json();
   }
@@ -160,13 +173,23 @@
         if (!vs.seekDragging && mediaEl.duration) {
           const pct = (mediaEl.currentTime / mediaEl.duration) * 100;
           el.vSeek.value = String(Math.round(pct * 10));
-          // YouTube progress bar
           if (el.vProgressFill) el.vProgressFill.style.width = pct + '%';
           if (el.vProgressHandle) el.vProgressHandle.style.left = pct + '%';
+
+          // Loop sectie: spring terug naar begin als we voorbij het einde zijn
+          if (vs.loopStart != null && vs.loopEnd != null && mediaEl.currentTime >= vs.loopEnd) {
+            mediaEl.currentTime = vs.loopStart;
+          }
         }
       });
       mediaEl.addEventListener('ended', () => {
+        stopReverse();
         if (vs.slideshow && vs.videoWait) slideshowTick();
+      });
+
+      // Pas opgeslagen snelheid toe
+      mediaEl.addEventListener('loadedmetadata', () => {
+        if (vs.playbackRate > 0) mediaEl.playbackRate = vs.playbackRate;
       });
 
       el.vVol.disabled  = false;
@@ -248,6 +271,9 @@
   }
 
   function cleanupMedia() {
+    stopReverse();
+    vs.loopStart = null;
+    vs.loopEnd = null;
     const v = el.vContent.querySelector('video');
     if (v) { v.pause(); v.src = ''; v.load(); }
     el.vContent.innerHTML = '';
@@ -344,9 +370,46 @@
 
   // ─── Rating ───────────────────────────────────────────────────────────────
   function updateRatingDisplay(rating) {
-    el.vNowRating.innerHTML =
-      gal().starHtml(rating) +
-      `<span class="rating-val">${rating != null ? rating : '—'}</span>`;
+    el.vNowRating.innerHTML = '';
+    const r = Number(rating) || 0;
+
+    for (let i = 1; i <= 5; i++) {
+      const s = document.createElement('span');
+      s.style.cssText = 'cursor:pointer; font-size:20px; padding:0 1px; transition:transform .1s;';
+
+      if (r >= i) {
+        s.textContent = '★';
+        s.style.color = '#ffd060';
+        s.style.textShadow = '0 0 6px rgba(255,208,96,.6)';
+      } else if (r >= i - 0.5) {
+        s.textContent = '⯪';
+        s.style.color = '#ffd060';
+        s.style.textShadow = '0 0 6px rgba(255,208,96,.6)';
+      } else {
+        s.textContent = '★';
+        s.style.color = 'rgba(255,255,255,.25)';
+      }
+
+      s.addEventListener('mouseenter', () => { s.style.transform = 'scale(1.3)'; });
+      s.addEventListener('mouseleave', () => { s.style.transform = ''; });
+
+      s.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const rect = s.getBoundingClientRect();
+        const half = (e.clientX - rect.left) < rect.width / 2;
+        let val = half ? i - 0.5 : i;
+        if (val === rating) val = null;   // toggle wist
+        setRating(val);
+      });
+
+      el.vNowRating.appendChild(s);
+    }
+
+    // Cijfer-label
+    const lbl = document.createElement('span');
+    lbl.style.cssText = 'font-size:11px; color:rgba(255,255,255,.5); margin-left:6px; font-weight:600;';
+    lbl.textContent = rating != null ? String(rating) : '—';
+    el.vNowRating.appendChild(lbl);
   }
 
   async function setRating(r) {
@@ -365,17 +428,6 @@
     } catch (e) {
       log('Rating fout: ' + e.message);
     }
-  }
-
-  // Rating klik — halve ster op X-positie
-  function handleRatingClick(e) {
-    const rect = el.vNowRating.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    // Sterren beslaan ca. 5 * 1em breedte
-    const starAreaPx = Math.min(rect.width * 0.72, 160);
-    const frac = Math.max(0, Math.min(1, x / starAreaPx));
-    const r = Math.max(0.5, Math.min(5, Math.round(frac * 10) / 2));
-    setRating(r);
   }
 
   // ─── HUD ──────────────────────────────────────────────────────────────────
@@ -589,6 +641,139 @@
     el.vLogBody.textContent = `[${ts}] ${msg}\n` + el.vLogBody.textContent;
   }
 
+  // ─── Afspeelsnelheid ─────────────────────────────────────────────────────
+  const SPEED_STEPS = [-2, -1, -0.5, 0.25, 0.5, 1, 1.5, 2, 3, 4];
+
+  function changeSpeed(dir) {
+    const cur = vs.playbackRate;
+    let idx = SPEED_STEPS.indexOf(cur);
+    if (idx === -1) {
+      // Zoek dichtstbijzijnde
+      idx = SPEED_STEPS.findIndex(s => s >= cur);
+      if (idx === -1) idx = SPEED_STEPS.length - 1;
+    }
+    idx = Math.max(0, Math.min(SPEED_STEPS.length - 1, idx + dir));
+    setSpeed(SPEED_STEPS[idx]);
+  }
+
+  function resetSpeed() { setSpeed(1); }
+
+  function setSpeed(rate) {
+    vs.playbackRate = rate;
+    const v = el.vContent.querySelector('video');
+
+    if (rate <= 0) {
+      // Achteruit: zet video op pause, start RAF-loop
+      if (v) { v.pause(); v.playbackRate = 1; }
+      startReverse(Math.abs(rate) || 1);
+    } else {
+      // Vooruit: stop eventuele reverse loop
+      stopReverse();
+      if (v) { v.playbackRate = rate; if (v.paused) v.play(); }
+    }
+    updateSpeedIndicator();
+    log(`Snelheid: ${rate > 0 ? rate + '×' : rate + '× (achteruit)'}`);
+  }
+
+  function startReverse(speed) {
+    stopReverse();
+    vs.reverseLastT = performance.now();
+    function tick(now) {
+      const v = el.vContent.querySelector('video');
+      if (!v || vs.playbackRate > 0) { stopReverse(); return; }
+      const dt = (now - vs.reverseLastT) / 1000;
+      vs.reverseLastT = now;
+      v.currentTime = Math.max(0, v.currentTime - dt * speed);
+      if (v.currentTime <= 0) { stopReverse(); return; }
+      vs.reverseRAF = requestAnimationFrame(tick);
+    }
+    vs.reverseRAF = requestAnimationFrame(tick);
+  }
+
+  function stopReverse() {
+    if (vs.reverseRAF) { cancelAnimationFrame(vs.reverseRAF); vs.reverseRAF = null; }
+  }
+
+  function updateSpeedIndicator() {
+    let ind = document.getElementById('vSpeedIndicator');
+    if (!ind) {
+      ind = document.createElement('span');
+      ind.id = 'vSpeedIndicator';
+      ind.style.cssText = 'font-size:11px; font-weight:700; padding:3px 8px; border-radius:4px; margin-left:4px; cursor:pointer; user-select:none; transition:all .2s;';
+      ind.title = 'Klik om te resetten. [ = langzamer, ] = sneller';
+      ind.addEventListener('click', () => resetSpeed());
+      // Voeg toe naast de slideshow-knop in topbar center
+      const center = document.querySelector('.vtop-center');
+      if (center) center.appendChild(ind);
+    }
+    const r = vs.playbackRate;
+    if (r === 1) {
+      ind.textContent = '1×';
+      ind.style.background = 'rgba(255,255,255,.08)';
+      ind.style.color = 'rgba(255,255,255,.4)';
+    } else {
+      ind.textContent = (r > 0 ? '' : '') + r + '×';
+      ind.style.background = r < 0 ? 'rgba(255,80,80,.25)' : 'rgba(80,200,255,.2)';
+      ind.style.color = r < 0 ? '#ff8080' : '#80d0ff';
+    }
+  }
+
+  // ─── Loop sectie ─────────────────────────────────────────────────────────
+  function setLoopPoint(which) {
+    const v = el.vContent.querySelector('video');
+    if (!v || !v.duration) return;
+
+    if (which === 'start') {
+      vs.loopStart = v.currentTime;
+      log(`Loop start: ${fmtTime(vs.loopStart)}`);
+    } else {
+      vs.loopEnd = v.currentTime;
+      log(`Loop einde: ${fmtTime(vs.loopEnd)}`);
+    }
+
+    // Zorg dat start < end
+    if (vs.loopStart != null && vs.loopEnd != null && vs.loopStart > vs.loopEnd) {
+      [vs.loopStart, vs.loopEnd] = [vs.loopEnd, vs.loopStart];
+    }
+
+    updateLoopOverlay();
+  }
+
+  function clearLoop() {
+    vs.loopStart = null;
+    vs.loopEnd = null;
+    updateLoopOverlay();
+    log('Loop gewist');
+  }
+
+  function updateLoopOverlay() {
+    let ov = document.getElementById('vLoopOverlay');
+    if (!ov && el.vProgressBar) {
+      ov = document.createElement('div');
+      ov.id = 'vLoopOverlay';
+      ov.style.cssText = 'position:absolute; bottom:8px; height:4px; background:rgba(80,200,255,.35); pointer-events:none; z-index:5; border-radius:2px; transition:all .2s;';
+      el.vProgressBar.appendChild(ov);
+    }
+    if (!ov) return;
+
+    const v = el.vContent.querySelector('video');
+    if (!v || !v.duration || vs.loopStart == null || vs.loopEnd == null) {
+      ov.style.display = 'none';
+      return;
+    }
+    const left = (vs.loopStart / v.duration) * 100;
+    const width = ((vs.loopEnd - vs.loopStart) / v.duration) * 100;
+    ov.style.display = '';
+    ov.style.left = left + '%';
+    ov.style.width = width + '%';
+  }
+
+  function fmtTime(sec) {
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return m + ':' + String(s).padStart(2, '0');
+  }
+
   function toggleLog() {
     vs.logOpen = !vs.logOpen;
     el.vLogPanel.classList.toggle('hidden', !vs.logOpen);
@@ -634,6 +819,12 @@
           toggleLog();
           e.preventDefault();
           break;
+        case '[': changeSpeed(-1); e.preventDefault(); break;
+        case ']': changeSpeed(1);  e.preventDefault(); break;
+        case '\\': resetSpeed();   e.preventDefault(); break;
+        case 'i': case 'I': setLoopPoint('start'); e.preventDefault(); break;
+        case 'o': case 'O': setLoopPoint('end');   e.preventDefault(); break;
+        case 'p': case 'P': clearLoop();            e.preventDefault(); break;
         default:
           if (/^[0-9]$/.test(e.key)) {
             const r = (10 - parseInt(e.key, 10)) / 2; // 0→5.0, 9→0.5
@@ -773,9 +964,6 @@
         v.currentTime = pct * v.duration;
       });
     }
-
-    // Rating klik → halve ster
-    el.vNowRating.addEventListener('click', handleRatingClick);
 
     // Rating rechterklik → wissen
     el.vNowRating.addEventListener('contextmenu', (e) => {

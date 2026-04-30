@@ -251,9 +251,9 @@ input[type="range"]:disabled { opacity: 0.35; cursor: default; }
 .vtop-title { font-size: 13px; font-weight: 600; color: var(--title-color); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-shadow: 0 0 12px var(--accent-neon), 0 0 24px var(--accent-glow); }
 .vtop-sub { font-size: 11px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .vtop-center { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-.vtop-rating { font-size: 20px; letter-spacing: 1px; color: var(--star-on); cursor: pointer; user-select: none; white-space: nowrap; flex-shrink: 0; text-shadow: 0 0 8px rgba(255,208,96,0.6); }
-.vtop-rating .off { color: var(--star-off); text-shadow: none; }
-.vtop-rating .rating-val { font-size: 11px; color: var(--text-secondary); margin-left: 4px; vertical-align: middle; }
+.vtop-rating { font-size: 20px; letter-spacing: 2px; color: var(--star-on); cursor: pointer; user-select: none; white-space: nowrap; flex-shrink: 0; display: flex; align-items: center; text-shadow: 0 0 8px rgba(255,208,96,0.6); }
+.vtop-rating .off { color: rgba(255, 255, 255, 0.3); text-shadow: none; }
+.vtop-rating .rating-val { font-size: 11px; color: var(--text-secondary); margin-left: 8px; font-weight: 600; }
 .vtop-right { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
 .vtop-btn { background: var(--btn-bg); color: #fff; border: 1px solid var(--btn-border); border-radius: 5px; padding: 4px 8px; font-size: 11px; cursor: pointer; white-space: nowrap; transition: all .2s ease; font-weight: 500; }
 .vtop-btn:hover { background: var(--btn-hover); border-color: var(--accent); color: var(--title-color); box-shadow: 0 0 8px var(--accent-glow); }
@@ -283,12 +283,12 @@ input[type="range"]:disabled { opacity: 0.35; cursor: default; }
 .hud-pill.hud-hidden { opacity: 0; }
 .viewer-stage.hud-hidden .vprogressbar { opacity: 0; }
 
-.vprogressbar { position: absolute; bottom: 0; left: 0; right: 0; height: 24px; background: transparent; cursor: pointer; z-index: 10; transition: opacity 0.4s ease; transform: translateY(50%); /* Center the 24px hit area exactly on the bottom edge */ }
-.vprogressbar::before { content: ''; position: absolute; top: 50%; left: 0; right: 0; height: 4px; transform: translateY(-50%); background: var(--accent-soft); transition: height 0.2s ease; }
+.vprogressbar { position: absolute; bottom: 0; left: 0; right: 0; height: 32px; background: transparent; cursor: pointer; z-index: 10; transition: opacity 0.4s ease; }
+.vprogressbar::before { content: ''; position: absolute; bottom: 8px; left: 0; right: 0; height: 4px; background: var(--accent-soft); transition: height 0.2s ease; }
 .vprogressbar:hover::before { height: 8px; }
-.vprogressbar-fill { position: absolute; top: 50%; left: 0; height: 4px; transform: translateY(-50%); background: var(--progress); width: 0%; transition: width 0.1s linear, height 0.2s ease; pointer-events: none; border-radius: 0 2px 2px 0; box-shadow: 0 0 6px var(--accent-glow); }
+.vprogressbar-fill { position: absolute; bottom: 8px; left: 0; height: 4px; background: var(--progress); width: 0%; transition: width 0.1s linear, height 0.2s ease; pointer-events: none; border-radius: 0 2px 2px 0; box-shadow: 0 0 6px var(--accent-glow); }
 .vprogressbar:hover .vprogressbar-fill { height: 8px; }
-.vprogressbar-handle { position: absolute; top: 50%; width: 14px; height: 14px; border-radius: 50%; background: var(--accent); transform: translate(-50%, -50%); opacity: 0; transition: opacity 0.2s ease; pointer-events: none; left: 0%; box-shadow: 0 0 8px var(--accent-glow); }
+.vprogressbar-handle { position: absolute; bottom: 3px; width: 14px; height: 14px; border-radius: 50%; background: var(--accent); transform: translateX(-50%); opacity: 0; transition: opacity 0.2s ease; pointer-events: none; left: 0%; box-shadow: 0 0 8px var(--accent-glow); }
 .vprogressbar:hover .vprogressbar-handle { opacity: 1; }
 
 /* ─── Tag dialog ──────────────────────────────────────────────────────────── */
