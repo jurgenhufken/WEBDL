@@ -8,6 +8,7 @@ const { createLogger } = require('./util/logger');
 const { createRepo } = require('./db/repo');
 const { startWorkerPool } = require('./queue/worker');
 const { startSlavePoller } = require('./queue/slave-poller');
+const { startSabnzbdWatcher } = require('./importers/sabnzbd-watch');
 const { buildApp } = require('./app');
 
 const adapters = [
@@ -40,10 +41,23 @@ async function main() {
   });
 
   const slavePoller = startSlavePoller({ repo, logger, intervalMs: 5000 });
+  const sabnzbdWatcher = config.sabnzbdWatchEnabled
+    ? startSabnzbdWatcher({
+        repo,
+        logger,
+        rootDir: config.sabnzbdCompletedDir,
+        pollMs: config.sabnzbdPollMs,
+        minFileAgeMs: config.sabnzbdMinFileAgeMs,
+        configPath: config.sabnzbdConfigPath,
+        sabnzbdUrl: config.sabnzbdUrl,
+        sabnzbdApiKey: config.sabnzbdApiKey,
+      })
+    : null;
   logger.info('worker.started', { worker: pool.workerId });
 
   const shutdown = async (sig) => {
     logger.info('server.shutdown', { sig });
+    if (sabnzbdWatcher) await sabnzbdWatcher.stop();
     await slavePoller.stop();
     await pool.stop();
     server.close();

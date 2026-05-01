@@ -32,9 +32,10 @@ const VIDEO_EXTS = ['mp4','webm','mkv','mov','m4v','avi','flv','ts'];
 const IMAGE_EXTS = ['jpg','jpeg','png','gif','webp','avif','bmp'];
 const MEDIA_EXTS = [...VIDEO_EXTS, ...IMAGE_EXTS];
 const AUX_RELPATH_RE = String.raw`(_thumb(_v[0-9]+)?\.(jpe?g|png|webp)$|_logo\.(jpe?g|png|webp)$|\.(json|part|tmp|ytdl)$)`;
+const TEMP_RELPATH_RE = String.raw`(^|[\\/])(_UNPACK_|_FAILED_|_ADMIN_|__ADMIN__|incomplete)([^\\/]*)([\\/]|$)`;
 const MEDIA_EXT_SQL = MEDIA_EXTS.map(e => `'${e}'`).join(',');
 const ACTIVE_STATUSES = ['pending', 'queued', 'downloading', 'postprocessing'];
-const HIDDEN_GALLERY_STATUSES = ['pending', 'queued', 'downloading', 'postprocessing'];
+const HIDDEN_GALLERY_STATUSES = ['pending', 'queued', 'downloading', 'postprocessing', 'superseded'];
 const KEEP2SHARE_DIR = path.join(BASE_DIR, '_Keep2Share');
 const JDOWNLOADER_CFG_DIR = process.env.JDOWNLOADER_CFG_DIR || path.join(process.env.HOME || '/Users/jurgen', 'Library/Application Support/JDownloader 2/cfg');
 const KEEP2SHARE_SYNC_MS = Number(process.env.KEEP2SHARE_SYNC_MS || 60000);
@@ -831,6 +832,7 @@ app.get('/api/items', async (req, res) => {
          AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
     )`);
     directWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
+    directWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
     directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
     const fileWhere = buildItemFilters({
       req, params,
@@ -839,6 +841,8 @@ app.get('/api/items', async (req, res) => {
       ratingExpr: 'df.rating',
     });
     fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
+    fileWhere.push(`df.relpath !~* '${TEMP_RELPATH_RE}'`);
+    fileWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
     fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
     fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
     const screenshotWhere = buildScreenshotFilters({ req, params });
@@ -950,6 +954,7 @@ app.get('/api/items-since', async (req, res) => {
          AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})
     )`);
     directWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
+    directWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
     directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
     const fileWhere = buildItemFilters({
       req, params,
@@ -958,6 +963,8 @@ app.get('/api/items-since', async (req, res) => {
       ratingExpr: 'df.rating',
     });
     fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
+    fileWhere.push(`df.relpath !~* '${TEMP_RELPATH_RE}'`);
+    fileWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
     fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
     fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})`);
     const screenshotWhere = buildScreenshotFilters({ req, params });

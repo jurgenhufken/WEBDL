@@ -27,6 +27,7 @@
     newestFinishedAt: null,
     knownIds: new Set(),
     queryVersion: 0,
+    pendingNewItems: new Map(),
   };
 
   const $ = (id) => document.getElementById(id);
@@ -193,11 +194,28 @@
     state.loading = false;
     state.newestFinishedAt = null;
     state.knownIds = new Set();
+    state.pendingNewItems = new Map();
     state.queryVersion += 1;
   }
 
+  function activeFilterText() {
+    const f = state.filters;
+    const parts = [];
+    if (f.platform) parts.push(f.platform);
+    if (f.channel) parts.push(f.channel);
+    if (f.media_type) parts.push(f.media_type === 'video' ? 'video' : 'afbeelding');
+    if (f.min_rating) parts.push(`${f.min_rating}+ sterren`);
+    if (f.q) parts.push(`"${f.q}"`);
+    return parts.join(' / ');
+  }
+
   function updateStats() {
-    $('stats').textContent = `${state.items.length} items${state.done ? '' : '+'}`;
+    const pending = state.pendingNewItems ? state.pendingNewItems.size : 0;
+    const filterText = activeFilterText();
+    const parts = [`${state.items.length} items${state.done ? '' : '+'}`];
+    if (pending) parts.push(`${pending} nieuw`);
+    if (filterText) parts.push(`filter: ${filterText}`);
+    $('stats').textContent = parts.join(' · ');
   }
 
   function compactBytes(n) {
@@ -437,7 +455,10 @@
       const data = await apiFetch('/api/items-since?' + params.toString()).then(r => r.json());
       if (!data.items || data.items.length === 0) return;
       const fresh = data.items.filter(it => !state.knownIds.has(String(it.id)));
-      if (fresh.length > 0) renderPrepend(fresh);
+      if (fresh.length > 0) {
+        for (const it of fresh) state.pendingNewItems.set(String(it.id), it);
+        updateStats();
+      }
     } catch (e) { console.warn('auto-refresh failed', e); }
   }
 
