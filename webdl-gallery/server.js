@@ -38,7 +38,9 @@ const KEEP2SHARE_DIR = path.join(BASE_DIR, '_Keep2Share');
 const JDOWNLOADER_CFG_DIR = process.env.JDOWNLOADER_CFG_DIR || path.join(process.env.HOME || '/Users/jurgen', 'Library/Application Support/JDownloader 2/cfg');
 const KEEP2SHARE_SYNC_MS = Number(process.env.KEEP2SHARE_SYNC_MS || 60000);
 const KEEP2SHARE_SYNC_MAX_FILES = Number(process.env.KEEP2SHARE_SYNC_MAX_FILES || 5000);
-const KEEP2SHARE_SYNC_MAX_ADDS = Number(process.env.KEEP2SHARE_SYNC_MAX_ADDS || 500);
+const KEEP2SHARE_SYNC_MAX_ADDS = process.env.KEEP2SHARE_SYNC_MAX_ADDS
+  ? Number(process.env.KEEP2SHARE_SYNC_MAX_ADDS)
+  : Number.POSITIVE_INFINITY;
 let keep2shareSyncRunning = false;
 const thumbInflight = new Map();
 
@@ -401,7 +403,7 @@ async function syncKeep2ShareFiles(reason = 'timer') {
   try {
     const files = await listKeep2ShareSyncFiles();
     for (const file of files) {
-      if (added >= KEEP2SHARE_SYNC_MAX_ADDS) break;
+      if (Number.isFinite(KEEP2SHARE_SYNC_MAX_ADDS) && added >= KEEP2SHARE_SYNC_MAX_ADDS) break;
       const title = path.basename(file.filename, path.extname(file.filename));
       const { rowCount } = await pool.query(`
         INSERT INTO downloads
