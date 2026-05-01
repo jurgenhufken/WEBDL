@@ -56,7 +56,8 @@ async function run() {
       // Maak een individueel download-record aan
       await pool.query(`
         INSERT INTO downloads (url, status, platform, channel, title, filename, filepath, filesize, format, source_url, created_at, updated_at, finished_at)
-        VALUES ($1, 'completed', 'keep2share', $2, $3, $4, $5, $6, $7, 'https://keep2share.cc', NOW(), NOW(), NOW())
+        VALUES ($1, 'completed', 'keep2share', $2, $3, $4, $5, $6, $7, 'https://keep2share.cc',
+                to_timestamp($8 / 1000.0), to_timestamp($8 / 1000.0), to_timestamp($8 / 1000.0))
       `, [
         `https://keep2share.cc/${channel}/${encodeURIComponent(file)}`,
         channel,
@@ -64,7 +65,8 @@ async function run() {
         file,
         absPath,
         stat.size,
-        ext
+        ext,
+        stat.mtimeMs
       ]);
       totalAdded++;
     }

@@ -358,12 +358,12 @@ app.get('/api/items', async (req, res) => {
       ? 'RANDOM()'
       : sort === 'rating'
         ? 'd.rating DESC NULLS LAST, d.id DESC'
-        : 'd.id DESC';
+        : 'COALESCE(d.finished_at, d.updated_at, d.created_at) DESC NULLS LAST, d.id DESC';
     const fileOrder = sort === 'random'
       ? 'RANDOM()'
       : sort === 'rating'
         ? 'df.rating DESC NULLS LAST, df.id DESC'
-        : 'df.id DESC';
+        : 'COALESCE(to_timestamp(NULLIF(df.mtime_ms,0) / 1000.0)::timestamp, df.updated_at, d.finished_at, d.updated_at, d.created_at) DESC NULLS LAST, df.id DESC';
     const orderBy = sort === 'random'
       ? 'RANDOM()'
       : sort === 'rating'
