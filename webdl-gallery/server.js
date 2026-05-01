@@ -35,6 +35,7 @@ const MEDIA_EXT_SQL = MEDIA_EXTS.map(e => `'${e}'`).join(',');
 const ACTIVE_STATUSES = ['downloading', 'postprocessing'];
 const HIDDEN_GALLERY_STATUSES = ['pending', 'queued', 'downloading', 'postprocessing'];
 const KEEP2SHARE_DIR = path.join(BASE_DIR, '_Keep2Share');
+const JDOWNLOADER_CFG_DIR = process.env.JDOWNLOADER_CFG_DIR || path.join(process.env.HOME || '/Users/jurgen', 'Library/Application Support/JDownloader 2/cfg');
 const KEEP2SHARE_SYNC_MS = Number(process.env.KEEP2SHARE_SYNC_MS || 60000);
 const KEEP2SHARE_SYNC_MAX_FILES = Number(process.env.KEEP2SHARE_SYNC_MAX_FILES || 5000);
 const KEEP2SHARE_SYNC_MAX_ADDS = Number(process.env.KEEP2SHARE_SYNC_MAX_ADDS || 500);
@@ -195,24 +196,159 @@ function listKeep2ShareMediaFiles() {
   return files;
 }
 
+function readJDownloaderKeep2ShareFiles() {
+  return new Promise((resolve) => {
+    const code = String.raw`
+import json, os, re, sys, zipfile
+
+base_dir, cfg_dir, max_files = sys.argv[1], sys.argv[2], int(sys.argv[3])
+video_exts = {'.mp4', '.webm', '.mkv', '.mov', '.m4v', '.avi', '.flv', '.ts'}
+
+def norm_path(p):
+    if not p:
+        return p
+    try:
+        rp = os.path.realpath(p)
+        base_rp = os.path.realpath(base_dir)
+        if rp == base_rp or rp.startswith(base_rp + os.sep):
+            return os.path.join(base_dir, os.path.relpath(rp, base_rp))
+    except Exception:
+        pass
+    return p
+
+try:
+    zips = [
+        os.path.join(cfg_dir, name)
+        for name in os.listdir(cfg_dir)
+        if re.match(r'^downloadList\d+\.zip$', name)
+    ]
+except Exception:
+    zips = []
+
+if not zips:
+    print('[]')
+    raise SystemExit
+
+latest = max(zips, key=lambda p: os.path.getmtime(p))
+out = []
+
+with zipfile.ZipFile(latest) as zf:
+    names = zf.namelist()
+    packages = {}
+    for name in names:
+        if '_' in name:
+            continue
+        try:
+            data = json.loads(zf.read(name).decode('utf-8', 'replace'))
+        except Exception:
+            continue
+        packages[name] = data
+
+    for name in names:
+        if '_' not in name:
+            continue
+        package_id = name.split('_', 1)[0]
+        package = packages.get(package_id) or {}
+        try:
+            link = json.loads(zf.read(name).decode('utf-8', 'replace'))
+        except Exception:
+            continue
+        host = (link.get('host') or '').lower()
+        url = link.get('url') or ''
+        if 'k2s' not in host and 'keep2share' not in host and 'k2s.cc' not in url and 'keep2share' not in url:
+            continue
+        if (link.get('finalLinkState') or '').upper() not in ('FINISHED', 'FINISHED_MIRROR'):
+            continue
+        props = link.get('properties') or {}
+        filename = props.get('FINAL_FILENAME') or link.get('name')
+        folder = package.get('downloadFolder')
+        if not filename or not folder:
+            continue
+        ext = os.path.splitext(filename)[1].lower()
+        if ext not in video_exts:
+            continue
+        filepath = norm_path(os.path.join(folder, filename))
+        if not os.path.exists(filepath) or filepath.lower().endswith(('.part', '.tmp', '.ytdl')):
+            continue
+        try:
+            stat = os.stat(filepath)
+        except Exception:
+            continue
+        out.append({
+            'channel': package.get('name') or os.path.basename(folder) or 'Keep2Share',
+            'filename': filename,
+            'filepath': filepath,
+            'ext': ext[1:],
+            'filesize': stat.st_size,
+            'mtimeMs': stat.st_mtime * 1000.0,
+            'url': url,
+            'source_url': url or 'https://keep2share.cc',
+            'jdownloaderList': os.path.basename(latest),
+        })
+        if len(out) >= max_files:
+            break
+
+out.sort(key=lambda x: x.get('mtimeMs') or 0, reverse=True)
+print(json.dumps(out))
+`;
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const child = spawn('python3', ['-c', code, BASE_DIR, JDOWNLOADER_CFG_DIR, String(KEEP2SHARE_SYNC_MAX_FILES)], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const done = (items) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { child.kill(); } catch (_) {}
+      resolve(items);
+    };
+    const timer = setTimeout(() => done([]), 8000);
+    child.stdout.on('data', (chunk) => { stdout += String(chunk); });
+    child.stderr.on('data', (chunk) => { stderr += String(chunk); });
+    child.on('error', () => done([]));
+    child.on('close', () => {
+      try {
+        const parsed = JSON.parse(stdout || '[]');
+        done(Array.isArray(parsed) ? parsed : []);
+      } catch (e) {
+        if (stderr) console.warn('[keep2share-sync] JDownloader read failed:', stderr.trim().slice(0, 500));
+        done([]);
+      }
+    });
+  });
+}
+
+async function listKeep2ShareSyncFiles() {
+  const byPath = new Map();
+  for (const file of listKeep2ShareMediaFiles()) byPath.set(file.filepath, file);
+  const jdFiles = await readJDownloaderKeep2ShareFiles();
+  for (const file of jdFiles) {
+    const existing = byPath.get(file.filepath) || {};
+    byPath.set(file.filepath, { ...existing, ...file });
+  }
+  return [...byPath.values()].sort((a, b) => (b.mtimeMs || 0) - (a.mtimeMs || 0));
+}
+
 async function syncKeep2ShareFiles(reason = 'timer') {
   if (keep2shareSyncRunning) return { added: 0, skipped: 0, running: true };
   keep2shareSyncRunning = true;
   let added = 0;
   let skipped = 0;
   try {
-    const files = listKeep2ShareMediaFiles();
+    const files = await listKeep2ShareSyncFiles();
     for (const file of files) {
       if (added >= KEEP2SHARE_SYNC_MAX_ADDS) break;
       const title = path.basename(file.filename, path.extname(file.filename));
       const { rowCount } = await pool.query(`
         INSERT INTO downloads
           (url, status, platform, channel, title, filename, filepath, filesize, format, source_url, created_at, updated_at, finished_at)
-        SELECT $1, 'completed', 'keep2share', $2, $3, $4, $5, $6, $7, 'https://keep2share.cc',
+        SELECT $1, 'completed', 'keep2share', $2, $3, $4, $5, $6, $7, $9,
                to_timestamp($8 / 1000.0), to_timestamp($8 / 1000.0), to_timestamp($8 / 1000.0)
         WHERE NOT EXISTS (SELECT 1 FROM downloads WHERE filepath = $5)
       `, [
-        `https://keep2share.cc/${encodeURIComponent(file.channel)}/${encodeURIComponent(file.filename)}`,
+        file.url || `https://keep2share.cc/${encodeURIComponent(file.channel)}/${encodeURIComponent(file.filename)}`,
         file.channel,
         title,
         file.filename,
@@ -220,9 +356,25 @@ async function syncKeep2ShareFiles(reason = 'timer') {
         file.filesize,
         file.ext,
         file.mtimeMs,
+        file.source_url || file.url || 'https://keep2share.cc',
       ]);
       if (rowCount) added += 1;
-      else skipped += 1;
+      else {
+        skipped += 1;
+        if (file.url) {
+          await pool.query(`
+            UPDATE downloads
+               SET url = $1,
+                   source_url = CASE
+                     WHEN source_url IS NULL OR source_url = '' OR source_url = 'https://keep2share.cc' THEN $1
+                     ELSE source_url
+                   END
+             WHERE filepath = $2
+               AND platform = 'keep2share'
+               AND (url IS NULL OR url = '' OR url NOT LIKE 'https://k2s.cc/file/%')
+          `, [file.url, file.filepath]);
+        }
+      }
     }
     if (added) console.log(`[keep2share-sync] ${added} nieuwe items (${reason})`);
     return { added, skipped, scanned: files.length };
