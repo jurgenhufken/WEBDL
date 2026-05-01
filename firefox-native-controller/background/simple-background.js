@@ -149,10 +149,10 @@ async function probeServerStatus(source = 'probe') {
     lastHeartbeatAt = Date.now();
     const status = await getJson('status');
     if (status && status.success !== false && status.status === 'running') {
-      if (typeof status.isRecording !== 'undefined') updateRecordingState(status.isRecording, status.activeRecordingUrls);
+      if (typeof status.isRecording !== 'undefined') updateRecordingState(status.isRecording, status.activeRecordingUrls, status.activeRecordingKeys);
       if (Number.isFinite(Number(status.activeDownloads))) activeDownloads = Number(status.activeDownloads);
     }
-    return { success: true, source, isConnected: true, isRecording, activeRecordingUrls, activeDownloads };
+    return { success: true, source, isConnected: true, isRecording, activeRecordingUrls, activeRecordingKeys, activeDownloads };
   }
   consecutiveProbeFailures += 1;
   const error = health && health.error ? health.error : 'Health probe mislukt';
@@ -170,7 +170,7 @@ async function probeServerStatus(source = 'probe') {
   if (!mutedAbort && !mutedNetwork) {
     console.warn(`[WEBDL] status probe failed (${source}): ${error}`);
   }
-  return { success: false, source, isConnected: isConnected && !shouldDisconnect, isRecording, activeRecordingUrls, activeDownloads, error };
+  return { success: false, source, isConnected: isConnected && !shouldDisconnect, isRecording, activeRecordingUrls, activeRecordingKeys, activeDownloads, error };
   })();
   try {
     return await probeInFlight;
@@ -228,12 +228,14 @@ function setConnectedState(next) {
 }
 
 let activeRecordingUrls = [];
+let activeRecordingKeys = [];
 
-function updateRecordingState(next, urls) {
+function updateRecordingState(next, urls, keys) {
   const normalized = !!next;
   activeRecordingUrls = Array.isArray(urls) ? urls : [];
+  activeRecordingKeys = Array.isArray(keys) ? keys : [];
   isRecording = normalized;
-  notifyRecordingStateChange(normalized, activeRecordingUrls);
+  notifyRecordingStateChange(normalized, activeRecordingUrls, activeRecordingKeys);
 }
 
 async function notifyConnectionStateChange(state) {
@@ -253,13 +255,14 @@ async function notifyConnectionStateChange(state) {
   }
 }
 
-async function notifyRecordingStateChange(state, urls) {
+async function notifyRecordingStateChange(state, urls, keys) {
   for (const tabId of activeTabs) {
     try {
       await browser.tabs.sendMessage(tabId, {
         action: 'recordingStateChanged',
         isRecording: state,
-        activeRecordingUrls: Array.isArray(urls) ? urls : activeRecordingUrls
+        activeRecordingUrls: Array.isArray(urls) ? urls : activeRecordingUrls,
+        activeRecordingKeys: Array.isArray(keys) ? keys : activeRecordingKeys
       }).catch(() => {
         activeTabs.delete(tabId);
       });
@@ -303,7 +306,7 @@ function startHeartbeat() {
     const status = await sendSocketRequest('status', {}, 5000);
     if (status && status.success) {
       lastHeartbeatAt = Date.now();
-      if (typeof status.isRecording !== 'undefined') updateRecordingState(status.isRecording);
+      if (typeof status.isRecording !== 'undefined') updateRecordingState(status.isRecording, status.activeRecordingUrls, status.activeRecordingKeys);
       if (Number.isFinite(Number(status.activeDownloads))) activeDownloads = Number(status.activeDownloads);
       return;
     }
@@ -418,7 +421,7 @@ function connectPersistentSocket() {
     startHeartbeat();
     const status = await sendSocketRequest('status', {}, 4000);
     if (status && status.success) {
-      if (typeof status.isRecording !== 'undefined') updateRecordingState(status.isRecording);
+      if (typeof status.isRecording !== 'undefined') updateRecordingState(status.isRecording, status.activeRecordingUrls, status.activeRecordingKeys);
       if (Number.isFinite(Number(status.activeDownloads))) activeDownloads = Number(status.activeDownloads);
       lastHeartbeatAt = Date.now();
     }
@@ -442,7 +445,7 @@ function connectPersistentSocket() {
 
   socket.on('recording-status-changed', (data) => {
     if (data && typeof data.isRecording !== 'undefined') {
-      updateRecordingState(data.isRecording, data.activeRecordingUrls);
+      updateRecordingState(data.isRecording, data.activeRecordingUrls, data.activeRecordingKeys);
     }
   });
 
@@ -518,7 +521,7 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   const action = message && message.action ? message.action : '';
   if (action === 'contentScriptLoaded') {
-    sendResponse({ success: true, isConnected, isRecording, activeRecordingUrls, activeDownloads });
+    sendResponse({ success: true, isConnected, isRecording, activeRecordingUrls, activeRecordingKeys, activeDownloads });
     return false;
   }
 
@@ -532,18 +535,19 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
               isConnected: !!probe.isConnected,
               isRecording: !!probe.isRecording,
               activeRecordingUrls: probe.activeRecordingUrls || activeRecordingUrls,
+              activeRecordingKeys: probe.activeRecordingKeys || activeRecordingKeys,
               activeDownloads: Number.isFinite(Number(probe.activeDownloads)) ? Number(probe.activeDownloads) : activeDownloads
             });
             return;
           }
-          sendResponse({ isConnected, isRecording, activeRecordingUrls, activeDownloads });
+          sendResponse({ isConnected, isRecording, activeRecordingUrls, activeRecordingKeys, activeDownloads });
         })
         .catch(() => {
-          sendResponse({ isConnected, isRecording, activeRecordingUrls, activeDownloads });
+          sendResponse({ isConnected, isRecording, activeRecordingUrls, activeRecordingKeys, activeDownloads });
         });
       return true;
     }
-    sendResponse({ isConnected, isRecording, activeRecordingUrls, activeDownloads });
+    sendResponse({ isConnected, isRecording, activeRecordingUrls, activeRecordingKeys, activeDownloads });
     return false;
   }
 

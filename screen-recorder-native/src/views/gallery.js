@@ -88,6 +88,11 @@ function getGalleryHTML() {
     .queue-info { padding: 6px 8px; flex: 1; display: flex; flex-direction: column; justify-content: flex-start; }
     .queue-platform { font-size: 9px; font-weight: bold; color: #8892b0; margin-bottom: 3px; }
     .queue-title { font-size: 11px; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.2; font-weight: normal; text-transform: none; letter-spacing: normal; }
+    .rec-bar { display:none; padding: 10px 14px; background: #220b12; border-top: 1px solid #5b1e31; color: #ffd7df; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .rec-bar.on { display:flex; }
+    .rec-list { display:flex; gap:8px; flex-wrap:wrap; flex:1 1 auto; min-width:180px; }
+    .rec-pill { font-size:11px; border:1px solid #7f2d42; background:#12050a; border-radius:999px; padding:5px 9px; max-width:360px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .panic-btn { background:#c1121f !important; border-color:#ff5a66 !important; color:#fff !important; font-weight:700; }
   </style>
 </head>
 <body>
@@ -130,6 +135,11 @@ function getGalleryHTML() {
     <div id="queue-bar" class="queue-bar" style="display: none;">
       <div class="queue-title">🔴 Momenteel bezig / Wachtrij</div>
       <div class="queue-grid" id="queue-grid"></div>
+    </div>
+    <div id="rec-bar" class="rec-bar">
+      <strong id="rec-title">REC</strong>
+      <div id="rec-list" class="rec-list"></div>
+      <button id="btnStopAllRecs" class="btn panic-btn">Stop alle recs</button>
     </div>
   </div>
 
@@ -298,6 +308,31 @@ function getGalleryHTML() {
         return Array.isArray(parsed) ? parsed.map(v => String(v || '').trim()).filter(Boolean) : [];
       } catch (e) {
         return null;
+      }
+    }
+
+    async function refreshRecordings() {
+      const bar = document.getElementById('rec-bar');
+      const list = document.getElementById('rec-list');
+      const title = document.getElementById('rec-title');
+      if (!bar || !list || !title) return;
+      const recs = Array.isArray(state.status && state.status.recordings) ? state.status.recordings : [];
+      if (!recs.length) {
+        bar.classList.remove('on');
+        list.innerHTML = '';
+        title.textContent = 'REC';
+        return;
+      }
+      bar.classList.add('on');
+      title.textContent = 'REC actief: ' + recs.length;
+      list.innerHTML = '';
+      for (const r of recs) {
+        const pill = document.createElement('div');
+        pill.className = 'rec-pill';
+        const label = [r.platform, r.channel, r.title].filter(Boolean).join(' / ') || r.key || 'recording';
+        const mins = Math.floor((Number(r.ageMs) || 0) / 60000);
+        pill.textContent = label + ' • ' + mins + 'm';
+        list.appendChild(pill);
       }
     }
 
@@ -1803,11 +1838,25 @@ function getGalleryHTML() {
           if (s && typeof s === 'object') {
             state.status = s;
             setHint();
+            refreshRecordings();
           }
         } catch (e) {}
       };
       setInterval(pollStatus, 2500);
       pollStatus();
+    } catch (e) {}
+
+    try {
+      const btnStopAllRecs = document.getElementById('btnStopAllRecs');
+      if (btnStopAllRecs) {
+        btnStopAllRecs.addEventListener('click', async () => {
+          const recs = Array.isArray(state.status && state.status.recordings) ? state.status.recordings : [];
+          if (!recs.length) return;
+          if (!confirm('Alle actieve opnames stoppen?')) return;
+          await postApi('/recordings/stop-all', { reason: 'panic_button' });
+          setTimeout(() => reloadAll().catch(() => {}), 1500);
+        });
+      }
     } catch (e) {}
 
     try {

@@ -2922,7 +2922,7 @@
         document.getElementById('webdl-dl-count').textContent = `${Number(data.activeDownloads) || 0} actief`;
       }
       if (typeof data.isRecording !== 'undefined') {
-        updateRecUI(!!data.isRecording, data.activeRecordingUrls);
+        updateRecUI(!!data.isRecording, data.activeRecordingUrls, data.activeRecordingKeys);
       }
     } catch (e) {}
   }
@@ -4142,17 +4142,63 @@
   let isRecording = false;
   let cropUpdateTimer = null;
   let frameUpdateTimer = null;
+  let recordingHeartbeatTimer = null;
+  let currentRecordingKey = '';
+  const recordingClientId = (() => {
+    try {
+      if (window.__webdlRecordingClientId) return window.__webdlRecordingClientId;
+      const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+      window.__webdlRecordingClientId = id;
+      return id;
+    } catch (e) {
+      return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    }
+  })();
 
-  function updateRecUI(recording, activeUrls) {
-    // Per-tab check: is THIS tab's URL in the activeRecordingUrls array?
+  function normalizeRecordingKeyFromMeta(meta) {
+    try {
+      const raw = String((meta && (meta.url || meta.pageUrl || meta.sourceUrl)) || window.location.href || '').trim();
+      const platform = String((meta && meta.platform) || '').trim().toLowerCase();
+      const channel = String((meta && meta.channel) || '').trim().toLowerCase();
+      if (raw) {
+        const u = new URL(raw);
+        const host = String(u.hostname || '').toLowerCase().replace(/^www\./, '');
+        const pathname = String(u.pathname || '').replace(/\/+$/, '');
+        const tiktok = pathname.match(/^\/@([^\/]+)(?:\/live)?$/i);
+        if (host.endsWith('tiktok.com') && tiktok && tiktok[1]) return `tiktok:@${tiktok[1].toLowerCase()}/live`;
+        if (host.includes('chaturbate.com')) {
+          const model = pathname.split('/').filter(Boolean)[0] || channel;
+          if (model) return `chaturbate:${model.toLowerCase()}`;
+        }
+        if (host.includes('stripchat.com')) {
+          const model = pathname.split('/').filter(Boolean)[0] || channel;
+          if (model) return `stripchat:${model.toLowerCase()}`;
+        }
+        return `${host}${pathname || '/'}`.toLowerCase();
+      }
+      if (platform || channel) return `${platform || 'unknown'}:${channel || 'unknown'}`;
+    } catch (e) {}
+    return String(window.location.href || 'default_rec').split('?')[0].replace(/\/+$/, '').toLowerCase();
+  }
+
+  function updateRecUI(recording, activeUrls, activeKeys) {
+    const meta = scrapeMetadata();
+    const key = normalizeRecordingKeyFromMeta(meta);
     const myUrl = window.location.href;
-    const myRecording = Array.isArray(activeUrls) && activeUrls.length
-      ? activeUrls.some(u => myUrl.startsWith(u) || u.startsWith(myUrl.split('?')[0]))
-      : !!recording;
+    const myRecording = Array.isArray(activeKeys) && activeKeys.length
+      ? activeKeys.includes(key)
+      : (Array.isArray(activeUrls) && activeUrls.length
+        ? activeUrls.some(u => myUrl.startsWith(u) || u.startsWith(myUrl.split('?')[0]))
+        : !!recording);
     isRecording = myRecording;
     if (!myRecording && cropUpdateTimer) {
       clearInterval(cropUpdateTimer);
       cropUpdateTimer = null;
+    }
+    if (!myRecording && recordingHeartbeatTimer) {
+      clearInterval(recordingHeartbeatTimer);
+      recordingHeartbeatTimer = null;
+      currentRecordingKey = '';
     }
     if (myRecording) {
       captureFrame.style.display = 'none';
@@ -4169,6 +4215,52 @@
       recStopBtn.style.backgroundColor = '#555';
     }
   }
+
+  function ensureRecordingHeartbeat(meta) {
+    currentRecordingKey = normalizeRecordingKeyFromMeta(meta || scrapeMetadata());
+    if (recordingHeartbeatTimer) clearInterval(recordingHeartbeatTimer);
+    const send = () => {
+      if (!isRecording || !currentRecordingKey) return;
+      postServerJson('recording/heartbeat', {
+        recordingKey: currentRecordingKey,
+        recordingClientId,
+        metadata: meta || scrapeMetadata()
+      }, 5000).catch(() => {});
+    };
+    send();
+    recordingHeartbeatTimer = setInterval(send, 10000);
+  }
+
+  function stopOwnedRecording(reason) {
+    if (!currentRecordingKey) return;
+    const meta = scrapeMetadata();
+    const payload = {
+      recordingKey: currentRecordingKey,
+      recordingClientId,
+      metadata: meta,
+      reason
+    };
+    try {
+      const body = JSON.stringify(payload);
+      if (navigator.sendBeacon) {
+        navigator.sendBeacon(`${SERVER}/stop-recording`, new Blob([body], { type: 'application/json' }));
+        return;
+      }
+    } catch (e) {}
+    fetch(`${SERVER}/stop-recording`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      keepalive: true
+    }).catch(() => {});
+  }
+
+  window.addEventListener('pagehide', () => {
+    if (isRecording) stopOwnedRecording('pagehide');
+  });
+  window.addEventListener('beforeunload', () => {
+    if (isRecording) stopOwnedRecording('beforeunload');
+  });
 
   function getVideoCropRect() {
     const target = pickBestVideoTarget();
@@ -4260,10 +4352,13 @@
 
     addLog(`Opname starten (crop ${crop.width}x${crop.height} @ ${crop.x},${crop.y})`);
     try {
-      const result = await startRecordingRequest({ metadata: meta, crop, lock: true });
+      const recordingKey = normalizeRecordingKeyFromMeta(meta);
+      const result = await startRecordingRequest({ metadata: meta, crop, lock: true, recordingKey, recordingClientId });
       if (result.success) {
         applyConnectionState(true);
-        updateRecUI(true);
+        currentRecordingKey = result.recordingKey || recordingKey;
+        updateRecUI(true, [meta.url || window.location.href], [currentRecordingKey]);
+        ensureRecordingHeartbeat(meta);
         showNotification(`Opname gestart: ${result.file}`);
         addLog(`REC gestart: ${result.file}`);
 
@@ -4287,10 +4382,12 @@
         }
       } else if (result && result.needsForce) {
         if (confirm("Er loopt al een opname op de achtergrond. Wil je deze geforceerd beëindigen en een nieuwe starten?")) {
-          const forceResult = await startRecordingRequest({ metadata: meta, crop, lock: true, force: true });
+          const forceResult = await startRecordingRequest({ metadata: meta, crop, lock: true, force: true, recordingKey, recordingClientId });
           if (forceResult.success) {
             applyConnectionState(true);
-            updateRecUI(true);
+            currentRecordingKey = forceResult.recordingKey || recordingKey;
+            updateRecUI(true, [meta.url || window.location.href], [currentRecordingKey]);
+            ensureRecordingHeartbeat(meta);
             showNotification(`Opname geforceerd herstart: ${forceResult.file}`);
             addLog(`REC geforceerd herstart: ${forceResult.file}`);
             if (!cropUpdateTimer) {
@@ -4319,7 +4416,7 @@
     addLog('Opname stoppen...');
     const meta = scrapeMetadata();
     try {
-      const result = await stopRecordingRequest({ metadata: meta });
+      const result = await stopRecordingRequest({ metadata: meta, recordingKey: currentRecordingKey || normalizeRecordingKeyFromMeta(meta), recordingClientId });
       if (result.success) {
         applyConnectionState(true);
         updateRecUI(false);
@@ -4398,7 +4495,7 @@
       if (message.isConnected) checkServer();
     }
     if (message.action === 'recordingStateChanged') {
-      updateRecUI(!!message.isRecording, message.activeRecordingUrls);
+      updateRecUI(!!message.isRecording, message.activeRecordingUrls, message.activeRecordingKeys);
     }
     return true;
   });
@@ -4409,7 +4506,7 @@
         applyConnectionState(!!status.isConnected);
       }
       if (status && typeof status.isRecording !== 'undefined') {
-        updateRecUI(!!status.isRecording, status.activeRecordingUrls);
+        updateRecUI(!!status.isRecording, status.activeRecordingUrls, status.activeRecordingKeys);
       }
       if (status && Number.isFinite(Number(status.activeDownloads))) {
         document.getElementById('webdl-dl-count').textContent = `${Number(status.activeDownloads) || 0} actief`;

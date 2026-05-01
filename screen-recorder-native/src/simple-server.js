@@ -34,6 +34,7 @@ const {
   TDL, TDL_NAMESPACE, TDL_THREADS, TDL_CONCURRENCY,
   REDDIT_DL_CLIENT_ID, REDDIT_DL_CLIENT_SECRET, REDDIT_DL_USERNAME, REDDIT_DL_PASSWORD, REDDIT_DL_AUTH_FILE, REDDIT_INDEX_MAX_ITEMS, REDDIT_INDEX_MAX_PAGES,
   VIDEO_DEVICE, AUDIO_DEVICE, RECORDING_FPS, VIDEO_CODEC, VIDEO_BITRATE, LIBX264_PRESET, AUDIO_BITRATE, RECORDING_AUDIO_CODEC, RECORDING_INPUT_PIXEL_FORMAT, RECORDING_FPS_MODE,
+  RECORDING_MAX_ACTIVE, RECORDING_MAX_DURATION_MS, RECORDING_MIN_FREE_BYTES,
   FFMPEG_PROBESIZE, FFMPEG_ANALYZEDURATION, FFMPEG_THREAD_QUEUE_SIZE, FFMPEG_RTBUFSIZE, FFMPEG_MAX_MUXING_QUEUE_SIZE,
   MIN_SCREENSHOT_BYTES, MIN_THUMB_BYTES,
   FINALCUT_ENABLED, FINALCUT_VIDEO_CODEC, FINALCUT_X264_PRESET, FINALCUT_X264_CRF, FINALCUT_AUDIO_BITRATE,
@@ -5368,6 +5369,85 @@ async function rehydrateDownloadQueue() {
 let activeRecordings = new Map();
 Object.defineProperty(global, 'isRecording', { get: () => activeRecordings.size > 0 });
 
+function getFreeBytesForPath(targetPath) {
+  try {
+    const stat = fs.statfsSync(targetPath);
+    const blockSize = Number(stat.bsize || stat.frsize || 0);
+    const blocks = Number(stat.bavail || stat.bfree || 0);
+    const free = blockSize * blocks;
+    return Number.isFinite(free) && free > 0 ? free : 0;
+  } catch (e) {
+    return 0;
+  }
+}
+
+function requestRecordingStop(recId, reason) {
+  try {
+    const body = JSON.stringify({ id: recId, reason });
+    const req = http.request({
+      hostname: '127.0.0.1',
+      port: PORT,
+      path: '/stop-recording',
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(body)
+      }
+    });
+    req.on('error', () => {});
+    req.end(body);
+  } catch (e) {}
+}
+
+function normalizeRecordingKey(input, metadata = {}) {
+  try {
+    const raw = String(input || metadata.url || metadata.pageUrl || metadata.sourceUrl || '').trim();
+    const platform = String(metadata.platform || '').trim().toLowerCase();
+    const channel = String(metadata.channel || '').trim().toLowerCase();
+    if (raw) {
+      const u = new URL(raw);
+      const host = String(u.hostname || '').toLowerCase().replace(/^www\./, '');
+      const pathname = String(u.pathname || '').replace(/\/+$/, '');
+      const tiktok = pathname.match(/^\/@([^\/]+)(?:\/live)?$/i);
+      if (host.endsWith('tiktok.com') && tiktok && tiktok[1]) return `tiktok:@${tiktok[1].toLowerCase()}/live`;
+      if (host.includes('chaturbate.com')) {
+        const model = pathname.split('/').filter(Boolean)[0] || channel;
+        if (model) return `chaturbate:${model.toLowerCase()}`;
+      }
+      if (host.includes('stripchat.com')) {
+        const model = pathname.split('/').filter(Boolean)[0] || channel;
+        if (model) return `stripchat:${model.toLowerCase()}`;
+      }
+      return `${host}${pathname || '/'}`.toLowerCase();
+    }
+    if (platform || channel) return `${platform || 'unknown'}:${channel || 'unknown'}`;
+  } catch (e) {
+    const platform = String(metadata.platform || '').trim().toLowerCase();
+    const channel = String(metadata.channel || '').trim().toLowerCase();
+    if (platform || channel) return `${platform || 'unknown'}:${channel || 'unknown'}`;
+  }
+  return 'default_rec';
+}
+
+function getRecordingSnapshots() {
+  return Array.from(activeRecordings.entries()).map(([id, session]) => {
+    const meta = session && session.currentRecordingMeta ? session.currentRecordingMeta : {};
+    return {
+      id,
+      key: id,
+      url: meta.pageUrl || '',
+      platform: meta.platform || '',
+      channel: meta.channel || '',
+      title: meta.title || '',
+      file: session && session.currentRecordingFile ? session.currentRecordingFile : '',
+      startedAt: session && session.startedAt ? new Date(session.startedAt).toISOString() : null,
+      ageMs: session && session.startedAt ? Math.max(0, Date.now() - session.startedAt) : 0,
+      ownerClientId: session && session.ownerClientId ? session.ownerClientId : null,
+      lastHeartbeatAt: session && session.lastHeartbeatAt ? new Date(session.lastHeartbeatAt).toISOString() : null
+    };
+  });
+}
+
 function cleanupOrphanedRecordingProcesses(reason = 'periodic') {
   const { execSync } = require('child_process');
   const activePids = new Set(
@@ -5396,6 +5476,19 @@ const recordingOrphanCleanupTimer = setInterval(() => {
   try { cleanupOrphanedRecordingProcesses('periodic'); } catch (e) {}
 }, 60000);
 if (typeof recordingOrphanCleanupTimer.unref === 'function') recordingOrphanCleanupTimer.unref();
+
+const RECORDING_HEARTBEAT_STALE_MS = Math.max(10000, parseInt(process.env.WEBDL_RECORDING_HEARTBEAT_STALE_MS || '30000', 10) || 30000);
+const recordingHeartbeatTimer = setInterval(() => {
+  const now = Date.now();
+  for (const [id, session] of activeRecordings.entries()) {
+    if (!session || !session.ownerClientId || !session.lastHeartbeatAt) continue;
+    if (now - session.lastHeartbeatAt > RECORDING_HEARTBEAT_STALE_MS) {
+      console.warn(`[recording] Client heartbeat stale; stopping ${id}`);
+      requestRecordingStop(id, 'client_lost');
+    }
+  }
+}, 10000);
+if (typeof recordingHeartbeatTimer.unref === 'function') recordingHeartbeatTimer.unref();
 
 let avfoundationDeviceListCache = null;
 
@@ -5499,7 +5592,13 @@ async function relaySocketCommandToHttp(endpoint, payload) {
 
 function broadcastRecordingState() {
   try {
-    io.emit('recording-status-changed', { isRecording });
+    const recordings = getRecordingSnapshots();
+    io.emit('recording-status-changed', {
+      isRecording,
+      activeRecordingUrls: recordings.map((r) => r.url).filter(Boolean),
+      activeRecordingKeys: recordings.map((r) => r.key),
+      recordings
+    });
   } catch (e) { }
 }
 
@@ -5510,7 +5609,12 @@ io.on('connection', (socket) => {
     connected: true,
     serverTime: new Date().toISOString()
   });
-  socket.emit('recording-status-changed', { isRecording });
+  socket.emit('recording-status-changed', {
+    isRecording,
+    activeRecordingUrls: getRecordingSnapshots().map((r) => r.url).filter(Boolean),
+    activeRecordingKeys: getRecordingSnapshots().map((r) => r.key),
+    recordings: getRecordingSnapshots()
+  });
 
   socket.on('webdl:request', async (message, ack) => {
     const reply = (payload) => {
@@ -5530,9 +5634,13 @@ io.on('connection', (socket) => {
     }
 
     if (action === 'status') {
+      const recordings = getRecordingSnapshots();
       reply({
         success: true,
         isRecording,
+        activeRecordingUrls: recordings.map((r) => r.url).filter(Boolean),
+        activeRecordingKeys: recordings.map((r) => r.key),
+        recordings,
         activeDownloads: (await getRuntimeActiveDownloadRows()).length,
         serverTime: new Date().toISOString()
       });
@@ -7761,7 +7869,14 @@ expressApp.get('/status', async (req, res) => {
   res.json({
     status: 'running',
     isRecording,
-    activeRecordingUrls: Array.from(activeRecordings.keys()),
+    activeRecordingUrls: getRecordingSnapshots().map((r) => r.url).filter(Boolean),
+    activeRecordingKeys: getRecordingSnapshots().map((r) => r.key),
+    recordings: getRecordingSnapshots(),
+    recordingLimits: {
+      maxActive: RECORDING_MAX_ACTIVE,
+      maxDurationMs: RECORDING_MAX_DURATION_MS,
+      minFreeBytes: RECORDING_MIN_FREE_BYTES
+    },
     activeDownloads: runtimeActive.length,
     active_items: activeDownloadsList,
     queuedDownloads: dbQueuedCount,
@@ -8527,26 +8642,8 @@ expressApp.post('/start-recording', async (req, res) => {
   } catch (e) { }
 
   const { metadata = {}, crop, lock } = req.body || {};
-  const recId = String((metadata && metadata.url) || req.body.url || 'default_rec').trim();
-
   const force = req.body.force === true;
-
-  if (activeRecordings.has(recId)) {
-    if (force) {
-      console.log(`[MULTI-REC] Force restart requested for ${recId}`);
-      // Wait for previous to die if any
-      const existing = activeRecordings.get(recId);
-      if (existing && existing.recordingProcess) {
-        try { existing.recordingProcess.kill('SIGINT'); } catch (e) { }
-      }
-      activeRecordings.delete(recId);
-      broadcastRecordingState();
-      await new Promise(r => setTimeout(r, 800));
-    } else {
-      console.log(`[MULTI-REC] URL already recording, prompting needsForce: ${recId}`);
-      return res.json({ success: true, action: 'start-recording', needsForce: true, existingUrl: recId });
-    }
-  }
+  const ownerClientId = String(req.body.recordingClientId || req.body.clientId || '').trim();
   let recordingProcess = null;
   let currentRecordingFile = null;
   let currentRecording = null;
@@ -8561,7 +8658,51 @@ expressApp.post('/start-recording', async (req, res) => {
   } const platform = resolved.platform || 'other';
   const channel = resolved.channel || 'unknown';
   const title = resolved.title || 'untitled';
+  const recId = normalizeRecordingKey(req.body.recordingKey || req.body.url || metadata.url || resolved.url, { ...metadata, ...resolved, platform, channel, title });
+
+  if (activeRecordings.has(recId)) {
+    if (force) {
+      console.log(`[MULTI-REC] Force restart requested for ${recId}`);
+      const existing = activeRecordings.get(recId);
+      if (existing && existing.recordingProcess) {
+        try { existing.recordingProcess.kill('SIGINT'); } catch (e) { }
+        if (existing.maxDurationTimer) clearTimeout(existing.maxDurationTimer);
+      }
+      activeRecordings.delete(recId);
+      broadcastRecordingState();
+      await new Promise(r => setTimeout(r, 800));
+    } else {
+      console.log(`[MULTI-REC] Recording already active for key ${recId}`);
+      return res.json({
+        success: true,
+        action: 'start-recording',
+        needsForce: true,
+        duplicate: true,
+        existingUrl: recId,
+        recordingKey: recId,
+        recordings: getRecordingSnapshots()
+      });
+    }
+  }
+  if (RECORDING_MAX_ACTIVE > 0 && activeRecordings.size >= RECORDING_MAX_ACTIVE) {
+    return res.status(429).json({
+      success: false,
+      error: `Maximaal aantal actieve opnames bereikt (${RECORDING_MAX_ACTIVE})`,
+      activeRecordingUrls: getRecordingSnapshots().map((r) => r.url).filter(Boolean),
+      activeRecordingKeys: getRecordingSnapshots().map((r) => r.key)
+    });
+  }
   const dir = getDownloadDir(platform, channel, title);
+  const freeBytes = getFreeBytesForPath(dir);
+  if (RECORDING_MIN_FREE_BYTES > 0 && freeBytes > 0 && freeBytes < RECORDING_MIN_FREE_BYTES) {
+    return res.status(507).json({
+      success: false,
+      error: `Te weinig vrije ruimte voor opname (${freeBytes} bytes vrij, minimaal ${RECORDING_MIN_FREE_BYTES})`,
+      freeBytes,
+      minFreeBytes: RECORDING_MIN_FREE_BYTES,
+      dir
+    });
+  }
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   const safeBase = sanitizeName(`${platform}__${channel}__${title}`).replace(/_+/g, '_');
@@ -8667,6 +8808,7 @@ expressApp.post('/start-recording', async (req, res) => {
   currentRecordingMeta = {
     recordingUrl: `recording:${timestamp}`,
     pageUrl: String(resolved.url || metadata.url || '').trim(),
+    recordingKey: recId,
     platform,
     channel,
     title,
@@ -8744,6 +8886,7 @@ expressApp.post('/start-recording', async (req, res) => {
     try { logStream.end(); } catch (e) { }
     const active = activeRecordings.get(recId);
     if (active && active.recordingProcess === recordingProcess) {
+      if (active.maxDurationTimer) clearTimeout(active.maxDurationTimer);
       activeRecordings.delete(recId);
     }
     broadcastRecordingState();
@@ -8754,25 +8897,40 @@ expressApp.post('/start-recording', async (req, res) => {
     try { logStream.end(); } catch (e) { }
     const active = activeRecordings.get(recId);
     if (active && active.recordingProcess === recordingProcess) {
+      if (active.maxDurationTimer) clearTimeout(active.maxDurationTimer);
       activeRecordings.delete(recId);
     }
     broadcastRecordingState();
   });
 
   currentRecordingFile = recordingFilePath;
-  activeRecordings.set(recId, {
+  const session = {
     recordingProcess,
     currentRecordingFile,
     currentRecording,
-    currentRecordingMeta
-  });
+    currentRecordingMeta,
+    startedAt: Date.now(),
+    ownerClientId,
+    lastHeartbeatAt: ownerClientId ? Date.now() : null,
+    maxDurationTimer: null
+  };
+  if (RECORDING_MAX_DURATION_MS > 0) {
+    session.maxDurationTimer = setTimeout(() => {
+      console.warn(`[recording] Max duration reached; stopping ${recId}`);
+      requestRecordingStop(recId, 'max_duration');
+    }, RECORDING_MAX_DURATION_MS);
+    if (typeof session.maxDurationTimer.unref === 'function') session.maxDurationTimer.unref();
+  }
+  activeRecordings.set(recId, session);
   broadcastRecordingState();
   console.log(`🔴 Opname gestart: ${recordingFilePath}`);
-  res.json({ success: true, action: 'start-recording', file: filename, dir, meta: resolved, lock: lockMode, rawFile: lockMode ? path.basename(rawFilePath) : undefined, finalFile: path.basename(finalFilePath), input: { device: inputDevice, video_name: resolvedVideoName, audio_name: resolvedAudioName, pixel_format: inputPixelFormat } });
+  res.json({ success: true, action: 'start-recording', file: filename, dir, meta: resolved, recordingKey: recId, lock: lockMode, rawFile: lockMode ? path.basename(rawFilePath) : undefined, finalFile: path.basename(finalFilePath), input: { device: inputDevice, video_name: resolvedVideoName, audio_name: resolvedAudioName, pixel_format: inputPixelFormat } });
 });
 
 expressApp.post('/recording/crop-update', (req, res) => {
-  const recId = String((req.body && req.body.url) || 'default_rec').trim();
+  const body = req.body || {};
+  const meta = body && typeof body.metadata === 'object' && body.metadata ? body.metadata : {};
+  const recId = normalizeRecordingKey(body.id || body.recordingKey || body.url || meta.url, meta);
   let currentRecording = activeRecordings.has(recId) ? activeRecordings.get(recId).currentRecording : null;
   if (!currentRecording && activeRecordings.size > 0) currentRecording = activeRecordings.values().next().value.currentRecording;
 
@@ -8790,8 +8948,38 @@ expressApp.post('/recording/crop-update', (req, res) => {
   res.json({ success: true });
 });
 
+expressApp.get('/recordings', (_req, res) => {
+  res.json({ success: true, isRecording, recordings: getRecordingSnapshots() });
+});
+
+expressApp.post('/recording/heartbeat', (req, res) => {
+  const body = req.body || {};
+  const meta = body && typeof body.metadata === 'object' && body.metadata ? body.metadata : {};
+  const recId = normalizeRecordingKey(body.id || body.recordingKey || body.url || meta.url, meta);
+  const clientId = String(body.recordingClientId || body.clientId || '').trim();
+  const session = activeRecordings.get(recId);
+  if (!session) return res.json({ success: true, active: false, recordingKey: recId });
+  if (session.ownerClientId && clientId && session.ownerClientId !== clientId) {
+    return res.json({ success: true, active: true, owner: false, recordingKey: recId });
+  }
+  if (clientId && !session.ownerClientId) session.ownerClientId = clientId;
+  session.lastHeartbeatAt = Date.now();
+  return res.json({ success: true, active: true, owner: true, recordingKey: recId });
+});
+
+expressApp.post('/recordings/stop-all', async (req, res) => {
+  const reason = String((req.body && req.body.reason) || 'panic').trim() || 'panic';
+  const ids = Array.from(activeRecordings.keys());
+  for (const id of ids) requestRecordingStop(id, reason);
+  res.json({ success: true, action: 'stop-all-recordings', count: ids.length, ids });
+});
+
 expressApp.post('/stop-recording', (req, res) => {
-  const reqId = String((req.body && (req.body.id || req.body.tabId || (req.body.metadata && req.body.metadata.url))) || '').trim();
+  const body = req.body || {};
+  const meta = body && typeof body.metadata === 'object' && body.metadata ? body.metadata : {};
+  const reqId = normalizeRecordingKey(body.id || body.recordingKey || body.tabId || meta.url || body.url, meta);
+  const clientId = String(body.recordingClientId || body.clientId || '').trim();
+  const reason = String(body.reason || '').trim();
   let session = null;
   let activeRecId = null;
 
@@ -8805,6 +8993,9 @@ expressApp.post('/stop-recording', (req, res) => {
 
   if (!session) {
     return res.json({ success: false, error: 'Er loopt geen opname' });
+  }
+  if ((reason === 'pagehide' || reason === 'client_lost') && session.ownerClientId && clientId && session.ownerClientId !== clientId) {
+    return res.json({ success: true, action: 'stop-recording', ignored: true, reason: 'client_mismatch' });
   }
 
   const recordingProcess = session.recordingProcess;
@@ -8834,6 +9025,7 @@ expressApp.post('/stop-recording', (req, res) => {
 
   const cleanup = () => {
     console.log(`⬛ Opname gestopt: ${currentRecordingFile}`);
+    if (session.maxDurationTimer) clearTimeout(session.maxDurationTimer);
     activeRecordings.delete(activeRecId);
     broadcastRecordingState();
   };
@@ -16141,6 +16333,7 @@ function shutdownGracefully(signal) {
     for (const session of activeRecordings.values()) {
       promises.push(new Promise((resolve) => {
         try {
+          if (session.maxDurationTimer) clearTimeout(session.maxDurationTimer);
           const proc = session.recordingProcess;
           if (!proc || proc.killed) return resolve();
 
