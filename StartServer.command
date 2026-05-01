@@ -50,7 +50,12 @@ function postgres_ready() {
 }
 
 function ensure_postgres_running() {
-    if [ "${WEBDL_DB_ENGINE}" != "postgres" ] && [ "${WEBDL_DB_ENGINE}" != "pg" ]; then
+    local ENGINE="${WEBDL_DB_ENGINE:-postgres}"
+    local DB_URL="${DATABASE_URL:-postgresql://jurgen@localhost:5432/webdl}"
+    if [ "${ENGINE}" = "sqlite" ]; then
+        return 0
+    fi
+    if [ "${ENGINE}" != "postgres" ] && [ "${ENGINE}" != "pg" ] && [[ "${DB_URL}" != postgres://* ]] && [[ "${DB_URL}" != postgresql://* ]]; then
         return 0
     fi
 

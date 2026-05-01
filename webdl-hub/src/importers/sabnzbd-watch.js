@@ -379,7 +379,13 @@ async function scanSabnzbdCompleted({ repo, rootDir, configPath = '', sabnzbdUrl
   const details = [];
   for (const filePath of files) {
     if (shouldStop && shouldStop()) break;
-    const result = await importSabnzbdFile({ repo, filePath, rootDir, history, minFileAgeMs, logger });
+    let result;
+    try {
+      result = await importSabnzbdFile({ repo, filePath, rootDir, history, minFileAgeMs, logger });
+    } catch (e) {
+      result = { imported: false, reason: 'error', error: String(e.message || e), filePath };
+      if (logger) logger.warn('sabnzbd.import.unhandled_error', { file: filePath, err: result.error });
+    }
     if (result.imported) imported++;
     else if (result.reason === 'error') errors++;
     else skipped++;
@@ -402,16 +408,22 @@ function startSabnzbdWatcher({ repo, logger, rootDir, rootDirs = [], pollMs = 30
     currentTick = (async () => {
       for (const currentRoot of roots) {
         if (stopped) break;
-        const result = await scanSabnzbdCompleted({
-          repo,
-          rootDir: currentRoot,
-          configPath,
-          sabnzbdUrl,
-          sabnzbdApiKey,
-          minFileAgeMs,
-          logger,
-          shouldStop: () => stopped,
-        });
+        let result;
+        try {
+          result = await scanSabnzbdCompleted({
+            repo,
+            rootDir: currentRoot,
+            configPath,
+            sabnzbdUrl,
+            sabnzbdApiKey,
+            minFileAgeMs,
+            logger,
+            shouldStop: () => stopped,
+          });
+        } catch (e) {
+          if (logger) logger.warn('sabnzbd.scan.error', { reason, rootDir: currentRoot, err: String(e.message || e) });
+          continue;
+        }
         if (!result.success) {
           if (logger) logger.warn('sabnzbd.scan.skipped', { reason: result.error, rootDir: currentRoot });
         } else if (result.imported || reason === 'startup') {
