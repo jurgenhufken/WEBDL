@@ -110,7 +110,7 @@ function statfsInfo(dir) {
 }
 
 function normalizeRootDirs({ rootDir = '', rootDirs = [] } = {}) {
-  const values = Array.isArray(rootDirs) ? rootDirs : [rootDirs];
+  const values = Array.isArray(rootDirs) ? [...rootDirs] : [rootDirs];
   if (rootDir) values.unshift(rootDir);
   const out = [];
   const seen = new Set();

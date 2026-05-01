@@ -64,6 +64,12 @@ test('SABNZBD roots worden genormaliseerd en gededuped', () => {
   );
 });
 
+test('SABNZBD root normalisatie muteert invoerarray niet', () => {
+  const roots = ['/old/Completed', '/new/Completed'];
+  normalizeRootDirs({ rootDir: '/old/Completed', rootDirs: roots });
+  assert.deepEqual(roots, ['/old/Completed', '/new/Completed']);
+});
+
 test('SABNZBD scan kan stoppen voordat DB-imports starten', async (t) => {
   const fs = require('node:fs');
   const path = require('node:path');
