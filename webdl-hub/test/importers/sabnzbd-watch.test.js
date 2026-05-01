@@ -90,3 +90,31 @@ test('SABNZBD scan kan stoppen voordat DB-imports starten', async (t) => {
   assert.equal(result.imported, 0);
   assert.equal(result.skipped, 0);
 });
+
+test('SABNZBD scan kan oude bestanden overslaan met mtime cutoff', async (t) => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'sabnzbd-cutoff-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'old-video.mp4');
+  fs.writeFileSync(file, Buffer.alloc(1024));
+  const oldDate = new Date(Date.now() - 60_000);
+  fs.utimesSync(file, oldDate, oldDate);
+
+  const repo = {
+    schema: 'webdl',
+    pool: {
+      query() {
+        throw new Error('DB should not be touched for old files outside cutoff');
+      },
+    },
+  };
+  const result = await scanSabnzbdCompleted({
+    repo,
+    rootDir: dir,
+    minFileAgeMs: 0,
+    sinceMtimeMs: Date.now() - 1_000,
+  });
+  assert.equal(result.success, true);
+  assert.equal(result.files, 0);
+});

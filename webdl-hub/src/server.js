@@ -48,6 +48,8 @@ async function main() {
         rootDirs: config.sabnzbdCompletedDirs,
         pollMs: config.sabnzbdPollMs,
         minFileAgeMs: config.sabnzbdMinFileAgeMs,
+        startupLookbackMs: config.sabnzbdStartupLookbackMs,
+        maxFilesPerScan: config.sabnzbdMaxFilesPerScan,
         configPath: config.sabnzbdConfigPath,
         sabnzbdUrl: config.sabnzbdUrl,
         sabnzbdApiKey: config.sabnzbdApiKey,

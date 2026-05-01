@@ -74,6 +74,8 @@ const config = Object.freeze({
   sabnzbdCompletedDirs: SABNZBD_COMPLETED_DIRS,
   sabnzbdPollMs: intEnv('WEBDL_SABNZBD_POLL_MS', 30_000),
   sabnzbdMinFileAgeMs: intEnv('WEBDL_SABNZBD_MIN_FILE_AGE_MS', 15_000),
+  sabnzbdStartupLookbackMs: intEnv('WEBDL_SABNZBD_STARTUP_LOOKBACK_MS', 24 * 60 * 60 * 1000),
+  sabnzbdMaxFilesPerScan: intEnv('WEBDL_SABNZBD_MAX_FILES_PER_SCAN', 500),
   sabnzbdConfigPath: process.env.WEBDL_SABNZBD_CONFIG || '',
   sabnzbdUrl: process.env.WEBDL_SABNZBD_URL || '',
   sabnzbdApiKey: process.env.WEBDL_SABNZBD_API_KEY || '',

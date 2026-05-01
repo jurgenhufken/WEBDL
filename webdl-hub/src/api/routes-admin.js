@@ -37,6 +37,8 @@ function createAdminRouter({ repo, adapters, logger = null }) {
         completedDirs: config.sabnzbdCompletedDirs,
         pollMs: config.sabnzbdPollMs,
         minFileAgeMs: config.sabnzbdMinFileAgeMs,
+        startupLookbackMs: config.sabnzbdStartupLookbackMs,
+        maxFilesPerScan: config.sabnzbdMaxFilesPerScan,
       },
     });
   });

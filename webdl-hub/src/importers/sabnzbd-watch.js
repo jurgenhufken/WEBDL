@@ -210,7 +210,7 @@ function findHistoryForFile(filePath, history = []) {
   return bestScore > 0 ? best : null;
 }
 
-function walkMediaFiles(rootDir, { maxDepth = 8 } = {}) {
+function walkMediaFiles(rootDir, { maxDepth = 8, sinceMtimeMs = 0, maxFiles = Number.POSITIVE_INFINITY } = {}) {
   const out = [];
   function walk(dir, depth) {
     if (depth > maxDepth) return;
@@ -221,11 +221,20 @@ function walkMediaFiles(rootDir, { maxDepth = 8 } = {}) {
       return;
     }
     for (const entry of entries) {
+      if (out.length >= maxFiles) return;
       if (!entry || !entry.name || entry.name.startsWith('.')) continue;
       const fullPath = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         walk(fullPath, depth + 1);
       } else if (entry.isFile() && isMediaPath(fullPath)) {
+        if (sinceMtimeMs > 0) {
+          try {
+            const stat = fs.statSync(fullPath);
+            if (Number(stat.mtimeMs || 0) < sinceMtimeMs) continue;
+          } catch (_) {
+            continue;
+          }
+        }
         out.push(fullPath);
       }
     }
@@ -367,12 +376,23 @@ async function importSabnzbdFile({ repo, filePath, rootDir, history = [], minFil
   }
 }
 
-async function scanSabnzbdCompleted({ repo, rootDir, configPath = '', sabnzbdUrl = '', sabnzbdApiKey = '', minFileAgeMs = 15_000, logger = null, shouldStop = null } = {}) {
+async function scanSabnzbdCompleted({
+  repo,
+  rootDir,
+  configPath = '',
+  sabnzbdUrl = '',
+  sabnzbdApiKey = '',
+  minFileAgeMs = 15_000,
+  logger = null,
+  shouldStop = null,
+  sinceMtimeMs = 0,
+  maxFiles = Number.POSITIVE_INFINITY,
+} = {}) {
   if (!rootDir || !fs.existsSync(rootDir)) {
     return { success: false, rootDir, error: 'completed dir missing', imported: 0, skipped: 0, errors: 0 };
   }
   const history = await fetchSabnzbdHistory({ configPath, url: sabnzbdUrl, apiKey: sabnzbdApiKey, logger });
-  const files = walkMediaFiles(rootDir);
+  const files = walkMediaFiles(rootDir, { sinceMtimeMs, maxFiles });
   let imported = 0;
   let skipped = 0;
   let errors = 0;
@@ -391,11 +411,24 @@ async function scanSabnzbdCompleted({ repo, rootDir, configPath = '', sabnzbdUrl
     else skipped++;
     if (result.imported || result.reason === 'error') details.push(result);
   }
-  return { success: true, rootDir, files: files.length, imported, skipped, errors, details: details.slice(0, 50) };
+  return { success: true, rootDir, files: files.length, imported, skipped, errors, limited: files.length >= maxFiles, details: details.slice(0, 50) };
 }
 
-function startSabnzbdWatcher({ repo, logger, rootDir, rootDirs = [], pollMs = 30_000, minFileAgeMs = 15_000, configPath = '', sabnzbdUrl = '', sabnzbdApiKey = '' } = {}) {
+function startSabnzbdWatcher({
+  repo,
+  logger,
+  rootDir,
+  rootDirs = [],
+  pollMs = 30_000,
+  minFileAgeMs = 15_000,
+  startupLookbackMs = 24 * 60 * 60 * 1000,
+  maxFilesPerScan = 500,
+  configPath = '',
+  sabnzbdUrl = '',
+  sabnzbdApiKey = '',
+} = {}) {
   const roots = normalizeRootDirs({ rootDir, rootDirs });
+  const lastScanAt = new Map();
   let stopped = false;
   let inProgress = false;
   let timer = null;
@@ -405,9 +438,14 @@ function startSabnzbdWatcher({ repo, logger, rootDir, rootDirs = [], pollMs = 30
   async function tick(reason) {
     if (stopped || inProgress) return;
     inProgress = true;
+    const scanStartedAt = Date.now();
     currentTick = (async () => {
       for (const currentRoot of roots) {
         if (stopped) break;
+        const previousScanAt = lastScanAt.get(currentRoot);
+        const sinceMtimeMs = reason === 'manual'
+          ? 0
+          : previousScanAt || Math.max(0, scanStartedAt - startupLookbackMs);
         let result;
         try {
           result = await scanSabnzbdCompleted({
@@ -419,6 +457,8 @@ function startSabnzbdWatcher({ repo, logger, rootDir, rootDirs = [], pollMs = 30
             minFileAgeMs,
             logger,
             shouldStop: () => stopped,
+            sinceMtimeMs,
+            maxFiles: maxFilesPerScan,
           });
         } catch (e) {
           if (logger) logger.warn('sabnzbd.scan.error', { reason, rootDir: currentRoot, err: String(e.message || e) });
@@ -427,7 +467,10 @@ function startSabnzbdWatcher({ repo, logger, rootDir, rootDirs = [], pollMs = 30
         if (!result.success) {
           if (logger) logger.warn('sabnzbd.scan.skipped', { reason: result.error, rootDir: currentRoot });
         } else if (result.imported || reason === 'startup') {
-          if (logger) logger.info('sabnzbd.scan.done', { reason, rootDir: currentRoot, files: result.files, imported: result.imported, skipped: result.skipped, errors: result.errors });
+          if (logger) logger.info('sabnzbd.scan.done', { reason, rootDir: currentRoot, files: result.files, imported: result.imported, skipped: result.skipped, errors: result.errors, limited: result.limited, sinceMtimeMs });
+        }
+        if (!stopped && reason !== 'manual') {
+          lastScanAt.set(currentRoot, Math.max(0, scanStartedAt - minFileAgeMs));
         }
       }
     })();
@@ -439,7 +482,7 @@ function startSabnzbdWatcher({ repo, logger, rootDir, rootDirs = [], pollMs = 30
     }
   }
 
-  if (logger) logger.info('sabnzbd.watch.started', { rootDirs: roots, pollMs, minFileAgeMs });
+  if (logger) logger.info('sabnzbd.watch.started', { rootDirs: roots, pollMs, minFileAgeMs, startupLookbackMs, maxFilesPerScan });
   timer = setInterval(() => tick('poll'), pollMs);
   startupTimer = setTimeout(() => tick('startup'), 1500);
 

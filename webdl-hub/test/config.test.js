@@ -9,6 +9,7 @@ function loadConfig(env) {
   for (const k of [
     'PORT','DATABASE_URL','DB_SCHEMA','DOWNLOAD_ROOT','WORKER_CONCURRENCY','LOG_LEVEL',
     'WEBDL_SABNZBD_COMPLETED_DIR','WEBDL_SABNZBD_COMPLETED_DIRS','WEBDL_STORAGE_ROOTS',
+    'WEBDL_SABNZBD_STARTUP_LOOKBACK_MS','WEBDL_SABNZBD_MAX_FILES_PER_SCAN',
   ]) {
     delete process.env[k];
   }
@@ -26,6 +27,8 @@ test('defaults als env leeg is', () => {
   assert.ok(path.isAbsolute(c.downloadRoot));
   assert.ok(Array.isArray(c.sabnzbdCompletedDirs));
   assert.ok(c.sabnzbdCompletedDirs.length >= 1);
+  assert.equal(c.sabnzbdStartupLookbackMs, 86400000);
+  assert.equal(c.sabnzbdMaxFilesPerScan, 500);
 });
 
 test('env override wordt gelezen', () => {
