@@ -9,15 +9,24 @@ const VALID_SCHEMA = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 // Lane classifier: bepaalt concurrency-bucket.
 //  - 'process-video': video + ffmpeg merge / zware sessie-adapters,
 //    max 1 tegelijk wegens zware CPU (ffmpeg-merge + transcodes)
-//  - 'video':         directe video download zonder merge, max 2 tegelijk
-//  - 'image':         images/attachments, max 6 tegelijk (netwerk-bound)
+//  - 'video':         directe video download zonder merge
+//  - 'image':         images/attachments (netwerk-bound)
 const IMAGE_URL_RE = /\.(jpe?g|png|webp|gif|avif|bmp|tiff?)(\?|$)/i;
 const DIRECT_VIDEO_RE = /\.(mp4|webm|mkv|mov|m4v|avi|flv|ts)(\?|$)/i;
 const MERGE_VIDEO_HOSTS = [
   'youtube.com', 'youtu.be', 'vimeo.com', 'twitch.tv',
-  'tiktok.com', 'reddit.com', 'redd.it', 'v.redd.it',
+  'reddit.com', 'redd.it', 'v.redd.it',
   'streamable.com', 'bitchute.com', 'rumble.com',
 ];
+
+function isTikTokHost(host) {
+  return host === 'tiktok.com' || host.endsWith('.tiktok.com');
+}
+
+function isDirectTikTokVideo(pathname) {
+  return /^\/@[^/]+\/video\/\d+\/?$/i.test(pathname);
+}
+
 function classifyLane(url, adapter) {
   const u = String(url || '').toLowerCase();
   if (adapter === 'slave-delegate') {
@@ -45,6 +54,9 @@ function classifyLane(url, adapter) {
     try {
       const parsed = new URL(url);
       const host = parsed.hostname.replace(/^www\./, '');
+      if (isTikTokHost(host)) {
+        return isDirectTikTokVideo(parsed.pathname) ? 'video' : 'process-video';
+      }
       if (MERGE_VIDEO_HOSTS.some((h) => host === h || host.endsWith('.' + h))) {
         return 'process-video';
       }

@@ -6,10 +6,19 @@ const test = require('node:test');
 const assert = require('node:assert');
 const { Client } = require('pg');
 const { migrate } = require('../../src/db/migrate');
-const { createRepo } = require('../../src/db/repo');
+const { createRepo, classifyLane } = require('../../src/db/repo');
 
 const DATABASE_URL = process.env.DATABASE_URL || 'postgres://jurgen@localhost:5432/webdl';
 const TEST_SCHEMA = 'webdl_test';
+
+test('classifyLane zet losse TikTok videos in de snelle video-lane', () => {
+  assert.equal(classifyLane('https://www.tiktok.com/@user/video/1234567890123456789', 'ytdlp'), 'video');
+});
+
+test('classifyLane houdt TikTok tags en profielen in process-video', () => {
+  assert.equal(classifyLane('https://www.tiktok.com/tag/girlfoot', 'ytdlp'), 'process-video');
+  assert.equal(classifyLane('https://www.tiktok.com/@toetokqueen', 'ytdlp'), 'process-video');
+});
 
 async function canConnect() {
   try {

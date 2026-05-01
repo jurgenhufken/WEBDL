@@ -12,6 +12,11 @@ const YOUTUBE_SLEEP_REQUESTS = process.env.WEBDL_YTDLP_YOUTUBE_SLEEP_REQUESTS ||
 const YOUTUBE_SLEEP_INTERVAL = process.env.WEBDL_YTDLP_YOUTUBE_SLEEP_INTERVAL || '2';
 const YOUTUBE_MAX_SLEEP_INTERVAL = process.env.WEBDL_YTDLP_YOUTUBE_MAX_SLEEP_INTERVAL || '8';
 const XVIDEOS_EXPAND_LIMIT = Number.parseInt(process.env.WEBDL_XVIDEOS_EXPAND_LIMIT || '50', 10) || 50;
+const MERGE_VIDEO_HOSTS = [
+  'youtube.com', 'youtu.be', 'vimeo.com', 'twitch.tv',
+  'reddit.com', 'redd.it', 'v.redd.it',
+  'streamable.com', 'bitchute.com', 'rumble.com',
+];
 
 // Generieke matcher: yt-dlp ondersteunt duizenden sites, dus we accepteren
 // elke http(s)-URL. Andere adapters (reddit, instagram, tdl) hebben hogere
@@ -71,6 +76,29 @@ function isTikTokUrl(url) {
   try {
     const h = new URL(String(url || '')).hostname.replace(/^www\./, '').toLowerCase();
     return h === 'tiktok.com' || h.endsWith('.tiktok.com');
+  } catch {
+    return false;
+  }
+}
+
+function isDirectTikTokVideoUrl(url) {
+  try {
+    const u = new URL(String(url || ''));
+    const host = u.hostname.replace(/^www\./, '').toLowerCase();
+    if (host !== 'tiktok.com' && !host.endsWith('.tiktok.com')) return false;
+    return /^\/@[^/]+\/video\/\d+\/?$/i.test(u.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function isMergeVideoUrl(url) {
+  try {
+    const host = new URL(String(url || '')).hostname.replace(/^www\./, '').toLowerCase();
+    if (host === 'tiktok.com' || host.endsWith('.tiktok.com')) {
+      return !isDirectTikTokVideoUrl(url);
+    }
+    return MERGE_VIDEO_HOSTS.some((h) => host === h || host.endsWith('.' + h));
   } catch {
     return false;
   }
@@ -142,7 +170,7 @@ async function expandXvideosListing(url) {
 
 function plan(url, opts = {}) {
   const cwd = opts.cwd;
-  const quality = opts.quality || 'bv*+ba/best';
+  const quality = opts.quality || (isMergeVideoUrl(url) ? 'bv*+ba/best' : 'best/bv*+ba');
   const isYoutube = /(?:youtube\.com|youtu\.be)/i.test(String(url || ''));
   const isTikTok = isTikTokUrl(url);
   const args = [

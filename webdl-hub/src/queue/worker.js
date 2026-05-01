@@ -18,6 +18,13 @@ const SKIP_EXTS = new Set(['.part', '.ytdl', '.tmp']);
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
+function intEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
 // ─── Thumbnail generatie ──────────────────────────────────────────────────────
 function generateThumbnail(videoPath) {
   return new Promise((resolve) => {
@@ -589,12 +596,12 @@ function startWorkerPool({
   // ─── Lane-based loops ──────────────────────────────────────────────────────
   // Elke lane heeft eigen concurrency-limiet en eigen worker-loop.
   //   process-video: 1 (ffmpeg merge CPU-zwaar)
-  //   video:         2 (directe video, geen merge)
-  //   image:         6 (snel, netwerk-bound)
+  //   video:         4 (directe video, geen merge; netwerk-bound)
+  //   image:         8 (snel, netwerk-bound)
   const LANES = [
-    { name: 'process-video', concurrency: 1 },
-    { name: 'video',         concurrency: 2 },
-    { name: 'image',         concurrency: 6 },
+    { name: 'process-video', concurrency: intEnv('WEBDL_PROCESS_VIDEO_CONCURRENCY', 1) },
+    { name: 'video',         concurrency: intEnv('WEBDL_DIRECT_VIDEO_CONCURRENCY', 4) },
+    { name: 'image',         concurrency: intEnv('WEBDL_IMAGE_CONCURRENCY', 8) },
   ];
   const laneActive = new Map(LANES.map((l) => [l.name, new Set()]));
 
