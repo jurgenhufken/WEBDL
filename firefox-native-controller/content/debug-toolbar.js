@@ -4144,6 +4144,10 @@
   let frameUpdateTimer = null;
   let recordingHeartbeatTimer = null;
   let currentRecordingKey = '';
+  let recordingUiMode = 'idle';
+  let recordingUiLockUntil = 0;
+  let recordingPendingKey = '';
+  const RECORDING_UI_LOCK_MS = 6000;
   const recordingClientId = (() => {
     try {
       if (window.__webdlRecordingClientId) return window.__webdlRecordingClientId;
@@ -4233,6 +4237,59 @@
     return aliases;
   }
 
+  function setRecordingUiMode(mode, key, lockMs = RECORDING_UI_LOCK_MS) {
+    recordingUiMode = mode || 'idle';
+    if (key) recordingPendingKey = String(key);
+    recordingUiLockUntil = Date.now() + Math.max(0, Number(lockMs) || 0);
+    renderRecButtons(recordingUiMode);
+  }
+
+  function clearRecordingUiLock(mode) {
+    recordingUiMode = mode || (isRecording ? 'recording' : 'idle');
+    recordingUiLockUntil = 0;
+    if (recordingUiMode === 'idle') recordingPendingKey = '';
+    renderRecButtons(recordingUiMode);
+  }
+
+  function renderRecButtons(mode) {
+    const state = mode || (isRecording ? 'recording' : 'idle');
+    if (state === 'starting') {
+      recStartBtn.textContent = '\u23fa Starten...';
+      recStartBtn.style.opacity = '0.65';
+      recStartBtn.style.cursor = 'wait';
+      recStopBtn.style.opacity = '0.5';
+      recStopBtn.style.cursor = 'not-allowed';
+      recStopBtn.style.backgroundColor = '#555';
+      return;
+    }
+    if (state === 'stopping') {
+      recStartBtn.textContent = '\u23fa REC...';
+      recStartBtn.style.opacity = '0.5';
+      recStartBtn.style.cursor = 'not-allowed';
+      recStopBtn.textContent = '\u23f9 Stoppen...';
+      recStopBtn.style.opacity = '0.65';
+      recStopBtn.style.cursor = 'wait';
+      recStopBtn.style.backgroundColor = '#8f3330';
+      return;
+    }
+    recStopBtn.textContent = '\u23f9 REC Stop';
+    if (state === 'recording') {
+      recStartBtn.textContent = '\u23fa REC...';
+      recStartBtn.style.opacity = '0.5';
+      recStartBtn.style.cursor = 'not-allowed';
+      recStopBtn.style.opacity = '1';
+      recStopBtn.style.cursor = 'pointer';
+      recStopBtn.style.backgroundColor = '#e74c3c';
+    } else {
+      recStartBtn.textContent = '\u23fa REC Start';
+      recStartBtn.style.opacity = '1';
+      recStartBtn.style.cursor = 'pointer';
+      recStopBtn.style.opacity = '0.5';
+      recStopBtn.style.cursor = 'not-allowed';
+      recStopBtn.style.backgroundColor = '#555';
+    }
+  }
+
   function updateRecUI(recording, activeUrls, activeKeys) {
     const meta = scrapeMetadata();
     const key = normalizeRecordingKeyFromMeta(meta);
@@ -4243,6 +4300,20 @@
       : (Array.isArray(activeUrls) && activeUrls.length
         ? activeUrls.some(u => myUrl.startsWith(u) || u.startsWith(myUrl.split('?')[0]))
         : !!recording);
+    if (Date.now() < recordingUiLockUntil) {
+      if (recordingUiMode === 'starting' && !myRecording) {
+        isRecording = true;
+        currentRecordingKey = currentRecordingKey || recordingPendingKey || key;
+        captureFrame.style.display = 'none';
+        renderRecButtons('starting');
+        return;
+      }
+      if (recordingUiMode === 'stopping' && myRecording) {
+        isRecording = false;
+        renderRecButtons('stopping');
+        return;
+      }
+    }
     isRecording = myRecording;
     if (!myRecording && cropUpdateTimer) {
       clearInterval(cropUpdateTimer);
@@ -4256,17 +4327,10 @@
     if (myRecording) {
       captureFrame.style.display = 'none';
     }
-    if (myRecording) {
-      recStartBtn.textContent = '\u23fa REC...';
-      recStartBtn.style.opacity = '0.5'; recStartBtn.style.cursor = 'not-allowed';
-      recStopBtn.style.opacity = '1'; recStopBtn.style.cursor = 'pointer';
-      recStopBtn.style.backgroundColor = '#e74c3c';
-    } else {
-      recStartBtn.textContent = '\u23fa REC Start';
-      recStartBtn.style.opacity = '1'; recStartBtn.style.cursor = 'pointer';
-      recStopBtn.style.opacity = '0.5'; recStopBtn.style.cursor = 'not-allowed';
-      recStopBtn.style.backgroundColor = '#555';
-    }
+    recordingUiMode = myRecording ? 'recording' : 'idle';
+    recordingUiLockUntil = 0;
+    if (!myRecording) recordingPendingKey = '';
+    renderRecButtons(recordingUiMode);
   }
 
   function ensureRecordingHeartbeat(meta) {
@@ -4394,8 +4458,9 @@
   }
 
   recStartBtn.addEventListener('click', async () => {
-    if (isRecording) return;
+    if (isRecording || recordingUiMode === 'starting' || recordingUiMode === 'stopping') return;
     const meta = scrapeMetadata();
+    const recordingKey = normalizeRecordingKeyFromMeta(meta);
     const crop = getVideoCropRect();
     if (crop.error) {
       showNotification(crop.error, true);
@@ -4404,13 +4469,17 @@
     }
 
     addLog(`Opname starten (crop ${crop.width}x${crop.height} @ ${crop.x},${crop.y})`);
+    currentRecordingKey = recordingKey;
+    isRecording = true;
+    setRecordingUiMode('starting', recordingKey);
     try {
-      const recordingKey = normalizeRecordingKeyFromMeta(meta);
       const result = await startRecordingRequest({ metadata: meta, crop, lock: true, recordingKey, recordingClientId });
       if (result.success) {
         applyConnectionState(true);
         currentRecordingKey = result.recordingKey || recordingKey;
+        recordingPendingKey = currentRecordingKey;
         updateRecUI(true, [meta.url || window.location.href], [currentRecordingKey]);
+        clearRecordingUiLock('recording');
         ensureRecordingHeartbeat(meta);
         const startedFile = result.file || result.finalFile || result.rawFile || currentRecordingKey || 'actief';
         showNotification(`Opname gestart: ${startedFile}`);
@@ -4429,18 +4498,24 @@
         if (toggleResult.success) {
           applyConnectionState(true);
           updateRecUI(false);
+          clearRecordingUiLock('idle');
           showNotification('Opname succesvol afgesloten.');
           addLog('Opname afgesloten (toggle)');
         } else {
+          updateRecUI(true, [meta.url || window.location.href], [recordingKey]);
+          clearRecordingUiLock('recording');
           showNotification(`Fout bij afsluiten opname: ${toggleResult.error}`, true);
         }
       } else if (result && result.needsForce) {
         if (confirm("Er loopt al een opname op de achtergrond. Wil je deze geforceerd beëindigen en een nieuwe starten?")) {
+          setRecordingUiMode('starting', recordingKey);
           const forceResult = await startRecordingRequest({ metadata: meta, crop, lock: true, force: true, recordingKey, recordingClientId });
           if (forceResult.success) {
             applyConnectionState(true);
             currentRecordingKey = forceResult.recordingKey || recordingKey;
+            recordingPendingKey = currentRecordingKey;
             updateRecUI(true, [meta.url || window.location.href], [currentRecordingKey]);
+            clearRecordingUiLock('recording');
             ensureRecordingHeartbeat(meta);
             const forcedFile = forceResult.file || forceResult.finalFile || forceResult.rawFile || currentRecordingKey || 'actief';
             showNotification(`Opname geforceerd herstart: ${forcedFile}`);
@@ -4453,28 +4528,40 @@
               }, 250);
             }
           } else {
+            isRecording = false;
+            clearRecordingUiLock('idle');
             showNotification(forceResult.error, true);
           }
+        } else {
+          isRecording = false;
+          clearRecordingUiLock('idle');
         }
       } else {
+        isRecording = false;
+        clearRecordingUiLock('idle');
         if (result && result.error) addLog(`REC start geweigerd: ${result.error}`, 'error');
         showNotification(result.error, true);
       }
     } catch (e) {
+      isRecording = false;
+      clearRecordingUiLock('idle');
       showNotification(`REC fout: ${e.message}`, true);
       addLog(`REC fout: ${e.message}`, 'error');
     }
   });
 
   recStopBtn.addEventListener('click', async () => {
-    if (!isRecording) return;
+    if (!isRecording || recordingUiMode === 'starting' || recordingUiMode === 'stopping') return;
     addLog('Opname stoppen...');
     const meta = scrapeMetadata();
+    const stopKey = currentRecordingKey || normalizeRecordingKeyFromMeta(meta);
+    setRecordingUiMode('stopping', stopKey);
     try {
-      const result = await stopRecordingRequest({ metadata: meta, recordingKey: currentRecordingKey || normalizeRecordingKeyFromMeta(meta), recordingClientId });
+      const result = await stopRecordingRequest({ metadata: meta, recordingKey: stopKey, recordingClientId });
       if (result.success) {
         applyConnectionState(true);
         updateRecUI(false);
+        clearRecordingUiLock('idle');
         ensureFrameUpdatesRunning();
         if (result.processing) {
           const rawName = result.rawFile ? String(result.rawFile).split('/').pop() : (result.file ? String(result.file).split('/').pop() : '');
@@ -4486,10 +4573,14 @@
           addLog(`REC gestopt: ${result.file}`);
         }
       } else {
+        updateRecUI(true, [meta.url || window.location.href], [stopKey]);
+        clearRecordingUiLock('recording');
         if (result && result.error) addLog(`REC stop geweigerd: ${result.error}`, 'error');
         showNotification(result.error, true);
       }
     } catch (e) {
+      updateRecUI(true, [meta.url || window.location.href], [stopKey]);
+      clearRecordingUiLock('recording');
       showNotification(`Stop fout: ${e.message}`, true);
       addLog(`Stop fout: ${e.message}`, 'error');
     }
