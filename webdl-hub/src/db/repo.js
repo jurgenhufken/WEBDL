@@ -138,7 +138,9 @@ function createRepo({ databaseUrl = config.databaseUrl, schema = config.dbSchema
               attempts   = attempts + 1,
               locked_by  = $1,
               locked_at  = now(),
-              started_at = COALESCE(started_at, now())
+              started_at = COALESCE(started_at, now()),
+              finished_at = NULL,
+              error = NULL
         WHERE id = (
           SELECT id FROM ${T.jobs}
            WHERE status = 'queued' ${laneFilter}

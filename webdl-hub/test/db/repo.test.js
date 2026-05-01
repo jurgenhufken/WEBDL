@@ -77,6 +77,17 @@ test('DB-tests', { concurrency: false }, async (t) => {
     assert.equal(first.attempts, 1);
   });
 
+  await t.test('claimNextJob wist oude foutstatus bij retry', async () => {
+    await repo.truncateAll();
+    const j = await repo.createJob({ url: 'u1', adapter: 'ytdlp' });
+    await repo.claimNextJob('w1');
+    await repo.failJob(j.id, 'oude fout', { retry: true });
+    const claimed = await repo.claimNextJob('w2');
+    assert.equal(claimed.status, 'running');
+    assert.equal(claimed.error, null);
+    assert.equal(claimed.finished_at, null);
+  });
+
   await t.test('SKIP LOCKED: parallelle claims → 1 winnaar', async () => {
     await repo.truncateAll();
     await repo.createJob({ url: 'u1', adapter: 'ytdlp' });
