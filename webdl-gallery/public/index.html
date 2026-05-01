@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WEBDL Gallery</title>
-<link rel="stylesheet" href="/styles.css?v=20260501-04">
+<link rel="stylesheet" href="/styles.css?v=20260501-05">
 </head>
 <body>
   <header class="topbar">
@@ -148,6 +148,11 @@
           <div class="vprogressbar-fill" id="vProgressFill"></div>
           <div class="vprogressbar-handle" id="vProgressHandle"></div>
         </div>
+        <div class="vbottom-controls" id="vBottomControls" aria-label="Video bediening">
+          <button id="vBtnPlayPause" class="vplay-btn" title="Afspelen/pauzeren (spatie)">▶</button>
+          <div class="vtime-label" id="vTimeLabel">0:00 / 0:00</div>
+          <input id="vBottomSeek" class="vbottom-seek" type="range" min="0" max="1000" step="1" value="0" title="Positie in video">
+        </div>
         <button class="viewer-nav prev" id="vPrev" title="Vorige (←)">‹</button>
         <button class="viewer-nav next" id="vNext" title="Volgende (→)">›</button>
         <div class="hud-pill hud-left" id="vHudLeft"></div>
@@ -179,8 +184,8 @@
 
   </div><!-- /viewer -->
 
-  <script src="/app.js?v=20260501-04"></script>
-  <script src="/viewer.js?v=20260501-04"></script>
+  <script src="/app.js?v=20260501-05"></script>
+  <script src="/viewer.js?v=20260501-05"></script>
   <script>
   // ─── Thema switcher ─────────────────────────────────────────────────────
   (function() {

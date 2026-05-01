@@ -367,6 +367,39 @@ input[type="range"]:disabled { opacity: 0.35; cursor: default; }
 .vprogressbar:hover .vprogressbar-fill { height: 8px; }
 .vprogressbar-handle { position: absolute; bottom: 3px; width: 14px; height: 14px; border-radius: 50%; background: var(--accent); transform: translateX(-50%); opacity: 0; transition: opacity 0.2s ease; pointer-events: none; left: 0%; box-shadow: 0 0 8px var(--accent-glow); }
 .vprogressbar:hover .vprogressbar-handle { opacity: 1; }
+.vbottom-controls {
+  position: absolute; left: 50%; bottom: 18px; z-index: 30;
+  transform: translateX(-50%);
+  display: grid; grid-template-columns: 42px auto minmax(180px, 420px);
+  align-items: center; gap: 10px;
+  width: min(720px, calc(100vw - 120px));
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-glass);
+  box-shadow: 0 8px 28px rgba(0,0,0,.45), 0 0 16px var(--card-glow);
+  backdrop-filter: blur(14px);
+  transition: opacity .4s ease;
+}
+.vbottom-controls.hidden { display: none; }
+.vplay-btn {
+  width: 34px; height: 34px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  font-size: 15px;
+  background: var(--btn-bg);
+  border-color: var(--btn-border);
+}
+.vtime-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.vbottom-seek {
+  width: 100%;
+  min-width: 0;
+}
 
 /* ─── Tag dialog ──────────────────────────────────────────────────────────── */
 .tag-dialog {

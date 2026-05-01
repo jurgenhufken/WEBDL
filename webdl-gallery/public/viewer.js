@@ -94,6 +94,7 @@
       'vSlideshow2','vRandom2',
       'vStage','vContent','vPrev','vNext','vHudLeft','vHudRight',
       'vProgressBar','vProgressFill','vProgressHandle',
+      'vBottomControls','vBtnPlayPause','vTimeLabel','vBottomSeek',
       'vTagDialog','vTagList','vNewTagInput','vBtnAddTag','vBtnCloseTagDialog',
       'vLogPanel','vLogBody',
     ];
@@ -177,6 +178,7 @@
         if (!vs.seekDragging && mediaEl.duration) {
           const pct = (mediaEl.currentTime / mediaEl.duration) * 100;
           el.vSeek.value = String(Math.round(pct * 10));
+          if (el.vBottomSeek) el.vBottomSeek.value = String(Math.round(pct * 10));
           if (el.vProgressFill) el.vProgressFill.style.width = pct + '%';
           if (el.vProgressHandle) el.vProgressHandle.style.left = pct + '%';
 
@@ -185,9 +187,14 @@
             mediaEl.currentTime = vs.loopStart;
           }
         }
+        updatePlaybackControls(mediaEl);
       });
+      mediaEl.addEventListener('loadedmetadata', () => updatePlaybackControls(mediaEl));
+      mediaEl.addEventListener('play', () => updatePlaybackControls(mediaEl));
+      mediaEl.addEventListener('pause', () => updatePlaybackControls(mediaEl));
       mediaEl.addEventListener('ended', () => {
         stopReverse();
+        updatePlaybackControls(mediaEl);
         if (vs.slideshow && vs.videoWait) slideshowTick();
       });
 
@@ -198,6 +205,8 @@
 
       el.vVol.disabled  = false;
       el.vSeek.disabled = false;
+      if (el.vBottomSeek) el.vBottomSeek.disabled = false;
+      if (el.vBottomControls) el.vBottomControls.classList.remove('hidden');
     } else {
       mediaEl = document.createElement('img');
       mediaEl.src = `/media/${it.id}`;
@@ -207,6 +216,12 @@
       el.vVol.disabled  = true;
       el.vSeek.disabled = true;
       el.vSeek.value = '0';
+      if (el.vBottomSeek) {
+        el.vBottomSeek.disabled = true;
+        el.vBottomSeek.value = '0';
+      }
+      if (el.vBottomControls) el.vBottomControls.classList.add('hidden');
+      updatePlaybackControls(null);
     }
 
     mediaEl.classList.add('zoom-media');
@@ -287,6 +302,8 @@
     el.vContent.innerHTML = '';
     vs.currentMediaEl = null;
     el.vSeek.value = '0';
+    if (el.vBottomSeek) el.vBottomSeek.value = '0';
+    updatePlaybackControls(null);
   }
 
   // ─── Navigatie ────────────────────────────────────────────────────────────
@@ -433,6 +450,38 @@
     }
   }
 
+  // ─── Video controls ───────────────────────────────────────────────────────
+  function formatTime(sec) {
+    if (!Number.isFinite(sec) || sec < 0) return '0:00';
+    const s = Math.floor(sec % 60).toString().padStart(2, '0');
+    const m = Math.floor((sec / 60) % 60);
+    const h = Math.floor(sec / 3600);
+    return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
+  }
+
+  function updatePlaybackControls(video) {
+    const v = video || el.vContent.querySelector('video');
+    if (el.vBtnPlayPause) el.vBtnPlayPause.textContent = v && !v.paused && !v.ended ? '⏸' : '▶';
+    if (el.vTimeLabel) {
+      el.vTimeLabel.textContent = v ? `${formatTime(v.currentTime)} / ${formatTime(v.duration)}` : '0:00 / 0:00';
+    }
+  }
+
+  function seekVideoFromRange(rangeEl) {
+    const v = el.vContent.querySelector('video');
+    if (!v || !v.duration || !rangeEl) return;
+    v.currentTime = (parseInt(rangeEl.value, 10) / 1000) * v.duration;
+    updatePlaybackControls(v);
+  }
+
+  function toggleVideoPlayback() {
+    const v = el.vContent.querySelector('video');
+    if (!v) return;
+    if (v.paused) v.play();
+    else v.pause();
+    updatePlaybackControls(v);
+  }
+
   // ─── HUD ──────────────────────────────────────────────────────────────────
   function updateHUD(it) {
     const total = vs.items.length;
@@ -444,8 +493,11 @@
     // Reset progress bar
     if (el.vProgressFill) el.vProgressFill.style.width = '0%';
     if (el.vProgressHandle) el.vProgressHandle.style.left = '0%';
+    if (el.vBottomSeek) el.vBottomSeek.value = '0';
     // Show progress bar alleen bij video
     if (el.vProgressBar) el.vProgressBar.style.display = it.type === 'video' ? '' : 'none';
+    if (el.vBottomControls) el.vBottomControls.classList.toggle('hidden', it.type !== 'video');
+    updatePlaybackControls(null);
   }
 
   function showHUD() {
@@ -1094,6 +1146,13 @@
       el.vBtnMute.textContent = vs.muted ? '🔇' : '🔊';
     });
 
+    if (el.vBtnPlayPause) {
+      el.vBtnPlayPause.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleVideoPlayback();
+      });
+    }
+
     el.vVol.addEventListener('input', () => {
       vs.vol = parseFloat(el.vVol.value);
       const v = el.vContent.querySelector('video');
@@ -1103,18 +1162,32 @@
     el.vSeek.addEventListener('mousedown', () => { vs.seekDragging = true; });
     el.vSeek.addEventListener('mouseup', () => {
       vs.seekDragging = false;
-      const v = el.vContent.querySelector('video');
-      if (v && v.duration) {
-        v.currentTime = (parseInt(el.vSeek.value, 10) / 1000) * v.duration;
-      }
+      seekVideoFromRange(el.vSeek);
     });
     el.vSeek.addEventListener('touchend', () => {
       vs.seekDragging = false;
-      const v = el.vContent.querySelector('video');
-      if (v && v.duration) {
-        v.currentTime = (parseInt(el.vSeek.value, 10) / 1000) * v.duration;
-      }
+      seekVideoFromRange(el.vSeek);
     });
+    el.vSeek.addEventListener('input', () => {
+      if (el.vBottomSeek) el.vBottomSeek.value = el.vSeek.value;
+    });
+
+    if (el.vBottomSeek) {
+      el.vBottomSeek.addEventListener('mousedown', () => { vs.seekDragging = true; });
+      el.vBottomSeek.addEventListener('mouseup', () => {
+        vs.seekDragging = false;
+        if (el.vSeek) el.vSeek.value = el.vBottomSeek.value;
+        seekVideoFromRange(el.vBottomSeek);
+      });
+      el.vBottomSeek.addEventListener('touchend', () => {
+        vs.seekDragging = false;
+        if (el.vSeek) el.vSeek.value = el.vBottomSeek.value;
+        seekVideoFromRange(el.vBottomSeek);
+      });
+      el.vBottomSeek.addEventListener('input', () => {
+        if (el.vSeek) el.vSeek.value = el.vBottomSeek.value;
+      });
+    }
 
     el.vSlideshow.addEventListener('click', () => {
       if (vs.slideshow) stopSlideshow(); else startSlideshow();
