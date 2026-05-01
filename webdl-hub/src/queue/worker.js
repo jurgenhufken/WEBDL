@@ -186,7 +186,7 @@ async function syncToGallery(job, outputFiles, logger) {
       if (SKIP_EXTS.has(ext)) continue;
 
       const fileInfo = await readInfoJsonForMedia(f.path, info);
-      const channel = fileInfo?.channel || (job.options?.playlistTitle) || '';
+      const channel = fileInfo?.channel || job.options?.channel || job.options?.playlistTitle || '';
       const infoPlatform = String(fileInfo?.platform || '').toLowerCase();
       const realPlatform = infoPlatform && infoPlatform !== 'generic' ? infoPlatform : platform;
       const title = fileInfo?.title || path.basename(f.path, ext).replace(/_/g, ' ').trim();
@@ -426,7 +426,7 @@ function startWorkerPool({
       if (partialReason) {
         await repo.pool.query(
           `UPDATE ${repo.schema}.jobs
-              SET options = COALESCE(options, '{}'::jsonb) || jsonb_build_object('partial_success', true, 'partial_reason', $2)
+              SET options = COALESCE(options, '{}'::jsonb) || jsonb_build_object('partial_success', true, 'partial_reason', $2::text)
             WHERE id = $1`,
           [job.id, partialReason],
         );
