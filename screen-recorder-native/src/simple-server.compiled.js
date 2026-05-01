@@ -1477,6 +1477,7 @@ const updateDownloadSourceUrl = db.prepare(`UPDATE downloads SET source_url=?, u
 const updateDownloadThumbnail = db.prepare(`UPDATE downloads SET thumbnail=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`);
 const updateDownloadRating = db.prepare(`UPDATE downloads SET rating=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`);
 const updateDownloadUrl = db.prepare(`UPDATE downloads SET url=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`);
+const updateDownloadContentTimestamp = db.prepare(`UPDATE downloads SET created_at=?, updated_at=?, finished_at=? WHERE id=?`);
 const rawGetDownload = db.prepare(`SELECT * FROM downloads WHERE id=?`);
 const getDownload = rawGetDownload;
 const updateScreenshotRating = db.prepare(`UPDATE screenshots SET rating=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`);
@@ -7818,6 +7819,32 @@ function parseSqliteDateMs(s) {
   }
 }
 
+function getYtdlpSourceTimestamp(info) {
+  try {
+    if (!info || typeof info !== 'object') return null;
+    const rawTimestamp = Number(info.timestamp);
+    if (Number.isFinite(rawTimestamp) && rawTimestamp > 0) {
+      const dt = new Date(rawTimestamp * 1000);
+      const ms = dt.getTime();
+      if (Number.isFinite(ms)) return dt.toISOString();
+    }
+
+    const uploadDate = String(info.upload_date || '').trim();
+    const m = uploadDate.match(/^(\d{4})(\d{2})(\d{2})$/);
+    if (m) {
+      const y = parseInt(m[1], 10);
+      const mo = parseInt(m[2], 10);
+      const d = parseInt(m[3], 10);
+      const dt = new Date(Date.UTC(y, Math.max(0, mo - 1), d, 12, 0, 0));
+      const ms = dt.getTime();
+      if (Number.isFinite(ms)) return dt.toISOString();
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
 function looksCompleteOnDisk(fpRaw) {
   try {
     const fp = path.resolve(String(fpRaw || '').trim());
@@ -11804,6 +11831,7 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
         // Read info.json to get the real channel/uploader (especially for playlist downloads)
         let realChannel = channel;
         let realTitle = title;
+        let sourcePublishedAt = null;
         try {
           const infoJson = fs.readdirSync(dir).find(f => f.endsWith('.info.json'));
           if (infoJson) {
@@ -11818,6 +11846,8 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
             if (info.webpage_url || info.original_url) {
               metaObj.source_url = info.webpage_url || info.original_url;
             }
+            sourcePublishedAt = getYtdlpSourceTimestamp(info);
+            if (sourcePublishedAt) metaObj.source_published_at = sourcePublishedAt;
           }
         } catch (e) {}
 
@@ -11853,6 +11883,11 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
         }
 
         await updateDownload.run('completed', 100, finalPath, finalFile, finalSize, finalFormat, JSON.stringify(metaObj), null, downloadId);
+        if (sourcePublishedAt && String(platform || '').toLowerCase() === 'youtube') {
+          try {
+            await updateDownloadContentTimestamp.run(sourcePublishedAt, sourcePublishedAt, sourcePublishedAt, downloadId);
+          } catch (e) { }
+        }
         try {
           const thumbPath = pickThumbnailFile(dir);
           if (thumbPath) await updateDownloadThumbnail.run(`/download/${downloadId}/thumb`, downloadId);
