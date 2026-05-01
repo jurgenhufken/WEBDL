@@ -132,28 +132,34 @@ async function generateVideoThumb(filePath) {
     } catch (_) {}
   }
   if (thumbInflight.has(filePath)) return thumbInflight.get(filePath);
-  const job = new Promise((resolve) => {
-    const args = [
-      '-y',
-      '-hide_banner',
-      '-loglevel', 'error',
-      '-ss', '10',
-      '-i', filePath,
-      '-frames:v', '1',
-      '-an',
-      '-vf', 'scale=480:270:force_original_aspect_ratio=decrease,pad=480:270:(ow-iw)/2:(oh-ih)/2:black,setsar=1',
-      '-q:v', '3',
-      outPath,
-    ];
-    const proc = spawn(FFMPEG_BIN, args, { stdio: ['ignore', 'ignore', 'ignore'] });
-    proc.on('close', () => {
-      try {
-        if (fs.existsSync(outPath) && fs.statSync(outPath).size > 8000) return resolve(outPath);
-        fs.rmSync(outPath, { force: true });
-      } catch (_) {}
-      resolve(null);
-    });
-    proc.on('error', () => resolve(null));
+  const job = (async () => {
+    for (const seek of ['10', '2', '0.5', '0']) {
+      const ok = await new Promise((resolve) => {
+        const args = [
+          '-y',
+          '-hide_banner',
+          '-loglevel', 'error',
+          '-ss', seek,
+          '-i', filePath,
+          '-frames:v', '1',
+          '-an',
+          '-vf', 'scale=480:270:force_original_aspect_ratio=decrease,pad=480:270:(ow-iw)/2:(oh-ih)/2:black,setsar=1',
+          '-q:v', '3',
+          outPath,
+        ];
+        const proc = spawn(FFMPEG_BIN, args, { stdio: ['ignore', 'ignore', 'ignore'] });
+        proc.on('close', () => {
+          try {
+            if (fs.existsSync(outPath) && fs.statSync(outPath).size > 8000) return resolve(true);
+            fs.rmSync(outPath, { force: true });
+          } catch (_) {}
+          resolve(false);
+        });
+        proc.on('error', () => resolve(false));
+      });
+      if (ok) return outPath;
+    }
+    return null;
   }).finally(() => thumbInflight.delete(filePath));
   thumbInflight.set(filePath, job);
   return job;
@@ -512,6 +518,7 @@ app.get('/api/items', async (req, res) => {
          AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
     )`);
     directWhere.push(`COALESCE(d.status, 'completed') <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
+    directWhere.push(`COALESCE(d.filesize, 1) > 0`);
     directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
     const fileWhere = buildItemFilters({
       req, params,
@@ -521,6 +528,7 @@ app.get('/api/items', async (req, res) => {
     });
     fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
     fileWhere.push(`COALESCE(d.status, 'completed') <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
+    fileWhere.push(`COALESCE(df.filesize, 1) > 0`);
     fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
 
     const directOrder = sort === 'random'
@@ -608,6 +616,7 @@ app.get('/api/items-since', async (req, res) => {
          AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})
     )`);
     directWhere.push(`COALESCE(d.status, 'completed') <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
+    directWhere.push(`COALESCE(d.filesize, 1) > 0`);
     directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
     const fileWhere = buildItemFilters({
       req, params,
@@ -617,6 +626,7 @@ app.get('/api/items-since', async (req, res) => {
     });
     fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
     fileWhere.push(`COALESCE(d.status, 'completed') <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
+    fileWhere.push(`COALESCE(df.filesize, 1) > 0`);
     fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})`);
     if (since) {
       params.push(since);
@@ -666,8 +676,9 @@ app.get('/api/platforms', async (_req, res) => {
       SELECT platform, COUNT(*) AS count
       FROM (
         SELECT d.platform
-          FROM downloads d
+         FROM downloads d
          WHERE d.filepath IS NOT NULL AND d.filepath <> ''
+           AND COALESCE(d.filesize, 1) > 0
            AND lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})
            AND NOT EXISTS (
              SELECT 1 FROM download_files mf
@@ -677,9 +688,10 @@ app.get('/api/platforms', async (_req, res) => {
            )
         UNION ALL
         SELECT d.platform
-          FROM download_files df
+         FROM download_files df
           JOIN downloads d ON d.id = df.download_id
          WHERE df.relpath !~* '${AUX_RELPATH_RE}'
+           AND COALESCE(df.filesize, 1) > 0
            AND lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})
       ) media_items
       GROUP BY platform
@@ -701,8 +713,9 @@ app.get('/api/channels', async (req, res) => {
       SELECT channel, platform, COUNT(*) AS count
       FROM (
         SELECT d.channel, d.platform
-          FROM downloads d
+         FROM downloads d
          WHERE d.filepath IS NOT NULL AND d.filepath <> ''
+           AND COALESCE(d.filesize, 1) > 0
            AND lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})
            ${platformClause}
            AND NOT EXISTS (
@@ -713,11 +726,12 @@ app.get('/api/channels', async (req, res) => {
            )
         UNION ALL
         SELECT d.channel, d.platform
-          FROM download_files df
+         FROM download_files df
           JOIN downloads d ON d.id = df.download_id
          WHERE 1=1
            ${platformClause}
            AND df.relpath !~* '${AUX_RELPATH_RE}'
+           AND COALESCE(df.filesize, 1) > 0
            AND lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})
       ) media_items
       GROUP BY channel, platform

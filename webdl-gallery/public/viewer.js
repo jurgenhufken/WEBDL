@@ -92,7 +92,7 @@
       'vVol','vBtnMute','vSeek',
       'vBtnTags','vBtnLog','vClose',
       'vSlideshow2','vRandom2',
-      'vStage','vContent','vPrev','vNext','vHudLeft','vHudRight',
+      'vStage','vContent','vPrev','vNext','vHudLeft','vHudMeta','vHudRight',
       'vProgressBar','vProgressFill','vProgressHandle',
       'vBottomControls','vBtnPlayPause','vTimeLabel','vBottomSeek',
       'vTagDialog','vTagList','vNewTagInput','vBtnAddTag','vBtnCloseTagDialog',
@@ -493,10 +493,13 @@
   function updateHUD(it) {
     const total = vs.items.length;
     const plus = vs.done ? '' : '+';
-    el.vHudLeft.textContent =
+    const meta =
       `${vs.idx + 1} / ${total}${plus}  ·  ${it.platform || '?'}  ·  ` +
       `${(it.channel && it.channel !== 'unknown') ? it.channel : '—'}`;
+    if (el.vHudMeta) el.vHudMeta.textContent = meta;
+    else el.vHudLeft.textContent = meta;
     el.vHudRight.textContent = it.duration ? String(it.duration) : '';
+    el.vHudLeft.classList.toggle('has-controls', it.type === 'video');
     // Reset progress bar
     if (el.vProgressFill) el.vProgressFill.style.width = '0%';
     if (el.vProgressHandle) el.vProgressHandle.style.left = '0%';
@@ -522,7 +525,9 @@
   }
 
   function hideHUD() {
-    el.vHudLeft.classList.add('hud-hidden');
+    const v = el.vContent.querySelector('video');
+    if (v) el.vHudLeft.classList.remove('hud-hidden');
+    else el.vHudLeft.classList.add('hud-hidden');
     el.vHudRight.classList.add('hud-hidden');
     el.vStage.classList.add('hud-hidden');
     // Topbar mee verbergen
