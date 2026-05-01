@@ -6,6 +6,7 @@ const assert = require('node:assert');
 const {
   isMediaPath,
   findHistoryForFile,
+  normalizeRootDirs,
   readSabnzbdConfig,
 } = require('../../src/importers/sabnzbd-watch');
 
@@ -53,4 +54,11 @@ test('SABNZBD config leest host uit misc en niet uit news-server sectie', (t) =>
   assert.equal(cfg.host, '127.0.0.1');
   assert.equal(cfg.port, '8080');
   assert.equal(cfg.api_key, 'local-key');
+});
+
+test('SABNZBD roots worden genormaliseerd en gededuped', () => {
+  assert.deepEqual(
+    normalizeRootDirs({ rootDir: '/old/Completed', rootDirs: ['/old/Completed', '/new/Completed'] }),
+    ['/old/Completed', '/new/Completed'],
+  );
 });

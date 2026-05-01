@@ -12,6 +12,7 @@
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
     "migrate": "node src/db/migrate.js",
+    "storage:audit": "node scripts/storage-audit.js",
     "test": "node --test --test-reporter=spec 'test/**/*.test.js'",
     "test:online": "TEST_ONLINE=1 node --test --test-reporter=spec 'test/**/*.test.js'",
     "lint": "eslint src test",

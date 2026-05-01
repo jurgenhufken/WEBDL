@@ -42,7 +42,7 @@ function readSabnzbdConfig(configPath = '') {
       const m = line.match(/^\s*([a-z_]+)\s*=\s*(.*)\s*$/i);
       if (!m) continue;
       const key = m[1].toLowerCase();
-      if (['host', 'port', 'https_port', 'api_key', 'complete_dir'].includes(key)) {
+      if (['host', 'port', 'https_port', 'api_key', 'complete_dir', 'download_dir'].includes(key)) {
         out[key] = parseIniValue(m[2]);
       }
     }
@@ -109,9 +109,26 @@ function statfsInfo(dir) {
   }
 }
 
-async function fetchSabnzbdStatus({ configPath = '', url = '', apiKey = '', completedDir = '', downloadRoot = '', logger = null } = {}) {
+function normalizeRootDirs({ rootDir = '', rootDirs = [] } = {}) {
+  const values = Array.isArray(rootDirs) ? rootDirs : [rootDirs];
+  if (rootDir) values.unshift(rootDir);
+  const out = [];
+  const seen = new Set();
+  for (const raw of values) {
+    const value = String(raw || '').trim();
+    if (!value) continue;
+    const resolved = path.resolve(value);
+    if (seen.has(resolved)) continue;
+    seen.add(resolved);
+    out.push(resolved);
+  }
+  return out;
+}
+
+async function fetchSabnzbdStatus({ configPath = '', url = '', apiKey = '', completedDir = '', completedDirs = [], downloadRoot = '', logger = null } = {}) {
   const startedAt = Date.now();
   try {
+    const sabConfig = readSabnzbdConfig(configPath);
     const [{ base, data: queueData }, { data: historyData }] = await Promise.all([
       fetchSabnzbdJson({ mode: 'queue', configPath, url, apiKey }),
       fetchSabnzbdJson({ mode: 'history', configPath, url, apiKey, extra: { limit: 20 } }),
@@ -154,7 +171,9 @@ async function fetchSabnzbdStatus({ configPath = '', url = '', apiKey = '', comp
         })),
       },
       disks: {
-        completed: completedDir ? statfsInfo(completedDir) : null,
+        completed: normalizeRootDirs({ rootDir: completedDir, rootDirs: completedDirs }).map((dir) => statfsInfo(dir)),
+        sabDownloading: sabConfig.download_dir ? statfsInfo(sabConfig.download_dir) : null,
+        sabCompleted: sabConfig.complete_dir ? statfsInfo(sabConfig.complete_dir) : null,
         downloadRoot: downloadRoot ? statfsInfo(downloadRoot) : null,
       },
     };
@@ -368,7 +387,8 @@ async function scanSabnzbdCompleted({ repo, rootDir, configPath = '', sabnzbdUrl
   return { success: true, rootDir, files: files.length, imported, skipped, errors, details: details.slice(0, 50) };
 }
 
-function startSabnzbdWatcher({ repo, logger, rootDir, pollMs = 30_000, minFileAgeMs = 15_000, configPath = '', sabnzbdUrl = '', sabnzbdApiKey = '' } = {}) {
+function startSabnzbdWatcher({ repo, logger, rootDir, rootDirs = [], pollMs = 30_000, minFileAgeMs = 15_000, configPath = '', sabnzbdUrl = '', sabnzbdApiKey = '' } = {}) {
+  const roots = normalizeRootDirs({ rootDir, rootDirs });
   let stopped = false;
   let inProgress = false;
   let timer = null;
@@ -377,18 +397,20 @@ function startSabnzbdWatcher({ repo, logger, rootDir, pollMs = 30_000, minFileAg
     if (stopped || inProgress) return;
     inProgress = true;
     try {
-      const result = await scanSabnzbdCompleted({ repo, rootDir, configPath, sabnzbdUrl, sabnzbdApiKey, minFileAgeMs, logger });
-      if (!result.success) {
-        if (logger) logger.warn('sabnzbd.scan.skipped', { reason: result.error, rootDir });
-      } else if (result.imported || reason === 'startup') {
-        if (logger) logger.info('sabnzbd.scan.done', { reason, rootDir, files: result.files, imported: result.imported, skipped: result.skipped, errors: result.errors });
+      for (const currentRoot of roots) {
+        const result = await scanSabnzbdCompleted({ repo, rootDir: currentRoot, configPath, sabnzbdUrl, sabnzbdApiKey, minFileAgeMs, logger });
+        if (!result.success) {
+          if (logger) logger.warn('sabnzbd.scan.skipped', { reason: result.error, rootDir: currentRoot });
+        } else if (result.imported || reason === 'startup') {
+          if (logger) logger.info('sabnzbd.scan.done', { reason, rootDir: currentRoot, files: result.files, imported: result.imported, skipped: result.skipped, errors: result.errors });
+        }
       }
     } finally {
       inProgress = false;
     }
   }
 
-  if (logger) logger.info('sabnzbd.watch.started', { rootDir, pollMs, minFileAgeMs });
+  if (logger) logger.info('sabnzbd.watch.started', { rootDirs: roots, pollMs, minFileAgeMs });
   timer = setInterval(() => tick('poll'), pollMs);
   setTimeout(() => tick('startup'), 1500);
 
@@ -408,6 +430,8 @@ module.exports = {
   buildSabnzbdUrl,
   fetchSabnzbdStatus,
   findHistoryForFile,
+  normalizeRootDirs,
+  statfsInfo,
   scanSabnzbdCompleted,
   startSabnzbdWatcher,
 };

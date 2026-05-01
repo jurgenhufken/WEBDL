@@ -45,7 +45,7 @@ async function main() {
     ? startSabnzbdWatcher({
         repo,
         logger,
-        rootDir: config.sabnzbdCompletedDir,
+        rootDirs: config.sabnzbdCompletedDirs,
         pollMs: config.sabnzbdPollMs,
         minFileAgeMs: config.sabnzbdMinFileAgeMs,
         configPath: config.sabnzbdConfigPath,

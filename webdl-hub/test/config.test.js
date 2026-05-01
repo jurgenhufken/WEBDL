@@ -6,7 +6,10 @@ const assert = require('node:assert');
 const path = require('node:path');
 
 function loadConfig(env) {
-  for (const k of ['PORT','DATABASE_URL','DB_SCHEMA','DOWNLOAD_ROOT','WORKER_CONCURRENCY','LOG_LEVEL']) {
+  for (const k of [
+    'PORT','DATABASE_URL','DB_SCHEMA','DOWNLOAD_ROOT','WORKER_CONCURRENCY','LOG_LEVEL',
+    'WEBDL_SABNZBD_COMPLETED_DIR','WEBDL_SABNZBD_COMPLETED_DIRS','WEBDL_STORAGE_ROOTS',
+  ]) {
     delete process.env[k];
   }
   Object.assign(process.env, env);
@@ -21,6 +24,8 @@ test('defaults als env leeg is', () => {
   assert.equal(c.workerConcurrency, 2);
   assert.equal(c.logLevel, 'info');
   assert.ok(path.isAbsolute(c.downloadRoot));
+  assert.ok(Array.isArray(c.sabnzbdCompletedDirs));
+  assert.ok(c.sabnzbdCompletedDirs.length >= 1);
 });
 
 test('env override wordt gelezen', () => {
@@ -33,6 +38,16 @@ test('env override wordt gelezen', () => {
   assert.equal(c.workerConcurrency, 4);
   assert.equal(c.logLevel, 'debug');
   assert.equal(c.downloadRoot, '/tmp/dl');
+});
+
+test('SABNZBD completed dirs ondersteunen meerdere roots', () => {
+  const c = loadConfig({
+    WEBDL_SABNZBD_COMPLETED_DIRS: '/old/Completed;/new/Completed',
+    WEBDL_STORAGE_ROOTS: '/old;/new',
+  });
+  assert.deepEqual(c.sabnzbdCompletedDirs, ['/old/Completed', '/new/Completed']);
+  assert.equal(c.sabnzbdCompletedDir, '/old/Completed');
+  assert.deepEqual(c.storageRoots, ['/old', '/new']);
 });
 
 test('ongeldige integer gooit fout', () => {
