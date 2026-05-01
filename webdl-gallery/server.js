@@ -43,6 +43,7 @@ const KEEP2SHARE_SYNC_MAX_FILES = Number(process.env.KEEP2SHARE_SYNC_MAX_FILES |
 const KEEP2SHARE_SYNC_MAX_ADDS = process.env.KEEP2SHARE_SYNC_MAX_ADDS
   ? Number(process.env.KEEP2SHARE_SYNC_MAX_ADDS)
   : Number.POSITIVE_INFINITY;
+const DEBUG_GALLERY_QUERY = /^(1|true|yes|on)$/i.test(process.env.DEBUG_GALLERY_QUERY || '');
 let keep2shareSyncRunning = false;
 const thumbInflight = new Map();
 const activeThumbPaths = new Map();
@@ -84,6 +85,13 @@ async function ensureSchema() {
   await pool.query('ALTER TABLE tags ADD COLUMN IF NOT EXISTS is_favorite boolean NOT NULL DEFAULT false');
   await pool.query('ALTER TABLE tags ADD COLUMN IF NOT EXISTS user_use_count integer NOT NULL DEFAULT 0');
   await pool.query('ALTER TABLE tags ADD COLUMN IF NOT EXISTS last_used_at timestamptz');
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_download_files_gallery_recent
+      ON download_files (mtime_ms DESC NULLS LAST, updated_at DESC NULLS LAST, id DESC)
+      WHERE relpath IS NOT NULL
+        AND relpath <> ''
+        AND (filesize IS NULL OR filesize > 0)
+  `);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS item_user_tags (
       download_id bigint NOT NULL,
@@ -813,6 +821,7 @@ app.get('/api/active-items', async (_req, res) => {
 
 // ─── Items: gepagineerde media ─────────────────────────────────────────────
 app.get('/api/items', async (req, res) => {
+  const startedAt = Date.now();
   try {
     const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 100));
     const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
@@ -961,121 +970,33 @@ app.get('/api/items', async (req, res) => {
     const nextCursor = last && sort === 'recent'
       ? { sort_ts: last.sort_ts, source_order: last.source_order }
       : null;
+    if (DEBUG_GALLERY_QUERY) {
+      console.log(JSON.stringify({
+        t: new Date().toISOString(),
+        route: '/api/items',
+        query: req.query,
+        useCursor,
+        rows: rows.length,
+        items: items.length,
+        first: items[0] ? { id: items[0].id, platform: items[0].platform, channel: items[0].channel, sort_ts: items[0].sort_ts, source_order: items[0].source_order } : null,
+        last: last ? { id: last.id, platform: last.platform, channel: last.channel, sort_ts: last.sort_ts, source_order: last.source_order } : null,
+        ms: Date.now() - startedAt,
+      }));
+    }
     res.json({ items, limit, offset, count: items.length, next_cursor: nextCursor });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// ─── Items sinds timestamp X (voor auto-refresh polling) ──────────────────
-// We filteren op COALESCE(finished_at, created_at) > since omdat nieuwe
-// completions vaak oude IDs hebben (pending rows die laat afgerond worden).
+// ─── Legacy endpoint: Live gebruikt nu /api/items met dezelfde filters ─────
 app.get('/api/items-since', async (req, res) => {
   try {
     const since = req.query.since ? String(req.query.since) : null;
-    const params = [];
-    const directWhere = buildItemFilters({
-      req, params,
-      fileExpr: 'd.filepath',
-      extExpr: "COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))",
-      ratingExpr: 'd.rating',
-    });
-    directWhere.push(`NOT EXISTS (
-      SELECT 1 FROM download_files mf
-       WHERE mf.download_id = d.id
-         AND mf.relpath !~* '${AUX_RELPATH_RE}'
-         AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})
-    )`);
-    directWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
-    directWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
-    directWhere.push(`(d.filesize IS NULL OR d.filesize > 0)`);
-    directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
-    const fileWhere = buildItemFilters({
-      req, params,
-      fileExpr: 'df.relpath',
-      extExpr: "regexp_replace(df.relpath, '^.*\\.', '')",
-      ratingExpr: 'df.rating',
-    });
-    fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
-    fileWhere.push(`df.relpath !~* '${TEMP_RELPATH_RE}'`);
-    fileWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
-    fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
-    fileWhere.push(`(df.filesize IS NULL OR df.filesize > 0)`);
-    fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})`);
-    const screenshotWhere = buildScreenshotFilters({ req, params });
-    screenshotWhere.push(`(s.filesize IS NULL OR s.filesize > 0)`);
-    let sinceParam = null;
-    if (since) {
-      params.push(since);
-      sinceParam = params.length;
-      directWhere.push(`(d.finished_at > $${sinceParam}::timestamp OR (d.finished_at IS NULL AND COALESCE(d.updated_at, d.created_at) > $${sinceParam}::timestamp))`);
-      const sinceMs = Date.parse(since);
-      if (Number.isFinite(sinceMs)) {
-        params.push(sinceMs);
-        fileWhere.push(`(df.mtime_ms > $${params.length} OR ((df.mtime_ms IS NULL OR df.mtime_ms = 0) AND COALESCE(df.updated_at, d.finished_at, d.updated_at, d.created_at) > $${sinceParam}::timestamp))`);
-      } else {
-        fileWhere.push(`COALESCE(df.updated_at, d.finished_at, d.updated_at, d.created_at) > $${sinceParam}::timestamp`);
-      }
-      screenshotWhere.push(`COALESCE(s.created_at, s.updated_at) > $${sinceParam}::timestamp`);
-    }
-    params.push(500);
-    const sourceLimitParam = params.length;
-
-    const sql = `
-      WITH direct_items AS MATERIALIZED (
-          SELECT 'download' AS item_kind,
-                 d.id::text AS id, d.id AS rating_id,
-                 d.url, d.source_url, d.platform, d.channel, d.title, d.filename,
-                 d.filepath, d.filesize, d.format, d.duration, d.rating, d.is_thumb_ready,
-                 d.finished_at, d.created_at,
-                 COALESCE(d.finished_at, d.updated_at, d.created_at) AS sort_ts
-            FROM downloads d
-           WHERE ${directWhere.join(' AND ')}
-           ORDER BY d.finished_at DESC NULLS LAST, d.updated_at DESC NULLS LAST, d.created_at DESC NULLS LAST, d.id DESC
-           LIMIT $${sourceLimitParam}
-      ),
-      file_items AS MATERIALIZED (
-          SELECT 'file' AS item_kind,
-                 'file-' || df.id::text AS id, d.id AS rating_id,
-                 d.url, d.source_url, d.platform, d.channel, d.title,
-                 regexp_replace(df.relpath, '^.*/', '') AS filename,
-                 df.relpath AS filepath, df.filesize,
-                 regexp_replace(df.relpath, '^.*\\.', '') AS format,
-                 d.duration, df.rating, COALESCE(df.is_thumb_ready, d.is_thumb_ready) AS is_thumb_ready,
-                 d.finished_at, d.created_at,
-                 COALESCE(to_timestamp(NULLIF(df.mtime_ms,0) / 1000.0)::timestamp, df.updated_at, d.finished_at, d.updated_at, d.created_at) AS sort_ts
-            FROM download_files df
-            JOIN downloads d ON d.id = df.download_id
-           WHERE ${fileWhere.join(' AND ')}
-           ORDER BY df.mtime_ms DESC NULLS LAST, df.updated_at DESC NULLS LAST, d.finished_at DESC NULLS LAST, d.updated_at DESC NULLS LAST, d.created_at DESC NULLS LAST, df.id DESC
-           LIMIT $${sourceLimitParam}
-      ),
-      screenshot_items AS MATERIALIZED (
-          SELECT 'screenshot' AS item_kind,
-                 's-' || s.id::text AS id, NULL::bigint AS rating_id,
-                 s.url, s.url AS source_url, s.platform, s.channel, s.title, s.filename,
-                 s.filepath, s.filesize, 'jpg' AS format, NULL::text AS duration,
-                 s.rating, s.is_thumb_ready,
-                 s.created_at AS finished_at, s.created_at,
-                 COALESCE(s.created_at, s.updated_at) AS sort_ts
-            FROM screenshots s
-           WHERE ${screenshotWhere.join(' AND ')}
-           ORDER BY s.created_at DESC NULLS LAST, s.updated_at DESC NULLS LAST, s.id DESC
-           LIMIT $${sourceLimitParam}
-      )
-      SELECT *
-        FROM (
-          SELECT * FROM direct_items
-          UNION ALL
-          SELECT * FROM file_items
-          UNION ALL
-          SELECT * FROM screenshot_items
-        ) media_items
-      ORDER BY sort_ts DESC, id DESC
-      LIMIT 200`;
-    const { rows } = await pool.query(sql, params);
-    const items = rows.filter(hasNonEmptyMedia).map(mapItem);
-    res.json({ items, since, count: items.length });
+    // Deprecated: de gallery gebruikt bewust dezelfde /api/items-query voor Live,
+    // zodat init, filter en refresh exact dezelfde dataset volgen. Deze endpoint
+    // gaf door andere timestamplogica valse "nieuwe" items en kon timeouten.
+    res.json({ items: [], since, count: 0, deprecated: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

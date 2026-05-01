@@ -19,7 +19,7 @@
     done: false,
     filters: { platform: '', channel: '', q: '', sort: 'recent', min_rating: '', media_type: '' },
     // Auto-refresh
-    autoRefresh: true,
+    autoRefresh: false,
     autoRefreshMs: 10000,
     autoRefreshTimer: null,
     activeRefreshMs: 30000,
@@ -29,6 +29,7 @@
     queryVersion: 0,
     pendingNewItems: new Map(),
     nextCursor: null,
+    channelsLoadedFor: null,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -341,6 +342,7 @@
       const platformsResp = await apiFetch('/api/platforms').then(r => r.json());
       const platforms = Array.isArray(platformsResp.platforms) ? platformsResp.platforms : [];
       const pSel = $('platform');
+      const prev = pSel.value;
       const total = platforms.reduce((s, p) => s + Number(p.count), 0);
       pSel.innerHTML = `<option value="">Alle platforms (${total})</option>`;
       for (const p of platforms) {
@@ -349,13 +351,33 @@
         o.textContent = `${p.platform} (${p.count})`;
         pSel.appendChild(o);
       }
-      await reloadChannels();
+      if (prev && [...pSel.options].some(o => o.value === prev)) {
+        pSel.value = prev;
+        state.filters.platform = prev;
+        await reloadChannels();
+      } else {
+        pSel.value = '';
+        state.filters.platform = '';
+        resetChannels();
+      }
     } catch (e) { console.warn('filters load failed', e); }
+  }
+
+  function resetChannels() {
+    const cSel = $('channel');
+    cSel.innerHTML = '<option value="">Alle kanalen</option>';
+    cSel.value = '';
+    state.filters.channel = '';
+    state.channelsLoadedFor = null;
   }
 
   async function reloadChannels() {
     try {
       const plat = state.filters.platform;
+      if (!plat) {
+        resetChannels();
+        return;
+      }
       const url = plat
         ? '/api/channels?platform=' + encodeURIComponent(plat)
         : '/api/channels';
@@ -378,6 +400,7 @@
         cSel.value = '';
         state.filters.channel = '';
       }
+      state.channelsLoadedFor = plat || '__all__';
     } catch (e) { console.warn('channels load failed', e); }
   }
 
@@ -444,6 +467,11 @@
     state.filters.q = $('q').value.trim();
     reloadGallery();
   });
+  $('channel').addEventListener('focus', () => {
+    if (state.filters.platform && state.channelsLoadedFor !== state.filters.platform) {
+      reloadChannels().catch((e) => console.warn('channels load failed', e));
+    }
+  });
 
   // ─── Infinite scroll ──────────────────────────────────────────────────────
   const io = new IntersectionObserver((entries) => {
@@ -454,13 +482,12 @@
   async function pollNewItems() {
     if (!state.autoRefresh) return;
     if (state.filters.sort !== 'recent') return;
-    if (!state.newestFinishedAt) return;
     try {
-      const params = new URLSearchParams({ since: state.newestFinishedAt });
+      const params = new URLSearchParams({ limit: String(state.limit), offset: '0' });
       for (const [k, v] of Object.entries(state.filters)) {
-        if (v && k !== 'sort') params.set(k, v);
+        if (v) params.set(k, v);
       }
-      const data = await apiFetch('/api/items-since?' + params.toString()).then(r => r.json());
+      const data = await apiFetch('/api/items?' + params.toString()).then(r => r.json());
       if (!data.items || data.items.length === 0) return;
       const fresh = data.items.filter(it => !state.knownIds.has(String(it.id)));
       if (fresh.length > 0) {
@@ -500,19 +527,21 @@
 
   // Live-toggle knop
   const autoBtn = document.createElement('button');
-  autoBtn.textContent = '🔴 Live';
-  autoBtn.title = 'Auto-refresh aan (klik om uit te zetten)';
+  autoBtn.textContent = state.autoRefresh ? '🔴 Live' : '⚪ Live';
+  autoBtn.title = state.autoRefresh ? 'Auto-refresh aan (klik om uit te zetten)' : 'Auto-refresh uit (klik om aan te zetten)';
   autoBtn.className = 'auto-toggle';
-  autoBtn.style.cssText = '';
+  autoBtn.style.cssText = state.autoRefresh ? 'background:#1f6feb;border-color:#1f6feb;color:#fff' : '';
   autoBtn.addEventListener('click', () => {
     state.autoRefresh = !state.autoRefresh;
     if (state.autoRefresh) {
       autoBtn.textContent = '🔴 Live';
+      autoBtn.title = 'Auto-refresh aan (klik om uit te zetten)';
       autoBtn.style.cssText = 'background:#1f6feb;border-color:#1f6feb;color:#fff';
       startAutoRefresh();
       pollNewItems();
     } else {
       autoBtn.textContent = '⚪ Live';
+      autoBtn.title = 'Auto-refresh uit (klik om aan te zetten)';
       autoBtn.style.cssText = '';
       stopAutoRefresh();
     }
@@ -530,12 +559,11 @@
   };
 
   // ─── Init ─────────────────────────────────────────────────────────────────
-  loadFilterDropdowns().then(async () => {
-    readFiltersFromControls();
-    if (state.filters.platform) await reloadChannels();
-    await loadMore();
+  readFiltersFromControls();
+  loadMore().then(() => {
     io.observe(sentinel);
     startActiveRefresh();
-    startAutoRefresh();
+    if (state.autoRefresh) startAutoRefresh();
   });
+  loadFilterDropdowns();
 })();
