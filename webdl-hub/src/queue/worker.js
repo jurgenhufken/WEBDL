@@ -191,6 +191,8 @@ async function syncToGallery(job, outputFiles, logger) {
       const realPlatform = infoPlatform && infoPlatform !== 'generic' ? infoPlatform : platform;
       const title = fileInfo?.title || path.basename(f.path, ext).replace(/_/g, ' ').trim();
       const sourceUrl = fileInfo?.sourceUrl || job.url;
+      const sourceUrlIsJobUrl = sourceUrl && String(sourceUrl) === String(job.url || '');
+      const shouldDedupeBySourceUrl = Boolean(sourceUrl) && !(sourceUrlIsJobUrl && outputFiles.length > 1);
 
       // Check for duplicate by filepath
       const existing = await galleryPool.query(
@@ -200,7 +202,7 @@ async function syncToGallery(job, outputFiles, logger) {
       if (existing.rows.length > 0) continue;
 
       // Check for duplicate by source URL
-      if (sourceUrl) {
+      if (shouldDedupeBySourceUrl) {
         const byUrl = await galleryPool.query(
           'SELECT id FROM downloads WHERE source_url = $1 LIMIT 1',
           [sourceUrl],
@@ -600,7 +602,7 @@ function startWorkerPool({
   //   image:         8 (snel, netwerk-bound)
   const LANES = [
     { name: 'process-video', concurrency: intEnv('WEBDL_PROCESS_VIDEO_CONCURRENCY', 1) },
-    { name: 'video',         concurrency: intEnv('WEBDL_DIRECT_VIDEO_CONCURRENCY', 4) },
+    { name: 'video',         concurrency: intEnv('WEBDL_DIRECT_VIDEO_CONCURRENCY', 2) },
     { name: 'image',         concurrency: intEnv('WEBDL_IMAGE_CONCURRENCY', 8) },
   ];
   const laneActive = new Map(LANES.map((l) => [l.name, new Set()]));

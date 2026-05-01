@@ -66,6 +66,21 @@ function classifyLane(url, adapter) {
   return 'video';
 }
 
+function normalizeJobOptionsForUrl(url, options = {}) {
+  const normalized = options && typeof options === 'object' && !Array.isArray(options)
+    ? { ...options }
+    : {};
+  const jobUrl = String(url || '').trim();
+  const optionUrl = String(normalized.url || '').trim();
+
+  if (optionUrl && jobUrl && optionUrl !== jobUrl) {
+    if (!normalized.contextUrl && !normalized.pageUrl) normalized.contextUrl = optionUrl;
+    delete normalized.url;
+  }
+
+  return normalized;
+}
+
 function createRepo({ databaseUrl = config.databaseUrl, schema = config.dbSchema } = {}) {
   if (!VALID_SCHEMA.test(schema)) {
     throw new Error(`Ongeldige schema-naam: "${schema}"`);
@@ -87,11 +102,12 @@ function createRepo({ databaseUrl = config.databaseUrl, schema = config.dbSchema
 
   async function createJob({ url, adapter, priority = 0, options = {}, maxAttempts = 3, lane = null }) {
     const finalLane = lane || classifyLane(url, adapter);
+    const finalOptions = normalizeJobOptionsForUrl(url, options);
     const { rows } = await query(
       `INSERT INTO ${T.jobs} (url, adapter, status, priority, options, max_attempts, lane)
        VALUES ($1, $2, 'queued', $3, $4::jsonb, $5, $6)
        RETURNING *`,
-      [url, adapter, priority, JSON.stringify(options), maxAttempts, finalLane],
+      [url, adapter, priority, JSON.stringify(finalOptions), maxAttempts, finalLane],
     );
     return rows[0];
   }

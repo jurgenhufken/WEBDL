@@ -10026,8 +10026,17 @@ function isKnownExternalMediaWrapperHost(hostname) {
     const host = String(hostname || '').toLowerCase();
     if (!host) return false;
     if (/^(?:www\.)?(?:pixhost\.to|postimages\.org|postimg\.cc|imagebam\.com|imgvb\.com|ibb\.co|imgbox\.com|imagevenue\.com|imgchest\.com|turboimagehost\.com|imx\.to|vipr\.im|pixeldrain\.com|cyberfile\.me|jpg\.pet|gofile\.io|img\.kiwi)$/.test(host)) return true;
-    if (/^(?:www\.)?bunkr\.(?:si|ru|is|ph)$/.test(host)) return true;
+    if (isBunkrHost(host)) return true;
     return false;
+  } catch (e) {
+    return false;
+  }
+}
+
+function isBunkrHost(hostname) {
+  try {
+    const host = String(hostname || '').toLowerCase().replace(/^www\./, '');
+    return /^bunkr\.(?:cr|si|ru|is|ph|su|site|red)$/.test(host);
   } catch (e) {
     return false;
   }
@@ -10305,6 +10314,79 @@ function extractDirectMediaCandidates(html, baseUrl) {
   }
 }
 
+function decryptBunkrVideoUrl(payload) {
+  try {
+    if (!payload || typeof payload !== 'object') return '';
+    const encryptedUrl = String(payload.url || '').trim();
+    const timestamp = Number(payload.timestamp || 0);
+    if (!encryptedUrl || !Number.isFinite(timestamp) || timestamp <= 0) return encryptedUrl;
+    if (payload.encrypted !== true) return encryptedUrl;
+    const key = Buffer.from(`SECRET_KEY_${Math.floor(timestamp / 3600)}`);
+    const bytes = Buffer.from(encryptedUrl, 'base64');
+    const out = Buffer.alloc(bytes.length);
+    for (let i = 0; i < bytes.length; i++) out[i] = bytes[i] ^ key[i % key.length];
+    return out.toString('utf8').trim();
+  } catch (e) {
+    return '';
+  }
+}
+
+function extractBunkrSlug(html, pageUrl) {
+  try {
+    const h = String(html || '');
+    let m = h.match(/\bjsSlug\s*=\s*["']([^"']+)["']/i);
+    if (m && m[1]) return String(m[1]).trim();
+    m = h.match(/\/api\/vs[\s\S]{0,500}slug["']?\s*[:=]\s*["']([^"']+)["']/i);
+    if (m && m[1]) return String(m[1]).trim();
+    const u = new URL(String(pageUrl || ''));
+    m = String(u.pathname || '').match(/\/f\/([^/?#]+)/i);
+    if (m && m[1]) return decodeURIComponent(m[1]).trim();
+    return '';
+  } catch (e) {
+    return '';
+  }
+}
+
+async function resolveBunkrDirectMediaUrl(pageUrl, html, timeoutMs = 15000, referer = '') {
+  try {
+    const input = String(pageUrl || '').trim();
+    if (!input) return '';
+    const page = new URL(input);
+    if (!isBunkrHost(page.hostname)) return '';
+
+    const slug = extractBunkrSlug(html, input);
+    if (!slug) return '';
+
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => {
+      try { ctrl.abort(); } catch (e) { }
+    }, Math.max(1000, timeoutMs));
+    try {
+      const res = await fetch(new URL('/api/vs', page.origin).toString(), {
+        method: 'POST',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+          'Accept': 'application/json, text/plain, */*',
+          'Content-Type': 'application/json',
+          'Referer': referer || input,
+          'Origin': page.origin
+        },
+        body: JSON.stringify({ slug }),
+        signal: ctrl.signal
+      });
+      if (!res.ok) return '';
+      const json = await res.json();
+      const direct = decryptBunkrVideoUrl(json);
+      if (direct && looksLikeDirectFileUrl(direct)) return direct;
+      return '';
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch (e) {
+    return '';
+  }
+}
+
 async function resolveHtmlWrapperToDirectMediaUrl(url, timeoutMs = 15000, referer = '') {
   try {
     const u0 = String(url || '').trim();
@@ -10314,6 +10396,8 @@ async function resolveHtmlWrapperToDirectMediaUrl(url, timeoutMs = 15000, refere
     if (r.contentType && r.contentType.toLowerCase().startsWith('image/')) return upgradeKnownLowQualityMediaUrl(String(r.finalUrl || u0));
     if (r.contentType && r.contentType.toLowerCase().startsWith('video/')) return upgradeKnownLowQualityMediaUrl(String(r.finalUrl || u0));
     if (!r.text) return '';
+    const bunkr = await resolveBunkrDirectMediaUrl(r.finalUrl || u0, r.text, timeoutMs, referer);
+    if (bunkr) return bunkr;
     const candidates = extractDirectMediaCandidates(r.text, u0);
     if (candidates && candidates.length) return candidates[0];
     const og = upgradeKnownLowQualityMediaUrl(extractOpenGraphMediaUrl(r.text, u0));
