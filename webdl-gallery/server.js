@@ -817,8 +817,20 @@ app.get('/api/items', async (req, res) => {
     const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 100));
     const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
     const sort = String(req.query.sort || 'recent'); // recent | random | rating
-    const sourceLimit = Math.min(5000, limit + offset + 500);
+    const cursorTs = req.query.cursor_ts ? String(req.query.cursor_ts) : '';
+    const cursorOrder = req.query.cursor_order != null ? Number(req.query.cursor_order) : NaN;
+    const useCursor = sort === 'recent' && cursorTs && Number.isFinite(cursorOrder);
+    // Elke bron moet minstens offset+limit kunnen leveren, anders stopt
+    // infinite scroll rond 5000 items terwijl de database veel meer media heeft.
+    const sourceLimit = useCursor ? limit : limit + offset;
     const params = [];
+    function addRecentCursor(where, sortExpr, orderExpr) {
+      params.push(cursorTs);
+      const tsParam = params.length;
+      params.push(cursorOrder);
+      const orderParam = params.length;
+      where.push(`(${sortExpr} < $${tsParam}::timestamp OR (${sortExpr} = $${tsParam}::timestamp AND ${orderExpr} < $${orderParam}::bigint))`);
+    }
     const directWhere = buildItemFilters({
       req, params,
       fileExpr: 'd.filepath',
@@ -833,7 +845,11 @@ app.get('/api/items', async (req, res) => {
     )`);
     directWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
     directWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
+    directWhere.push(`(d.filesize IS NULL OR d.filesize > 0)`);
     directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
+    if (useCursor) {
+      addRecentCursor(directWhere, 'COALESCE(d.finished_at, d.updated_at, d.created_at)', 'd.id::bigint');
+    }
     const fileWhere = buildItemFilters({
       req, params,
       fileExpr: 'df.relpath',
@@ -844,8 +860,20 @@ app.get('/api/items', async (req, res) => {
     fileWhere.push(`df.relpath !~* '${TEMP_RELPATH_RE}'`);
     fileWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
     fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
+    fileWhere.push(`(df.filesize IS NULL OR df.filesize > 0)`);
     fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
+    if (useCursor) {
+      addRecentCursor(
+        fileWhere,
+        'COALESCE(to_timestamp(NULLIF(df.mtime_ms,0) / 1000.0)::timestamp, df.updated_at, d.finished_at, d.updated_at, d.created_at)',
+        '(1000000000000 + df.id)::bigint',
+      );
+    }
     const screenshotWhere = buildScreenshotFilters({ req, params });
+    screenshotWhere.push(`(s.filesize IS NULL OR s.filesize > 0)`);
+    if (useCursor) {
+      addRecentCursor(screenshotWhere, 'COALESCE(s.created_at, s.updated_at)', '(2000000000000 + s.id)::bigint');
+    }
 
     const directOrder = sort === 'random'
       ? 'RANDOM()'
@@ -927,8 +955,13 @@ app.get('/api/items', async (req, res) => {
       LIMIT $${sourceLimitParam}`;
     const { rows } = await pool.query(sql, params);
 
-    const items = rows.filter(hasNonEmptyMedia).slice(offset, offset + limit).map(mapItem);
-    res.json({ items, limit, offset, count: items.length });
+    const pageRows = rows.filter(hasNonEmptyMedia);
+    const items = (useCursor ? pageRows.slice(0, limit) : pageRows.slice(offset, offset + limit)).map(mapItem);
+    const last = items[items.length - 1] || null;
+    const nextCursor = last && sort === 'recent'
+      ? { sort_ts: last.sort_ts, source_order: last.source_order }
+      : null;
+    res.json({ items, limit, offset, count: items.length, next_cursor: nextCursor });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -955,6 +988,7 @@ app.get('/api/items-since', async (req, res) => {
     )`);
     directWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
     directWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
+    directWhere.push(`(d.filesize IS NULL OR d.filesize > 0)`);
     directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
     const fileWhere = buildItemFilters({
       req, params,
@@ -966,8 +1000,10 @@ app.get('/api/items-since', async (req, res) => {
     fileWhere.push(`df.relpath !~* '${TEMP_RELPATH_RE}'`);
     fileWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
     fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
+    fileWhere.push(`(df.filesize IS NULL OR df.filesize > 0)`);
     fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})`);
     const screenshotWhere = buildScreenshotFilters({ req, params });
+    screenshotWhere.push(`(s.filesize IS NULL OR s.filesize > 0)`);
     let sinceParam = null;
     if (since) {
       params.push(since);
@@ -1054,6 +1090,9 @@ app.get('/api/platforms', async (_req, res) => {
         SELECT d.platform
           FROM downloads d
          WHERE d.filepath IS NOT NULL AND d.filepath <> ''
+           AND d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])
+           AND d.filepath !~* '${TEMP_RELPATH_RE}'
+           AND (d.filesize IS NULL OR d.filesize > 0)
            AND lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})
            AND NOT EXISTS (
              SELECT 1 FROM download_files mf
@@ -1066,11 +1105,16 @@ app.get('/api/platforms', async (_req, res) => {
           FROM download_files df
           JOIN downloads d ON d.id = df.download_id
          WHERE df.relpath !~* '${AUX_RELPATH_RE}'
+           AND df.relpath !~* '${TEMP_RELPATH_RE}'
+           AND d.filepath !~* '${TEMP_RELPATH_RE}'
+           AND d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])
+           AND (df.filesize IS NULL OR df.filesize > 0)
            AND lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})
         UNION ALL
         SELECT s.platform
           FROM screenshots s
          WHERE s.filepath IS NOT NULL AND s.filepath <> ''
+           AND (s.filesize IS NULL OR s.filesize > 0)
       ) media_items
       GROUP BY platform
       ORDER BY count DESC`);
@@ -1098,6 +1142,8 @@ app.get('/api/channels', async (req, res) => {
          AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
     )`);
     directWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
+    directWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
+    directWhere.push(`(d.filesize IS NULL OR d.filesize > 0)`);
     directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
     const fileWhere = buildItemFilters({
       req, params,
@@ -1107,9 +1153,13 @@ app.get('/api/channels', async (req, res) => {
       includeChannel: false,
     });
     fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
+    fileWhere.push(`df.relpath !~* '${TEMP_RELPATH_RE}'`);
+    fileWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
     fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
+    fileWhere.push(`(df.filesize IS NULL OR df.filesize > 0)`);
     fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
     const screenshotWhere = buildScreenshotFilters({ req, params, includeChannel: false });
+    screenshotWhere.push(`(s.filesize IS NULL OR s.filesize > 0)`);
 
     const { rows } = await pool.query(`
       SELECT channel, platform, COUNT(*) AS count

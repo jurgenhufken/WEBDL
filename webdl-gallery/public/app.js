@@ -28,6 +28,7 @@
     knownIds: new Set(),
     queryVersion: 0,
     pendingNewItems: new Map(),
+    nextCursor: null,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -195,6 +196,7 @@
     state.newestFinishedAt = null;
     state.knownIds = new Set();
     state.pendingNewItems = new Map();
+    state.nextCursor = null;
     state.queryVersion += 1;
   }
 
@@ -298,7 +300,12 @@
     try {
       const params = new URLSearchParams();
       params.set('limit',  String(state.limit));
-      params.set('offset', String(state.offset));
+      if (state.filters.sort === 'recent' && state.nextCursor) {
+        params.set('cursor_ts', state.nextCursor.sort_ts);
+        params.set('cursor_order', state.nextCursor.source_order);
+      } else {
+        params.set('offset', String(state.offset));
+      }
       for (const [k, v] of Object.entries(state.filters)) if (v) params.set(k, v);
       const resp = await apiFetch('/api/items?' + params.toString());
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -307,6 +314,7 @@
       if (!data.items) throw new Error(data.error || 'geen items');
       state.items.push(...data.items);
       state.offset += data.items.length;
+      state.nextCursor = data.next_cursor || null;
       if (data.items.length < state.limit) state.done = true;
       renderAppend(data.items);
       updateStats();
