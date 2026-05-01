@@ -226,6 +226,7 @@
   }
 
   async function reloadGallery() {
+    window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
     clearGrid();
     await loadMore();
   }
@@ -283,6 +284,15 @@
     if (el) el.value = value;
   }
 
+  function readFiltersFromControls() {
+    state.filters.platform   = $('platform').value;
+    state.filters.channel    = $('channel').value;
+    state.filters.sort       = $('sort').value;
+    state.filters.min_rating = $('minRating').value;
+    state.filters.media_type = $('mediaType').value;
+    state.filters.q          = $('q').value.trim();
+  }
+
   // updateCardRating — bijwerken van ster-weergave in de grid
   function updateCardRating(itemId, rating) {
     const card = grid.querySelector(`.card[data-id="${itemId}"]`);
@@ -314,11 +324,7 @@
 
   for (const id of ['platform', 'channel', 'sort', 'minRating', 'mediaType']) {
     $(id).addEventListener('change', async () => {
-      state.filters.platform   = $('platform').value;
-      state.filters.channel    = $('channel').value;
-      state.filters.sort       = $('sort').value;
-      state.filters.min_rating = $('minRating').value;
-      state.filters.media_type = $('mediaType').value;
+      readFiltersFromControls();
       // Bij platform-wissel: kanalen herladen (filtert op geselecteerd platform)
       if (id === 'platform') await reloadChannels();
       reloadGallery();
@@ -418,8 +424,11 @@
   };
 
   // ─── Init ─────────────────────────────────────────────────────────────────
-  loadFilterDropdowns().then(() => loadMore().then(() => {
+  loadFilterDropdowns().then(async () => {
+    readFiltersFromControls();
+    if (state.filters.platform) await reloadChannels();
+    await loadMore();
     startActiveRefresh();
     startAutoRefresh();
-  }));
+  });
 })();
