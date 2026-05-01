@@ -12,10 +12,11 @@ const adapters = [
   require('../../src/adapters/gallerydl'),
   require('../../src/adapters/ytdlp'),
 ];
+const instaloader = adapters.find((a) => a.name === 'instaloader');
 
 const cases = [
   ['https://www.youtube.com/watch?v=abc',      'ytdlp'],
-  ['https://www.instagram.com/p/ABCDE/',       'instaloader'],
+  ['https://www.instagram.com/p/ABCDE/',       instaloader._instaloaderAvailable ? 'instaloader' : 'gallerydl'],
   ['https://t.me/channelname/123',             'tdl'],
   ['https://telegram.me/x/1',                  'tdl'],
   ['https://imgur.com/gallery/xyz',            'gallerydl'],

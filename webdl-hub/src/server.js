@@ -8,6 +8,7 @@ const { createLogger } = require('./util/logger');
 const { createRepo } = require('./db/repo');
 const { startWorkerPool } = require('./queue/worker');
 const { startSlavePoller } = require('./queue/slave-poller');
+const { startSabnzbdWatcher } = require('./importers/sabnzbd-watch');
 const { buildApp } = require('./app');
 
 const adapters = [
@@ -24,6 +25,15 @@ async function main() {
   const repo = createRepo();
   const { server, queue } = buildApp({ repo, adapters, logger });
 
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(config.port, () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
+  logger.info('server.listening', { port: config.port });
+
   const pool = startWorkerPool({
     queue, repo, adapters, logger,
     downloadRoot: config.downloadRoot,
@@ -31,12 +41,25 @@ async function main() {
   });
 
   const slavePoller = startSlavePoller({ repo, logger, intervalMs: 5000 });
-
-  await new Promise((r) => server.listen(config.port, r));
-  logger.info('server.listening', { port: config.port, worker: pool.workerId });
+  const sabnzbdWatcher = config.sabnzbdWatchEnabled
+    ? startSabnzbdWatcher({
+        repo,
+        logger,
+        rootDirs: config.sabnzbdCompletedDirs,
+        pollMs: config.sabnzbdPollMs,
+        minFileAgeMs: config.sabnzbdMinFileAgeMs,
+        startupLookbackMs: config.sabnzbdStartupLookbackMs,
+        maxFilesPerScan: config.sabnzbdMaxFilesPerScan,
+        configPath: config.sabnzbdConfigPath,
+        sabnzbdUrl: config.sabnzbdUrl,
+        sabnzbdApiKey: config.sabnzbdApiKey,
+      })
+    : null;
+  logger.info('worker.started', { worker: pool.workerId });
 
   const shutdown = async (sig) => {
     logger.info('server.shutdown', { sig });
+    if (sabnzbdWatcher) await sabnzbdWatcher.stop();
     await slavePoller.stop();
     await pool.stop();
     server.close();

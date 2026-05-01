@@ -6,8 +6,8 @@ const assert = require('node:assert');
 const a = require('../../src/adapters/instaloader');
 
 test('matches alleen instagram.com', () => {
-  assert.equal(a.matches('https://www.instagram.com/p/ABC/'), true);
-  assert.equal(a.matches('https://instagram.com/nasa/'), true);
+  assert.equal(a.matches('https://www.instagram.com/p/ABC/'), a._instaloaderAvailable);
+  assert.equal(a.matches('https://instagram.com/nasa/'), a._instaloaderAvailable);
   assert.equal(a.matches('https://twitter.com/x'), false);
 });
 

@@ -22,7 +22,7 @@ function buildApp({ repo, adapters, logger }) {
   app.use('/api/jobs', createJobsRouter({ repo, queue, adapters, detect }));
   app.use('/api/files', createFilesRouter({ repo }));
   app.use('/api/downloads', createLegacyRouter({ repo }));
-  app.use('/api', createAdminRouter({ repo, adapters }));
+  app.use('/api', createAdminRouter({ repo, adapters, logger }));
   app.use(express.static(path.join(__dirname, 'public')));
   app.use((err, _req, res, _next) => {
     logger.error('api.error', { err: String(err.message || err) });

@@ -8,6 +8,17 @@ const { defineAdapter } = require('./base');
 
 const YT_DLP = process.env.WEBDL_YT_DLP || 'yt-dlp';
 const FFMPEG_LOCATION = process.env.WEBDL_FFMPEG || '/opt/homebrew/bin/ffmpeg';
+const YOUTUBE_SLEEP_REQUESTS = process.env.WEBDL_YTDLP_YOUTUBE_SLEEP_REQUESTS || '2';
+const YOUTUBE_SLEEP_INTERVAL = process.env.WEBDL_YTDLP_YOUTUBE_SLEEP_INTERVAL || '2';
+const YOUTUBE_MAX_SLEEP_INTERVAL = process.env.WEBDL_YTDLP_YOUTUBE_MAX_SLEEP_INTERVAL || '8';
+const XVIDEOS_EXPAND_LIMIT = Number.parseInt(process.env.WEBDL_XVIDEOS_EXPAND_LIMIT || '50', 10) || 50;
+const YTDLP_TIMEOUT_MS = Number.parseInt(process.env.WEBDL_YTDLP_TIMEOUT_MS || String(4 * 60 * 60 * 1000), 10);
+const YTDLP_IDLE_TIMEOUT_MS = Number.parseInt(process.env.WEBDL_YTDLP_IDLE_TIMEOUT_MS || String(12 * 60 * 1000), 10);
+const MERGE_VIDEO_HOSTS = [
+  'youtube.com', 'youtu.be', 'vimeo.com', 'twitch.tv',
+  'reddit.com', 'redd.it', 'v.redd.it',
+  'streamable.com', 'bitchute.com', 'rumble.com',
+];
 
 // Generieke matcher: yt-dlp ondersteunt duizenden sites, dus we accepteren
 // elke http(s)-URL. Andere adapters (reddit, instagram, tdl) hebben hogere
@@ -24,9 +35,146 @@ function matches(url) {
 // Output-template: alle media van één job in z'n eigen job-dir, nette naam.
 const OUTPUT_TEMPLATE = '%(title).200B [%(id)s].%(ext)s';
 
+function normalizeFlatEntryUrl(obj, seedUrl) {
+  const raw = String(obj && (obj.url || obj.webpage_url || obj.original_url) || '').trim();
+  const id = String(obj && obj.id || '').trim();
+  if (/^https?:\/\//i.test(raw)) return raw;
+  try {
+    const seed = new URL(String(seedUrl || ''));
+    const host = seed.hostname.replace(/^www\./, '').toLowerCase();
+    if (raw.startsWith('/')) return new URL(raw, seed.origin).toString();
+    if ((host === 'youtube.com' || host === 'youtu.be' || host.endsWith('.youtube.com')) && id) {
+      return `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`;
+    }
+    if (raw) return new URL(raw, seed.origin).toString();
+  } catch {}
+  return raw || (id ? `https://www.youtube.com/watch?v=${encodeURIComponent(id)}` : '');
+}
+
+function bestThumbnail(obj, entryUrl) {
+  const direct = String(obj && (obj.thumbnail || obj.thumbnail_url) || '').trim();
+  if (/^https?:\/\//i.test(direct)) return direct;
+
+  const thumbs = Array.isArray(obj && obj.thumbnails) ? obj.thumbnails : [];
+  const urls = thumbs
+    .map((t) => String(t && t.url || '').trim())
+    .filter((u) => /^https?:\/\//i.test(u));
+  if (urls.length) return urls[urls.length - 1];
+
+  try {
+    const u = new URL(String(entryUrl || ''));
+    const host = u.hostname.replace(/^www\./, '').toLowerCase();
+    const videoId = host === 'youtu.be'
+      ? u.pathname.split('/').filter(Boolean)[0]
+      : u.searchParams.get('v');
+    if ((host === 'youtube.com' || host === 'youtu.be' || host.endsWith('.youtube.com')) && videoId) {
+      return `https://i.ytimg.com/vi/${encodeURIComponent(videoId)}/hqdefault.jpg`;
+    }
+  } catch {}
+  return '';
+}
+
+function isTikTokUrl(url) {
+  try {
+    const h = new URL(String(url || '')).hostname.replace(/^www\./, '').toLowerCase();
+    return h === 'tiktok.com' || h.endsWith('.tiktok.com');
+  } catch {
+    return false;
+  }
+}
+
+function isDirectTikTokVideoUrl(url) {
+  try {
+    const u = new URL(String(url || ''));
+    const host = u.hostname.replace(/^www\./, '').toLowerCase();
+    if (host !== 'tiktok.com' && !host.endsWith('.tiktok.com')) return false;
+    return /^\/@[^/]+\/video\/\d+\/?$/i.test(u.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function isMergeVideoUrl(url) {
+  try {
+    const host = new URL(String(url || '')).hostname.replace(/^www\./, '').toLowerCase();
+    if (host === 'tiktok.com' || host.endsWith('.tiktok.com')) {
+      return !isDirectTikTokVideoUrl(url);
+    }
+    return MERGE_VIDEO_HOSTS.some((h) => host === h || host.endsWith('.' + h));
+  } catch {
+    return false;
+  }
+}
+
+function isXvideosListingUrl(url) {
+  try {
+    const u = new URL(String(url || ''));
+    const host = u.hostname.replace(/^www\./, '').toLowerCase();
+    if (host !== 'xvideos.com' && !host.endsWith('.xvideos.com')) return false;
+    return !/^\/video[./]/i.test(u.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function decodeHtml(text) {
+  return String(text || '')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(Number.parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number.parseInt(n, 10)));
+}
+
+function titleFromXvideosHref(href) {
+  const slug = String(href || '').split('/').filter(Boolean).pop() || '';
+  return decodeURIComponent(slug).replace(/[_-]+/g, ' ').trim();
+}
+
+function absoluteXvideosUrl(href, seedUrl) {
+  try {
+    return new URL(href, seedUrl).toString().split('#')[0];
+  } catch {
+    return '';
+  }
+}
+
+async function expandXvideosListing(url) {
+  const res = await fetch(url, {
+    headers: {
+      'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+      'accept': 'text/html,application/xhtml+xml',
+    },
+  });
+  if (!res.ok) throw new Error(`xvideos listing fetch failed: HTTP ${res.status}`);
+  const html = await res.text();
+  const entries = [];
+  const seen = new Set();
+  const re = /<a\b[^>]*href=["']([^"']*\/video[./][^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = re.exec(html)) && entries.length < XVIDEOS_EXPAND_LIMIT) {
+    const entryUrl = absoluteXvideosUrl(decodeHtml(m[1]), url);
+    if (!entryUrl || seen.has(entryUrl)) continue;
+    seen.add(entryUrl);
+    const textTitle = decodeHtml(String(m[2] || '').replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+    const hrefTitle = titleFromXvideosHref(entryUrl);
+    entries.push({
+      id: entryUrl.split('/').filter(Boolean).slice(-2, -1)[0] || '',
+      title: textTitle && !/^\d+p$/i.test(textTitle) ? textTitle : hrefTitle,
+      url: entryUrl,
+      thumbnail: '',
+    });
+  }
+  return entries;
+}
+
 function plan(url, opts = {}) {
   const cwd = opts.cwd;
-  const quality = opts.quality || 'bv*+ba/best';
+  const quality = opts.quality || (isMergeVideoUrl(url) ? 'bv*+ba/best' : 'best/bv*+ba');
+  const isYoutube = /(?:youtube\.com|youtu\.be)/i.test(String(url || ''));
+  const isTikTok = isTikTokUrl(url);
   const args = [
     '--no-colors',
     '--newline',                // progress per regel i.p.v. \r-updates
@@ -38,9 +186,24 @@ function plan(url, opts = {}) {
     '--cookies-from-browser', 'firefox',   // Fix age verification
     '--write-info-json',                   // Metadata voor gallery sync
     '--no-playlist',                       // NOOIT een hele playlist in 1 job
-    url,
   ];
-  return { cmd: YT_DLP, args, cwd, env: {} };
+  if (isTikTok) {
+    args.push(
+      '--impersonate', process.env.WEBDL_TIKTOK_IMPERSONATE || 'chrome',
+      '--ignore-errors',
+      '--no-abort-on-error',
+      '--skip-playlist-after-errors', process.env.WEBDL_TIKTOK_SKIP_PLAYLIST_AFTER_ERRORS || '25',
+    );
+  }
+  if (isYoutube) {
+    args.push(
+      '--sleep-requests', YOUTUBE_SLEEP_REQUESTS,
+      '--sleep-interval', YOUTUBE_SLEEP_INTERVAL,
+      '--max-sleep-interval', YOUTUBE_MAX_SLEEP_INTERVAL,
+    );
+  }
+  args.push(url);
+  return { cmd: YT_DLP, args, cwd, env: {}, timeoutMs: YTDLP_TIMEOUT_MS, idleTimeoutMs: YTDLP_IDLE_TIMEOUT_MS };
 }
 
 // Matcht op onze custom progress-template hierboven.
@@ -77,6 +240,10 @@ async function collectOutputs(workdir) {
 // Resolvet naar een array of rejects bij fatale fouten.
 function expandPlaylist(url) {
   return new Promise((resolve, reject) => {
+    if (isXvideosListingUrl(url)) {
+      expandXvideosListing(url).then(resolve, reject);
+      return;
+    }
     const args = [
       '--flat-playlist',
       '--dump-json',
@@ -100,9 +267,9 @@ function expandPlaylist(url) {
           const obj = JSON.parse(trimmed);
           const id = obj.id || '';
           const title = obj.title || obj.fulltitle || '';
-          const entryUrl = obj.url || obj.webpage_url || obj.original_url || '';
+          const entryUrl = normalizeFlatEntryUrl(obj, url);
           if (entryUrl) {
-            entries.push({ id, title, url: entryUrl });
+            entries.push({ id, title, url: entryUrl, thumbnail: bestThumbnail(obj, entryUrl) });
           }
         } catch { /* niet-JSON regel, skip */ }
       }

@@ -1,11 +1,23 @@
 // src/adapters/instaloader.js — Instagram via instaloader CLI.
 'use strict';
 
+const { spawnSync } = require('node:child_process');
 const { defineAdapter } = require('./base');
 const { collectOutputsRecursive } = require('./_fs');
 
+function hasInstaloader() {
+  const cmd = process.env.WEBDL_INSTALOADER || 'instaloader';
+  const res = spawnSync('sh', ['-lc', `command -v ${JSON.stringify(cmd)} >/dev/null 2>&1`], {
+    stdio: 'ignore',
+  });
+  return res.status === 0;
+}
+
+const INSTALOADER_AVAILABLE = hasInstaloader();
+
 // Matcht instagram.com posts, reels, stories, profielen en highlights.
 function matches(url) {
+  if (!INSTALOADER_AVAILABLE) return false;
   try {
     const u = new URL(url);
     if (!/^https?:$/.test(u.protocol)) return false;
@@ -46,7 +58,7 @@ function plan(url, opts = {}) {
   } else {
     args.push(t.value);
   }
-  return { cmd: 'instaloader', args, cwd: opts.cwd, env: {} };
+  return { cmd: process.env.WEBDL_INSTALOADER || 'instaloader', args, cwd: opts.cwd, env: {} };
 }
 
 // instaloader rapporteert "[ 1/10] <file>" als voortgang.
@@ -70,3 +82,4 @@ module.exports = defineAdapter({
 });
 // Extra helpers voor tests (niet onderdeel van adapter-contract).
 module.exports._urlToTarget = urlToTarget;
+module.exports._instaloaderAvailable = INSTALOADER_AVAILABLE;

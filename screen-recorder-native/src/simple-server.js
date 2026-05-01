@@ -34,6 +34,7 @@ const {
   TDL, TDL_NAMESPACE, TDL_THREADS, TDL_CONCURRENCY,
   REDDIT_DL_CLIENT_ID, REDDIT_DL_CLIENT_SECRET, REDDIT_DL_USERNAME, REDDIT_DL_PASSWORD, REDDIT_DL_AUTH_FILE, REDDIT_INDEX_MAX_ITEMS, REDDIT_INDEX_MAX_PAGES,
   VIDEO_DEVICE, AUDIO_DEVICE, RECORDING_FPS, VIDEO_CODEC, VIDEO_BITRATE, LIBX264_PRESET, AUDIO_BITRATE, RECORDING_AUDIO_CODEC, RECORDING_INPUT_PIXEL_FORMAT, RECORDING_FPS_MODE,
+  RECORDING_MAX_ACTIVE, RECORDING_MAX_DURATION_MS, RECORDING_MIN_FREE_BYTES,
   FFMPEG_PROBESIZE, FFMPEG_ANALYZEDURATION, FFMPEG_THREAD_QUEUE_SIZE, FFMPEG_RTBUFSIZE, FFMPEG_MAX_MUXING_QUEUE_SIZE,
   MIN_SCREENSHOT_BYTES, MIN_THUMB_BYTES,
   FINALCUT_ENABLED, FINALCUT_VIDEO_CODEC, FINALCUT_X264_PRESET, FINALCUT_X264_CRF, FINALCUT_AUDIO_BITRATE,
@@ -211,6 +212,20 @@ function stripAnsiCodes(input) {
 const IMPORTABLE_VIDEO_EXTS = new Set([
   '.mp4', '.mov', '.m4v', '.webm', '.mkv', '.avi', '.wmv', '.flv', '.ts', '.m2ts']
 );
+const IMPORTABLE_IMAGE_EXTS = new Set([
+  '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.avif', '.heic', '.heif']
+);
+
+function isImageUrlLike(input) {
+  try {
+    const u = new URL(String(input || ''));
+    const ext = String(path.extname(String(u.pathname || '')).toLowerCase() || '');
+    return IMPORTABLE_IMAGE_EXTS.has(ext);
+  } catch (e) {
+    const ext = String(path.extname(String(input || '').split(/[?#]/)[0]).toLowerCase() || '');
+    return IMPORTABLE_IMAGE_EXTS.has(ext);
+  }
+}
 
 // Auto-import settings en Startup rehydrate settings worden nu beheerd in src/config.js.
 // De variabelen zijn bovenaan via destructuring beschikbaar.
@@ -1477,6 +1492,8 @@ const updateDownloadSourceUrl = db.prepare(`UPDATE downloads SET source_url=?, u
 const updateDownloadThumbnail = db.prepare(`UPDATE downloads SET thumbnail=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`);
 const updateDownloadRating = db.prepare(`UPDATE downloads SET rating=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`);
 const updateDownloadUrl = db.prepare(`UPDATE downloads SET url=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`);
+const updateDownloadContentTimestamp = db.prepare(`UPDATE downloads SET created_at=?, updated_at=?, finished_at=? WHERE id=?`);
+const updateDownloadFilesContentTimestamp = db.prepare(`UPDATE download_files SET mtime_ms=?, updated_at=? WHERE download_id=?`);
 const rawGetDownload = db.prepare(`SELECT * FROM downloads WHERE id=?`);
 const getDownload = rawGetDownload;
 const updateScreenshotRating = db.prepare(`UPDATE screenshots SET rating=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`);
@@ -1681,6 +1698,11 @@ async function emitDownloadStatusActivity(downloadId, status, progress, error, e
 const updateDownload = {
   run: async (status, progress, filepath, filename, filesize, format, metadata, error, id) => {
     const out = await rawUpdateDownload.run(status, progress, filepath, filename, filesize, format, metadata, error, id);
+    if (String(status || '').toLowerCase() === 'completed') {
+      try {
+        await normalizeYoutubeDownloadTimestamp(id, filepath);
+      } catch (e) { }
+    }
     setDownloadActivityContext(id, { filepath, filename });
     await emitDownloadStatusActivity(id, status, progress, error, { filepath, filename });
     return out;
@@ -4652,6 +4674,9 @@ function detectLane(platform, url = '') {
   const p = String(platform || '').toLowerCase();
   const u = String(url || '').toLowerCase();
 
+  // Images are cheap direct transfers and must never sit behind video jobs.
+  if (isImageUrlLike(u)) return 'light';
+
   // If this is a live stream or explicitly a video, definitely heavy
   if (u.includes('is_live=true') || u.includes('/live/') || u.includes('tiktok.com/@') && !u.includes('/photo/')) {
     return 'heavy';
@@ -4737,9 +4762,25 @@ function runDownloadSchedulerSoon() {
   if (schedulerTimer) return;
   schedulerTimer = setTimeout(() => {
     schedulerTimer = null;
-    runDownloadScheduler();
-    syncRuntimeActiveState().catch(() => { });
+    Promise.resolve(runDownloadScheduler()).catch((e) => {
+      console.error('Download scheduler error:', e && e.stack ? e.stack : e && e.message ? e.message : String(e));
+    }).finally(() => {
+      syncRuntimeActiveState().catch(() => { });
+    });
   }, 120);
+}
+
+function hasQueuedWorkWithCapacity() {
+  try {
+    const heavyLimit = Math.max(0, HEAVY_DOWNLOAD_CONCURRENCY);
+    const lightLimit = Math.max(0, LIGHT_DOWNLOAD_CONCURRENCY);
+    const batchLimit = Math.max(0, BATCH_DOWNLOAD_CONCURRENCY);
+    return heavyLimit > 0 && queuedHeavy.length > 0 && activeLaneCount('heavy') < heavyLimit ||
+      lightLimit > 0 && queuedLight.length > 0 && activeLaneCount('light') < lightLimit ||
+      batchLimit > 0 && queuedBatch.length > 0 && activeLaneCount('batch') < batchLimit;
+  } catch (e) {
+    return false;
+  }
 }
 
 async function runDownloadScheduler() {
@@ -4902,18 +4943,36 @@ async function runDownloadScheduler() {
     }
   }
 
-  // Auto-rehydrate: if all in-memory queues are empty, pull more pending items from DB
-  if (queuedHeavy.length === 0 && queuedLight.length === 0 && queuedBatch.length === 0) {
+  // Auto-rehydrate per lane: a full heavy queue must not starve light/direct downloads.
+  if (shouldAutoRehydrate()) {
     scheduleAutoRehydrate();
   }
 }
 
 let autoRehydrateTimer = null;
+function shouldAutoRehydrate() {
+  const heavyLimit = Math.max(0, HEAVY_DOWNLOAD_CONCURRENCY);
+  const lightLimit = Math.max(0, LIGHT_DOWNLOAD_CONCURRENCY);
+  const batchLimit = Math.max(0, BATCH_DOWNLOAD_CONCURRENCY);
+  const needHeavy = heavyLimit > 0 && queuedHeavy.length === 0 && activeLaneCount('heavy') < heavyLimit;
+  const needLight = lightLimit > 0 && queuedLight.length === 0 && activeLaneCount('light') < lightLimit;
+  const needBatch = batchLimit > 0 && queuedBatch.length === 0 && activeLaneCount('batch') < batchLimit;
+  return needHeavy || needLight || needBatch;
+}
+
 function scheduleAutoRehydrate() {
   if (autoRehydrateTimer) return;
   autoRehydrateTimer = setTimeout(async () => {
     autoRehydrateTimer = null;
     try {
+      const heavyLimit = Math.max(0, HEAVY_DOWNLOAD_CONCURRENCY);
+      const lightLimit = Math.max(0, LIGHT_DOWNLOAD_CONCURRENCY);
+      const batchLimit = Math.max(0, BATCH_DOWNLOAD_CONCURRENCY);
+      const needHeavy = heavyLimit > 0 && queuedHeavy.length === 0 && activeLaneCount('heavy') < heavyLimit;
+      const needLight = lightLimit > 0 && queuedLight.length === 0 && activeLaneCount('light') < lightLimit;
+      const needBatch = batchLimit > 0 && queuedBatch.length === 0 && activeLaneCount('batch') < batchLimit;
+      if (!needHeavy && !needLight && !needBatch) return;
+
       const rows = await db.prepare(
         `SELECT id, url, platform, channel, title, metadata, status
          FROM downloads
@@ -4938,6 +4997,9 @@ function scheduleAutoRehydrate() {
         const channel = (row.channel && row.channel !== 'unknown') ? row.channel : deriveChannelFromUrl(platform, url) || 'unknown';
         const title = (row.title && row.title !== 'untitled') ? row.title : deriveTitleFromUrl(url);
         const lane = detectLane(platform, url);
+        if (lane === 'heavy' && !needHeavy) continue;
+        if (lane === 'light' && !needLight) continue;
+        if (lane === 'batch' && !needBatch) continue;
         queuedJobs.set(id, { downloadId: id, url, platform, channel, title, metadata: parsedMeta, progress: 0 });
         jobLane.set(id, lane);
         jobPlatform.set(id, platform);
@@ -4957,10 +5019,13 @@ function scheduleAutoRehydrate() {
 
 // Periodic check: if in-memory queues are empty but pending items exist, trigger rehydrate
 setInterval(() => {
-  if (queuedHeavy.length === 0 && queuedLight.length === 0 && queuedBatch.length === 0) {
+  if (hasQueuedWorkWithCapacity()) {
+    runDownloadSchedulerSoon();
+  }
+  if (shouldAutoRehydrate()) {
     scheduleAutoRehydrate();
   }
-}, 10000);
+}, 5000);
 
 let postprocessSchedulerTimer = null;
 function runPostprocessSchedulerSoon() {
@@ -5304,16 +5369,196 @@ async function rehydrateDownloadQueue() {
 let activeRecordings = new Map();
 Object.defineProperty(global, 'isRecording', { get: () => activeRecordings.size > 0 });
 
+function getFreeBytesForPath(targetPath) {
+  try {
+    const stat = fs.statfsSync(targetPath);
+    const blockSize = Number(stat.bsize || stat.frsize || 0);
+    const blocks = Number(stat.bavail || stat.bfree || 0);
+    const free = blockSize * blocks;
+    return Number.isFinite(free) && free > 0 ? free : 0;
+  } catch (e) {
+    return 0;
+  }
+}
+
+function requestRecordingStop(recId, reason) {
+  try {
+    const body = JSON.stringify({ id: recId, reason });
+    const req = http.request({
+      hostname: '127.0.0.1',
+      port: PORT,
+      path: '/stop-recording',
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(body)
+      }
+    });
+    req.on('error', () => {});
+    req.end(body);
+  } catch (e) {}
+}
+
+function normalizeRecordingKey(input, metadata = {}) {
+  const platformHint = String(metadata.platform || '').trim().toLowerCase();
+  const channelHint = String(metadata.channel || '').trim().toLowerCase();
+  const cleanTikTokChannel = (value) => {
+    let s = String(value || '').trim().toLowerCase();
+    if (!s) return '';
+    s = s.replace(/^tiktok:/, '');
+    s = s.replace(/^https?:\/\/(?:www\.)?tiktok\.com\//, '');
+    s = s.replace(/^\/+/, '');
+    s = s.replace(/\/live\/?$/, '');
+    if (!s.startsWith('@')) s = `@${s}`;
+    return s;
+  };
+  try {
+    const raw = String(input || metadata.url || metadata.pageUrl || metadata.sourceUrl || '').trim();
+    const platform = platformHint;
+    const channel = channelHint;
+    if (raw) {
+      const rawLower = raw.toLowerCase().replace(/\/+$/, '');
+      if (/^tiktok:@/i.test(rawLower)) {
+        const user = cleanTikTokChannel(rawLower);
+        if (user) return `tiktok:${user}/live`;
+      }
+      if ((platform === 'tiktok' || rawLower.includes('/live')) && /^@[^\/\s]+(?:\/live)?$/i.test(rawLower)) {
+        const user = cleanTikTokChannel(rawLower);
+        if (user) return `tiktok:${user}/live`;
+      }
+      const u = new URL(raw);
+      const host = String(u.hostname || '').toLowerCase().replace(/^www\./, '');
+      const pathname = String(u.pathname || '').replace(/\/+$/, '');
+      const tiktok = pathname.match(/^\/@([^\/]+)(?:\/live)?$/i);
+      if (host.endsWith('tiktok.com') && tiktok && tiktok[1]) return `tiktok:@${tiktok[1].toLowerCase()}/live`;
+      if (host.includes('chaturbate.com')) {
+        const model = pathname.split('/').filter(Boolean)[0] || channel;
+        if (model) return `chaturbate:${model.toLowerCase()}`;
+      }
+      if (host.includes('stripchat.com')) {
+        const model = pathname.split('/').filter(Boolean)[0] || channel;
+        if (model) return `stripchat:${model.toLowerCase()}`;
+      }
+      return `${host}${pathname || '/'}`.toLowerCase();
+    }
+    if (platform === 'tiktok' && channel) {
+      const user = cleanTikTokChannel(channel);
+      if (user) return `tiktok:${user}/live`;
+    }
+    if (platform || channel) return `${platform || 'unknown'}:${channel || 'unknown'}`;
+  } catch (e) {
+    const platform = platformHint;
+    const channel = channelHint;
+    if (platform === 'tiktok' && channel) {
+      const user = cleanTikTokChannel(channel);
+      if (user) return `tiktok:${user}/live`;
+    }
+    if (platform || channel) return `${platform || 'unknown'}:${channel || 'unknown'}`;
+  }
+  return 'default_rec';
+}
+
+function findRecordingEntryFromRequest(body = {}, meta = {}) {
+  const candidates = [
+    body.id,
+    body.recordingKey,
+    body.url,
+    body.tabId,
+    meta.url,
+    meta.pageUrl,
+    meta.sourceUrl
+  ];
+  const normalized = [];
+  const seen = new Set();
+  const add = (value) => {
+    const raw = String(value || '').trim();
+    if (!raw) return;
+    for (const key of [raw, normalizeRecordingKey(raw, meta)]) {
+      const k = String(key || '').trim();
+      if (k && !seen.has(k)) {
+        seen.add(k);
+        normalized.push(k);
+      }
+    }
+  };
+  candidates.forEach(add);
+
+  for (const key of normalized) {
+    if (activeRecordings.has(key)) return [key, activeRecordings.get(key)];
+  }
+
+  const requestedKey = normalized[0] || '';
+  if (requestedKey) {
+    for (const [id, session] of activeRecordings.entries()) {
+      const sessionMeta = session && session.currentRecordingMeta ? session.currentRecordingMeta : {};
+      if (normalizeRecordingKey(id, sessionMeta) === requestedKey) return [id, session];
+      if (normalizeRecordingKey(sessionMeta.recordingKey || sessionMeta.pageUrl, sessionMeta) === requestedKey) return [id, session];
+    }
+  }
+
+  return [null, null];
+}
+
+function getRecordingSnapshots() {
+  return Array.from(activeRecordings.entries()).map(([id, session]) => {
+    const meta = session && session.currentRecordingMeta ? session.currentRecordingMeta : {};
+    return {
+      id,
+      key: id,
+      url: meta.pageUrl || '',
+      platform: meta.platform || '',
+      channel: meta.channel || '',
+      title: meta.title || '',
+      file: session && session.currentRecordingFile ? session.currentRecordingFile : '',
+      startedAt: session && session.startedAt ? new Date(session.startedAt).toISOString() : null,
+      ageMs: session && session.startedAt ? Math.max(0, Date.now() - session.startedAt) : 0,
+      ownerClientId: session && session.ownerClientId ? session.ownerClientId : null,
+      lastHeartbeatAt: session && session.lastHeartbeatAt ? new Date(session.lastHeartbeatAt).toISOString() : null
+    };
+  });
+}
+
+function cleanupOrphanedRecordingProcesses(reason = 'periodic') {
+  const { execSync } = require('child_process');
+  const activePids = new Set(
+    Array.from(activeRecordings.values())
+      .map((session) => session && session.recordingProcess && session.recordingProcess.pid)
+      .filter(Boolean)
+      .map(String)
+  );
+  const pids = execSync("pgrep -f 'ffmpeg.*avfoundation.*recording_' 2>/dev/null || true", { encoding: 'utf8' }).trim().split('\n').filter(Boolean);
+  const killed = [];
+  for (const pid of pids) {
+    if (activePids.has(String(pid))) continue;
+    try { process.kill(Number(pid), 'SIGKILL'); } catch (e) {}
+    killed.push(pid);
+  }
+  if (killed.length > 0) console.log(`[recording] Killed ${killed.length} orphaned ffmpeg recording process(es) (${reason})`);
+}
+
 // Kill orphaned ffmpeg avfoundation recording processes from previous server runs.
 // These zombies block new recordings from capturing the screen.
 try {
-  const { execSync } = require('child_process');
-  const pids = execSync("pgrep -f 'ffmpeg.*avfoundation.*recording_' 2>/dev/null || true", { encoding: 'utf8' }).trim().split('\n').filter(Boolean);
-  for (const pid of pids) {
-    try { process.kill(Number(pid), 'SIGKILL'); } catch (e) {}
-  }
-  if (pids.length > 0) console.log(`[startup] Killed ${pids.length} orphaned ffmpeg recording process(es)`);
+  cleanupOrphanedRecordingProcesses('startup');
 } catch (e) {}
+
+const recordingOrphanCleanupTimer = setInterval(() => {
+  try { cleanupOrphanedRecordingProcesses('periodic'); } catch (e) {}
+}, 60000);
+if (typeof recordingOrphanCleanupTimer.unref === 'function') recordingOrphanCleanupTimer.unref();
+
+const RECORDING_HEARTBEAT_STALE_MS = Math.max(10000, parseInt(process.env.WEBDL_RECORDING_HEARTBEAT_STALE_MS || '30000', 10) || 30000);
+const recordingHeartbeatTimer = setInterval(() => {
+  const now = Date.now();
+  for (const [id, session] of activeRecordings.entries()) {
+    if (!session || !session.ownerClientId || !session.lastHeartbeatAt) continue;
+    if (now - session.lastHeartbeatAt > RECORDING_HEARTBEAT_STALE_MS) {
+      console.warn(`[recording] Client heartbeat stale; stopping ${id}`);
+      requestRecordingStop(id, 'client_lost');
+    }
+  }
+}, 10000);
+if (typeof recordingHeartbeatTimer.unref === 'function') recordingHeartbeatTimer.unref();
 
 let avfoundationDeviceListCache = null;
 
@@ -5417,7 +5662,13 @@ async function relaySocketCommandToHttp(endpoint, payload) {
 
 function broadcastRecordingState() {
   try {
-    io.emit('recording-status-changed', { isRecording });
+    const recordings = getRecordingSnapshots();
+    io.emit('recording-status-changed', {
+      isRecording,
+      activeRecordingUrls: recordings.map((r) => r.url).filter(Boolean),
+      activeRecordingKeys: recordings.map((r) => r.key),
+      recordings
+    });
   } catch (e) { }
 }
 
@@ -5428,7 +5679,12 @@ io.on('connection', (socket) => {
     connected: true,
     serverTime: new Date().toISOString()
   });
-  socket.emit('recording-status-changed', { isRecording });
+  socket.emit('recording-status-changed', {
+    isRecording,
+    activeRecordingUrls: getRecordingSnapshots().map((r) => r.url).filter(Boolean),
+    activeRecordingKeys: getRecordingSnapshots().map((r) => r.key),
+    recordings: getRecordingSnapshots()
+  });
 
   socket.on('webdl:request', async (message, ack) => {
     const reply = (payload) => {
@@ -5448,9 +5704,13 @@ io.on('connection', (socket) => {
     }
 
     if (action === 'status') {
+      const recordings = getRecordingSnapshots();
       reply({
         success: true,
         isRecording,
+        activeRecordingUrls: recordings.map((r) => r.url).filter(Boolean),
+        activeRecordingKeys: recordings.map((r) => r.key),
+        recordings,
         activeDownloads: (await getRuntimeActiveDownloadRows()).length,
         serverTime: new Date().toISOString()
       });
@@ -6998,6 +7258,7 @@ function detectPlatform(url) {
   if (/instagram\.com/i.test(u)) return 'instagram';
   if (/reddit\.com|redd\.it/i.test(u)) return 'reddit';
   if (/footfetishforum\.com/i.test(u)) return 'footfetishforum';
+  if (/flc\.nyc3\.digitaloceanspaces\.com\/data\/(?:attachments|video)\//i.test(u)) return 'footfetishforum';
   if (/onlyfans\.com/i.test(u)) return 'onlyfans';
   if (/rutube\.ru/i.test(u)) return 'rutube';
   if (/wikifeet\.com/i.test(u)) return 'wikifeet';
@@ -7011,6 +7272,7 @@ function detectPlatform(url) {
   if (/pornpics\.com/i.test(u)) return 'pornpics';
   if (/elitebabes\.com/i.test(u)) return 'elitebabes';
   if (/erome\.com/i.test(u)) return 'erome';
+  if (/keep2share\.cc|k2s\.cc/i.test(u)) return 'keep2share';
 
   try {
     const host = new URL(u).hostname.toLowerCase();
@@ -7060,6 +7322,7 @@ const KNOWN_PLATFORMS = new Set([
   'pornpics',
   'elitebabes',
   'erome',
+  'keep2share',
   '4kdownloader',
   'other']
 );
@@ -7067,6 +7330,7 @@ const KNOWN_PLATFORMS = new Set([
 function normalizePlatform(platform, url) {
   const p = typeof platform === 'string' ? platform.trim().toLowerCase() : '';
   const detected = detectPlatform(url);
+  if (p === '_keep2share' || p === 'keep2share.cc' || p === 'k2s' || p === 'k2scc') return 'keep2share';
   if (!p || p === 'unknown' || p === 'other') return detected;
   if (KNOWN_PLATFORMS.has(p)) return p;
   if (/^[a-z0-9_-]{2,30}$/.test(p)) return p;
@@ -7493,6 +7757,17 @@ function isFootfetishforumThreadUrl(input) {
   }
 }
 
+function isFootfetishforumForumUrl(input) {
+  try {
+    const u = new URL(String(input || ''));
+    const host = String(u.hostname || '').toLowerCase();
+    if (!(host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com'))) return false;
+    return /\/forums\/[^\/\?#]*\.(\d+)(?:\/|\?|#|$)/i.test(String(u.pathname || '') + String(u.search || '') + String(u.hash || ''));
+  } catch (e) {
+    return false;
+  }
+}
+
 function isAznudefeetViewUrl(input) {
   try {
     const u = new URL(String(input || ''));
@@ -7664,7 +7939,14 @@ expressApp.get('/status', async (req, res) => {
   res.json({
     status: 'running',
     isRecording,
-    activeRecordingUrls: Array.from(activeRecordings.keys()),
+    activeRecordingUrls: getRecordingSnapshots().map((r) => r.url).filter(Boolean),
+    activeRecordingKeys: getRecordingSnapshots().map((r) => r.key),
+    recordings: getRecordingSnapshots(),
+    recordingLimits: {
+      maxActive: RECORDING_MAX_ACTIVE,
+      maxDurationMs: RECORDING_MAX_DURATION_MS,
+      minFreeBytes: RECORDING_MIN_FREE_BYTES
+    },
     activeDownloads: runtimeActive.length,
     active_items: activeDownloadsList,
     queuedDownloads: dbQueuedCount,
@@ -7801,6 +8083,81 @@ function parseSqliteDateMs(s) {
   } catch (e) {
     return null;
   }
+}
+
+function getYtdlpSourceTimestamp(info) {
+  try {
+    if (!info || typeof info !== 'object') return null;
+    const rawTimestamp = Number(info.release_timestamp || info.timestamp || info.modified_timestamp || 0);
+    if (Number.isFinite(rawTimestamp) && rawTimestamp > 0) {
+      const dt = new Date(rawTimestamp * 1000);
+      const ms = dt.getTime();
+      if (Number.isFinite(ms)) return dt.toISOString();
+    }
+
+    const uploadDate = String(info.upload_date || '').trim();
+    const m = uploadDate.match(/^(\d{4})(\d{2})(\d{2})$/);
+    if (m) {
+      const y = parseInt(m[1], 10);
+      const mo = parseInt(m[2], 10);
+      const d = parseInt(m[3], 10);
+      const dt = new Date(Date.UTC(y, Math.max(0, mo - 1), d, 12, 0, 0));
+      const ms = dt.getTime();
+      if (Number.isFinite(ms)) return dt.toISOString();
+    }
+    const releaseDate = String(info.release_date || info.date || '').trim();
+    const rm = releaseDate.match(/^(\d{4})(\d{2})(\d{2})$/);
+    if (rm) {
+      const y = parseInt(rm[1], 10);
+      const mo = parseInt(rm[2], 10);
+      const d = parseInt(rm[3], 10);
+      const dt = new Date(Date.UTC(y, Math.max(0, mo - 1), d, 12, 0, 0));
+      const ms = dt.getTime();
+      if (Number.isFinite(ms)) return dt.toISOString();
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function findYtdlpInfoJsonForMediaPath(fpRaw) {
+  try {
+    const fp = String(fpRaw || '').trim();
+    if (!fp || !fs.existsSync(fp)) return null;
+    const st = fs.statSync(fp);
+    const dir = st.isDirectory() ? fp : path.dirname(fp);
+    const files = fs.readdirSync(dir).filter(f => f.endsWith('.info.json'));
+    if (!files.length) return null;
+    const stem = st.isDirectory() ? '' : path.basename(fp, path.extname(fp));
+    const exact = stem ? files.find(f => path.basename(f, '.info.json') === stem) : null;
+    return path.join(dir, exact || files[0]);
+  } catch (e) {
+    return null;
+  }
+}
+
+async function normalizeYoutubeDownloadTimestamp(downloadId, filepath) {
+  try {
+    if (!downloadId) return;
+    const row = await rawGetDownload.get(downloadId);
+    if (!row || String(row.platform || '').toLowerCase() !== 'youtube') return;
+    const fp = filepath || row.filepath || '';
+    const infoPath = findYtdlpInfoJsonForMediaPath(fp);
+    if (!infoPath) return;
+    const info = JSON.parse(fs.readFileSync(infoPath, 'utf8'));
+    const sourcePublishedAt = getYtdlpSourceTimestamp(info);
+    if (!sourcePublishedAt) return;
+    await updateDownloadContentTimestamp.run(sourcePublishedAt, sourcePublishedAt, sourcePublishedAt, downloadId);
+    const sourceMs = new Date(sourcePublishedAt).getTime();
+    if (Number.isFinite(sourceMs)) {
+      try { await updateDownloadFilesContentTimestamp.run(Math.floor(sourceMs), sourcePublishedAt, downloadId); } catch (e) { }
+    }
+    const sourceUrl = String(info.webpage_url || info.original_url || '').trim();
+    if (sourceUrl) {
+      try { await updateDownloadSourceUrl.run(sourceUrl, downloadId); } catch (e) { }
+    }
+  } catch (e) { }
 }
 
 function looksCompleteOnDisk(fpRaw) {
@@ -8355,26 +8712,8 @@ expressApp.post('/start-recording', async (req, res) => {
   } catch (e) { }
 
   const { metadata = {}, crop, lock } = req.body || {};
-  const recId = String((metadata && metadata.url) || req.body.url || 'default_rec').trim();
-
   const force = req.body.force === true;
-
-  if (activeRecordings.has(recId)) {
-    if (force) {
-      console.log(`[MULTI-REC] Force restart requested for ${recId}`);
-      // Wait for previous to die if any
-      const existing = activeRecordings.get(recId);
-      if (existing && existing.recordingProcess) {
-        try { existing.recordingProcess.kill('SIGINT'); } catch (e) { }
-      }
-      activeRecordings.delete(recId);
-      broadcastRecordingState();
-      await new Promise(r => setTimeout(r, 800));
-    } else {
-      console.log(`[MULTI-REC] URL already recording, prompting needsForce: ${recId}`);
-      return res.json({ success: true, action: 'start-recording', needsForce: true, existingUrl: recId });
-    }
-  }
+  const ownerClientId = String(req.body.recordingClientId || req.body.clientId || '').trim();
   let recordingProcess = null;
   let currentRecordingFile = null;
   let currentRecording = null;
@@ -8389,7 +8728,51 @@ expressApp.post('/start-recording', async (req, res) => {
   } const platform = resolved.platform || 'other';
   const channel = resolved.channel || 'unknown';
   const title = resolved.title || 'untitled';
+  const recId = normalizeRecordingKey(req.body.recordingKey || req.body.url || metadata.url || resolved.url, { ...metadata, ...resolved, platform, channel, title });
+
+  if (activeRecordings.has(recId)) {
+    if (force) {
+      console.log(`[MULTI-REC] Force restart requested for ${recId}`);
+      const existing = activeRecordings.get(recId);
+      if (existing && existing.recordingProcess) {
+        try { existing.recordingProcess.kill('SIGINT'); } catch (e) { }
+        if (existing.maxDurationTimer) clearTimeout(existing.maxDurationTimer);
+      }
+      activeRecordings.delete(recId);
+      broadcastRecordingState();
+      await new Promise(r => setTimeout(r, 800));
+    } else {
+      console.log(`[MULTI-REC] Recording already active for key ${recId}`);
+      return res.json({
+        success: true,
+        action: 'start-recording',
+        needsForce: true,
+        duplicate: true,
+        existingUrl: recId,
+        recordingKey: recId,
+        recordings: getRecordingSnapshots()
+      });
+    }
+  }
+  if (RECORDING_MAX_ACTIVE > 0 && activeRecordings.size >= RECORDING_MAX_ACTIVE) {
+    return res.status(429).json({
+      success: false,
+      error: `Maximaal aantal actieve opnames bereikt (${RECORDING_MAX_ACTIVE})`,
+      activeRecordingUrls: getRecordingSnapshots().map((r) => r.url).filter(Boolean),
+      activeRecordingKeys: getRecordingSnapshots().map((r) => r.key)
+    });
+  }
   const dir = getDownloadDir(platform, channel, title);
+  const freeBytes = getFreeBytesForPath(dir);
+  if (RECORDING_MIN_FREE_BYTES > 0 && freeBytes > 0 && freeBytes < RECORDING_MIN_FREE_BYTES) {
+    return res.status(507).json({
+      success: false,
+      error: `Te weinig vrije ruimte voor opname (${freeBytes} bytes vrij, minimaal ${RECORDING_MIN_FREE_BYTES})`,
+      freeBytes,
+      minFreeBytes: RECORDING_MIN_FREE_BYTES,
+      dir
+    });
+  }
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   const safeBase = sanitizeName(`${platform}__${channel}__${title}`).replace(/_+/g, '_');
@@ -8495,6 +8878,7 @@ expressApp.post('/start-recording', async (req, res) => {
   currentRecordingMeta = {
     recordingUrl: `recording:${timestamp}`,
     pageUrl: String(resolved.url || metadata.url || '').trim(),
+    recordingKey: recId,
     platform,
     channel,
     title,
@@ -8572,6 +8956,7 @@ expressApp.post('/start-recording', async (req, res) => {
     try { logStream.end(); } catch (e) { }
     const active = activeRecordings.get(recId);
     if (active && active.recordingProcess === recordingProcess) {
+      if (active.maxDurationTimer) clearTimeout(active.maxDurationTimer);
       activeRecordings.delete(recId);
     }
     broadcastRecordingState();
@@ -8582,25 +8967,40 @@ expressApp.post('/start-recording', async (req, res) => {
     try { logStream.end(); } catch (e) { }
     const active = activeRecordings.get(recId);
     if (active && active.recordingProcess === recordingProcess) {
+      if (active.maxDurationTimer) clearTimeout(active.maxDurationTimer);
       activeRecordings.delete(recId);
     }
     broadcastRecordingState();
   });
 
   currentRecordingFile = recordingFilePath;
-  activeRecordings.set(recId, {
+  const session = {
     recordingProcess,
     currentRecordingFile,
     currentRecording,
-    currentRecordingMeta
-  });
+    currentRecordingMeta,
+    startedAt: Date.now(),
+    ownerClientId,
+    lastHeartbeatAt: ownerClientId ? Date.now() : null,
+    maxDurationTimer: null
+  };
+  if (RECORDING_MAX_DURATION_MS > 0) {
+    session.maxDurationTimer = setTimeout(() => {
+      console.warn(`[recording] Max duration reached; stopping ${recId}`);
+      requestRecordingStop(recId, 'max_duration');
+    }, RECORDING_MAX_DURATION_MS);
+    if (typeof session.maxDurationTimer.unref === 'function') session.maxDurationTimer.unref();
+  }
+  activeRecordings.set(recId, session);
   broadcastRecordingState();
   console.log(`🔴 Opname gestart: ${recordingFilePath}`);
-  res.json({ success: true, action: 'start-recording', file: filename, dir, meta: resolved, lock: lockMode, rawFile: lockMode ? path.basename(rawFilePath) : undefined, finalFile: path.basename(finalFilePath), input: { device: inputDevice, video_name: resolvedVideoName, audio_name: resolvedAudioName, pixel_format: inputPixelFormat } });
+  res.json({ success: true, action: 'start-recording', file: filename, dir, meta: resolved, recordingKey: recId, lock: lockMode, rawFile: lockMode ? path.basename(rawFilePath) : undefined, finalFile: path.basename(finalFilePath), input: { device: inputDevice, video_name: resolvedVideoName, audio_name: resolvedAudioName, pixel_format: inputPixelFormat } });
 });
 
 expressApp.post('/recording/crop-update', (req, res) => {
-  const recId = String((req.body && req.body.url) || 'default_rec').trim();
+  const body = req.body || {};
+  const meta = body && typeof body.metadata === 'object' && body.metadata ? body.metadata : {};
+  const recId = normalizeRecordingKey(body.id || body.recordingKey || body.url || meta.url, meta);
   let currentRecording = activeRecordings.has(recId) ? activeRecordings.get(recId).currentRecording : null;
   if (!currentRecording && activeRecordings.size > 0) currentRecording = activeRecordings.values().next().value.currentRecording;
 
@@ -8618,21 +9018,57 @@ expressApp.post('/recording/crop-update', (req, res) => {
   res.json({ success: true });
 });
 
+expressApp.get('/recordings', (_req, res) => {
+  res.json({ success: true, isRecording, recordings: getRecordingSnapshots() });
+});
+
+expressApp.post('/recording/heartbeat', (req, res) => {
+  const body = req.body || {};
+  const meta = body && typeof body.metadata === 'object' && body.metadata ? body.metadata : {};
+  const recId = normalizeRecordingKey(body.id || body.recordingKey || body.url || meta.url, meta);
+  const clientId = String(body.recordingClientId || body.clientId || '').trim();
+  const [activeRecId, session] = findRecordingEntryFromRequest(body, meta);
+  if (!session) return res.json({ success: true, active: false, recordingKey: recId });
+  if (session.ownerClientId && clientId && session.ownerClientId !== clientId) {
+    const last = Number(session.lastHeartbeatAt || 0);
+    if (last && Date.now() - last > RECORDING_HEARTBEAT_STALE_MS) {
+      console.warn(`[recording] Client heartbeat owner stale; reassigning ${activeRecId}`);
+      session.ownerClientId = clientId;
+    } else {
+      return res.json({ success: true, active: true, owner: false, recordingKey: recId });
+    }
+  }
+  if (clientId && !session.ownerClientId) session.ownerClientId = clientId;
+  session.lastHeartbeatAt = Date.now();
+  return res.json({ success: true, active: true, owner: true, recordingKey: activeRecId || recId });
+});
+
+expressApp.post('/recordings/stop-all', async (req, res) => {
+  const reason = String((req.body && req.body.reason) || 'panic').trim() || 'panic';
+  const ids = Array.from(activeRecordings.keys());
+  for (const id of ids) requestRecordingStop(id, reason);
+  res.json({ success: true, action: 'stop-all-recordings', count: ids.length, ids });
+});
+
 expressApp.post('/stop-recording', (req, res) => {
-  const reqId = String((req.body && (req.body.id || req.body.tabId || (req.body.metadata && req.body.metadata.url))) || '').trim();
+  const body = req.body || {};
+  const meta = body && typeof body.metadata === 'object' && body.metadata ? body.metadata : {};
+  const clientId = String(body.recordingClientId || body.clientId || '').trim();
+  const reason = String(body.reason || '').trim();
   let session = null;
   let activeRecId = null;
 
-  if (reqId && activeRecordings.has(reqId)) {
-    session = activeRecordings.get(reqId);
-    activeRecId = reqId;
-  } else if (activeRecordings.size > 0) {
+  [activeRecId, session] = findRecordingEntryFromRequest(body, meta);
+  if (!session && activeRecordings.size > 0) {
     activeRecId = activeRecordings.keys().next().value;
     session = activeRecordings.get(activeRecId);
   }
 
   if (!session) {
     return res.json({ success: false, error: 'Er loopt geen opname' });
+  }
+  if ((reason === 'pagehide' || reason === 'client_lost') && session.ownerClientId && clientId && session.ownerClientId !== clientId) {
+    return res.json({ success: true, action: 'stop-recording', ignored: true, reason: 'client_mismatch' });
   }
 
   const recordingProcess = session.recordingProcess;
@@ -8662,6 +9098,7 @@ expressApp.post('/stop-recording', (req, res) => {
 
   const cleanup = () => {
     console.log(`⬛ Opname gestopt: ${currentRecordingFile}`);
+    if (session.maxDurationTimer) clearTimeout(session.maxDurationTimer);
     activeRecordings.delete(activeRecId);
     broadcastRecordingState();
   };
@@ -9034,8 +9471,8 @@ expressApp.post('/download', async (req, res) => {
   const pageUrl = metadata && typeof metadata.url === 'string' ? metadata.url.trim() : '';
   const originPlatform = normalizePlatform(metaPlatform, pageUrl || effectiveUrl);
   const pinFffOrigin = !!(
-    (originPlatform === 'footfetishforum' && pageUrl && pageUrl !== effectiveUrl && isFootfetishforumThreadUrl(pageUrl)) ||
-    (detectPlatform(effectiveUrl) === 'footfetishforum' && /\/attachments\//i.test(effectiveUrl) && pageUrl && isFootfetishforumThreadUrl(pageUrl))
+    (originPlatform === 'footfetishforum' && pageUrl && pageUrl !== effectiveUrl && (isFootfetishforumThreadUrl(pageUrl) || isFootfetishforumForumUrl(pageUrl))) ||
+    (detectPlatform(effectiveUrl) === 'footfetishforum' && /\/attachments\//i.test(effectiveUrl) && pageUrl && (isFootfetishforumThreadUrl(pageUrl) || isFootfetishforumForumUrl(pageUrl)))
   );
   const pinAznOrigin = !!(originPlatform === 'aznudefeet' && pageUrl && pageUrl !== effectiveUrl && isAznudefeetViewUrl(pageUrl));
   const pinToOrigin = !!(pinFffOrigin || pinAznOrigin);
@@ -9422,7 +9859,7 @@ expressApp.post('/download/batch', async (req, res) => {
   const metaPlatform = metadata && typeof metadata.platform === 'string' ? metadata.platform : null;
   const pageUrl = metadata && typeof metadata.url === 'string' ? metadata.url.trim() : '';
   const originPlatform = normalizePlatform(metaPlatform, pageUrl || '');
-  const pinFffOrigin = !!(originPlatform === 'footfetishforum' && pageUrl && isFootfetishforumThreadUrl(pageUrl));
+  const pinFffOrigin = !!(originPlatform === 'footfetishforum' && pageUrl && (isFootfetishforumThreadUrl(pageUrl) || isFootfetishforumForumUrl(pageUrl)));
   const pinAznOrigin = !!(originPlatform === 'aznudefeet' && pageUrl && isAznudefeetViewUrl(pageUrl));
   const fffThreadInfo = pinFffOrigin ? parseFootFetishForumThreadInfo(pageUrl) : null;
   const originChannel = pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : metadata && metadata.channel && metadata.channel !== 'unknown' ? metadata.channel : deriveChannelFromUrl(originPlatform, pageUrl) || 'unknown';
@@ -9872,8 +10309,17 @@ function isKnownExternalMediaWrapperHost(hostname) {
     const host = String(hostname || '').toLowerCase();
     if (!host) return false;
     if (/^(?:www\.)?(?:pixhost\.to|postimages\.org|postimg\.cc|imagebam\.com|imgvb\.com|ibb\.co|imgbox\.com|imagevenue\.com|imgchest\.com|turboimagehost\.com|imx\.to|vipr\.im|pixeldrain\.com|cyberfile\.me|jpg\.pet|gofile\.io|img\.kiwi)$/.test(host)) return true;
-    if (/^(?:www\.)?bunkr\.(?:si|ru|is|ph)$/.test(host)) return true;
+    if (isBunkrHost(host)) return true;
     return false;
+  } catch (e) {
+    return false;
+  }
+}
+
+function isBunkrHost(hostname) {
+  try {
+    const host = String(hostname || '').toLowerCase().replace(/^www\./, '');
+    return /^bunkr\.(?:cr|si|ru|is|ph|su|site|red)$/.test(host);
   } catch (e) {
     return false;
   }
@@ -10151,6 +10597,79 @@ function extractDirectMediaCandidates(html, baseUrl) {
   }
 }
 
+function decryptBunkrVideoUrl(payload) {
+  try {
+    if (!payload || typeof payload !== 'object') return '';
+    const encryptedUrl = String(payload.url || '').trim();
+    const timestamp = Number(payload.timestamp || 0);
+    if (!encryptedUrl || !Number.isFinite(timestamp) || timestamp <= 0) return encryptedUrl;
+    if (payload.encrypted !== true) return encryptedUrl;
+    const key = Buffer.from(`SECRET_KEY_${Math.floor(timestamp / 3600)}`);
+    const bytes = Buffer.from(encryptedUrl, 'base64');
+    const out = Buffer.alloc(bytes.length);
+    for (let i = 0; i < bytes.length; i++) out[i] = bytes[i] ^ key[i % key.length];
+    return out.toString('utf8').trim();
+  } catch (e) {
+    return '';
+  }
+}
+
+function extractBunkrSlug(html, pageUrl) {
+  try {
+    const h = String(html || '');
+    let m = h.match(/\bjsSlug\s*=\s*["']([^"']+)["']/i);
+    if (m && m[1]) return String(m[1]).trim();
+    m = h.match(/\/api\/vs[\s\S]{0,500}slug["']?\s*[:=]\s*["']([^"']+)["']/i);
+    if (m && m[1]) return String(m[1]).trim();
+    const u = new URL(String(pageUrl || ''));
+    m = String(u.pathname || '').match(/\/f\/([^/?#]+)/i);
+    if (m && m[1]) return decodeURIComponent(m[1]).trim();
+    return '';
+  } catch (e) {
+    return '';
+  }
+}
+
+async function resolveBunkrDirectMediaUrl(pageUrl, html, timeoutMs = 15000, referer = '') {
+  try {
+    const input = String(pageUrl || '').trim();
+    if (!input) return '';
+    const page = new URL(input);
+    if (!isBunkrHost(page.hostname)) return '';
+
+    const slug = extractBunkrSlug(html, input);
+    if (!slug) return '';
+
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => {
+      try { ctrl.abort(); } catch (e) { }
+    }, Math.max(1000, timeoutMs));
+    try {
+      const res = await fetch(new URL('/api/vs', page.origin).toString(), {
+        method: 'POST',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+          'Accept': 'application/json, text/plain, */*',
+          'Content-Type': 'application/json',
+          'Referer': referer || input,
+          'Origin': page.origin
+        },
+        body: JSON.stringify({ slug }),
+        signal: ctrl.signal
+      });
+      if (!res.ok) return '';
+      const json = await res.json();
+      const direct = decryptBunkrVideoUrl(json);
+      if (direct && looksLikeDirectFileUrl(direct)) return direct;
+      return '';
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch (e) {
+    return '';
+  }
+}
+
 async function resolveHtmlWrapperToDirectMediaUrl(url, timeoutMs = 15000, referer = '') {
   try {
     const u0 = String(url || '').trim();
@@ -10160,6 +10679,8 @@ async function resolveHtmlWrapperToDirectMediaUrl(url, timeoutMs = 15000, refere
     if (r.contentType && r.contentType.toLowerCase().startsWith('image/')) return upgradeKnownLowQualityMediaUrl(String(r.finalUrl || u0));
     if (r.contentType && r.contentType.toLowerCase().startsWith('video/')) return upgradeKnownLowQualityMediaUrl(String(r.finalUrl || u0));
     if (!r.text) return '';
+    const bunkr = await resolveBunkrDirectMediaUrl(r.finalUrl || u0, r.text, timeoutMs, referer);
+    if (bunkr) return bunkr;
     const candidates = extractDirectMediaCandidates(r.text, u0);
     if (candidates && candidates.length) return candidates[0];
     const og = upgradeKnownLowQualityMediaUrl(extractOpenGraphMediaUrl(r.text, u0));
@@ -10288,6 +10809,38 @@ function resolveDirectDownloadFilename(url, fallback, rawHeaders) {
   return safe || fallback;
 }
 
+function directDownloadLooksLikeHtml(filepath, rawHeaders) {
+  const headers = parseLastHttpHeaders(rawHeaders);
+  const contentType = String(headers['content-type'] || '').toLowerCase();
+  if (/\b(?:text\/html|application\/xhtml\+xml)\b/.test(contentType)) return true;
+  try {
+    if (!filepath || !fs.existsSync(filepath)) return false;
+    const fd = fs.openSync(filepath, 'r');
+    try {
+      const buf = Buffer.alloc(512);
+      const n = fs.readSync(fd, buf, 0, buf.length, 0);
+      const head = buf.slice(0, n).toString('utf8').trimStart().toLowerCase();
+      return head.startsWith('<!doctype html') || head.startsWith('<html') || head.includes('<title>keep2share</title>');
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (e) {
+    return false;
+  }
+}
+
+function rejectInvalidDirectDownload(url, filepath, filename, rawHeaders) {
+  const ext = String(path.extname(filename || filepath || '') || '').toLowerCase();
+  const isExpectedMedia = IMPORTABLE_VIDEO_EXTS.has(ext) || isImagePath(filename || filepath || '');
+  const isKeep2Share = /(?:keep2share\.cc|k2s\.cc)/i.test(String(url || ''));
+  if ((isExpectedMedia || isKeep2Share) && directDownloadLooksLikeHtml(filepath, rawHeaders)) {
+    return isKeep2Share
+      ? 'Keep2Share gaf een HTML/login-pagina terug in plaats van het videobestand'
+      : 'Directe download gaf HTML terug in plaats van media';
+  }
+  return '';
+}
+
 async function startDirectFileDownload(downloadId, url, platform, channel, title, metadata) {
   try {
     if (isCancelled(downloadId)) {
@@ -10298,7 +10851,11 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
     }
 
     // Probeer lage resolutie links van footfetishforum te upgraden
-    url = upgradeKnownLowQualityMediaUrl(url);
+    const upgradedInitialUrl = upgradeKnownLowQualityMediaUrl(url);
+    if (upgradedInitialUrl && upgradedInitialUrl !== url) {
+      try { await updateDownloadUrl.run(upgradedInitialUrl, downloadId); } catch (e) { }
+      url = upgradedInitialUrl;
+    }
 
     // Skip site infrastructure files (favicons, apple-touch-icons, etc.)
     if (/(?:^|[/])(?:apple-touch-icon|favicon|browserconfig)(?:[_.]|\.\w+$)/i.test(url)) {
@@ -10448,6 +11005,12 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
         if (code === 0 && fs.existsSync(tmpFilepath)) {
           const rawHeaders = fs.existsSync(headerFilepath) ? fs.readFileSync(headerFilepath, 'utf8') : '';
           const filename = resolveDirectDownloadFilename(url, provisionalFilename, rawHeaders);
+          const invalidReason = rejectInvalidDirectDownload(url, tmpFilepath, filename, rawHeaders);
+          if (invalidReason) {
+            try { fs.rmSync(tmpFilepath, { force: true }); } catch (e) { }
+            await updateDownloadStatus.run('error', 0, invalidReason, downloadId);
+            return;
+          }
           const filepath = uniqueFilePath(path.join(dir, filename), downloadId);
           try {
             if (fs.existsSync(filepath)) {
@@ -11682,11 +12245,12 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
         }
 
         if (!mainPath) {
-          const files = fs.readdirSync(dir).filter((f) =>
-            f.endsWith('.mp4') || f.endsWith('.mkv') || f.endsWith('.webm') ||
-            f.endsWith('.jpg') || f.endsWith('.jpeg') || f.endsWith('.png') ||
-            f.endsWith('.gif') || f.endsWith('.webp') || f.endsWith('.unknown_video')
-          );
+          const files = fs.readdirSync(dir).filter((f) => {
+            const ext = path.extname(String(f || '')).toLowerCase();
+            return IMPORTABLE_VIDEO_EXTS.has(ext) ||
+              IMPORTABLE_IMAGE_EXTS.has(ext) ||
+              String(f || '').endsWith('.unknown_video');
+          });
           files.sort((a, b) => {
             try {
               const statA = fs.statSync(path.join(dir, a));
@@ -11698,6 +12262,12 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
           });
           const mainFileGuess = files[0] || '';
           mainPath = mainFileGuess ? path.join(dir, mainFileGuess) : '';
+        }
+
+        if (!mainPath || !fs.existsSync(mainPath)) {
+          await updateDownloadStatus.run('error', 0, 'yt-dlp eindigde zonder importeerbaar mediabestand', downloadId);
+          console.log(`   ❌ Download mislukt: geen importeerbaar mediabestand gevonden in ${dir}`);
+          return;
         }
 
         if (mainPath && mainPath.endsWith('.unknown_video')) {
@@ -11785,6 +12355,7 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
         // Read info.json to get the real channel/uploader (especially for playlist downloads)
         let realChannel = channel;
         let realTitle = title;
+        let sourcePublishedAt = null;
         try {
           const infoJson = fs.readdirSync(dir).find(f => f.endsWith('.info.json'));
           if (infoJson) {
@@ -11799,6 +12370,8 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
             if (info.webpage_url || info.original_url) {
               metaObj.source_url = info.webpage_url || info.original_url;
             }
+            sourcePublishedAt = getYtdlpSourceTimestamp(info);
+            if (sourcePublishedAt) metaObj.source_published_at = sourcePublishedAt;
           }
         } catch (e) {}
 
@@ -11834,6 +12407,11 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
         }
 
         await updateDownload.run('completed', 100, finalPath, finalFile, finalSize, finalFormat, JSON.stringify(metaObj), null, downloadId);
+        if (sourcePublishedAt && String(platform || '').toLowerCase() === 'youtube') {
+          try {
+            await updateDownloadContentTimestamp.run(sourcePublishedAt, sourcePublishedAt, sourcePublishedAt, downloadId);
+          } catch (e) { }
+        }
         try {
           const thumbPath = pickThumbnailFile(dir);
           if (thumbPath) await updateDownloadThumbnail.run(`/download/${downloadId}/thumb`, downloadId);
@@ -12139,6 +12717,7 @@ async function importExistingVideosFromDisk(options = {}) {
             moveFileSyncWithFallback(fp, targetPath);
           } else {
             fs.copyFileSync(fp, targetPath);
+            try { fs.utimesSync(targetPath, st.atime, st.mtime); } catch (e) { }
           }
         }
 
@@ -12177,6 +12756,11 @@ async function importExistingVideosFromDisk(options = {}) {
             JSON.stringify(importMeta)
           );
           const newId = Number(info && info.lastInsertRowid);
+          if (Number.isFinite(newId)) {
+            const sourceMtime = new Date(st.mtimeMs).toISOString();
+            await updateDownloadContentTimestamp.run(sourceMtime, sourceMtime, sourceMtime, newId);
+            if (platform === 'youtube') await normalizeYoutubeDownloadTimestamp(newId, storedPath);
+          }
           if (Number.isFinite(newId) && sourceUrl && sourceUrl !== canonicalSource) {
             try { await updateDownloadSourceUrl.run(sourceUrl, newId); } catch (e) { }
           }
@@ -15822,6 +16406,7 @@ function shutdownGracefully(signal) {
     for (const session of activeRecordings.values()) {
       promises.push(new Promise((resolve) => {
         try {
+          if (session.maxDurationTimer) clearTimeout(session.maxDurationTimer);
           const proc = session.recordingProcess;
           if (!proc || proc.killed) return resolve();
 
@@ -16014,6 +16599,7 @@ async function scan4KDownloaderDir() {
         );
         const newId = ins && ins.lastInsertRowid ? ins.lastInsertRowid : null;
         if (newId) {
+          await normalizeYoutubeDownloadTimestamp(newId, filePath);
           console.log(`[4K-SCAN] Indexed #${newId}: ${title} (${channel})`);
           // Queue thumbnail generation
           try {

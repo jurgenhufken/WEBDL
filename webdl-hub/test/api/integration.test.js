@@ -108,6 +108,13 @@ test('API-integratie', { concurrency: false }, async (t) => {
     assert.ok(data.jobs.some((j) => j.id === jobId));
   });
 
+  await t.test('GET /api/jobs/meta/stats telt hele queue', async () => {
+    const { status, data } = await getJSON(base, '/api/jobs/meta/stats');
+    assert.equal(status, 200);
+    assert.ok(data.stats.total >= 1);
+    assert.ok(Array.isArray(data.groups));
+  });
+
   await t.test('GET /api/jobs/:id → job + files + logs', async () => {
     const { status, data } = await getJSON(base, '/api/jobs/' + jobId);
     assert.equal(status, 200);
@@ -130,6 +137,22 @@ test('API-integratie', { concurrency: false }, async (t) => {
   await t.test('POST retry op cancelled job → queued', async () => {
     const { data } = await postJSON(base, '/api/jobs/' + jobId + '/retry', {});
     assert.equal(data.status, 'queued');
+  });
+
+  await t.test('POST pause/resume beïnvloedt queued job', async () => {
+    const paused = await postJSON(base, '/api/jobs/' + jobId + '/pause', {});
+    assert.equal(paused.status, 200);
+    assert.equal(paused.data.status, 'queued');
+    assert.equal(paused.data.lane, 'paused');
+    const resumed = await postJSON(base, '/api/jobs/' + jobId + '/resume', {});
+    assert.equal(resumed.status, 200);
+    assert.notEqual(resumed.data.lane, 'paused');
+  });
+
+  await t.test('POST priority zet expliciete voorrang', async () => {
+    const boosted = await postJSON(base, '/api/jobs/' + jobId + '/priority', { priority: 100 });
+    assert.equal(boosted.status, 200);
+    assert.equal(boosted.data.priority, 100);
   });
 
   await t.test('URL-dedupe: tweede POST met zelfde URL → duplicate:true + 200', async () => {

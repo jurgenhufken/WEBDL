@@ -9,7 +9,7 @@
  echo "---------------------------------------------"
  echo ""
  
- function check_port_and_kill() {
+function check_port_and_kill() {
      local PORT=$1
      echo "Controleren of poort $PORT al in gebruik is..."
      local PORTPROC=$(lsof -ti:$PORT)
@@ -35,10 +35,79 @@
          echo "Poort $PORT is vrij"
      fi
      echo ""
- }
- check_port_and_kill 35729
- check_port_and_kill 35730
- check_port_and_kill 35731
+}
+
+function postgres_ready() {
+    local PG_ISREADY
+    PG_ISREADY="$(command -v pg_isready 2>/dev/null || true)"
+    if [ -z "$PG_ISREADY" ] && [ -x "/opt/homebrew/opt/postgresql@16/bin/pg_isready" ]; then
+        PG_ISREADY="/opt/homebrew/opt/postgresql@16/bin/pg_isready"
+    fi
+    if [ -z "$PG_ISREADY" ]; then
+        return 1
+    fi
+    "$PG_ISREADY" -h localhost -p 5432 >/dev/null 2>&1
+}
+
+function ensure_postgres_running() {
+    local ENGINE="${WEBDL_DB_ENGINE:-postgres}"
+    local DB_URL="${DATABASE_URL:-postgresql://jurgen@localhost:5432/webdl}"
+    if [ "${ENGINE}" = "sqlite" ]; then
+        return 0
+    fi
+    if [ "${ENGINE}" != "postgres" ] && [ "${ENGINE}" != "pg" ] && [[ "${DB_URL}" != postgres://* ]] && [[ "${DB_URL}" != postgresql://* ]]; then
+        return 0
+    fi
+
+    echo "PostgreSQL controleren..."
+    if postgres_ready; then
+        echo "PostgreSQL draait"
+        echo ""
+        return 0
+    fi
+
+    echo "PostgreSQL reageert niet op localhost:5432"
+
+    local DATA_DIR="${WEBDL_POSTGRES_DATA_DIR:-/opt/homebrew/var/postgresql@16}"
+    local PID_FILE="$DATA_DIR/postmaster.pid"
+    if [ -f "$PID_FILE" ]; then
+        local PID
+        PID="$(sed -n '1p' "$PID_FILE" 2>/dev/null || true)"
+        if [ ! -z "$PID" ] && ! ps -p "$PID" -o args= 2>/dev/null | grep -Eiq 'postgres|postmaster'; then
+            local BACKUP="$PID_FILE.stale.$(date +%Y%m%d%H%M%S)"
+            echo "Stale PostgreSQL lock gevonden voor PID $PID; verplaatsen naar $(basename "$BACKUP")"
+            mv "$PID_FILE" "$BACKUP"
+        fi
+    fi
+
+    if command -v brew >/dev/null 2>&1; then
+        echo "PostgreSQL starten via Homebrew..."
+        brew services start postgresql@16 >/dev/null 2>&1 || brew services restart postgresql@16 >/dev/null 2>&1 || true
+    elif [ -x "/opt/homebrew/opt/postgresql@16/bin/pg_ctl" ]; then
+        echo "PostgreSQL starten via pg_ctl..."
+        /opt/homebrew/opt/postgresql@16/bin/pg_ctl -D "$DATA_DIR" -l /opt/homebrew/var/log/postgresql@16.log start >/dev/null 2>&1 || true
+    fi
+
+    for i in {1..30}; do
+        if postgres_ready; then
+            echo "PostgreSQL draait"
+            echo ""
+            return 0
+        fi
+        sleep 0.5
+    done
+
+    echo "FOUT: PostgreSQL kon niet worden gestart. Controleer Homebrew PostgreSQL met:"
+    echo "  brew services restart postgresql@16"
+    echo ""
+    echo "Druk op een toets om dit venster te sluiten"
+    read -n 1
+    exit 1
+}
+
+check_port_and_kill 35729
+check_port_and_kill 35730
+check_port_and_kill 35731
  
  # Navigeer naar de applicatie directory
  cd screen-recorder-native
@@ -59,9 +128,30 @@
  fi
  
  echo "Server starten..."
+ NEW_WEBDL_ROOT="/Volumes/WEBDL Extra/WEBDL"
+ OLD_WEBDL_ROOT="/Volumes/HDD - One Touch/WEBDL"
+ if [ -d "$NEW_WEBDL_ROOT" ]; then
+     : "${WEBDL_BASE_DIR:=$NEW_WEBDL_ROOT}"
+     : "${WEBDL_AUTO_IMPORT_ROOT_DIR:=$NEW_WEBDL_ROOT/_Downloads}"
+ else
+     : "${WEBDL_BASE_DIR:=$HOME/Downloads/WEBDL}"
+     : "${WEBDL_AUTO_IMPORT_ROOT_DIR:=$HOME/Downloads/WEBDL/_Downloads}"
+ fi
+ if [ -d "$OLD_WEBDL_ROOT" ] && [ -d "$NEW_WEBDL_ROOT" ]; then
+     : "${WEBDL_EXTRA_MEDIA_ROOTS:=$OLD_WEBDL_ROOT;$NEW_WEBDL_ROOT}"
+ elif [ -d "$OLD_WEBDL_ROOT" ]; then
+     : "${WEBDL_EXTRA_MEDIA_ROOTS:=$OLD_WEBDL_ROOT}"
+ elif [ -d "$NEW_WEBDL_ROOT" ]; then
+     : "${WEBDL_EXTRA_MEDIA_ROOTS:=$NEW_WEBDL_ROOT}"
+ else
+     : "${WEBDL_EXTRA_MEDIA_ROOTS:=$HOME/Downloads/WEBDL}"
+ fi
  : "${WEBDL_VIDEO_DEVICE:=auto}"
  : "${WEBDL_AUDIO_DEVICE:=auto}"
  : "${WEBDL_RECORDING_INPUT_PIXEL_FORMAT:=auto}"
+ : "${WEBDL_RECORDING_MAX_ACTIVE:=6}"
+ : "${WEBDL_RECORDING_MAX_DURATION_MS:=7200000}"
+ : "${WEBDL_RECORDING_MIN_FREE_BYTES:=53687091200}"
  : "${WEBDL_YOUTUBE_DOWNLOAD_CONCURRENCY:=1}"
  : "${WEBDL_YOUTUBE_START_SPACING_MS:=3500}"
  : "${WEBDL_YOUTUBE_START_JITTER_MS:=1500}"
@@ -82,13 +172,11 @@
  : "${WEBDL_STARTUP_REHYDRATE_MODE:=all}"
  : "${WEBDL_STARTUP_REHYDRATE_MAX_ROWS:=80}"
  : "${WEBDL_AUTO_IMPORT_ON_START:=1}"
- : "${WEBDL_AUTO_IMPORT_ROOT_DIR:=$HOME/Downloads/WEBDL/_Downloads}"
  : "${WEBDL_AUTO_IMPORT_MAX_DEPTH:=6}"
  : "${WEBDL_AUTO_IMPORT_POLL_MS:=0}"
  : "${WEBDL_AUTO_IMPORT_MIN_FILE_AGE_MS:=30000}"
  : "${WEBDL_AUTO_IMPORT_FLATTEN_TO_WEBDL:=0}"
  : "${WEBDL_AUTO_IMPORT_MOVE_SOURCE:=0}"
- : "${WEBDL_EXTRA_MEDIA_ROOTS:=$HOME/Downloads/WEBDL}"
  : "${WEBDL_DB_ENGINE:=postgres}"
  : "${DATABASE_URL:=postgresql://jurgen@localhost:5432/webdl}"
  : "${WEBDL_ADDON_AUTO_BUILD_ON_START:=0}"
@@ -153,8 +241,12 @@
  fi
  WEBDL_FINALCUT_OUTPUT=0
  export WEBDL_VIDEO_DEVICE
+ export WEBDL_BASE_DIR
  export WEBDL_AUDIO_DEVICE
  export WEBDL_RECORDING_INPUT_PIXEL_FORMAT
+ export WEBDL_RECORDING_MAX_ACTIVE
+ export WEBDL_RECORDING_MAX_DURATION_MS
+ export WEBDL_RECORDING_MIN_FREE_BYTES
  export WEBDL_YOUTUBE_DOWNLOAD_CONCURRENCY
  export WEBDL_YOUTUBE_START_SPACING_MS
  export WEBDL_YOUTUBE_START_JITTER_MS
@@ -195,6 +287,8 @@
  export WEBDL_FINALCUT_OUTPUT
  export WEBDL_VERBOSE_LOG
  export WEBDL_SCAN_EXISTING_TAGS=0
+
+ensure_postgres_running
  
  (sleep 1; open "$HOME/Downloads/WEBDL") >/dev/null 2>&1 &
  (sleep 4; open "http://localhost:35729/addon/firefox-debug-controller.xpi?t=$(date +%s)") >/dev/null 2>&1 &

@@ -17,6 +17,9 @@ const state = {
   platformFilter: '',
   adapters: [],
   collapsedGroups: new Set(),
+  jobStats: { queued: 0, running: 0, paused: 0, done: 0, failed: 0, cancelled: 0, total: 0 },
+  jobGroups: [],
+  sabnzbd: null,
   // Live progress data van WebSocket (speed/eta)
   liveProgress: new Map(),
 };
@@ -57,6 +60,12 @@ function humanSize(n) {
   return n.toFixed(i === 0 ? 0 : 1) + ' ' + u[i];
 }
 
+function humanBytes(n) {
+  const value = Number(n);
+  if (!Number.isFinite(value) || value <= 0) return '-';
+  return humanSize(value);
+}
+
 function sumSizes(files) {
   return files.reduce((sum, f) => sum + (Number(f.size || f.filesize) || 0), 0);
 }
@@ -70,6 +79,7 @@ function statusIcon(status) {
   switch (status) {
     case 'pending':   return '⏳';
     case 'queued':    return '⏳';
+    case 'paused':    return '⏸';
     case 'downloading':
     case 'running':   return '⬇️';
     case 'postprocessing': return '⚙';
@@ -86,6 +96,7 @@ function displayStatus(status) {
   switch (status) {
     case 'pending': return 'pending';
     case 'queued': return 'wachtrij';
+    case 'paused': return 'pauze';
     case 'running':
     case 'downloading': return 'actief';
     case 'postprocessing': return 'verwerkt';
@@ -96,6 +107,11 @@ function displayStatus(status) {
     case 'cancelled': return 'cancelled';
     default: return status || '—';
   }
+}
+
+function effectiveStatus(job) {
+  if (job && job.status === 'queued' && job.lane === 'paused') return 'paused';
+  return job?.status || '';
 }
 
 function videoTitle(job) {
@@ -127,17 +143,13 @@ function serverStatusToFilter(status) {
 
 // ─── Queue stats ──────────────────────────────────────────────────────────────
 function updateStats() {
-  let q = 0, r = 0, d = 0, f = 0;
-  for (const j of state.jobs.values()) {
-    if (j.status === 'queued') q++;
-    else if (j.status === 'running') r++;
-    else if (j.status === 'done') d++;
-    else if (j.status === 'failed') f++;
-  }
-  $('statQueued').textContent = q;
-  $('statRunning').textContent = r;
-  $('statDone').textContent = d;
-  $('statFailed').textContent = f;
+  const s = state.jobStats || {};
+  setText('statQueued', s.queued || 0);
+  setText('statRunning', s.running || 0);
+  setText('statPaused', s.paused || 0);
+  setText('statDone', s.done || 0);
+  setText('statFailed', s.failed || 0);
+  renderOverview();
 }
 
 function updateServerStats(stats = {}) {
@@ -147,6 +159,82 @@ function updateServerStats(stats = {}) {
   setText('srvDownloading', (legacy.downloading || 0) + (legacy.postprocessing || 0));
   setText('srvCompleted', legacy.completed || 0);
   setText('srvError', (legacy.error || 0) + (legacy.failed || 0));
+}
+
+function renderOverview() {
+  const s = state.jobStats || {};
+  setText('overviewTotal', `${s.total || 0} jobs totaal`);
+  setText('ovRunning', s.running || 0);
+  setText('ovQueued', s.queued || 0);
+  setText('ovPaused', s.paused || 0);
+  setText('ovFailed', s.failed || 0);
+  renderSabnzbdStatus();
+
+  const target = $('overviewGroups');
+  if (!target) return;
+  target.innerHTML = '';
+  const groups = (state.jobGroups || []).filter((g) =>
+    Number(g.running || 0) || Number(g.queued || 0) || Number(g.paused || 0) || Number(g.failed || 0)
+  ).slice(0, 12);
+  for (const g of groups) {
+    const total = Number(g.total || g.jobs || 0);
+    const done = Number(g.done || 0);
+    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+    const div = document.createElement('div');
+    div.className = 'overview-group';
+    div.innerHTML = `
+      <div class="overview-group-title" title="${esc(g.name || g.group_id)}">${esc(g.name || 'Playlist')}</div>
+      <div class="overview-group-stats">
+        ${g.running ? `<span>⬇ ${g.running} actief</span>` : ''}
+        ${g.queued ? `<span>⏳ ${g.queued} wacht</span>` : ''}
+        ${g.paused ? `<span>⏸ ${g.paused} pauze</span>` : ''}
+        ${g.failed ? `<span>❌ ${g.failed} fout</span>` : ''}
+        ${total ? `<span>${done}/${total}</span>` : ''}
+      </div>
+      <div class="overview-group-progress"><div class="bar"><div class="bar-fill ${pct === 100 ? 'done' : ''}" style="width:${pct}%"></div></div></div>
+    `;
+    target.appendChild(div);
+  }
+  if (groups.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-inline';
+    empty.textContent = 'Geen actieve of wachtende groepen';
+    target.appendChild(empty);
+  }
+}
+
+function renderSabnzbdStatus() {
+  const sab = state.sabnzbd;
+  if (!sab) return;
+  if (!sab.ok) {
+    setText('sabState', sab.error || 'niet bereikbaar');
+    setText('sabQueue', '-');
+    setText('sabSpeed', '-');
+    setText('sabLeft', '-');
+    setText('sabFree', '-');
+    const slots = $('sabSlots');
+    if (slots) slots.innerHTML = '';
+    return;
+  }
+  const queue = sab.queue || {};
+  setText('sabState', queue.paused ? 'gepauzeerd' : (queue.status || 'actief'));
+  setText('sabQueue', queue.noOfSlots || 0);
+  setText('sabSpeed', queue.speed || '-');
+  setText('sabLeft', queue.sizeLeft || queue.timeLeft || '-');
+  setText('sabFree', humanBytes(sab.disks?.completed?.free));
+  const slots = $('sabSlots');
+  if (!slots) return;
+  slots.innerHTML = '';
+  for (const item of (queue.slots || []).slice(0, 6)) {
+    const row = document.createElement('div');
+    row.className = 'overview-sab-slot';
+    row.innerHTML = `
+      <strong title="${esc(item.name)}">${esc(item.name)}</strong>
+      <span>${Math.round(Number(item.percentage || 0))}%</span>
+      <span>${esc(item.timeLeft || item.sizeLeft || '')}</span>
+    `;
+    slots.appendChild(row);
+  }
 }
 
 function setFilterOptions() {
@@ -166,6 +254,7 @@ function setFilterOptions() {
       <option value="">alle</option>
       <option value="queued">wachtrij</option>
       <option value="running">actief</option>
+      <option value="paused">pauze</option>
       <option value="done">klaar</option>
       <option value="failed">mislukt</option>
     `;
@@ -178,6 +267,8 @@ function updateSourceControls() {
   $('source').value = state.source;
   $('platformFilter').hidden = state.source !== 'server';
   $('btnBulkClear').hidden = state.source === 'server';
+  $('btnBulkPause').hidden = state.source === 'server';
+  $('btnBulkResume').hidden = state.source === 'server';
   $('btnBulkCancel').textContent = state.source === 'server' ? '✕ pending' : '✕ wacht';
   $('btnBulkRetry').textContent = state.source === 'server' ? '↻ error' : '↻ failed';
   setFilterOptions();
@@ -191,7 +282,7 @@ function buildGroups() {
   const standalone = [];
 
   const allJobs = [...state.jobs.values()]
-    .filter((j) => !state.filter || j.status === state.filter)
+    .filter((j) => !state.filter || effectiveStatus(j) === state.filter)
     .sort((a, b) => {
       // Sorteer op expandIndex als die er is, anders op id
       const aIdx = a.options?.expandIndex || Infinity;
@@ -222,14 +313,16 @@ function buildGroups() {
 }
 
 function groupStats(group) {
-  let q = 0, r = 0, d = 0, f = 0;
+  let q = 0, r = 0, p = 0, d = 0, f = 0;
   for (const j of group.jobs) {
-    if (j.status === 'queued') q++;
-    else if (j.status === 'running') r++;
-    else if (j.status === 'done') d++;
-    else if (j.status === 'failed') f++;
+    const status = effectiveStatus(j);
+    if (status === 'queued') q++;
+    else if (status === 'running') r++;
+    else if (status === 'paused') p++;
+    else if (status === 'done') d++;
+    else if (status === 'failed') f++;
   }
-  return { queued: q, running: r, done: d, failed: f, total: group.jobs.length };
+  return { queued: q, running: r, paused: p, done: d, failed: f, total: group.jobs.length };
 }
 
 // ─── Render job list ──────────────────────────────────────────────────────────
@@ -264,6 +357,8 @@ function renderList() {
           📋 ${esc(g.name)}
         </div>
         <div class="group-actions">
+          ${s.queued ? `<button class="btn-sm btn-grp" data-action="pause-queued" data-gid="${esc(g.id)}" title="Pauzeer wachtende">⏸ ${s.queued}</button>` : ''}
+          ${s.paused ? `<button class="btn-sm btn-grp" data-action="resume-paused" data-gid="${esc(g.id)}" title="Hervat gepauzeerde">▶ ${s.paused}</button>` : ''}
           ${s.queued ? `<button class="btn-sm btn-grp" data-action="cancel-queued" data-gid="${esc(g.id)}" title="Cancel alle wachtende">✕ ${s.queued}</button>` : ''}
           ${s.failed ? `<button class="btn-sm btn-grp" data-action="retry-failed" data-gid="${esc(g.id)}" title="Retry alle mislukte">↻ ${s.failed}</button>` : ''}
         </div>
@@ -273,6 +368,7 @@ function renderList() {
         <span style="color:var(--ok)">✅ ${s.done}</span>
         ${s.running ? `<span style="color:var(--running)">⬇ ${s.running}</span>` : ''}
         ${s.queued ? `<span style="color:var(--queued)">⏳ ${s.queued}</span>` : ''}
+        ${s.paused ? `<span style="color:var(--warn)">⏸ ${s.paused}</span>` : ''}
         ${s.failed ? `<span style="color:var(--err)">❌ ${s.failed}</span>` : ''}
       </div>
       <div class="group-bar">
@@ -338,35 +434,38 @@ function renderJobItem(job, isStandalone) {
   div.dataset.id = job.id;
 
   const pct = Math.round(job.progress_pct || 0);
+  const status = effectiveStatus(job);
   const title = isStandalone ? videoTitle(job) : (job.options?.videoTitle || videoTitle(job));
   const live = state.liveProgress.get(String(job.id));
   const gallerySynced = job.options?.gallery_synced;
 
   // Regel 2: meta-info afhankelijk van status
   let metaHtml = '';
-  if (job.status === 'running') {
+  if (status === 'running') {
     const speed = live?.speed || '';
     const eta = live?.eta || '';
     metaHtml = `<div class="job-meta">${job.adapter || ''} · ${job.lane || ''} · ${pct}%${speed ? ' · ' + speed : ''}${eta && eta !== 'Unknown' ? ' · ETA ' + eta : ''}</div>`;
-  } else if (job.status === 'failed' && job.error) {
+  } else if (status === 'failed' && job.error) {
     metaHtml = `<div class="job-meta job-error">${esc(job.error).slice(0, 80)}</div>`;
-  } else if (job.status === 'done') {
+  } else if (status === 'done') {
     metaHtml = `<div class="job-meta">${gallerySynced ? '🖼️ in gallery' : job.adapter || ''}</div>`;
-  } else if (job.status === 'queued') {
+  } else if (status === 'paused') {
+    metaHtml = `<div class="job-meta">${job.options?.pauseLane || job.lane || ''} · gepauzeerd</div>`;
+  } else if (status === 'queued') {
     metaHtml = `<div class="job-meta">${job.lane || ''} · wachtrij</div>`;
   }
 
   // Progress bar bij running
-  const progressBar = job.status === 'running'
+  const progressBar = status === 'running'
     ? `<div class="job-progress-bar"><div class="job-progress-fill" style="width:${pct}%"></div></div>`
     : '';
 
   div.innerHTML = `
-    <span class="job-icon">${statusIcon(job.status)}${gallerySynced && job.status === 'done' ? '<span class="gallery-dot"></span>' : ''}</span>
+    <span class="job-icon">${statusIcon(status)}${gallerySynced && status === 'done' ? '<span class="gallery-dot"></span>' : ''}</span>
     <div class="job-body">
       <div class="job-title-row">
         <span class="job-title" title="${esc(job.url)}">${esc(title)}</span>
-        <span class="job-badge ${job.status}">${job.status === 'running' ? 'actief' : job.status === 'queued' ? 'wacht' : job.status === 'done' ? 'klaar' : job.status}</span>
+        <span class="job-badge ${status}">${status === 'running' ? 'actief' : status === 'queued' ? 'wacht' : status === 'paused' ? 'pauze' : status === 'done' ? 'klaar' : status}</span>
       </div>
       ${metaHtml}
       ${progressBar}
@@ -435,6 +534,7 @@ async function selectServerDownload(id) {
 
 function renderDetail(job, files, logs) {
   const title = job.options?.videoTitle || videoTitle(job);
+  const status = effectiveStatus(job);
   closeInlineViewer();
   setText('dTitle', title);
   setText('dUrl', job.url);
@@ -445,10 +545,10 @@ function renderDetail(job, files, logs) {
   setText('dChannel', job.options?.expandName || job.options?.playlistTitle || '—');
   const totalSize = sumSizes(files);
   setText('dFilesize', totalSize ? humanSize(totalSize) : '—');
-  $('dStatus').innerHTML = `<span class="badge ${job.status}">${job.status}</span>`;
+  $('dStatus').innerHTML = `<span class="badge ${status}">${displayStatus(status)}</span>`;
   const pct = Math.round(job.progress_pct || 0);
   $('dBar').style.width = pct + '%';
-  $('dBar').className = 'bar-fill' + (job.status === 'done' ? ' done' : '');
+  $('dBar').className = 'bar-fill' + (status === 'done' ? ' done' : '');
   setText('dPct', pct + '%');
   setText('dAttempts', `${job.attempts} / ${job.max_attempts}`);
   setText('dStarted', fmtTime(job.started_at));
@@ -461,8 +561,11 @@ function renderDetail(job, files, logs) {
   $('dErrorRow').hidden = !hasError;
   $('dError').textContent = job.error || '';
 
-  $('btnRetry').disabled = !['failed', 'cancelled'].includes(job.status);
-  $('btnCancel').disabled = !['queued', 'running'].includes(job.status);
+  $('btnPause').disabled = status !== 'queued';
+  $('btnResume').disabled = status !== 'paused';
+  $('btnBoost').disabled = !['queued', 'paused'].includes(status);
+  $('btnRetry').disabled = !['failed', 'cancelled'].includes(status);
+  $('btnCancel').disabled = !['queued', 'running', 'paused'].includes(status);
 
   // Media tab - show images/videos with thumbnails
   const mediaFiles = files.filter(f => isMediaFile(f.path));
@@ -502,8 +605,8 @@ function renderDetail(job, files, logs) {
 
   // Hero status badge
   const heroStatus = $('heroStatus');
-  heroStatus.textContent = job.status.toUpperCase();
-  heroStatus.className = `hero-badge ${job.status}`;
+  heroStatus.textContent = displayStatus(status).toUpperCase();
+  heroStatus.className = `hero-badge ${status}`;
 
   // Hero progress
   const heroPct = $('heroPct');
@@ -582,6 +685,9 @@ function renderServerDetail(download) {
 
   $('btnRetry').disabled = !['error', 'failed', 'cancelled'].includes(status);
   $('btnCancel').disabled = !['pending', 'queued', 'downloading', 'postprocessing'].includes(status);
+  $('btnPause').disabled = true;
+  $('btnResume').disabled = true;
+  $('btnBoost').disabled = true;
 
   const heroThumb = $('heroThumb');
   if (download.filepath) {
@@ -771,10 +877,20 @@ async function loadAdapters() {
 }
 
 async function loadJobs() {
-  const { jobs } = await api('GET', '/api/jobs?limit=500');
+  const params = new URLSearchParams({ limit: '500' });
+  if (state.filter) params.set('status', state.filter);
+  const { jobs } = await api('GET', '/api/jobs?' + params.toString());
   state.jobs = new Map(jobs.map((j) => [j.id, j]));
   if (state.source === 'hub') renderList();
-  updateStats();
+}
+
+async function loadJobStats() {
+  try {
+    const { stats, groups } = await api('GET', '/api/jobs/meta/stats');
+    state.jobStats = stats || state.jobStats;
+    state.jobGroups = groups || [];
+    updateStats();
+  } catch {}
 }
 
 async function loadServerStats() {
@@ -782,6 +898,16 @@ async function loadServerStats() {
     const stats = await api('GET', '/api/downloads/meta/stats');
     updateServerStats(stats);
   } catch {}
+}
+
+async function loadSabnzbdStatus() {
+  try {
+    state.sabnzbd = await api('GET', '/api/sabnzbd/status');
+    renderSabnzbdStatus();
+  } catch (e) {
+    state.sabnzbd = { ok: false, error: e.message };
+    renderSabnzbdStatus();
+  }
 }
 
 async function loadServerPlatforms() {
@@ -816,9 +942,9 @@ async function loadServerDownloads() {
 
 async function refreshCurrentSource() {
   if (state.source === 'server') {
-    await Promise.all([loadServerStats(), loadServerPlatforms(), loadServerDownloads()]);
+    await Promise.all([loadJobStats(), loadServerStats(), loadServerPlatforms(), loadServerDownloads(), loadSabnzbdStatus()]);
   } else {
-    await Promise.all([loadJobs(), loadServerStats()]);
+    await Promise.all([loadJobs(), loadJobStats(), loadServerStats(), loadSabnzbdStatus()]);
   }
 }
 
@@ -844,6 +970,21 @@ function bind() {
       const job = await api('POST', '/api/jobs', { url, force });
       state.source = 'hub';
       updateSourceControls();
+      if (job && job.expanded) {
+        $('url').value = '';
+        setMsg(`✅ ${job.total || 0} video's → ${job.queued || 0} ingepland, ${job.duplicates || 0} overgeslagen${job.skipped ? `, ${job.skipped} verwijderd/privé geskipt` : ''}`, false, true);
+        await loadJobs();
+        renderList();
+        const firstId = Array.isArray(job.jobs) && job.jobs[0] && job.jobs[0].id ? job.jobs[0].id : null;
+        if (firstId) selectJob(firstId);
+        return;
+      }
+      if (!job || job.id == null || job.id === '') {
+        await loadJobs();
+        renderList();
+        setMsg('Download is verwerkt, maar Hub gaf geen job-ID terug', false, true);
+        return;
+      }
       state.jobs.set(job.id, job);
       renderList();
       selectJob(job.id);
@@ -879,6 +1020,7 @@ function bind() {
   $('filter').addEventListener('change', async (ev) => {
     state.filter = ev.target.value;
     if (state.source === 'server') await loadServerDownloads().catch((e) => setMsg(e.message, true));
+    else await loadJobs().catch((e) => setMsg(e.message, true));
     renderList();
   });
   $('platformFilter').addEventListener('change', async (ev) => {
@@ -902,6 +1044,8 @@ function bind() {
       await refreshCurrentSource();
     } catch (e) { setMsg(e.message, true); }
   }
+  $('btnBulkPause').addEventListener('click', () => doBulk('pause-queued'));
+  $('btnBulkResume').addEventListener('click', () => doBulk('resume-paused'));
   $('btnBulkCancel').addEventListener('click', () => doBulk('cancel-queued'));
   $('btnBulkRetry').addEventListener('click', () => doBulk('retry-failed'));
   $('btnBulkClear').addEventListener('click', () => doBulk('clear-done'));
@@ -910,6 +1054,24 @@ function bind() {
     if (!state.selectedId) return;
     const path = state.source === 'server' ? `/api/downloads/${state.selectedId}/retry` : `/api/jobs/${state.selectedId}/retry`;
     api('POST', path).then(() => refreshCurrentSource()).catch((e) => setMsg(e.message, true));
+  });
+  $('btnPause').addEventListener('click', () => {
+    if (!state.selectedId || state.source !== 'hub') return;
+    api('POST', `/api/jobs/${state.selectedId}/pause`)
+      .then(() => refreshCurrentSource())
+      .catch((e) => setMsg(e.message, true));
+  });
+  $('btnResume').addEventListener('click', () => {
+    if (!state.selectedId || state.source !== 'hub') return;
+    api('POST', `/api/jobs/${state.selectedId}/resume`)
+      .then(() => refreshCurrentSource())
+      .catch((e) => setMsg(e.message, true));
+  });
+  $('btnBoost').addEventListener('click', () => {
+    if (!state.selectedId || state.source !== 'hub') return;
+    api('POST', `/api/jobs/${state.selectedId}/priority`, { priority: 100 })
+      .then(() => refreshCurrentSource())
+      .catch((e) => setMsg(e.message, true));
   });
   $('btnCancel').addEventListener('click', () => {
     if (!state.selectedId) return;

@@ -14,6 +14,10 @@ function isMultiItemUrl(url) {
     const host = u.hostname.replace(/^www\./, '').toLowerCase();
     const pathname = u.pathname.toLowerCase();
     const isYoutubeHost = host === 'youtube.com' || host === 'youtu.be' || host.endsWith('.youtube.com');
+    const isXvideosHost = host === 'xvideos.com' || host.endsWith('.xvideos.com');
+    if (isXvideosHost) {
+      return !/^\/video[./]/i.test(pathname);
+    }
     if (!isYoutubeHost) return false;
     // /playlist?list=... of watch?list=... (playlist param met echte waarde)
     const list = u.searchParams.get('list');
@@ -79,10 +83,11 @@ async function expandAndEnqueue({ repo, queue, adapters, url, priority, options,
           expandIndex: i + 1,
           expandTotal: entries.length,
           videoTitle: entry.title || undefined,
+          thumbnail: entry.thumbnail || undefined,
         },
         maxAttempts,
       });
-      jobs.push({ id: job.id, url: entry.url, title: entry.title });
+      jobs.push({ id: job.id, url: entry.url, title: entry.title, thumbnail: entry.thumbnail || undefined });
       queued++;
     } catch (_e) {
       errors++;
@@ -103,9 +108,7 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
       }
       const requestedPriority = Number(req.body && req.body.priority);
       const isExpandedRequest = !hint && isMultiItemUrl(url);
-      const priority = Number.isFinite(requestedPriority)
-        ? requestedPriority
-        : (isExpandedRequest ? 0 : 10);
+      const priority = Number.isFinite(requestedPriority) ? requestedPriority : 0;
 
       // Master/slave routing: sommige hosts worden door simple-server
       // afgehandeld. Hub inserteert dan een pending download rij; de
@@ -224,6 +227,17 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
     } catch (e) { next(e); }
   });
 
+  r.get('/meta/stats', async (_req, res, next) => {
+    try {
+      const [stats, lanes, groups] = await Promise.all([
+        repo.getJobStats(),
+        repo.getLaneStats(),
+        repo.listGroups({ limit: 80 }),
+      ]);
+      res.json({ stats, lanes, groups });
+    } catch (e) { next(e); }
+  });
+
   // ─── Job detail ─────────────────────────────────────────────────────────────
   r.get('/:id', async (req, res, next) => {
     try {
@@ -255,6 +269,41 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
     } catch (e) { next(e); }
   });
 
+  r.post('/:id/pause', async (req, res, next) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isFinite(id)) return res.status(400).json({ error: 'ongeldig ID' });
+      const j = await queue.pause(id);
+      if (!j) return res.status(404).json({ error: 'niet gevonden of niet pauzeerbaar' });
+      await repo.appendLog(id, 'info', '⏸️ gepauzeerd');
+      res.json(j);
+    } catch (e) { next(e); }
+  });
+
+  r.post('/:id/resume', async (req, res, next) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isFinite(id)) return res.status(400).json({ error: 'ongeldig ID' });
+      const j = await queue.resume(id);
+      if (!j) return res.status(404).json({ error: 'niet gevonden of niet hervatbaar' });
+      await repo.appendLog(id, 'info', '▶ hervat');
+      res.json(j);
+    } catch (e) { next(e); }
+  });
+
+  r.post('/:id/priority', async (req, res, next) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const priority = Number(req.body && req.body.priority);
+      if (!Number.isFinite(id)) return res.status(400).json({ error: 'ongeldig ID' });
+      if (!Number.isFinite(priority)) return res.status(400).json({ error: 'priority ontbreekt' });
+      const j = await queue.setPriority(id, Math.round(priority));
+      if (!j) return res.status(404).json({ error: 'niet gevonden' });
+      await repo.appendLog(id, 'info', `prioriteit gezet op ${Math.round(priority)}`);
+      res.json(j);
+    } catch (e) { next(e); }
+  });
+
   // ─── Bulk actions ──────────────────────────────────────────────────────────
   r.post('/bulk', async (req, res, next) => {
     try {
@@ -270,6 +319,28 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
           result = await repo.pool.query(
             `UPDATE "${schema}".jobs SET status='cancelled', finished_at=now(), locked_by=NULL, locked_at=NULL
               WHERE status='queued' ${groupFilter} RETURNING id`);
+          res.json({ action, affected: result.rows.length, ids: result.rows.map(r => r.id) });
+          break;
+
+        case 'pause-queued':
+          result = await repo.pool.query(
+            `UPDATE "${schema}".jobs
+                SET lane='paused',
+                    options = options || jsonb_build_object('pauseLane', lane, 'paused_at', now()),
+                    locked_by=NULL,
+                    locked_at=NULL
+              WHERE status='queued' AND lane <> 'paused' ${groupFilter}
+              RETURNING id`);
+          res.json({ action, affected: result.rows.length, ids: result.rows.map(r => r.id) });
+          break;
+
+        case 'resume-paused':
+          result = await repo.pool.query(
+            `UPDATE "${schema}".jobs
+                SET lane = COALESCE(NULLIF(options->>'pauseLane', ''), lane),
+                    options = options - 'paused_at' - 'pauseLane'
+              WHERE status='queued' AND lane='paused' ${groupFilter}
+              RETURNING id`);
           res.json({ action, affected: result.rows.length, ids: result.rows.map(r => r.id) });
           break;
 
