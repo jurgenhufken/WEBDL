@@ -4909,18 +4909,36 @@ async function runDownloadScheduler() {
     }
   }
 
-  // Auto-rehydrate: if all in-memory queues are empty, pull more pending items from DB
-  if (queuedHeavy.length === 0 && queuedLight.length === 0 && queuedBatch.length === 0) {
+  // Auto-rehydrate per lane: a full heavy queue must not starve light/direct downloads.
+  if (shouldAutoRehydrate()) {
     scheduleAutoRehydrate();
   }
 }
 
 let autoRehydrateTimer = null;
+function shouldAutoRehydrate() {
+  const heavyLimit = Math.max(0, HEAVY_DOWNLOAD_CONCURRENCY);
+  const lightLimit = Math.max(0, LIGHT_DOWNLOAD_CONCURRENCY);
+  const batchLimit = Math.max(0, BATCH_DOWNLOAD_CONCURRENCY);
+  const needHeavy = heavyLimit > 0 && queuedHeavy.length === 0 && activeLaneCount('heavy') < heavyLimit;
+  const needLight = lightLimit > 0 && queuedLight.length === 0 && activeLaneCount('light') < lightLimit;
+  const needBatch = batchLimit > 0 && queuedBatch.length === 0 && activeLaneCount('batch') < batchLimit;
+  return needHeavy || needLight || needBatch;
+}
+
 function scheduleAutoRehydrate() {
   if (autoRehydrateTimer) return;
   autoRehydrateTimer = setTimeout(async () => {
     autoRehydrateTimer = null;
     try {
+      const heavyLimit = Math.max(0, HEAVY_DOWNLOAD_CONCURRENCY);
+      const lightLimit = Math.max(0, LIGHT_DOWNLOAD_CONCURRENCY);
+      const batchLimit = Math.max(0, BATCH_DOWNLOAD_CONCURRENCY);
+      const needHeavy = heavyLimit > 0 && queuedHeavy.length === 0 && activeLaneCount('heavy') < heavyLimit;
+      const needLight = lightLimit > 0 && queuedLight.length === 0 && activeLaneCount('light') < lightLimit;
+      const needBatch = batchLimit > 0 && queuedBatch.length === 0 && activeLaneCount('batch') < batchLimit;
+      if (!needHeavy && !needLight && !needBatch) return;
+
       const rows = await db.prepare(
         `SELECT id, url, platform, channel, title, metadata, status
          FROM downloads
@@ -4945,6 +4963,9 @@ function scheduleAutoRehydrate() {
         const channel = (row.channel && row.channel !== 'unknown') ? row.channel : deriveChannelFromUrl(platform, url) || 'unknown';
         const title = (row.title && row.title !== 'untitled') ? row.title : deriveTitleFromUrl(url);
         const lane = detectLane(platform, url);
+        if (lane === 'heavy' && !needHeavy) continue;
+        if (lane === 'light' && !needLight) continue;
+        if (lane === 'batch' && !needBatch) continue;
         queuedJobs.set(id, { downloadId: id, url, platform, channel, title, metadata: parsedMeta, progress: 0 });
         jobLane.set(id, lane);
         jobPlatform.set(id, platform);
@@ -4964,7 +4985,7 @@ function scheduleAutoRehydrate() {
 
 // Periodic check: if in-memory queues are empty but pending items exist, trigger rehydrate
 setInterval(() => {
-  if (queuedHeavy.length === 0 && queuedLight.length === 0 && queuedBatch.length === 0) {
+  if (shouldAutoRehydrate()) {
     scheduleAutoRehydrate();
   }
 }, 10000);
