@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WEBDL Gallery</title>
-<link rel="stylesheet" href="/styles.css">
+<link rel="stylesheet" href="/styles.css?v=20260501-03">
 </head>
 <body>
   <header class="topbar">
@@ -37,6 +37,7 @@
     </div>
   </header>
 
+  <section id="activeStrip" class="active-strip" aria-live="polite"></section>
   <main id="grid" class="grid"></main>
   <div id="sentinel" class="sentinel">Laden…</div>
 
@@ -178,8 +179,8 @@
 
   </div><!-- /viewer -->
 
-  <script src="/app.js?v=20260430-11"></script>
-  <script src="/viewer.js?v=20260430-11"></script>
+  <script src="/app.js?v=20260501-03"></script>
+  <script src="/viewer.js?v=20260501-03"></script>
   <script>
   // ─── Thema switcher ─────────────────────────────────────────────────────
   (function() {

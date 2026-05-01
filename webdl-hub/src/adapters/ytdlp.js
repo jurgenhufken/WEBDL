@@ -24,6 +24,22 @@ function matches(url) {
 // Output-template: alle media van één job in z'n eigen job-dir, nette naam.
 const OUTPUT_TEMPLATE = '%(title).200B [%(id)s].%(ext)s';
 
+function normalizeFlatEntryUrl(obj, seedUrl) {
+  const raw = String(obj && (obj.url || obj.webpage_url || obj.original_url) || '').trim();
+  const id = String(obj && obj.id || '').trim();
+  if (/^https?:\/\//i.test(raw)) return raw;
+  try {
+    const seed = new URL(String(seedUrl || ''));
+    const host = seed.hostname.replace(/^www\./, '').toLowerCase();
+    if (raw.startsWith('/')) return new URL(raw, seed.origin).toString();
+    if ((host === 'youtube.com' || host === 'youtu.be' || host.endsWith('.youtube.com')) && id) {
+      return `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`;
+    }
+    if (raw) return new URL(raw, seed.origin).toString();
+  } catch {}
+  return raw || (id ? `https://www.youtube.com/watch?v=${encodeURIComponent(id)}` : '');
+}
+
 function plan(url, opts = {}) {
   const cwd = opts.cwd;
   const quality = opts.quality || 'bv*+ba/best';
@@ -100,7 +116,7 @@ function expandPlaylist(url) {
           const obj = JSON.parse(trimmed);
           const id = obj.id || '';
           const title = obj.title || obj.fulltitle || '';
-          const entryUrl = obj.url || obj.webpage_url || obj.original_url || '';
+          const entryUrl = normalizeFlatEntryUrl(obj, url);
           if (entryUrl) {
             entries.push({ id, title, url: entryUrl });
           }

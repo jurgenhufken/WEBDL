@@ -57,7 +57,10 @@ function generateThumbnail(videoPath) {
 function detectPlatform(url) {
   try {
     const h = new URL(url).hostname.toLowerCase();
+    const p = new URL(url).pathname.toLowerCase();
     if (h.includes('youtube') || h.includes('youtu.be')) return 'youtube';
+    if (h === 'flc.nyc3.digitaloceanspaces.com' && /\/data\/(?:attachments|video)\//i.test(p)) return 'footfetishforum';
+    if (h.includes('footfetishforum.com')) return 'footfetishforum';
     if (h.includes('vimeo')) return 'vimeo';
     if (h.includes('tiktok')) return 'tiktok';
     if (h.includes('reddit')) return 'reddit';
@@ -125,7 +128,8 @@ async function syncToGallery(job, outputFiles, logger) {
   const info = await readInfoJson(workdir);
 
   const channel = info?.channel || (job.options?.playlistTitle) || '';
-  const realPlatform = info?.platform || platform;
+  const infoPlatform = String(info?.platform || '').toLowerCase();
+  const realPlatform = infoPlatform && infoPlatform !== 'generic' ? infoPlatform : platform;
 
   try {
     for (const f of outputFiles) {

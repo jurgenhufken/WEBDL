@@ -844,6 +844,21 @@ function bind() {
       const job = await api('POST', '/api/jobs', { url, force });
       state.source = 'hub';
       updateSourceControls();
+      if (job && job.expanded) {
+        $('url').value = '';
+        setMsg(`✅ ${job.total || 0} video's → ${job.queued || 0} ingepland, ${job.duplicates || 0} overgeslagen${job.skipped ? `, ${job.skipped} verwijderd/privé geskipt` : ''}`, false, true);
+        await loadJobs();
+        renderList();
+        const firstId = Array.isArray(job.jobs) && job.jobs[0] && job.jobs[0].id ? job.jobs[0].id : null;
+        if (firstId) selectJob(firstId);
+        return;
+      }
+      if (!job || job.id == null || job.id === '') {
+        await loadJobs();
+        renderList();
+        setMsg('Download is verwerkt, maar Hub gaf geen job-ID terug', false, true);
+        return;
+      }
       state.jobs.set(job.id, job);
       renderList();
       selectJob(job.id);

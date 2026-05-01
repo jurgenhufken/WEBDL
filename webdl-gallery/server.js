@@ -5,11 +5,13 @@
 
 const path = require('node:path');
 const fs = require('node:fs');
+const { spawn } = require('node:child_process');
 const express = require('express');
 const { Pool } = require('pg');
 
 const PORT = Number(process.env.PORT || 35731);
 const DATABASE_URL = process.env.DATABASE_URL || 'postgres://localhost/webdl';
+const FFMPEG_BIN = process.env.FFMPEG_BIN || 'ffmpeg';
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
@@ -24,11 +26,51 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 const BASE_DIR = process.env.WEBDL_BASE_DIR || '/Users/jurgen/Downloads/WEBDL';
+const RG_BIN = process.env.RG_BIN || (fs.existsSync('/Applications/Codex.app/Contents/Resources/rg') ? '/Applications/Codex.app/Contents/Resources/rg' : 'rg');
 const VIDEO_EXTS = ['mp4','webm','mkv','mov','m4v','avi','flv','ts'];
 const IMAGE_EXTS = ['jpg','jpeg','png','gif','webp','avif','bmp'];
 const MEDIA_EXTS = [...VIDEO_EXTS, ...IMAGE_EXTS];
 const AUX_RELPATH_RE = String.raw`(_thumb(_v[0-9]+)?\.(jpe?g|png|webp)$|_logo\.(jpe?g|png|webp)$|\.(json|part|tmp|ytdl)$)`;
 const MEDIA_EXT_SQL = MEDIA_EXTS.map(e => `'${e}'`).join(',');
+const ACTIVE_STATUSES = ['downloading', 'postprocessing'];
+const HIDDEN_GALLERY_STATUSES = ['pending', 'queued', 'downloading', 'postprocessing'];
+const KEEP2SHARE_DIR = path.join(BASE_DIR, '_Keep2Share');
+const KEEP2SHARE_SYNC_MS = Number(process.env.KEEP2SHARE_SYNC_MS || 60000);
+const KEEP2SHARE_SYNC_MAX_FILES = Number(process.env.KEEP2SHARE_SYNC_MAX_FILES || 5000);
+const KEEP2SHARE_SYNC_MAX_ADDS = Number(process.env.KEEP2SHARE_SYNC_MAX_ADDS || 500);
+let keep2shareSyncRunning = false;
+const thumbInflight = new Map();
+
+function collectPartFiles(root, limit = 40) {
+  return new Promise((resolve) => {
+    const paths = [];
+    let buffer = '';
+    let settled = false;
+    const child = spawn(RG_BIN, ['--files', root], { stdio: ['ignore', 'pipe', 'ignore'] });
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { child.kill(); } catch (_) {}
+      resolve(paths);
+    };
+    const timer = setTimeout(done, 8000);
+    child.stdout.on('data', (chunk) => {
+      buffer += String(chunk);
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        if (/\.part$/i.test(line)) paths.push(line);
+        if (paths.length >= limit) return done();
+      }
+    });
+    child.on('error', done);
+    child.on('close', () => {
+      if (buffer && /\.part$/i.test(buffer)) paths.push(buffer);
+      done();
+    });
+  });
+}
 
 async function ensureSchema() {
   await pool.query('ALTER TABLE download_files ADD COLUMN IF NOT EXISTS rating double precision');
@@ -50,6 +92,143 @@ function mapItem(row) {
     ext,
     type: isVideo ? 'video' : 'image',
   };
+}
+
+function isVideoFile(filePath) {
+  return VIDEO_EXTS.includes(path.extname(filePath || '').replace('.', '').toLowerCase());
+}
+
+function thumbPathForMedia(filePath) {
+  const dir = path.dirname(filePath);
+  const base = path.basename(filePath, path.extname(filePath));
+  return path.join(dir, `${base}_thumb_v3.jpg`);
+}
+
+async function generateVideoThumb(filePath) {
+  if (!isVideoFile(filePath)) return null;
+  const outPath = thumbPathForMedia(filePath);
+  if (fs.existsSync(outPath)) {
+    try {
+      if (fs.statSync(outPath).size > 8000) return outPath;
+    } catch (_) {}
+  }
+  if (thumbInflight.has(filePath)) return thumbInflight.get(filePath);
+  const job = new Promise((resolve) => {
+    const args = [
+      '-y',
+      '-hide_banner',
+      '-loglevel', 'error',
+      '-ss', '10',
+      '-i', filePath,
+      '-frames:v', '1',
+      '-an',
+      '-vf', 'scale=480:270:force_original_aspect_ratio=decrease,pad=480:270:(ow-iw)/2:(oh-ih)/2:black,setsar=1',
+      '-q:v', '3',
+      outPath,
+    ];
+    const proc = spawn(FFMPEG_BIN, args, { stdio: ['ignore', 'ignore', 'ignore'] });
+    proc.on('close', () => {
+      try {
+        if (fs.existsSync(outPath) && fs.statSync(outPath).size > 8000) return resolve(outPath);
+        fs.rmSync(outPath, { force: true });
+      } catch (_) {}
+      resolve(null);
+    });
+    proc.on('error', () => resolve(null));
+  }).finally(() => thumbInflight.delete(filePath));
+  thumbInflight.set(filePath, job);
+  return job;
+}
+
+async function scanJDownloaderKeep2ShareParts(limit = 40) {
+  const root = KEEP2SHARE_DIR;
+  const out = [];
+  try {
+    const paths = await collectPartFiles(root, limit);
+    for (const p of paths) {
+      let st = null;
+      try { st = fs.statSync(p); } catch (_) {}
+      const rel = path.relative(root, p);
+      const parts = rel.split(path.sep).filter(Boolean);
+      const channel = parts.length > 1 ? parts[0] : 'JDownloader';
+      const filename = path.basename(p).replace(/\.part$/i, '');
+      out.push({
+        id: `jd-${out.length + 1}`,
+        source: 'jdownloader',
+        status: 'downloading',
+        platform: 'keep2share',
+        channel,
+        title: filename,
+        filename,
+        filepath: p,
+        filesize: st ? st.size : 0,
+        updated_at: st ? new Date(st.mtimeMs).toISOString() : null,
+      });
+    }
+  } catch (_) {}
+  out.sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
+  return out;
+}
+
+function listKeep2ShareMediaFiles() {
+  const files = [];
+  let channels = [];
+  try { channels = fs.readdirSync(KEEP2SHARE_DIR, { withFileTypes: true }); } catch (_) { return files; }
+  for (const channelEntry of channels) {
+    if (!channelEntry.isDirectory() || files.length >= KEEP2SHARE_SYNC_MAX_FILES) continue;
+    const channel = channelEntry.name;
+    const channelDir = path.join(KEEP2SHARE_DIR, channel);
+    let entries = [];
+    try { entries = fs.readdirSync(channelDir, { withFileTypes: true }); } catch (_) { continue; }
+    for (const entry of entries) {
+      if (!entry.isFile() || entry.name.startsWith('.') || files.length >= KEEP2SHARE_SYNC_MAX_FILES) continue;
+      const ext = path.extname(entry.name).replace('.', '').toLowerCase();
+      if (!VIDEO_EXTS.includes(ext)) continue;
+      if (/_thumb(_v[0-9]+)?\.(jpe?g|png|webp)$/i.test(entry.name) || /\.(part|tmp|ytdl)$/i.test(entry.name)) continue;
+      const filepath = path.join(channelDir, entry.name);
+      let stat = null;
+      try { stat = fs.statSync(filepath); } catch (_) { continue; }
+      files.push({ channel, filename: entry.name, filepath, ext, filesize: stat.size, mtimeMs: stat.mtimeMs });
+    }
+  }
+  files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return files;
+}
+
+async function syncKeep2ShareFiles(reason = 'timer') {
+  if (keep2shareSyncRunning) return { added: 0, skipped: 0, running: true };
+  keep2shareSyncRunning = true;
+  let added = 0;
+  let skipped = 0;
+  try {
+    const files = listKeep2ShareMediaFiles();
+    for (const file of files) {
+      if (added >= KEEP2SHARE_SYNC_MAX_ADDS) break;
+      const title = path.basename(file.filename, path.extname(file.filename));
+      const { rowCount } = await pool.query(`
+        INSERT INTO downloads
+          (url, status, platform, channel, title, filename, filepath, filesize, format, source_url, created_at, updated_at, finished_at)
+        SELECT $1, 'completed', 'keep2share', $2, $3, $4, $5, $6, $7, 'https://keep2share.cc',
+               to_timestamp($8 / 1000.0), to_timestamp($8 / 1000.0), to_timestamp($8 / 1000.0)
+        WHERE NOT EXISTS (SELECT 1 FROM downloads WHERE filepath = $5)
+      `, [
+        `https://keep2share.cc/${encodeURIComponent(file.channel)}/${encodeURIComponent(file.filename)}`,
+        file.channel,
+        title,
+        file.filename,
+        file.filepath,
+        file.filesize,
+        file.ext,
+        file.mtimeMs,
+      ]);
+      if (rowCount) added += 1;
+      else skipped += 1;
+    }
+    if (added) console.log(`[keep2share-sync] ${added} nieuwe items (${reason})`);
+    return { added, skipped, scanned: files.length };
+  } finally {
+    keep2shareSyncRunning = false;
+  }
 }
 
 async function resolveMediaPath(idRaw) {
@@ -114,6 +293,35 @@ app.get('/api/health', async (_req, res) => {
   }
 });
 
+app.get('/api/active-items', async (_req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT id::text, status, platform, channel, title, filename, filepath,
+             progress, filesize, updated_at, created_at
+        FROM downloads
+       WHERE status = ANY($1)
+         AND url NOT LIKE 'recording:%'
+       ORDER BY
+         CASE status
+           WHEN 'downloading' THEN 0
+           WHEN 'postprocessing' THEN 1
+           ELSE 9
+         END,
+         COALESCE(updated_at, created_at) DESC,
+         id DESC
+       LIMIT 80`, [ACTIVE_STATUSES]);
+    const dbItems = rows.map((r) => ({
+      ...r,
+      source: 'db',
+      title: r.title || r.filename || r.filepath || `download ${r.id}`,
+    }));
+    const jdItems = await scanJDownloaderKeep2ShareParts(40);
+    res.json({ items: [...jdItems, ...dbItems], count: jdItems.length + dbItems.length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── Items: gepagineerde media ─────────────────────────────────────────────
 app.get('/api/items', async (req, res) => {
   try {
@@ -134,6 +342,7 @@ app.get('/api/items', async (req, res) => {
          AND mf.relpath !~* '${AUX_RELPATH_RE}'
          AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
     )`);
+    directWhere.push(`COALESCE(d.status, 'completed') <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
     directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
     const fileWhere = buildItemFilters({
       req, params,
@@ -142,6 +351,7 @@ app.get('/api/items', async (req, res) => {
       ratingExpr: 'df.rating',
     });
     fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
+    fileWhere.push(`COALESCE(d.status, 'completed') <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
     fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
 
     const directOrder = sort === 'random'
@@ -228,6 +438,7 @@ app.get('/api/items-since', async (req, res) => {
          AND mf.relpath !~* '${AUX_RELPATH_RE}'
          AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})
     )`);
+    directWhere.push(`COALESCE(d.status, 'completed') <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
     directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
     const fileWhere = buildItemFilters({
       req, params,
@@ -236,6 +447,7 @@ app.get('/api/items-since', async (req, res) => {
       ratingExpr: 'df.rating',
     });
     fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
+    fileWhere.push(`COALESCE(d.status, 'completed') <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
     fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})`);
     if (since) {
       params.push(since);
@@ -391,17 +603,30 @@ app.get('/thumb/:id', async (req, res) => {
     if (!fp) return res.status(404).send('not found');
     const dir = path.dirname(fp);
     const base = path.basename(fp, path.extname(fp));
+    const isVideo = isVideoFile(fp);
     // Probeer meerdere thumb-varianten
     const candidates = [
       path.join(dir, `${base}_thumb_v3.jpg`),
       path.join(dir, `${base}_thumb.jpg`),
       path.join(dir, `${base}.webp`),
-      fp, // fallback naar origineel (voor images)
+      ...(isVideo ? [] : [fp]), // fallback naar origineel alleen voor images
     ];
     for (const c of candidates) {
       if (fs.existsSync(c)) {
         res.setHeader('Cache-Control', 'public, max-age=86400');
         return res.sendFile(c);
+      }
+    }
+    if (isVideo && fs.existsSync(fp)) {
+      const generated = await generateVideoThumb(fp);
+      if (generated && fs.existsSync(generated)) {
+        if (/^\d+$/.test(String(req.params.id))) {
+          pool.query('UPDATE downloads SET is_thumb_ready = true WHERE id = $1', [Number(req.params.id)]).catch(() => {});
+        } else if (String(req.params.id).startsWith('file-')) {
+          pool.query('UPDATE download_files SET is_thumb_ready = true WHERE id = $1', [Number(String(req.params.id).slice(5))]).catch(() => {});
+        }
+        res.setHeader('Cache-Control', 'public, max-age=86400');
+        return res.sendFile(generated);
       }
     }
     res.status(404).send('no thumb');
@@ -496,6 +721,10 @@ ensureSchema()
   .then(() => {
     app.listen(PORT, () => {
       console.log(`webdl-gallery listening on http://localhost:${PORT}`);
+      syncKeep2ShareFiles('startup').catch((e) => console.warn('[keep2share-sync] failed:', e.message));
+      setInterval(() => {
+        syncKeep2ShareFiles('timer').catch((e) => console.warn('[keep2share-sync] failed:', e.message));
+      }, KEEP2SHARE_SYNC_MS).unref();
     });
   })
   .catch((e) => {

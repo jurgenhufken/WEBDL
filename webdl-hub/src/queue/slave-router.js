@@ -9,6 +9,7 @@
 // pikt deze op via de normale scheduler.
 const SLAVE_PLATFORMS = [
   { match: /footfetishforum\.com/i,       platform: 'footfetishforum' },
+  { match: /flc\.nyc3\.digitaloceanspaces\.com\/data\/(?:attachments|video)\//i, platform: 'footfetishforum' },
   { match: /wikifeet\.com/i,              platform: 'wikifeet' },
   { match: /aznudefeet\.com/i,            platform: 'aznudefeet' },
   { match: /amateurvoyeurforum\.com/i,    platform: 'amateurvoyeurforum' },

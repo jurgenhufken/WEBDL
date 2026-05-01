@@ -454,7 +454,10 @@
     el.vStage.classList.remove('hud-hidden');
     // Topbar mee tonen
     const topbar = document.querySelector('.viewer-topbar');
-    if (topbar) topbar.style.opacity = '';
+    if (topbar) {
+      topbar.style.opacity = '';
+      topbar.style.pointerEvents = '';
+    }
     clearTimeout(vs.hudTimer);
     vs.hudTimer = setTimeout(hideHUD, 3000);
   }
@@ -465,7 +468,10 @@
     el.vStage.classList.add('hud-hidden');
     // Topbar mee verbergen
     const topbar = document.querySelector('.viewer-topbar');
-    if (topbar) topbar.style.opacity = '0';
+    if (topbar) {
+      topbar.style.opacity = '0';
+      topbar.style.pointerEvents = 'none';
+    }
   }
 
   // ─── Slideshow ────────────────────────────────────────────────────────────

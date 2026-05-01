@@ -6,9 +6,9 @@
   // Uniek ID per tabblad zodat de browser requests niet samenvoegt
   const TAB_ID = Math.random().toString(36).slice(2, 8);
 
-  function apiFetch(url) {
+  function apiFetch(url, options) {
     const sep = url.includes('?') ? '&' : '?';
-    return fetch(url + sep + '_t=' + TAB_ID);
+    return fetch(url + sep + '_t=' + TAB_ID, options);
   }
 
   const state = {
@@ -22,6 +22,8 @@
     autoRefresh: true,
     autoRefreshMs: 10000,
     autoRefreshTimer: null,
+    activeRefreshMs: 30000,
+    activeRefreshTimer: null,
     newestFinishedAt: null,
     knownIds: new Set(),
   };
@@ -29,6 +31,7 @@
   const $ = (id) => document.getElementById(id);
   const grid      = $('grid');
   const sentinel  = $('sentinel');
+  const activeStrip = $('activeStrip');
 
   // ─── Star HTML helper ─────────────────────────────────────────────────────
   function starHtml(rating) {
@@ -145,6 +148,53 @@
 
   function updateStats() {
     $('stats').textContent = `${state.items.length} items${state.done ? '' : '+'}`;
+  }
+
+  function compactBytes(n) {
+    const v = Number(n) || 0;
+    if (v >= 1024 * 1024 * 1024) return (v / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+    if (v >= 1024 * 1024) return (v / (1024 * 1024)).toFixed(1) + ' MB';
+    if (v >= 1024) return Math.round(v / 1024) + ' KB';
+    return v ? v + ' B' : '';
+  }
+
+  function renderActiveItems(items) {
+    if (!activeStrip) return;
+    const list = (Array.isArray(items) ? items : [])
+      .filter((it) => !['pending', 'queued'].includes(String(it.status || '').toLowerCase()))
+      .slice(0, 12);
+    activeStrip.classList.toggle('has-items', list.length > 0);
+    if (!list.length) {
+      activeStrip.innerHTML = '';
+      return;
+    }
+    activeStrip.innerHTML = '';
+    const frag = document.createDocumentFragment();
+    for (const it of list) {
+      const card = document.createElement('div');
+      card.className = 'active-card';
+      const source = it.source === 'jdownloader' ? 'JDownloader' : (it.status || 'actief');
+      const sub = [it.platform, it.channel, compactBytes(it.filesize)].filter(Boolean).join(' / ');
+      card.innerHTML = `
+        <div class="active-top"><span>${escHtml(source)}</span><span>${escHtml(it.status || '')}</span></div>
+        <div class="active-title">${escHtml(it.title || it.filename || it.filepath || '')}</div>
+        <div class="active-sub">${escHtml(sub)}</div>`;
+      frag.appendChild(card);
+    }
+    activeStrip.appendChild(frag);
+  }
+
+  async function pollActiveItems() {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 5000);
+    try {
+      const data = await apiFetch('/api/active-items', { signal: ctrl.signal }).then(r => r.json());
+      renderActiveItems(data.items || []);
+    } catch (e) {
+      if (e.name !== 'AbortError') console.warn('active-items failed', e);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   // ─── API: laad meer ───────────────────────────────────────────────────────
@@ -316,10 +366,24 @@
     if (state.autoRefreshTimer) clearInterval(state.autoRefreshTimer);
     state.autoRefreshTimer = null;
   }
+  function startActiveRefresh() {
+    stopActiveRefresh();
+    pollActiveItems();
+    state.activeRefreshTimer = setInterval(pollActiveItems, state.activeRefreshMs);
+  }
+  function stopActiveRefresh() {
+    if (state.activeRefreshTimer) clearInterval(state.activeRefreshTimer);
+    state.activeRefreshTimer = null;
+  }
 
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) stopAutoRefresh();
-    else if (state.autoRefresh) startAutoRefresh();
+    if (document.hidden) {
+      stopAutoRefresh();
+      stopActiveRefresh();
+    } else {
+      startActiveRefresh();
+      if (state.autoRefresh) startAutoRefresh();
+    }
   });
 
   // Live-toggle knop
@@ -354,5 +418,8 @@
   };
 
   // ─── Init ─────────────────────────────────────────────────────────────────
-  loadFilterDropdowns().then(() => loadMore().then(() => startAutoRefresh()));
+  loadFilterDropdowns().then(() => loadMore().then(() => {
+    startActiveRefresh();
+    startAutoRefresh();
+  }));
 })();

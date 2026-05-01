@@ -6998,6 +6998,7 @@ function detectPlatform(url) {
   if (/instagram\.com/i.test(u)) return 'instagram';
   if (/reddit\.com|redd\.it/i.test(u)) return 'reddit';
   if (/footfetishforum\.com/i.test(u)) return 'footfetishforum';
+  if (/flc\.nyc3\.digitaloceanspaces\.com\/data\/(?:attachments|video)\//i.test(u)) return 'footfetishforum';
   if (/onlyfans\.com/i.test(u)) return 'onlyfans';
   if (/rutube\.ru/i.test(u)) return 'rutube';
   if (/wikifeet\.com/i.test(u)) return 'wikifeet';
@@ -7011,6 +7012,7 @@ function detectPlatform(url) {
   if (/pornpics\.com/i.test(u)) return 'pornpics';
   if (/elitebabes\.com/i.test(u)) return 'elitebabes';
   if (/erome\.com/i.test(u)) return 'erome';
+  if (/keep2share\.cc|k2s\.cc/i.test(u)) return 'keep2share';
 
   try {
     const host = new URL(u).hostname.toLowerCase();
@@ -7060,6 +7062,7 @@ const KNOWN_PLATFORMS = new Set([
   'pornpics',
   'elitebabes',
   'erome',
+  'keep2share',
   '4kdownloader',
   'other']
 );
@@ -7067,6 +7070,7 @@ const KNOWN_PLATFORMS = new Set([
 function normalizePlatform(platform, url) {
   const p = typeof platform === 'string' ? platform.trim().toLowerCase() : '';
   const detected = detectPlatform(url);
+  if (p === '_keep2share' || p === 'keep2share.cc' || p === 'k2s' || p === 'k2scc') return 'keep2share';
   if (!p || p === 'unknown' || p === 'other') return detected;
   if (KNOWN_PLATFORMS.has(p)) return p;
   if (/^[a-z0-9_-]{2,30}$/.test(p)) return p;
@@ -7488,6 +7492,17 @@ function isFootfetishforumThreadUrl(input) {
     const host = String(u.hostname || '').toLowerCase();
     if (!(host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com'))) return false;
     return /\/threads\/[^\/\?#]+\.(\d+)(?:\/[^\/\?#]*)?(?:\/|\?|#|$)/i.test(String(u.pathname || '') + String(u.search || '') + String(u.hash || ''));
+  } catch (e) {
+    return false;
+  }
+}
+
+function isFootfetishforumForumUrl(input) {
+  try {
+    const u = new URL(String(input || ''));
+    const host = String(u.hostname || '').toLowerCase();
+    if (!(host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com'))) return false;
+    return /\/forums\/[^\/\?#]*\.(\d+)(?:\/|\?|#|$)/i.test(String(u.pathname || '') + String(u.search || '') + String(u.hash || ''));
   } catch (e) {
     return false;
   }
@@ -9034,8 +9049,8 @@ expressApp.post('/download', async (req, res) => {
   const pageUrl = metadata && typeof metadata.url === 'string' ? metadata.url.trim() : '';
   const originPlatform = normalizePlatform(metaPlatform, pageUrl || effectiveUrl);
   const pinFffOrigin = !!(
-    (originPlatform === 'footfetishforum' && pageUrl && pageUrl !== effectiveUrl && isFootfetishforumThreadUrl(pageUrl)) ||
-    (detectPlatform(effectiveUrl) === 'footfetishforum' && /\/attachments\//i.test(effectiveUrl) && pageUrl && isFootfetishforumThreadUrl(pageUrl))
+    (originPlatform === 'footfetishforum' && pageUrl && pageUrl !== effectiveUrl && (isFootfetishforumThreadUrl(pageUrl) || isFootfetishforumForumUrl(pageUrl))) ||
+    (detectPlatform(effectiveUrl) === 'footfetishforum' && /\/attachments\//i.test(effectiveUrl) && pageUrl && (isFootfetishforumThreadUrl(pageUrl) || isFootfetishforumForumUrl(pageUrl)))
   );
   const pinAznOrigin = !!(originPlatform === 'aznudefeet' && pageUrl && pageUrl !== effectiveUrl && isAznudefeetViewUrl(pageUrl));
   const pinToOrigin = !!(pinFffOrigin || pinAznOrigin);
@@ -9422,7 +9437,7 @@ expressApp.post('/download/batch', async (req, res) => {
   const metaPlatform = metadata && typeof metadata.platform === 'string' ? metadata.platform : null;
   const pageUrl = metadata && typeof metadata.url === 'string' ? metadata.url.trim() : '';
   const originPlatform = normalizePlatform(metaPlatform, pageUrl || '');
-  const pinFffOrigin = !!(originPlatform === 'footfetishforum' && pageUrl && isFootfetishforumThreadUrl(pageUrl));
+  const pinFffOrigin = !!(originPlatform === 'footfetishforum' && pageUrl && (isFootfetishforumThreadUrl(pageUrl) || isFootfetishforumForumUrl(pageUrl)));
   const pinAznOrigin = !!(originPlatform === 'aznudefeet' && pageUrl && isAznudefeetViewUrl(pageUrl));
   const fffThreadInfo = pinFffOrigin ? parseFootFetishForumThreadInfo(pageUrl) : null;
   const originChannel = pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : metadata && metadata.channel && metadata.channel !== 'unknown' ? metadata.channel : deriveChannelFromUrl(originPlatform, pageUrl) || 'unknown';
@@ -10298,7 +10313,11 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
     }
 
     // Probeer lage resolutie links van footfetishforum te upgraden
-    url = upgradeKnownLowQualityMediaUrl(url);
+    const upgradedInitialUrl = upgradeKnownLowQualityMediaUrl(url);
+    if (upgradedInitialUrl && upgradedInitialUrl !== url) {
+      try { await updateDownloadUrl.run(upgradedInitialUrl, downloadId); } catch (e) { }
+      url = upgradedInitialUrl;
+    }
 
     // Skip site infrastructure files (favicons, apple-touch-icons, etc.)
     if (/(?:^|[/])(?:apple-touch-icon|favicon|browserconfig)(?:[_.]|\.\w+$)/i.test(url)) {
