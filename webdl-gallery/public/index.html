@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WEBDL Gallery</title>
-<link rel="stylesheet" href="/styles.css?v=20260501-08">
+<link rel="stylesheet" href="/styles.css?v=20260501-10">
 </head>
 <body>
   <header class="topbar">
@@ -167,10 +167,17 @@
           <strong>Tags</strong>
           <button id="vBtnCloseTagDialog">✕</button>
         </div>
+        <div class="tag-current-wrap">
+          <div class="tag-label">Op dit item</div>
+          <div id="vTagCurrent" class="tag-current"></div>
+        </div>
+        <div class="tag-search">
+          <input id="vTagSearch" type="search" placeholder="Zoek bestaande tags...">
+        </div>
         <div id="vTagList" class="tag-list"></div>
         <div class="tag-new">
-          <input id="vNewTagInput" type="text" placeholder="Nieuwe tag...">
-          <button id="vBtnAddTag">＋ Toevoegen</button>
+          <input id="vNewTagInput" type="text" placeholder="Nieuwe tag voor dit item...">
+          <button id="vBtnAddTag">＋ Maak + voeg toe</button>
         </div>
       </div>
     </div>
@@ -183,8 +190,8 @@
 
   </div><!-- /viewer -->
 
-  <script src="/app.js?v=20260501-08"></script>
-  <script src="/viewer.js?v=20260501-08"></script>
+  <script src="/app.js?v=20260501-10"></script>
+  <script src="/viewer.js?v=20260501-10"></script>
   <script>
   // ─── Thema switcher ─────────────────────────────────────────────────────
   (function() {

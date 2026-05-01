@@ -75,6 +75,14 @@ function collectPartFiles(root, limit = 40) {
 
 async function ensureSchema() {
   await pool.query('ALTER TABLE download_files ADD COLUMN IF NOT EXISTS rating double precision');
+  await pool.query('ALTER TABLE tags ADD COLUMN IF NOT EXISTS is_user boolean NOT NULL DEFAULT false');
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS item_user_tags (
+      download_id bigint NOT NULL,
+      tag_id bigint NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (download_id, tag_id)
+    )`);
 }
 
 function fileExt(filePath, format) {
@@ -97,6 +105,31 @@ function mapItem(row) {
     duration: durationText,
     duration_seconds: durationSeconds,
   };
+}
+
+function cleanTagName(value) {
+  return String(value || '')
+    .trim()
+    .replace(/^#+/, '')
+    .toLowerCase()
+    .replace(/\s+/g, '-')
+    .replace(/[^a-z0-9_-]/g, '')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64);
+}
+
+function isJunkTagName(value) {
+  const name = String(value || '').trim().toLowerCase();
+  if (!name) return true;
+  if (/\s+#/.test(name) || name.includes('. #')) return true;
+  if (/^[0-9]+$/.test(name)) return true;
+  if (/\.(jpe?g|png|gif|webp|mp4|mov|mkv|webm)$/i.test(name)) return true;
+  if (/(^|[-_])(jpe?g|png|gif|webp|mp4|mov|mkv|webm)$/i.test(name)) return true;
+  if (/^[a-f0-9]{6,}$/i.test(name) && /\d/.test(name)) return true;
+  if (/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(name)) return true;
+  if (/^[-_][a-z0-9_-]{6,}$/i.test(name)) return true;
+  if (/^\d{4}-\d{2}-\d{2}/.test(name)) return true;
+  return false;
 }
 
 function hasNonEmptyMedia(row) {
@@ -447,10 +480,9 @@ function buildItemFilters({ req, params, fileExpr, extExpr, ratingExpr }) {
   if (Number.isFinite(tagId)) {
     params.push(tagId);
     where.push(`d.id IN (
-      SELECT dt.download_id
-        FROM download_tags dt
-        JOIN tags t ON t.name = dt.tag
-       WHERE t.id = $${params.length}
+      SELECT iut.download_id
+        FROM item_user_tags iut
+       WHERE iut.tag_id = $${params.length}
     )`);
   }
   return where;
@@ -819,17 +851,23 @@ app.get('/thumb/:id', async (req, res) => {
 // ─── Tags CRUD ─────────────────────────────────────────────────────────────
 app.get('/api/tags', async (_req, res) => {
   try {
-    const { rows } = await pool.query('SELECT id, name FROM tags ORDER BY name ASC');
-    res.json({ tags: rows });
+    const { rows } = await pool.query(`
+      SELECT t.id, t.name, COUNT(iut.download_id)::int AS uses
+        FROM tags t
+        LEFT JOIN item_user_tags iut ON iut.tag_id = t.id
+       WHERE t.is_user = true
+       GROUP BY t.id, t.name
+       ORDER BY t.name ASC`);
+    res.json({ tags: rows.filter((r) => !isJunkTagName(r.name)) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/tags', async (req, res) => {
   try {
-    const name = String(req.body.name || '').trim();
-    if (!name) return res.status(400).json({ error: 'name vereist' });
+    const name = cleanTagName(req.body.name);
+    if (!name || name.length < 2) return res.status(400).json({ error: 'name vereist' });
     const { rows } = await pool.query(
-      'INSERT INTO tags (name) VALUES ($1) ON CONFLICT (name) DO UPDATE SET name=EXCLUDED.name RETURNING id, name',
+      'INSERT INTO tags (name, is_user) VALUES ($1, true) ON CONFLICT (name) DO UPDATE SET is_user=true RETURNING id, name',
       [name]);
     res.json({ tag: rows[0] });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -838,11 +876,13 @@ app.post('/api/tags', async (req, res) => {
 app.delete('/api/tags/:id', async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
-    const tag = await pool.query('SELECT name FROM tags WHERE id=$1', [id]);
-    if (tag.rows[0]) {
-      await pool.query('DELETE FROM download_tags WHERE tag=$1', [tag.rows[0].name]);
-    }
-    await pool.query('DELETE FROM tags WHERE id=$1', [id]);
+    await pool.query('DELETE FROM item_user_tags WHERE tag_id=$1', [id]);
+    await pool.query('UPDATE tags SET is_user=false WHERE id=$1', [id]);
+    await pool.query(`
+      DELETE FROM tags t
+       WHERE t.id=$1
+         AND NOT EXISTS (SELECT 1 FROM download_tags dt WHERE dt.tag=t.name)`,
+      [id]);
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -852,9 +892,9 @@ app.get('/api/items/:id/tags', async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
     const { rows } = await pool.query(
-      'SELECT t.id, t.name FROM tags t JOIN download_tags dt ON t.name=dt.tag WHERE dt.download_id=$1 ORDER BY t.name',
+      'SELECT t.id, t.name FROM tags t JOIN item_user_tags iut ON iut.tag_id=t.id WHERE iut.download_id=$1 ORDER BY t.name',
       [id]);
-    res.json({ tags: rows });
+    res.json({ tags: rows.filter((r) => !isJunkTagName(r.name)) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -863,11 +903,11 @@ app.post('/api/items/:id/tags', async (req, res) => {
     const itemId = parseInt(req.params.id, 10);
     const tagId = parseInt(req.body.tag_id, 10);
     if (!Number.isFinite(tagId)) return res.status(400).json({ error: 'tag_id vereist' });
-    const tag = await pool.query('SELECT name FROM tags WHERE id=$1', [tagId]);
+    const tag = await pool.query('UPDATE tags SET is_user=true WHERE id=$1 RETURNING id', [tagId]);
     if (!tag.rows[0]) return res.status(404).json({ error: 'tag niet gevonden' });
     await pool.query(
-      'INSERT INTO download_tags (download_id, tag) VALUES ($1,$2) ON CONFLICT ON CONSTRAINT download_tags_download_id_tag_key DO NOTHING',
-      [itemId, tag.rows[0].name]);
+      'INSERT INTO item_user_tags (download_id, tag_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
+      [itemId, tagId]);
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -876,10 +916,7 @@ app.delete('/api/items/:id/tags/:tagId', async (req, res) => {
   try {
     const itemId = parseInt(req.params.id, 10);
     const tagId = parseInt(req.params.tagId, 10);
-    const tag = await pool.query('SELECT name FROM tags WHERE id=$1', [tagId]);
-    if (tag.rows[0]) {
-      await pool.query('DELETE FROM download_tags WHERE download_id=$1 AND tag=$2', [itemId, tag.rows[0].name]);
-    }
+    await pool.query('DELETE FROM item_user_tags WHERE download_id=$1 AND tag_id=$2', [itemId, tagId]);
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

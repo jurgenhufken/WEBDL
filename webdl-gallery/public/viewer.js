@@ -95,7 +95,7 @@
       'vStage','vContent','vPrev','vNext','vHudLeft','vHudRight',
       'vProgressBar','vProgressFill','vProgressHandle',
       'vBottomControls','vBtnPlayPause','vTimeLabel',
-      'vTagDialog','vTagList','vNewTagInput','vBtnAddTag','vBtnCloseTagDialog',
+      'vTagDialog','vTagCurrent','vTagSearch','vTagList','vNewTagInput','vBtnAddTag','vBtnCloseTagDialog',
       'vLogPanel','vLogBody',
     ];
     for (const id of ids) {
@@ -164,9 +164,12 @@
       mediaEl.src = `/media/${it.id}`;
       mediaEl.poster = `/thumb/${it.id}`;   // thumbnail terwijl video laadt
       mediaEl.autoplay = true;
+      mediaEl.controls = true;
       mediaEl.playsinline = true;
       mediaEl.muted = true;                  // altijd muted starten (browser autoplay policy)
       mediaEl.volume = vs.vol;
+      try { mediaEl.setAttribute('controlsList', 'noremoteplayback nodownload'); } catch (_) {}
+      try { mediaEl.disablePictureInPicture = true; } catch (_) {}
 
       // Zodra metadata geladen is: unmute als gebruiker dat wil
       mediaEl.addEventListener('loadedmetadata', () => {
@@ -606,6 +609,10 @@
   }
 
   // ─── Tags ─────────────────────────────────────────────────────────────────
+  function safeText(value) {
+    return String(value || '');
+  }
+
   async function loadTags() {
     try {
       const data = await api('/api/tags');
@@ -616,7 +623,7 @@
       for (const t of vs.availableTags) {
         const o = document.createElement('option');
         o.value = String(t.id);
-        o.textContent = t.name;
+        o.textContent = t.uses ? `${t.name} (${t.uses})` : t.name;
         sel.appendChild(o);
       }
     } catch (e) {
@@ -636,7 +643,9 @@
   async function openTagDialog() {
     const it = vs.items[vs.idx];
     if (!it) return;
+    await loadTags();
     await loadItemTags(it.rating_id || it.id);
+    if (el.vTagSearch) el.vTagSearch.value = '';
     renderTagDialog();
     el.vTagDialog.classList.remove('hidden');
   }
@@ -649,42 +658,97 @@
     const it = vs.items[vs.idx];
     if (!it) return;
     const itemId = it.rating_id || it.id;
-    const currentIds = new Set(vs.currentItemTags.map(t => t.id));
+    const currentIds = new Set(vs.currentItemTags.map(t => Number(t.id)));
+
+    if (el.vTagCurrent) {
+      el.vTagCurrent.innerHTML = '';
+      if (!vs.currentItemTags.length) {
+        const empty = document.createElement('span');
+        empty.className = 'tag-empty';
+        empty.textContent = 'Geen tags op dit item';
+        el.vTagCurrent.appendChild(empty);
+      } else {
+        for (const t of vs.currentItemTags) {
+          const chip = document.createElement('button');
+          chip.type = 'button';
+          chip.className = 'tag-chip tag-chip-current';
+
+          const name = document.createElement('span');
+          name.textContent = `#${safeText(t.name)}`;
+          const remove = document.createElement('span');
+          remove.className = 'tag-chip-remove';
+          remove.textContent = '×';
+          chip.append(name, remove);
+
+          chip.addEventListener('click', async () => {
+            try {
+              await api(`/api/items/${itemId}/tags/${t.id}`, { method: 'DELETE' });
+              await loadItemTags(itemId);
+              renderTagDialog();
+            } catch (err) { log('Tag fout: ' + err.message); }
+          });
+
+          el.vTagCurrent.appendChild(chip);
+        }
+      }
+    }
+
+    const q = (el.vTagSearch?.value || '').trim().toLowerCase();
+    const candidates = vs.availableTags
+      .filter(t => !currentIds.has(Number(t.id)))
+      .filter(t => !q || safeText(t.name).toLowerCase().includes(q))
+      .slice(0, 120);
 
     el.vTagList.innerHTML = '';
-    for (const t of vs.availableTags) {
-      const has = currentIds.has(t.id);
+    if (!candidates.length) {
+      const empty = document.createElement('div');
+      empty.className = 'tag-empty tag-empty-row';
+      empty.textContent = q ? 'Geen bestaande tags gevonden' : 'Geen andere tags beschikbaar';
+      el.vTagList.appendChild(empty);
+      return;
+    }
+
+    for (const t of candidates) {
       const row = document.createElement('div');
       row.className = 'tag-row';
-      const safeName = t.name.replace(/</g, '&lt;');
-      row.innerHTML = `
-        <span class="tag-name">${safeName}</span>
-        <button class="tag-toggle${has ? ' tag-has' : ''}" data-tagid="${t.id}" data-has="${has ? '1' : '0'}">${has ? '−' : '+'}</button>
-        <button class="tag-del" data-tagid="${t.id}" title="Verwijder globaal">🗑</button>`;
+      const name = document.createElement('span');
+      name.className = 'tag-name';
+      name.textContent = `#${safeText(t.name)}`;
 
-      row.querySelector('.tag-toggle').addEventListener('click', async (e) => {
-        const tagId = Number(e.currentTarget.dataset.tagid);
-        const isHas  = e.currentTarget.dataset.has === '1';
+      const uses = document.createElement('span');
+      uses.className = 'tag-uses';
+      uses.textContent = t.uses ? `${t.uses}×` : '';
+
+      const add = document.createElement('button');
+      add.className = 'tag-toggle';
+      add.type = 'button';
+      add.title = 'Tag aan huidig item toevoegen';
+      add.textContent = '+';
+
+      const del = document.createElement('button');
+      del.className = 'tag-del';
+      del.type = 'button';
+      del.title = 'Tag globaal verwijderen';
+      del.textContent = '🗑';
+
+      row.append(name, uses, add, del);
+
+      add.addEventListener('click', async () => {
         try {
-          if (isHas) {
-            await api(`/api/items/${itemId}/tags/${tagId}`, { method: 'DELETE' });
-          } else {
-            await api(`/api/items/${itemId}/tags`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ tag_id: tagId }),
-            });
-          }
+          await api(`/api/items/${itemId}/tags`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tag_id: t.id }),
+          });
           await loadItemTags(itemId);
           renderTagDialog();
         } catch (err) { log('Tag fout: ' + err.message); }
       });
 
-      row.querySelector('.tag-del').addEventListener('click', async (e) => {
-        const tagId = Number(e.currentTarget.dataset.tagid);
+      del.addEventListener('click', async () => {
         if (!confirm(`Tag "${t.name}" globaal verwijderen?`)) return;
         try {
-          await api(`/api/tags/${tagId}`, { method: 'DELETE' });
+          await api(`/api/tags/${t.id}`, { method: 'DELETE' });
           await loadTags();
           await loadItemTags(itemId);
           renderTagDialog();
@@ -1244,6 +1308,7 @@
     // Tags dialog
     el.vBtnTags.addEventListener('click', (e) => { e.stopPropagation(); openTagDialog(); });
     el.vBtnCloseTagDialog.addEventListener('click', closeTagDialog);
+    if (el.vTagSearch) el.vTagSearch.addEventListener('input', renderTagDialog);
 
     el.vBtnAddTag.addEventListener('click', async () => {
       const name = el.vNewTagInput.value.trim();
