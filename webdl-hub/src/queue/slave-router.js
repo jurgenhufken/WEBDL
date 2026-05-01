@@ -13,6 +13,7 @@ const SLAVE_PLATFORMS = [
   { match: /wikifeet\.com/i,              platform: 'wikifeet' },
   { match: /aznudefeet\.com/i,            platform: 'aznudefeet' },
   { match: /amateurvoyeurforum\.com/i,    platform: 'amateurvoyeurforum' },
+  { match: /(?:keep2share\.cc|k2s\.cc)/i, platform: 'keep2share' },
   { match: /pornpics\.com/i,              platform: 'pornpics' },
   { match: /forum-area\.com/i,            platform: 'forum-area' },
   { match: /imagetwist\.com/i,            platform: 'imagetwist' },

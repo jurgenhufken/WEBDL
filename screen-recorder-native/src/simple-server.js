@@ -10385,6 +10385,38 @@ function resolveDirectDownloadFilename(url, fallback, rawHeaders) {
   return safe || fallback;
 }
 
+function directDownloadLooksLikeHtml(filepath, rawHeaders) {
+  const headers = parseLastHttpHeaders(rawHeaders);
+  const contentType = String(headers['content-type'] || '').toLowerCase();
+  if (/\b(?:text\/html|application\/xhtml\+xml)\b/.test(contentType)) return true;
+  try {
+    if (!filepath || !fs.existsSync(filepath)) return false;
+    const fd = fs.openSync(filepath, 'r');
+    try {
+      const buf = Buffer.alloc(512);
+      const n = fs.readSync(fd, buf, 0, buf.length, 0);
+      const head = buf.slice(0, n).toString('utf8').trimStart().toLowerCase();
+      return head.startsWith('<!doctype html') || head.startsWith('<html') || head.includes('<title>keep2share</title>');
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (e) {
+    return false;
+  }
+}
+
+function rejectInvalidDirectDownload(url, filepath, filename, rawHeaders) {
+  const ext = String(path.extname(filename || filepath || '') || '').toLowerCase();
+  const isExpectedMedia = IMPORTABLE_VIDEO_EXTS.has(ext) || isImagePath(filename || filepath || '');
+  const isKeep2Share = /(?:keep2share\.cc|k2s\.cc)/i.test(String(url || ''));
+  if ((isExpectedMedia || isKeep2Share) && directDownloadLooksLikeHtml(filepath, rawHeaders)) {
+    return isKeep2Share
+      ? 'Keep2Share gaf een HTML/login-pagina terug in plaats van het videobestand'
+      : 'Directe download gaf HTML terug in plaats van media';
+  }
+  return '';
+}
+
 async function startDirectFileDownload(downloadId, url, platform, channel, title, metadata) {
   try {
     if (isCancelled(downloadId)) {
@@ -10549,6 +10581,12 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
         if (code === 0 && fs.existsSync(tmpFilepath)) {
           const rawHeaders = fs.existsSync(headerFilepath) ? fs.readFileSync(headerFilepath, 'utf8') : '';
           const filename = resolveDirectDownloadFilename(url, provisionalFilename, rawHeaders);
+          const invalidReason = rejectInvalidDirectDownload(url, tmpFilepath, filename, rawHeaders);
+          if (invalidReason) {
+            try { fs.rmSync(tmpFilepath, { force: true }); } catch (e) { }
+            await updateDownloadStatus.run('error', 0, invalidReason, downloadId);
+            return;
+          }
           const filepath = uniqueFilePath(path.join(dir, filename), downloadId);
           try {
             if (fs.existsSync(filepath)) {
