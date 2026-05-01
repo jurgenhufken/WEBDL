@@ -11878,11 +11878,12 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
         }
 
         if (!mainPath) {
-          const files = fs.readdirSync(dir).filter((f) =>
-            f.endsWith('.mp4') || f.endsWith('.mkv') || f.endsWith('.webm') ||
-            f.endsWith('.jpg') || f.endsWith('.jpeg') || f.endsWith('.png') ||
-            f.endsWith('.gif') || f.endsWith('.webp') || f.endsWith('.unknown_video')
-          );
+          const files = fs.readdirSync(dir).filter((f) => {
+            const ext = path.extname(String(f || '')).toLowerCase();
+            return IMPORTABLE_VIDEO_EXTS.has(ext) ||
+              IMPORTABLE_IMAGE_EXTS.has(ext) ||
+              String(f || '').endsWith('.unknown_video');
+          });
           files.sort((a, b) => {
             try {
               const statA = fs.statSync(path.join(dir, a));
@@ -11894,6 +11895,12 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
           });
           const mainFileGuess = files[0] || '';
           mainPath = mainFileGuess ? path.join(dir, mainFileGuess) : '';
+        }
+
+        if (!mainPath || !fs.existsSync(mainPath)) {
+          await updateDownloadStatus.run('error', 0, 'yt-dlp eindigde zonder importeerbaar mediabestand', downloadId);
+          console.log(`   ❌ Download mislukt: geen importeerbaar mediabestand gevonden in ${dir}`);
+          return;
         }
 
         if (mainPath && mainPath.endsWith('.unknown_video')) {

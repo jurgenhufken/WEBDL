@@ -52,7 +52,13 @@ function startSlavePoller({ repo, logger, intervalMs = 5000 }) {
     }
 
     // Slave voltooid? Importeer file + thumb + mark done.
-    if (row.slave_status === 'completed' && row.filepath) {
+    if (row.slave_status === 'completed') {
+      if (!row.filepath) {
+        await repo.failJob(hubJobId, 'slave download completed without a file path', { retry: false });
+        await repo.appendLog(hubJobId, 'error', '❌ slave klaar gemeld, maar zonder bestandspad');
+        logger.warn('slave.completed_without_file', { hubJob: hubJobId, downloadId: row.id });
+        return;
+      }
       try {
         // Bestands-metadata uit filesystem
         let size = null;
