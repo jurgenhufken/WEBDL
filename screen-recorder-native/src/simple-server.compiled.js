@@ -5400,11 +5400,32 @@ function requestRecordingStop(recId, reason) {
 }
 
 function normalizeRecordingKey(input, metadata = {}) {
+  const platformHint = String(metadata.platform || '').trim().toLowerCase();
+  const channelHint = String(metadata.channel || '').trim().toLowerCase();
+  const cleanTikTokChannel = (value) => {
+    let s = String(value || '').trim().toLowerCase();
+    if (!s) return '';
+    s = s.replace(/^tiktok:/, '');
+    s = s.replace(/^https?:\/\/(?:www\.)?tiktok\.com\//, '');
+    s = s.replace(/^\/+/, '');
+    s = s.replace(/\/live\/?$/, '');
+    if (!s.startsWith('@')) s = `@${s}`;
+    return s;
+  };
   try {
     const raw = String(input || metadata.url || metadata.pageUrl || metadata.sourceUrl || '').trim();
-    const platform = String(metadata.platform || '').trim().toLowerCase();
-    const channel = String(metadata.channel || '').trim().toLowerCase();
+    const platform = platformHint;
+    const channel = channelHint;
     if (raw) {
+      const rawLower = raw.toLowerCase().replace(/\/+$/, '');
+      if (/^tiktok:@/i.test(rawLower)) {
+        const user = cleanTikTokChannel(rawLower);
+        if (user) return `tiktok:${user}/live`;
+      }
+      if ((platform === 'tiktok' || rawLower.includes('/live')) && /^@[^\/\s]+(?:\/live)?$/i.test(rawLower)) {
+        const user = cleanTikTokChannel(rawLower);
+        if (user) return `tiktok:${user}/live`;
+      }
       const u = new URL(raw);
       const host = String(u.hostname || '').toLowerCase().replace(/^www\./, '');
       const pathname = String(u.pathname || '').replace(/\/+$/, '');
@@ -5420,13 +5441,62 @@ function normalizeRecordingKey(input, metadata = {}) {
       }
       return `${host}${pathname || '/'}`.toLowerCase();
     }
+    if (platform === 'tiktok' && channel) {
+      const user = cleanTikTokChannel(channel);
+      if (user) return `tiktok:${user}/live`;
+    }
     if (platform || channel) return `${platform || 'unknown'}:${channel || 'unknown'}`;
   } catch (e) {
-    const platform = String(metadata.platform || '').trim().toLowerCase();
-    const channel = String(metadata.channel || '').trim().toLowerCase();
+    const platform = platformHint;
+    const channel = channelHint;
+    if (platform === 'tiktok' && channel) {
+      const user = cleanTikTokChannel(channel);
+      if (user) return `tiktok:${user}/live`;
+    }
     if (platform || channel) return `${platform || 'unknown'}:${channel || 'unknown'}`;
   }
   return 'default_rec';
+}
+
+function findRecordingEntryFromRequest(body = {}, meta = {}) {
+  const candidates = [
+    body.id,
+    body.recordingKey,
+    body.url,
+    body.tabId,
+    meta.url,
+    meta.pageUrl,
+    meta.sourceUrl
+  ];
+  const normalized = [];
+  const seen = new Set();
+  const add = (value) => {
+    const raw = String(value || '').trim();
+    if (!raw) return;
+    for (const key of [raw, normalizeRecordingKey(raw, meta)]) {
+      const k = String(key || '').trim();
+      if (k && !seen.has(k)) {
+        seen.add(k);
+        normalized.push(k);
+      }
+    }
+  };
+  candidates.forEach(add);
+
+  for (const key of normalized) {
+    if (activeRecordings.has(key)) return [key, activeRecordings.get(key)];
+  }
+
+  const requestedKey = normalized[0] || '';
+  if (requestedKey) {
+    for (const [id, session] of activeRecordings.entries()) {
+      const sessionMeta = session && session.currentRecordingMeta ? session.currentRecordingMeta : {};
+      if (normalizeRecordingKey(id, sessionMeta) === requestedKey) return [id, session];
+      if (normalizeRecordingKey(sessionMeta.recordingKey || sessionMeta.pageUrl, sessionMeta) === requestedKey) return [id, session];
+    }
+  }
+
+  return [null, null];
 }
 
 function getRecordingSnapshots() {
@@ -8957,14 +9027,20 @@ expressApp.post('/recording/heartbeat', (req, res) => {
   const meta = body && typeof body.metadata === 'object' && body.metadata ? body.metadata : {};
   const recId = normalizeRecordingKey(body.id || body.recordingKey || body.url || meta.url, meta);
   const clientId = String(body.recordingClientId || body.clientId || '').trim();
-  const session = activeRecordings.get(recId);
+  const [activeRecId, session] = findRecordingEntryFromRequest(body, meta);
   if (!session) return res.json({ success: true, active: false, recordingKey: recId });
   if (session.ownerClientId && clientId && session.ownerClientId !== clientId) {
-    return res.json({ success: true, active: true, owner: false, recordingKey: recId });
+    const last = Number(session.lastHeartbeatAt || 0);
+    if (last && Date.now() - last > RECORDING_HEARTBEAT_STALE_MS) {
+      console.warn(`[recording] Client heartbeat owner stale; reassigning ${activeRecId}`);
+      session.ownerClientId = clientId;
+    } else {
+      return res.json({ success: true, active: true, owner: false, recordingKey: recId });
+    }
   }
   if (clientId && !session.ownerClientId) session.ownerClientId = clientId;
   session.lastHeartbeatAt = Date.now();
-  return res.json({ success: true, active: true, owner: true, recordingKey: recId });
+  return res.json({ success: true, active: true, owner: true, recordingKey: activeRecId || recId });
 });
 
 expressApp.post('/recordings/stop-all', async (req, res) => {
@@ -8977,16 +9053,13 @@ expressApp.post('/recordings/stop-all', async (req, res) => {
 expressApp.post('/stop-recording', (req, res) => {
   const body = req.body || {};
   const meta = body && typeof body.metadata === 'object' && body.metadata ? body.metadata : {};
-  const reqId = normalizeRecordingKey(body.id || body.recordingKey || body.tabId || meta.url || body.url, meta);
   const clientId = String(body.recordingClientId || body.clientId || '').trim();
   const reason = String(body.reason || '').trim();
   let session = null;
   let activeRecId = null;
 
-  if (reqId && activeRecordings.has(reqId)) {
-    session = activeRecordings.get(reqId);
-    activeRecId = reqId;
-  } else if (activeRecordings.size > 0) {
+  [activeRecId, session] = findRecordingEntryFromRequest(body, meta);
+  if (!session && activeRecordings.size > 0) {
     activeRecId = activeRecordings.keys().next().value;
     session = activeRecordings.get(activeRecId);
   }

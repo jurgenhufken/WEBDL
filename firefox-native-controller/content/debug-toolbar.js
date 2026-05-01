@@ -4147,8 +4147,14 @@
   const recordingClientId = (() => {
     try {
       if (window.__webdlRecordingClientId) return window.__webdlRecordingClientId;
+      const stored = window.sessionStorage && window.sessionStorage.getItem('webdlRecordingClientId');
+      if (stored) {
+        window.__webdlRecordingClientId = stored;
+        return stored;
+      }
       const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
       window.__webdlRecordingClientId = id;
+      if (window.sessionStorage) window.sessionStorage.setItem('webdlRecordingClientId', id);
       return id;
     } catch (e) {
       return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
@@ -4156,11 +4162,30 @@
   })();
 
   function normalizeRecordingKeyFromMeta(meta) {
+    const cleanTikTokChannel = (value) => {
+      let s = String(value || '').trim().toLowerCase();
+      if (!s) return '';
+      s = s.replace(/^tiktok:/, '');
+      s = s.replace(/^https?:\/\/(?:www\.)?tiktok\.com\//, '');
+      s = s.replace(/^\/+/, '');
+      s = s.replace(/\/live\/?$/, '');
+      if (!s.startsWith('@')) s = `@${s}`;
+      return s;
+    };
     try {
       const raw = String((meta && (meta.url || meta.pageUrl || meta.sourceUrl)) || window.location.href || '').trim();
       const platform = String((meta && meta.platform) || '').trim().toLowerCase();
       const channel = String((meta && meta.channel) || '').trim().toLowerCase();
       if (raw) {
+        const rawLower = raw.toLowerCase().replace(/\/+$/, '');
+        if (/^tiktok:@/i.test(rawLower)) {
+          const user = cleanTikTokChannel(rawLower);
+          if (user) return `tiktok:${user}/live`;
+        }
+        if ((platform === 'tiktok' || rawLower.includes('/live')) && /^@[^\/\s]+(?:\/live)?$/i.test(rawLower)) {
+          const user = cleanTikTokChannel(rawLower);
+          if (user) return `tiktok:${user}/live`;
+        }
         const u = new URL(raw);
         const host = String(u.hostname || '').toLowerCase().replace(/^www\./, '');
         const pathname = String(u.pathname || '').replace(/\/+$/, '');
@@ -4176,17 +4201,45 @@
         }
         return `${host}${pathname || '/'}`.toLowerCase();
       }
+      if (platform === 'tiktok' && channel) {
+        const user = cleanTikTokChannel(channel);
+        if (user) return `tiktok:${user}/live`;
+      }
       if (platform || channel) return `${platform || 'unknown'}:${channel || 'unknown'}`;
     } catch (e) {}
+    if (meta && String(meta.platform || '').trim().toLowerCase() === 'tiktok') {
+      const user = cleanTikTokChannel(meta.channel);
+      if (user) return `tiktok:${user}/live`;
+    }
     return String(window.location.href || 'default_rec').split('?')[0].replace(/\/+$/, '').toLowerCase();
+  }
+
+  function recordingKeyAliases(key) {
+    const s = String(key || '').trim().toLowerCase().replace(/\/+$/, '');
+    const aliases = new Set();
+    if (!s) return aliases;
+    aliases.add(s);
+    if (/^tiktok:@[^\/]+(?:\/live)?$/i.test(s)) {
+      const user = s.replace(/^tiktok:/, '').replace(/\/live$/, '');
+      aliases.add(`tiktok:${user}/live`);
+      aliases.add(`${user}/live`);
+      aliases.add(user);
+    } else if (/^@[^\/]+(?:\/live)?$/i.test(s)) {
+      const user = s.replace(/\/live$/, '');
+      aliases.add(`tiktok:${user}/live`);
+      aliases.add(`${user}/live`);
+      aliases.add(user);
+    }
+    return aliases;
   }
 
   function updateRecUI(recording, activeUrls, activeKeys) {
     const meta = scrapeMetadata();
     const key = normalizeRecordingKeyFromMeta(meta);
+    const keyAliases = recordingKeyAliases(key);
     const myUrl = window.location.href;
     const myRecording = Array.isArray(activeKeys) && activeKeys.length
-      ? activeKeys.includes(key)
+      ? activeKeys.some(k => keyAliases.has(String(k || '').trim().toLowerCase().replace(/\/+$/, '')))
       : (Array.isArray(activeUrls) && activeUrls.length
         ? activeUrls.some(u => myUrl.startsWith(u) || u.startsWith(myUrl.split('?')[0]))
         : !!recording);
@@ -4359,8 +4412,9 @@
         currentRecordingKey = result.recordingKey || recordingKey;
         updateRecUI(true, [meta.url || window.location.href], [currentRecordingKey]);
         ensureRecordingHeartbeat(meta);
-        showNotification(`Opname gestart: ${result.file}`);
-        addLog(`REC gestart: ${result.file}`);
+        const startedFile = result.file || result.finalFile || result.rawFile || currentRecordingKey || 'actief';
+        showNotification(`Opname gestart: ${startedFile}`);
+        addLog(`REC gestart: ${startedFile}`);
 
         if (!cropUpdateTimer) {
           cropUpdateTimer = setInterval(() => {
@@ -4388,8 +4442,9 @@
             currentRecordingKey = forceResult.recordingKey || recordingKey;
             updateRecUI(true, [meta.url || window.location.href], [currentRecordingKey]);
             ensureRecordingHeartbeat(meta);
-            showNotification(`Opname geforceerd herstart: ${forceResult.file}`);
-            addLog(`REC geforceerd herstart: ${forceResult.file}`);
+            const forcedFile = forceResult.file || forceResult.finalFile || forceResult.rawFile || currentRecordingKey || 'actief';
+            showNotification(`Opname geforceerd herstart: ${forcedFile}`);
+            addLog(`REC geforceerd herstart: ${forcedFile}`);
             if (!cropUpdateTimer) {
               cropUpdateTimer = setInterval(() => {
                 if (!isRecording) return;
