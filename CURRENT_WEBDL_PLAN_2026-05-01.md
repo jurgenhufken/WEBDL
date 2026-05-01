@@ -22,6 +22,7 @@ It supersedes the older gallery handoff for the next steps.
   - done: `20416`
   - failed: `583`
   - cancelled: `5`
+- SABNZBD stays on the old `HDD - One Touch` disk by design. Its completed/downloading paths should not be moved as part of the general WEBDL storage change.
 - SABNZBD hub status endpoint currently returns `fetch failed`, but the SAB watcher is enabled and points to:
   `/Volumes/HDD - One Touch/WEBDL/_SABNZBD/Completed`
 
@@ -41,8 +42,8 @@ The system drifted into too many partial responsibilities:
 - The hub/database must be the brain and motor:
   planned, running, paused, failed, completed, imported and visible states must be auditable from the hub.
 - The gallery should only show real imported/completed media, not queued or discovery-only placeholders.
-- New downloads should use `/Volumes/WEBDL Extra/WEBDL` as a preferred output root where practical, while existing media remains valid on old roots.
-- SABNZBD should be monitored and imported through the hub, but its completed/incomplete paths should not be changed blindly while large partial queues exist.
+- New non-SAB WEBDL downloads should use `/Volumes/WEBDL Extra/WEBDL` as the preferred output root, while existing media remains valid on old roots.
+- SABNZBD should be monitored and imported through the hub, but its completed/incomplete paths stay on `HDD - One Touch` unless explicitly changed later.
 - Queue priority must be explicit. A new URL should not silently starve old playlist jobs forever, and old playlist jobs should not block urgent/manual jobs without visible controls.
 - ViperGirls should be implemented with the same user-facing pattern as FootFetishForum: thread expansion, per-post/media jobs, visible progress, retry/cancel/pause controls.
 
@@ -55,9 +56,10 @@ The system drifted into too many partial responsibilities:
    - decide whether to resume all paused jobs, only selected groups, or keep paused while adding ViperGirls.
 
 2. Make storage policy explicit:
-   - define one preferred new output root: `/Volumes/WEBDL Extra/WEBDL`;
+   - define one preferred new output root for non-SAB work: `/Volumes/WEBDL Extra/WEBDL`;
    - keep `HDD - One Touch` as an existing media root;
-   - ensure hub, gallery, simple-server, auto-import and SAB watcher all agree on allowed roots;
+   - ensure hub, gallery, simple-server and auto-import agree on allowed roots;
+   - leave SABNZBD paths on `HDD - One Touch`;
    - add a status panel or endpoint showing roots, free space and which root new jobs will use.
 
 3. Improve hub quality before more adapters:
@@ -116,4 +118,3 @@ Do not commit unless explicitly intended:
 
 - `firefox-debug-controller.xpi`
 - `firefox (1).xpi`
-

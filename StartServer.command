@@ -123,6 +123,24 @@ check_port_and_kill 35731
  fi
  
  echo "Server starten..."
+ NEW_WEBDL_ROOT="/Volumes/WEBDL Extra/WEBDL"
+ OLD_WEBDL_ROOT="/Volumes/HDD - One Touch/WEBDL"
+ if [ -d "$NEW_WEBDL_ROOT" ]; then
+     : "${WEBDL_BASE_DIR:=$NEW_WEBDL_ROOT}"
+     : "${WEBDL_AUTO_IMPORT_ROOT_DIR:=$NEW_WEBDL_ROOT/_Downloads}"
+ else
+     : "${WEBDL_BASE_DIR:=$HOME/Downloads/WEBDL}"
+     : "${WEBDL_AUTO_IMPORT_ROOT_DIR:=$HOME/Downloads/WEBDL/_Downloads}"
+ fi
+ if [ -d "$OLD_WEBDL_ROOT" ] && [ -d "$NEW_WEBDL_ROOT" ]; then
+     : "${WEBDL_EXTRA_MEDIA_ROOTS:=$OLD_WEBDL_ROOT;$NEW_WEBDL_ROOT}"
+ elif [ -d "$OLD_WEBDL_ROOT" ]; then
+     : "${WEBDL_EXTRA_MEDIA_ROOTS:=$OLD_WEBDL_ROOT}"
+ elif [ -d "$NEW_WEBDL_ROOT" ]; then
+     : "${WEBDL_EXTRA_MEDIA_ROOTS:=$NEW_WEBDL_ROOT}"
+ else
+     : "${WEBDL_EXTRA_MEDIA_ROOTS:=$HOME/Downloads/WEBDL}"
+ fi
  : "${WEBDL_VIDEO_DEVICE:=auto}"
  : "${WEBDL_AUDIO_DEVICE:=auto}"
  : "${WEBDL_RECORDING_INPUT_PIXEL_FORMAT:=auto}"
@@ -146,13 +164,11 @@ check_port_and_kill 35731
  : "${WEBDL_STARTUP_REHYDRATE_MODE:=all}"
  : "${WEBDL_STARTUP_REHYDRATE_MAX_ROWS:=80}"
  : "${WEBDL_AUTO_IMPORT_ON_START:=1}"
- : "${WEBDL_AUTO_IMPORT_ROOT_DIR:=$HOME/Downloads/WEBDL/_Downloads}"
  : "${WEBDL_AUTO_IMPORT_MAX_DEPTH:=6}"
  : "${WEBDL_AUTO_IMPORT_POLL_MS:=0}"
  : "${WEBDL_AUTO_IMPORT_MIN_FILE_AGE_MS:=30000}"
  : "${WEBDL_AUTO_IMPORT_FLATTEN_TO_WEBDL:=0}"
  : "${WEBDL_AUTO_IMPORT_MOVE_SOURCE:=0}"
- : "${WEBDL_EXTRA_MEDIA_ROOTS:=$HOME/Downloads/WEBDL}"
  : "${WEBDL_DB_ENGINE:=postgres}"
  : "${DATABASE_URL:=postgresql://jurgen@localhost:5432/webdl}"
  : "${WEBDL_ADDON_AUTO_BUILD_ON_START:=0}"
@@ -217,6 +233,7 @@ check_port_and_kill 35731
  fi
  WEBDL_FINALCUT_OUTPUT=0
  export WEBDL_VIDEO_DEVICE
+ export WEBDL_BASE_DIR
  export WEBDL_AUDIO_DEVICE
  export WEBDL_RECORDING_INPUT_PIXEL_FORMAT
  export WEBDL_YOUTUBE_DOWNLOAD_CONCURRENCY
