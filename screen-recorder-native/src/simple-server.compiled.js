@@ -211,6 +211,20 @@ function stripAnsiCodes(input) {
 const IMPORTABLE_VIDEO_EXTS = new Set([
   '.mp4', '.mov', '.m4v', '.webm', '.mkv', '.avi', '.wmv', '.flv', '.ts', '.m2ts']
 );
+const IMPORTABLE_IMAGE_EXTS = new Set([
+  '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.avif', '.heic', '.heif']
+);
+
+function isImageUrlLike(input) {
+  try {
+    const u = new URL(String(input || ''));
+    const ext = String(path.extname(String(u.pathname || '')).toLowerCase() || '');
+    return IMPORTABLE_IMAGE_EXTS.has(ext);
+  } catch (e) {
+    const ext = String(path.extname(String(input || '').split(/[?#]/)[0]).toLowerCase() || '');
+    return IMPORTABLE_IMAGE_EXTS.has(ext);
+  }
+}
 
 // Auto-import settings en Startup rehydrate settings worden nu beheerd in src/config.js.
 // De variabelen zijn bovenaan via destructuring beschikbaar.
@@ -4659,6 +4673,9 @@ function detectLane(platform, url = '') {
   const p = String(platform || '').toLowerCase();
   const u = String(url || '').toLowerCase();
 
+  // Images are cheap direct transfers and must never sit behind video jobs.
+  if (isImageUrlLike(u)) return 'light';
+
   // If this is a live stream or explicitly a video, definitely heavy
   if (u.includes('is_live=true') || u.includes('/live/') || u.includes('tiktok.com/@') && !u.includes('/photo/')) {
     return 'heavy';
@@ -4744,9 +4761,25 @@ function runDownloadSchedulerSoon() {
   if (schedulerTimer) return;
   schedulerTimer = setTimeout(() => {
     schedulerTimer = null;
-    runDownloadScheduler();
-    syncRuntimeActiveState().catch(() => { });
+    Promise.resolve(runDownloadScheduler()).catch((e) => {
+      console.error('Download scheduler error:', e && e.stack ? e.stack : e && e.message ? e.message : String(e));
+    }).finally(() => {
+      syncRuntimeActiveState().catch(() => { });
+    });
   }, 120);
+}
+
+function hasQueuedWorkWithCapacity() {
+  try {
+    const heavyLimit = Math.max(0, HEAVY_DOWNLOAD_CONCURRENCY);
+    const lightLimit = Math.max(0, LIGHT_DOWNLOAD_CONCURRENCY);
+    const batchLimit = Math.max(0, BATCH_DOWNLOAD_CONCURRENCY);
+    return heavyLimit > 0 && queuedHeavy.length > 0 && activeLaneCount('heavy') < heavyLimit ||
+      lightLimit > 0 && queuedLight.length > 0 && activeLaneCount('light') < lightLimit ||
+      batchLimit > 0 && queuedBatch.length > 0 && activeLaneCount('batch') < batchLimit;
+  } catch (e) {
+    return false;
+  }
 }
 
 async function runDownloadScheduler() {
@@ -4909,18 +4942,36 @@ async function runDownloadScheduler() {
     }
   }
 
-  // Auto-rehydrate: if all in-memory queues are empty, pull more pending items from DB
-  if (queuedHeavy.length === 0 && queuedLight.length === 0 && queuedBatch.length === 0) {
+  // Auto-rehydrate per lane: a full heavy queue must not starve light/direct downloads.
+  if (shouldAutoRehydrate()) {
     scheduleAutoRehydrate();
   }
 }
 
 let autoRehydrateTimer = null;
+function shouldAutoRehydrate() {
+  const heavyLimit = Math.max(0, HEAVY_DOWNLOAD_CONCURRENCY);
+  const lightLimit = Math.max(0, LIGHT_DOWNLOAD_CONCURRENCY);
+  const batchLimit = Math.max(0, BATCH_DOWNLOAD_CONCURRENCY);
+  const needHeavy = heavyLimit > 0 && queuedHeavy.length === 0 && activeLaneCount('heavy') < heavyLimit;
+  const needLight = lightLimit > 0 && queuedLight.length === 0 && activeLaneCount('light') < lightLimit;
+  const needBatch = batchLimit > 0 && queuedBatch.length === 0 && activeLaneCount('batch') < batchLimit;
+  return needHeavy || needLight || needBatch;
+}
+
 function scheduleAutoRehydrate() {
   if (autoRehydrateTimer) return;
   autoRehydrateTimer = setTimeout(async () => {
     autoRehydrateTimer = null;
     try {
+      const heavyLimit = Math.max(0, HEAVY_DOWNLOAD_CONCURRENCY);
+      const lightLimit = Math.max(0, LIGHT_DOWNLOAD_CONCURRENCY);
+      const batchLimit = Math.max(0, BATCH_DOWNLOAD_CONCURRENCY);
+      const needHeavy = heavyLimit > 0 && queuedHeavy.length === 0 && activeLaneCount('heavy') < heavyLimit;
+      const needLight = lightLimit > 0 && queuedLight.length === 0 && activeLaneCount('light') < lightLimit;
+      const needBatch = batchLimit > 0 && queuedBatch.length === 0 && activeLaneCount('batch') < batchLimit;
+      if (!needHeavy && !needLight && !needBatch) return;
+
       const rows = await db.prepare(
         `SELECT id, url, platform, channel, title, metadata, status
          FROM downloads
@@ -4945,6 +4996,9 @@ function scheduleAutoRehydrate() {
         const channel = (row.channel && row.channel !== 'unknown') ? row.channel : deriveChannelFromUrl(platform, url) || 'unknown';
         const title = (row.title && row.title !== 'untitled') ? row.title : deriveTitleFromUrl(url);
         const lane = detectLane(platform, url);
+        if (lane === 'heavy' && !needHeavy) continue;
+        if (lane === 'light' && !needLight) continue;
+        if (lane === 'batch' && !needBatch) continue;
         queuedJobs.set(id, { downloadId: id, url, platform, channel, title, metadata: parsedMeta, progress: 0 });
         jobLane.set(id, lane);
         jobPlatform.set(id, platform);
@@ -4964,10 +5018,13 @@ function scheduleAutoRehydrate() {
 
 // Periodic check: if in-memory queues are empty but pending items exist, trigger rehydrate
 setInterval(() => {
-  if (queuedHeavy.length === 0 && queuedLight.length === 0 && queuedBatch.length === 0) {
+  if (hasQueuedWorkWithCapacity()) {
+    runDownloadSchedulerSoon();
+  }
+  if (shouldAutoRehydrate()) {
     scheduleAutoRehydrate();
   }
-}, 10000);
+}, 5000);
 
 let postprocessSchedulerTimer = null;
 function runPostprocessSchedulerSoon() {
@@ -5311,16 +5368,34 @@ async function rehydrateDownloadQueue() {
 let activeRecordings = new Map();
 Object.defineProperty(global, 'isRecording', { get: () => activeRecordings.size > 0 });
 
+function cleanupOrphanedRecordingProcesses(reason = 'periodic') {
+  const { execSync } = require('child_process');
+  const activePids = new Set(
+    Array.from(activeRecordings.values())
+      .map((session) => session && session.recordingProcess && session.recordingProcess.pid)
+      .filter(Boolean)
+      .map(String)
+  );
+  const pids = execSync("pgrep -f 'ffmpeg.*avfoundation.*recording_' 2>/dev/null || true", { encoding: 'utf8' }).trim().split('\n').filter(Boolean);
+  const killed = [];
+  for (const pid of pids) {
+    if (activePids.has(String(pid))) continue;
+    try { process.kill(Number(pid), 'SIGKILL'); } catch (e) {}
+    killed.push(pid);
+  }
+  if (killed.length > 0) console.log(`[recording] Killed ${killed.length} orphaned ffmpeg recording process(es) (${reason})`);
+}
+
 // Kill orphaned ffmpeg avfoundation recording processes from previous server runs.
 // These zombies block new recordings from capturing the screen.
 try {
-  const { execSync } = require('child_process');
-  const pids = execSync("pgrep -f 'ffmpeg.*avfoundation.*recording_' 2>/dev/null || true", { encoding: 'utf8' }).trim().split('\n').filter(Boolean);
-  for (const pid of pids) {
-    try { process.kill(Number(pid), 'SIGKILL'); } catch (e) {}
-  }
-  if (pids.length > 0) console.log(`[startup] Killed ${pids.length} orphaned ffmpeg recording process(es)`);
+  cleanupOrphanedRecordingProcesses('startup');
 } catch (e) {}
+
+const recordingOrphanCleanupTimer = setInterval(() => {
+  try { cleanupOrphanedRecordingProcesses('periodic'); } catch (e) {}
+}, 60000);
+if (typeof recordingOrphanCleanupTimer.unref === 'function') recordingOrphanCleanupTimer.unref();
 
 let avfoundationDeviceListCache = null;
 
@@ -9969,8 +10044,17 @@ function isKnownExternalMediaWrapperHost(hostname) {
     const host = String(hostname || '').toLowerCase();
     if (!host) return false;
     if (/^(?:www\.)?(?:pixhost\.to|postimages\.org|postimg\.cc|imagebam\.com|imgvb\.com|ibb\.co|imgbox\.com|imagevenue\.com|imgchest\.com|turboimagehost\.com|imx\.to|vipr\.im|pixeldrain\.com|cyberfile\.me|jpg\.pet|gofile\.io|img\.kiwi)$/.test(host)) return true;
-    if (/^(?:www\.)?bunkr\.(?:si|ru|is|ph)$/.test(host)) return true;
+    if (isBunkrHost(host)) return true;
     return false;
+  } catch (e) {
+    return false;
+  }
+}
+
+function isBunkrHost(hostname) {
+  try {
+    const host = String(hostname || '').toLowerCase().replace(/^www\./, '');
+    return /^bunkr\.(?:cr|si|ru|is|ph|su|site|red)$/.test(host);
   } catch (e) {
     return false;
   }
@@ -10248,6 +10332,79 @@ function extractDirectMediaCandidates(html, baseUrl) {
   }
 }
 
+function decryptBunkrVideoUrl(payload) {
+  try {
+    if (!payload || typeof payload !== 'object') return '';
+    const encryptedUrl = String(payload.url || '').trim();
+    const timestamp = Number(payload.timestamp || 0);
+    if (!encryptedUrl || !Number.isFinite(timestamp) || timestamp <= 0) return encryptedUrl;
+    if (payload.encrypted !== true) return encryptedUrl;
+    const key = Buffer.from(`SECRET_KEY_${Math.floor(timestamp / 3600)}`);
+    const bytes = Buffer.from(encryptedUrl, 'base64');
+    const out = Buffer.alloc(bytes.length);
+    for (let i = 0; i < bytes.length; i++) out[i] = bytes[i] ^ key[i % key.length];
+    return out.toString('utf8').trim();
+  } catch (e) {
+    return '';
+  }
+}
+
+function extractBunkrSlug(html, pageUrl) {
+  try {
+    const h = String(html || '');
+    let m = h.match(/\bjsSlug\s*=\s*["']([^"']+)["']/i);
+    if (m && m[1]) return String(m[1]).trim();
+    m = h.match(/\/api\/vs[\s\S]{0,500}slug["']?\s*[:=]\s*["']([^"']+)["']/i);
+    if (m && m[1]) return String(m[1]).trim();
+    const u = new URL(String(pageUrl || ''));
+    m = String(u.pathname || '').match(/\/f\/([^/?#]+)/i);
+    if (m && m[1]) return decodeURIComponent(m[1]).trim();
+    return '';
+  } catch (e) {
+    return '';
+  }
+}
+
+async function resolveBunkrDirectMediaUrl(pageUrl, html, timeoutMs = 15000, referer = '') {
+  try {
+    const input = String(pageUrl || '').trim();
+    if (!input) return '';
+    const page = new URL(input);
+    if (!isBunkrHost(page.hostname)) return '';
+
+    const slug = extractBunkrSlug(html, input);
+    if (!slug) return '';
+
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => {
+      try { ctrl.abort(); } catch (e) { }
+    }, Math.max(1000, timeoutMs));
+    try {
+      const res = await fetch(new URL('/api/vs', page.origin).toString(), {
+        method: 'POST',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+          'Accept': 'application/json, text/plain, */*',
+          'Content-Type': 'application/json',
+          'Referer': referer || input,
+          'Origin': page.origin
+        },
+        body: JSON.stringify({ slug }),
+        signal: ctrl.signal
+      });
+      if (!res.ok) return '';
+      const json = await res.json();
+      const direct = decryptBunkrVideoUrl(json);
+      if (direct && looksLikeDirectFileUrl(direct)) return direct;
+      return '';
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch (e) {
+    return '';
+  }
+}
+
 async function resolveHtmlWrapperToDirectMediaUrl(url, timeoutMs = 15000, referer = '') {
   try {
     const u0 = String(url || '').trim();
@@ -10257,6 +10414,8 @@ async function resolveHtmlWrapperToDirectMediaUrl(url, timeoutMs = 15000, refere
     if (r.contentType && r.contentType.toLowerCase().startsWith('image/')) return upgradeKnownLowQualityMediaUrl(String(r.finalUrl || u0));
     if (r.contentType && r.contentType.toLowerCase().startsWith('video/')) return upgradeKnownLowQualityMediaUrl(String(r.finalUrl || u0));
     if (!r.text) return '';
+    const bunkr = await resolveBunkrDirectMediaUrl(r.finalUrl || u0, r.text, timeoutMs, referer);
+    if (bunkr) return bunkr;
     const candidates = extractDirectMediaCandidates(r.text, u0);
     if (candidates && candidates.length) return candidates[0];
     const og = upgradeKnownLowQualityMediaUrl(extractOpenGraphMediaUrl(r.text, u0));
@@ -10383,6 +10542,38 @@ function resolveDirectDownloadFilename(url, fallback, rawHeaders) {
   }
   const safe = sanitizeName(filename || '');
   return safe || fallback;
+}
+
+function directDownloadLooksLikeHtml(filepath, rawHeaders) {
+  const headers = parseLastHttpHeaders(rawHeaders);
+  const contentType = String(headers['content-type'] || '').toLowerCase();
+  if (/\b(?:text\/html|application\/xhtml\+xml)\b/.test(contentType)) return true;
+  try {
+    if (!filepath || !fs.existsSync(filepath)) return false;
+    const fd = fs.openSync(filepath, 'r');
+    try {
+      const buf = Buffer.alloc(512);
+      const n = fs.readSync(fd, buf, 0, buf.length, 0);
+      const head = buf.slice(0, n).toString('utf8').trimStart().toLowerCase();
+      return head.startsWith('<!doctype html') || head.startsWith('<html') || head.includes('<title>keep2share</title>');
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (e) {
+    return false;
+  }
+}
+
+function rejectInvalidDirectDownload(url, filepath, filename, rawHeaders) {
+  const ext = String(path.extname(filename || filepath || '') || '').toLowerCase();
+  const isExpectedMedia = IMPORTABLE_VIDEO_EXTS.has(ext) || isImagePath(filename || filepath || '');
+  const isKeep2Share = /(?:keep2share\.cc|k2s\.cc)/i.test(String(url || ''));
+  if ((isExpectedMedia || isKeep2Share) && directDownloadLooksLikeHtml(filepath, rawHeaders)) {
+    return isKeep2Share
+      ? 'Keep2Share gaf een HTML/login-pagina terug in plaats van het videobestand'
+      : 'Directe download gaf HTML terug in plaats van media';
+  }
+  return '';
 }
 
 async function startDirectFileDownload(downloadId, url, platform, channel, title, metadata) {
@@ -10549,6 +10740,12 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
         if (code === 0 && fs.existsSync(tmpFilepath)) {
           const rawHeaders = fs.existsSync(headerFilepath) ? fs.readFileSync(headerFilepath, 'utf8') : '';
           const filename = resolveDirectDownloadFilename(url, provisionalFilename, rawHeaders);
+          const invalidReason = rejectInvalidDirectDownload(url, tmpFilepath, filename, rawHeaders);
+          if (invalidReason) {
+            try { fs.rmSync(tmpFilepath, { force: true }); } catch (e) { }
+            await updateDownloadStatus.run('error', 0, invalidReason, downloadId);
+            return;
+          }
           const filepath = uniqueFilePath(path.join(dir, filename), downloadId);
           try {
             if (fs.existsSync(filepath)) {
@@ -11783,11 +11980,12 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
         }
 
         if (!mainPath) {
-          const files = fs.readdirSync(dir).filter((f) =>
-            f.endsWith('.mp4') || f.endsWith('.mkv') || f.endsWith('.webm') ||
-            f.endsWith('.jpg') || f.endsWith('.jpeg') || f.endsWith('.png') ||
-            f.endsWith('.gif') || f.endsWith('.webp') || f.endsWith('.unknown_video')
-          );
+          const files = fs.readdirSync(dir).filter((f) => {
+            const ext = path.extname(String(f || '')).toLowerCase();
+            return IMPORTABLE_VIDEO_EXTS.has(ext) ||
+              IMPORTABLE_IMAGE_EXTS.has(ext) ||
+              String(f || '').endsWith('.unknown_video');
+          });
           files.sort((a, b) => {
             try {
               const statA = fs.statSync(path.join(dir, a));
@@ -11799,6 +11997,12 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
           });
           const mainFileGuess = files[0] || '';
           mainPath = mainFileGuess ? path.join(dir, mainFileGuess) : '';
+        }
+
+        if (!mainPath || !fs.existsSync(mainPath)) {
+          await updateDownloadStatus.run('error', 0, 'yt-dlp eindigde zonder importeerbaar mediabestand', downloadId);
+          console.log(`   ❌ Download mislukt: geen importeerbaar mediabestand gevonden in ${dir}`);
+          return;
         }
 
         if (mainPath && mainPath.endsWith('.unknown_video')) {

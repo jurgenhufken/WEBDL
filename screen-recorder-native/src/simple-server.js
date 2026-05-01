@@ -5368,16 +5368,34 @@ async function rehydrateDownloadQueue() {
 let activeRecordings = new Map();
 Object.defineProperty(global, 'isRecording', { get: () => activeRecordings.size > 0 });
 
+function cleanupOrphanedRecordingProcesses(reason = 'periodic') {
+  const { execSync } = require('child_process');
+  const activePids = new Set(
+    Array.from(activeRecordings.values())
+      .map((session) => session && session.recordingProcess && session.recordingProcess.pid)
+      .filter(Boolean)
+      .map(String)
+  );
+  const pids = execSync("pgrep -f 'ffmpeg.*avfoundation.*recording_' 2>/dev/null || true", { encoding: 'utf8' }).trim().split('\n').filter(Boolean);
+  const killed = [];
+  for (const pid of pids) {
+    if (activePids.has(String(pid))) continue;
+    try { process.kill(Number(pid), 'SIGKILL'); } catch (e) {}
+    killed.push(pid);
+  }
+  if (killed.length > 0) console.log(`[recording] Killed ${killed.length} orphaned ffmpeg recording process(es) (${reason})`);
+}
+
 // Kill orphaned ffmpeg avfoundation recording processes from previous server runs.
 // These zombies block new recordings from capturing the screen.
 try {
-  const { execSync } = require('child_process');
-  const pids = execSync("pgrep -f 'ffmpeg.*avfoundation.*recording_' 2>/dev/null || true", { encoding: 'utf8' }).trim().split('\n').filter(Boolean);
-  for (const pid of pids) {
-    try { process.kill(Number(pid), 'SIGKILL'); } catch (e) {}
-  }
-  if (pids.length > 0) console.log(`[startup] Killed ${pids.length} orphaned ffmpeg recording process(es)`);
+  cleanupOrphanedRecordingProcesses('startup');
 } catch (e) {}
+
+const recordingOrphanCleanupTimer = setInterval(() => {
+  try { cleanupOrphanedRecordingProcesses('periodic'); } catch (e) {}
+}, 60000);
+if (typeof recordingOrphanCleanupTimer.unref === 'function') recordingOrphanCleanupTimer.unref();
 
 let avfoundationDeviceListCache = null;
 

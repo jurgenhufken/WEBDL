@@ -9,7 +9,7 @@
  echo "---------------------------------------------"
  echo ""
  
- function check_port_and_kill() {
+function check_port_and_kill() {
      local PORT=$1
      echo "Controleren of poort $PORT al in gebruik is..."
      local PORTPROC=$(lsof -ti:$PORT)
@@ -35,10 +35,74 @@
          echo "Poort $PORT is vrij"
      fi
      echo ""
- }
- check_port_and_kill 35729
- check_port_and_kill 35730
- check_port_and_kill 35731
+}
+
+function postgres_ready() {
+    local PG_ISREADY
+    PG_ISREADY="$(command -v pg_isready 2>/dev/null || true)"
+    if [ -z "$PG_ISREADY" ] && [ -x "/opt/homebrew/opt/postgresql@16/bin/pg_isready" ]; then
+        PG_ISREADY="/opt/homebrew/opt/postgresql@16/bin/pg_isready"
+    fi
+    if [ -z "$PG_ISREADY" ]; then
+        return 1
+    fi
+    "$PG_ISREADY" -h localhost -p 5432 >/dev/null 2>&1
+}
+
+function ensure_postgres_running() {
+    if [ "${WEBDL_DB_ENGINE}" != "postgres" ] && [ "${WEBDL_DB_ENGINE}" != "pg" ]; then
+        return 0
+    fi
+
+    echo "PostgreSQL controleren..."
+    if postgres_ready; then
+        echo "PostgreSQL draait"
+        echo ""
+        return 0
+    fi
+
+    echo "PostgreSQL reageert niet op localhost:5432"
+
+    local DATA_DIR="${WEBDL_POSTGRES_DATA_DIR:-/opt/homebrew/var/postgresql@16}"
+    local PID_FILE="$DATA_DIR/postmaster.pid"
+    if [ -f "$PID_FILE" ]; then
+        local PID
+        PID="$(sed -n '1p' "$PID_FILE" 2>/dev/null || true)"
+        if [ ! -z "$PID" ] && ! ps -p "$PID" -o args= 2>/dev/null | grep -Eiq 'postgres|postmaster'; then
+            local BACKUP="$PID_FILE.stale.$(date +%Y%m%d%H%M%S)"
+            echo "Stale PostgreSQL lock gevonden voor PID $PID; verplaatsen naar $(basename "$BACKUP")"
+            mv "$PID_FILE" "$BACKUP"
+        fi
+    fi
+
+    if command -v brew >/dev/null 2>&1; then
+        echo "PostgreSQL starten via Homebrew..."
+        brew services start postgresql@16 >/dev/null 2>&1 || brew services restart postgresql@16 >/dev/null 2>&1 || true
+    elif [ -x "/opt/homebrew/opt/postgresql@16/bin/pg_ctl" ]; then
+        echo "PostgreSQL starten via pg_ctl..."
+        /opt/homebrew/opt/postgresql@16/bin/pg_ctl -D "$DATA_DIR" -l /opt/homebrew/var/log/postgresql@16.log start >/dev/null 2>&1 || true
+    fi
+
+    for i in {1..30}; do
+        if postgres_ready; then
+            echo "PostgreSQL draait"
+            echo ""
+            return 0
+        fi
+        sleep 0.5
+    done
+
+    echo "FOUT: PostgreSQL kon niet worden gestart. Controleer Homebrew PostgreSQL met:"
+    echo "  brew services restart postgresql@16"
+    echo ""
+    echo "Druk op een toets om dit venster te sluiten"
+    read -n 1
+    exit 1
+}
+
+check_port_and_kill 35729
+check_port_and_kill 35730
+check_port_and_kill 35731
  
  # Navigeer naar de applicatie directory
  cd screen-recorder-native
@@ -195,6 +259,8 @@
  export WEBDL_FINALCUT_OUTPUT
  export WEBDL_VERBOSE_LOG
  export WEBDL_SCAN_EXISTING_TAGS=0
+
+ensure_postgres_running
  
  (sleep 1; open "$HOME/Downloads/WEBDL") >/dev/null 2>&1 &
  (sleep 4; open "http://localhost:35729/addon/firefox-debug-controller.xpi?t=$(date +%s)") >/dev/null 2>&1 &

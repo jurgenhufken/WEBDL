@@ -27,6 +27,69 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 const BASE_DIR = process.env.WEBDL_BASE_DIR || '/Users/jurgen/Downloads/WEBDL';
+
+function uniqueExistingDirs(paths) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of paths) {
+    const p = String(raw || '').trim();
+    if (!p) continue;
+    const resolved = path.resolve(p);
+    let real = resolved;
+    try { real = fs.realpathSync(resolved); } catch (_) {}
+    const key = real;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(resolved);
+  }
+  return out;
+}
+
+function discoverVolumeMediaRoots() {
+  try {
+    return fs.readdirSync('/Volumes', { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => path.join('/Volumes', entry.name, 'WEBDL'))
+      .filter((root) => {
+        try { return fs.statSync(root).isDirectory(); } catch (_) { return false; }
+      });
+  } catch (_) {
+    return [];
+  }
+}
+
+function parseConfiguredMediaRoots() {
+  const raw = [
+    process.env.WEBDL_MEDIA_ROOTS,
+    process.env.WEBDL_EXTRA_MEDIA_ROOTS,
+    process.env.WEBDL_ALLOWED_MEDIA_ROOTS,
+  ].filter(Boolean).join(';');
+  return raw.split(/[;\n]/).map((p) => p.trim()).filter(Boolean);
+}
+
+const MEDIA_ROOTS = uniqueExistingDirs([
+  BASE_DIR,
+  ...parseConfiguredMediaRoots(),
+  ...discoverVolumeMediaRoots(),
+]);
+
+function resolveRelativeMediaPath(relPath) {
+  for (const root of MEDIA_ROOTS) {
+    const candidate = path.resolve(root, relPath);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return path.resolve(BASE_DIR, relPath);
+}
+
+function relativeToMediaRoot(filePath) {
+  const abs = path.resolve(filePath);
+  for (const root of MEDIA_ROOTS) {
+    const rel = path.relative(root, abs);
+    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) return rel;
+  }
+  return path.relative(BASE_DIR, abs);
+}
+
 const RG_BIN = process.env.RG_BIN || (fs.existsSync('/Applications/Codex.app/Contents/Resources/rg') ? '/Applications/Codex.app/Contents/Resources/rg' : 'rg');
 const VIDEO_EXTS = ['mp4','webm','mkv','mov','m4v','avi','flv','ts'];
 const IMAGE_EXTS = ['jpg','jpeg','png','gif','webp','avif','bmp'];
@@ -308,7 +371,7 @@ function findSiblingImageFallbackSync(filePath) {
 }
 
 function parseRecordingFile(filePath, stat) {
-  const rel = path.relative(BASE_DIR, filePath);
+  const rel = relativeToMediaRoot(filePath);
   const parts = rel.split(path.sep).filter(Boolean);
   const platform = parts[0] || platformFromUrl(filePath) || 'recording';
   const channel = parts[1] || '';
@@ -335,10 +398,13 @@ function parseRecordingFile(filePath, stat) {
 }
 
 async function listRecentRawRecordings(limit = 20) {
-  const root = path.join(BASE_DIR, 'tiktok');
+  const roots = MEDIA_ROOTS.map((root) => path.join(root, 'tiktok')).filter((root, index, arr) => {
+    if (arr.indexOf(root) !== index) return false;
+    try { return fs.statSync(root).isDirectory(); } catch (_) { return false; }
+  });
   const cutoff = Date.now() - 8 * 60 * 1000;
   const files = [];
-  await new Promise((resolve) => {
+  await Promise.all(roots.map((root) => new Promise((resolve) => {
     let buffer = '';
     let settled = false;
     const child = spawn(RG_BIN, ['--files', root], { stdio: ['ignore', 'pipe', 'ignore'] });
@@ -372,7 +438,7 @@ async function listRecentRawRecordings(limit = 20) {
       }
       done();
     });
-  });
+  })));
   files.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
   const recent = files.slice(0, limit);
   if (!recent.length) return [];
@@ -642,7 +708,7 @@ async function resolveMediaPath(idRaw) {
     if (!rows.length || !rows[0].relpath) return null;
     const rel = rows[0].relpath;
     if (path.isAbsolute(rel)) return rel;
-    const resolved = path.resolve(BASE_DIR, rel);
+    const resolved = resolveRelativeMediaPath(rel);
     if (fs.existsSync(resolved)) return resolved;
     const userPathMatch = String(rel).match(/(?:^|\/)(Users\/.+)$/);
     if (userPathMatch) {
