@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WEBDL Gallery</title>
-<link rel="stylesheet" href="/styles.css?v=20260501-10">
+<link rel="stylesheet" href="/styles.css?v=20260501-12">
 </head>
 <body>
   <header class="topbar">
@@ -103,7 +103,7 @@
           </div>
         </div>
 
-        <!-- Midden: rating + afspeelknoppen -->
+        <!-- Midden: rating -->
         <div class="vtop-center">
           <div class="vtop-rating" id="vNowRating"></div>
           <select id="vRatingSelect" class="vtop-select" title="Rating instellen">
@@ -119,27 +119,22 @@
             <option value="4.5">4.5</option>
             <option value="5">5</option>
           </select>
-          <button id="vSlideshow2" class="vtop-btn" title="Diashow starten/stoppen (spatiebalk)">▶ Dia</button>
-          <button id="vRandom2" class="vtop-btn" title="Willekeurige volgorde aan/uit">🔀 Rand</button>
-          <label class="vtop-ctrl" title="Zoom"><span>Zoom</span> <input id="vZoomRange" type="range" min="100" max="600" step="10" value="100"></label>
-          <button id="vZoomReset" class="vtop-btn" title="Zoom resetten">Reset</button>
         </div>
 
-        <!-- Rechts: media-controls + tools -->
+        <!-- Rechts: tools -->
         <div class="vtop-right">
           <label class="vtop-ctrl" title="Volume"><span>Vol</span> <input id="vVol" type="range" min="0" max="1" step="0.01" value="0.8"></label>
           <button id="vBtnMute" class="vtop-btn" title="Geluid dempen (M)">🔊</button>
-          <div class="vbottom-controls hidden" id="vBottomControls" aria-label="Video bediening">
-            <button id="vBtnPlayPause" class="vplay-btn" title="Afspelen/pauzeren (spatie)">▶</button>
-            <div class="vtime-label" id="vTimeLabel">0:00 / 0:00</div>
-          </div>
-          <label class="vtop-ctrl" title="Positie in video"><span>Tijd</span> <input id="vSeek" type="range" min="0" max="1000" step="1" value="0"></label>
           <span class="vtop-sep"></span>
           <button id="vBtnOpen" class="vtop-btn" title="Bron-URL openen in browser">🔗 Bron</button>
           <button id="vBtnFinder" class="vtop-btn" title="Bestand tonen in Finder">📁 Finder</button>
           <button id="vBtnTags" class="vtop-btn" title="Tags beheren">🏷 Tags</button>
           <button id="vBtnLog" class="vtop-btn" title="Activiteitenlog tonen (L)">📋 Log</button>
           <button id="vBtnTheme" class="vtop-btn" title="Thema wisselen">💎</button>
+          <input id="vZoomRange" class="vzoom-hidden" type="range" min="100" max="600" step="10" value="100" aria-hidden="true" tabindex="-1">
+          <button id="vZoomReset" class="vzoom-hidden" aria-hidden="true" tabindex="-1">Reset</button>
+          <button id="vSlideshow2" class="vzoom-hidden" aria-hidden="true" tabindex="-1">▶ Dia</button>
+          <button id="vRandom2" class="vzoom-hidden" aria-hidden="true" tabindex="-1">🔀 Rand</button>
           <button id="vClose" class="vtop-close" title="Viewer sluiten (Esc)">✕</button>
         </div>
       </div>
@@ -151,6 +146,11 @@
         <div class="vprogressbar" id="vProgressBar">
           <div class="vprogressbar-fill" id="vProgressFill"></div>
           <div class="vprogressbar-handle" id="vProgressHandle"></div>
+        </div>
+        <div class="vbottom-controls hidden" id="vBottomControls" aria-label="Video bediening">
+          <button id="vBtnPlayPause" class="vplay-btn" title="Afspelen/pauzeren (spatie)">▶</button>
+          <div class="vtime-label" id="vTimeLabel">0:00 / 0:00</div>
+          <input id="vSeek" class="vbottom-seek" type="range" min="0" max="1000" step="1" value="0" title="Positie in video">
         </div>
         <button class="viewer-nav prev" id="vPrev" title="Vorige (←)">‹</button>
         <button class="viewer-nav next" id="vNext" title="Volgende (→)">›</button>
@@ -171,6 +171,10 @@
           <div class="tag-label">Op dit item</div>
           <div id="vTagCurrent" class="tag-current"></div>
         </div>
+        <div class="tag-quick-wrap">
+          <div class="tag-label">Meest gebruikt</div>
+          <div id="vTagQuick" class="tag-quick"></div>
+        </div>
         <div class="tag-search">
           <input id="vTagSearch" type="search" placeholder="Zoek bestaande tags...">
         </div>
@@ -190,8 +194,8 @@
 
   </div><!-- /viewer -->
 
-  <script src="/app.js?v=20260501-10"></script>
-  <script src="/viewer.js?v=20260501-10"></script>
+  <script src="/app.js?v=20260501-12"></script>
+  <script src="/viewer.js?v=20260501-12"></script>
   <script>
   // ─── Thema switcher ─────────────────────────────────────────────────────
   (function() {

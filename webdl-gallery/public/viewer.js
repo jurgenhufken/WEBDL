@@ -95,7 +95,7 @@
       'vStage','vContent','vPrev','vNext','vHudLeft','vHudRight',
       'vProgressBar','vProgressFill','vProgressHandle',
       'vBottomControls','vBtnPlayPause','vTimeLabel',
-      'vTagDialog','vTagCurrent','vTagSearch','vTagList','vNewTagInput','vBtnAddTag','vBtnCloseTagDialog',
+      'vTagDialog','vTagCurrent','vTagQuick','vTagSearch','vTagList','vNewTagInput','vBtnAddTag','vBtnCloseTagDialog',
       'vLogPanel','vLogBody',
     ];
     for (const id of ids) {
@@ -164,7 +164,6 @@
       mediaEl.src = `/media/${it.id}`;
       mediaEl.poster = `/thumb/${it.id}`;   // thumbnail terwijl video laadt
       mediaEl.autoplay = true;
-      mediaEl.controls = true;
       mediaEl.playsinline = true;
       mediaEl.muted = true;                  // altijd muted starten (browser autoplay policy)
       mediaEl.volume = vs.vol;
@@ -694,6 +693,42 @@
     }
 
     const q = (el.vTagSearch?.value || '').trim().toLowerCase();
+    const quickTags = vs.availableTags
+      .filter(t => !currentIds.has(Number(t.id)))
+      .filter(t => Number(t.uses || 0) > 0)
+      .sort((a, b) => Number(b.uses || 0) - Number(a.uses || 0) || safeText(a.name).localeCompare(safeText(b.name)))
+      .slice(0, 14);
+
+    if (el.vTagQuick) {
+      el.vTagQuick.innerHTML = '';
+      if (!quickTags.length) {
+        const empty = document.createElement('span');
+        empty.className = 'tag-empty';
+        empty.textContent = 'Nog geen veelgebruikte tags';
+        el.vTagQuick.appendChild(empty);
+      } else {
+        for (const t of quickTags) {
+          const chip = document.createElement('button');
+          chip.type = 'button';
+          chip.className = 'tag-chip tag-chip-quick';
+          chip.title = `${Number(t.uses || 0)}× gebruikt`;
+          chip.textContent = `#${safeText(t.name)}`;
+          chip.addEventListener('click', async () => {
+            try {
+              await api(`/api/items/${itemId}/tags`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ tag_id: t.id }),
+              });
+              await loadItemTags(itemId);
+              renderTagDialog();
+            } catch (err) { log('Tag fout: ' + err.message); }
+          });
+          el.vTagQuick.appendChild(chip);
+        }
+      }
+    }
+
     const candidates = vs.availableTags
       .filter(t => !currentIds.has(Number(t.id)))
       .filter(t => !q || safeText(t.name).toLowerCase().includes(q))
@@ -1308,6 +1343,9 @@
     // Tags dialog
     el.vBtnTags.addEventListener('click', (e) => { e.stopPropagation(); openTagDialog(); });
     el.vBtnCloseTagDialog.addEventListener('click', closeTagDialog);
+    el.vTagDialog.addEventListener('click', (e) => {
+      if (e.target === el.vTagDialog) closeTagDialog();
+    });
     if (el.vTagSearch) el.vTagSearch.addEventListener('input', renderTagDialog);
 
     el.vBtnAddTag.addEventListener('click', async () => {
