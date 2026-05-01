@@ -7,7 +7,7 @@ const config = require('../config');
 const VALID_SCHEMA = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 
 // Lane classifier: bepaalt concurrency-bucket.
-//  - 'process-video': video + ffmpeg merge (YouTube, Vimeo, Twitch, TikTok, Reddit video),
+//  - 'process-video': video + ffmpeg merge / zware sessie-adapters,
 //    max 1 tegelijk wegens zware CPU (ffmpeg-merge + transcodes)
 //  - 'video':         directe video download zonder merge, max 2 tegelijk
 //  - 'image':         images/attachments, max 6 tegelijk (netwerk-bound)
@@ -39,7 +39,8 @@ function classifyLane(url, adapter) {
     return 'video';
   }
   if (DIRECT_VIDEO_RE.test(u)) return 'video';
-  // yt-dlp met merge-hosts → process-video
+  // Alleen bekende merge-/sessie-zware hosts blokkeren de zware lane.
+  // Andere yt-dlp hosts (zoals directe tube sites) mogen parallel in video.
   if (adapter === 'ytdlp') {
     try {
       const parsed = new URL(url);
@@ -48,7 +49,7 @@ function classifyLane(url, adapter) {
         return 'process-video';
       }
     } catch (_) {}
-    return 'process-video';
+    return 'video';
   }
   return 'video';
 }

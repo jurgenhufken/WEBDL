@@ -94,6 +94,27 @@ async function readInfoJson(workdir) {
   return null;
 }
 
+async function readInfoJsonForMedia(mediaPath, fallbackInfo = null) {
+  try {
+    const dir = path.dirname(mediaPath);
+    const ext = path.extname(mediaPath);
+    const exact = path.join(dir, `${path.basename(mediaPath, ext)}.info.json`);
+    if (fsSync.existsSync(exact)) {
+      const raw = await fs.readFile(exact, 'utf8');
+      const data = JSON.parse(raw);
+      return {
+        channel: data.channel || data.uploader || data.uploader_id || data.playlist_title || '',
+        title: data.fulltitle || data.title || '',
+        sourceUrl: data.webpage_url || data.original_url || data.url || '',
+        platform: data.extractor_key ? data.extractor_key.toLowerCase() : '',
+        duration: data.duration_string || (Number.isFinite(Number(data.duration)) ? String(Math.round(Number(data.duration))) : null),
+        sourcePublishedAt: getYtdlpSourceTimestamp(data),
+      };
+    }
+  } catch {}
+  return fallbackInfo;
+}
+
 function getYtdlpSourceTimestamp(info) {
   try {
     if (!info || typeof info !== 'object') return null;
@@ -147,10 +168,6 @@ async function syncToGallery(job, outputFiles, logger) {
   const workdir = path.dirname(outputFiles[0]?.path || '');
   const info = await readInfoJson(workdir);
 
-  const channel = info?.channel || (job.options?.playlistTitle) || '';
-  const infoPlatform = String(info?.platform || '').toLowerCase();
-  const realPlatform = infoPlatform && infoPlatform !== 'generic' ? infoPlatform : platform;
-
   try {
     for (const f of outputFiles) {
       const ext = path.extname(f.path).toLowerCase();
@@ -161,8 +178,12 @@ async function syncToGallery(job, outputFiles, logger) {
       if (/_thumb(_v\d+)?\.(jpe?g|png|webp)$/i.test(path.basename(f.path))) continue;
       if (SKIP_EXTS.has(ext)) continue;
 
-      const title = path.basename(f.path, ext).replace(/_/g, ' ').trim();
-      const sourceUrl = info?.sourceUrl || job.url;
+      const fileInfo = await readInfoJsonForMedia(f.path, info);
+      const channel = fileInfo?.channel || (job.options?.playlistTitle) || '';
+      const infoPlatform = String(fileInfo?.platform || '').toLowerCase();
+      const realPlatform = infoPlatform && infoPlatform !== 'generic' ? infoPlatform : platform;
+      const title = fileInfo?.title || path.basename(f.path, ext).replace(/_/g, ' ').trim();
+      const sourceUrl = fileInfo?.sourceUrl || job.url;
 
       // Check for duplicate by filepath
       const existing = await galleryPool.query(
@@ -181,13 +202,16 @@ async function syncToGallery(job, outputFiles, logger) {
       }
 
       const stat = fsSync.statSync(f.path);
-      const galleryTimestamp = info?.sourcePublishedAt || stat.mtime.toISOString();
+      // Gallery "recent" means imported/downloaded recently, not the original
+      // publish date of a TikTok/YouTube post. Keep the source date only as
+      // metadata so newly completed downloads actually surface at the top.
+      const importedAt = new Date().toISOString();
       await galleryPool.query(
         `INSERT INTO downloads
           (url, platform, channel, title, filename, filepath, filesize, format,
            status, progress, metadata, source_url, duration, created_at, updated_at, finished_at, is_thumb_ready)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-                 'completed', 100, $9::jsonb, $10, $11, $12::timestamp, $12::timestamp, $12::timestamp, $13)
+                 'completed', 100, $9::jsonb, $10, $11, $12::timestamptz, $12::timestamptz, $12::timestamptz, $13)
          ON CONFLICT DO NOTHING`,
         [
           sourceUrl,
@@ -198,10 +222,10 @@ async function syncToGallery(job, outputFiles, logger) {
           f.path,
           stat.size,
           ext.replace('.', ''),
-          JSON.stringify({ hub_job_id: job.id, adapter: job.adapter }),
+          JSON.stringify({ hub_job_id: job.id, adapter: job.adapter, source_published_at: fileInfo?.sourcePublishedAt || null }),
           sourceUrl,
-          info?.duration || null,
-          galleryTimestamp,
+          fileInfo?.duration || null,
+          importedAt,
           f._thumbPath ? true : false,
         ],
       );
@@ -234,9 +258,13 @@ function startWorkerPool({
     try {
       const { rows: doneRows } = await repo.pool.query(
         `UPDATE ${repo.schema}.jobs
-            SET status='done', finished_at=now(),
-                locked_by=NULL, locked_at=NULL
-          WHERE status='running' AND progress_pct >= 100
+            SET status='queued',
+                locked_by=NULL, locked_at=NULL, started_at=NULL
+          WHERE status='running'
+            AND adapter <> 'slave-delegate'
+            AND progress_pct >= 100
+            AND error IS NULL
+            AND (locked_at IS NULL OR locked_at < NOW() - INTERVAL '10 minutes')
         RETURNING id`,
       );
       const { rows: failedRows } = await repo.pool.query(
@@ -263,7 +291,7 @@ function startWorkerPool({
       );
       if (doneRows.length || failedRows.length || requeuedRows.length) {
         logger.info('worker.startup.reclaim', {
-          markedDone: doneRows.map((r) => r.id),
+          requeuedCompleteProgress: doneRows.map((r) => r.id),
           markedFailed: failedRows.map((r) => r.id),
           requeued: requeuedRows.map((r) => r.id),
         });

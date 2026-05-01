@@ -79,10 +79,11 @@ async function expandAndEnqueue({ repo, queue, adapters, url, priority, options,
           expandIndex: i + 1,
           expandTotal: entries.length,
           videoTitle: entry.title || undefined,
+          thumbnail: entry.thumbnail || undefined,
         },
         maxAttempts,
       });
-      jobs.push({ id: job.id, url: entry.url, title: entry.title });
+      jobs.push({ id: job.id, url: entry.url, title: entry.title, thumbnail: entry.thumbnail || undefined });
       queued++;
     } catch (_e) {
       errors++;

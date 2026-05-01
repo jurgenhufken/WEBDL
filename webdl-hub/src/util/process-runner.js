@@ -26,11 +26,26 @@ function runProcess({ cmd, args = [], cwd, env, stdin = 'ignore', timeoutMs = 0,
   const ee = new EventEmitter();
   let timedOut = false;
   let idleTimedOut = false;
+  let forceKillTimer = null;
   const child = spawn(cmd, args, {
     cwd,
     env: env ? { ...process.env, ...env } : process.env,
     stdio: [stdin, 'pipe', 'pipe'],
+    detached: process.platform !== 'win32',
   });
+
+  function killChild(sig = 'SIGTERM') {
+    if (!child.pid) return;
+    try {
+      if (process.platform !== 'win32') process.kill(-child.pid, sig);
+      else child.kill(sig);
+    } catch (_) {
+      try { child.kill(sig); } catch (_) {}
+    }
+    if (sig === 'SIGTERM' && !forceKillTimer) {
+      forceKillTimer = setTimeout(() => killChild('SIGKILL'), 15_000);
+    }
+  }
 
   let idleTimer = null;
   function clearIdleTimer() {
@@ -42,7 +57,7 @@ function runProcess({ cmd, args = [], cwd, env, stdin = 'ignore', timeoutMs = 0,
     clearIdleTimer();
     idleTimer = setTimeout(() => {
       idleTimedOut = true;
-      try { child.kill('SIGTERM'); } catch (_) {}
+      killChild('SIGTERM');
     }, idleTimeoutMs);
   }
 
@@ -55,7 +70,7 @@ function runProcess({ cmd, args = [], cwd, env, stdin = 'ignore', timeoutMs = 0,
 
   const timeoutTimer = timeoutMs ? setTimeout(() => {
     timedOut = true;
-    try { child.kill('SIGTERM'); } catch (_) {}
+    killChild('SIGTERM');
   }, timeoutMs) : null;
 
   // No-op 'error' listener voorkomt dat een ontbrekende binary (ENOENT) of
@@ -67,6 +82,7 @@ function runProcess({ cmd, args = [], cwd, env, stdin = 'ignore', timeoutMs = 0,
     child.on('error', (err) => { ee.emit('error', err); reject(err); });
     child.on('close', (code, signal) => {
       if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
       clearIdleTimer();
       stdoutSplitter.flush();
       stderrSplitter.flush();
@@ -75,7 +91,7 @@ function runProcess({ cmd, args = [], cwd, env, stdin = 'ignore', timeoutMs = 0,
     });
   });
 
-  ee.kill = (sig = 'SIGTERM') => child.kill(sig);
+  ee.kill = (sig = 'SIGTERM') => killChild(sig);
   ee.pid = child.pid;
   ee.done = done;
   return ee;

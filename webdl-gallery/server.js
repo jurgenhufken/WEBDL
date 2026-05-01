@@ -5,6 +5,7 @@
 
 const path = require('node:path');
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const express = require('express');
 const { Pool } = require('pg');
@@ -32,7 +33,7 @@ const IMAGE_EXTS = ['jpg','jpeg','png','gif','webp','avif','bmp'];
 const MEDIA_EXTS = [...VIDEO_EXTS, ...IMAGE_EXTS];
 const AUX_RELPATH_RE = String.raw`(_thumb(_v[0-9]+)?\.(jpe?g|png|webp)$|_logo\.(jpe?g|png|webp)$|\.(json|part|tmp|ytdl)$)`;
 const MEDIA_EXT_SQL = MEDIA_EXTS.map(e => `'${e}'`).join(',');
-const ACTIVE_STATUSES = ['downloading', 'postprocessing'];
+const ACTIVE_STATUSES = ['pending', 'queued', 'downloading', 'postprocessing'];
 const HIDDEN_GALLERY_STATUSES = ['pending', 'queued', 'downloading', 'postprocessing'];
 const KEEP2SHARE_DIR = path.join(BASE_DIR, '_Keep2Share');
 const JDOWNLOADER_CFG_DIR = process.env.JDOWNLOADER_CFG_DIR || path.join(process.env.HOME || '/Users/jurgen', 'Library/Application Support/JDownloader 2/cfg');
@@ -43,6 +44,7 @@ const KEEP2SHARE_SYNC_MAX_ADDS = process.env.KEEP2SHARE_SYNC_MAX_ADDS
   : Number.POSITIVE_INFINITY;
 let keep2shareSyncRunning = false;
 const thumbInflight = new Map();
+const activeThumbPaths = new Map();
 
 function collectPartFiles(root, limit = 40) {
   return new Promise((resolve) => {
@@ -78,6 +80,9 @@ function collectPartFiles(root, limit = 40) {
 async function ensureSchema() {
   await pool.query('ALTER TABLE download_files ADD COLUMN IF NOT EXISTS rating double precision');
   await pool.query('ALTER TABLE tags ADD COLUMN IF NOT EXISTS is_user boolean NOT NULL DEFAULT false');
+  await pool.query('ALTER TABLE tags ADD COLUMN IF NOT EXISTS is_favorite boolean NOT NULL DEFAULT false');
+  await pool.query('ALTER TABLE tags ADD COLUMN IF NOT EXISTS user_use_count integer NOT NULL DEFAULT 0');
+  await pool.query('ALTER TABLE tags ADD COLUMN IF NOT EXISTS last_used_at timestamptz');
   await pool.query(`
     CREATE TABLE IF NOT EXISTS item_user_tags (
       download_id bigint NOT NULL,
@@ -89,6 +94,34 @@ async function ensureSchema() {
 
 function fileExt(filePath, format) {
   return format ? String(format).toLowerCase() : path.extname(filePath || '').replace('.', '').toLowerCase();
+}
+
+function platformFromUrl(url) {
+  const value = String(url || '').toLowerCase();
+  if (value.includes('tiktok.com')) return 'tiktok';
+  if (value.includes('youtube.com') || value.includes('youtu.be')) return 'youtube';
+  if (value.includes('instagram.com')) return 'instagram';
+  if (value.includes('reddit.com') || value.includes('redd.it')) return 'reddit';
+  if (value.includes('keep2share') || value.includes('k2s.cc')) return 'keep2share';
+  return '';
+}
+
+function thumbnailFromHubJob(row) {
+  const opts = row && row.options ? row.options : {};
+  const direct = String(opts.thumbnail || opts.thumbnail_url || opts.thumb_url || '').trim();
+  if (/^https?:\/\//i.test(direct)) return direct;
+  const rawUrl = String(opts.url || row.url || '').trim();
+  try {
+    const u = new URL(rawUrl);
+    const host = u.hostname.replace(/^www\./, '').toLowerCase();
+    const videoId = host === 'youtu.be'
+      ? u.pathname.split('/').filter(Boolean)[0]
+      : u.searchParams.get('v');
+    if ((host === 'youtube.com' || host === 'youtu.be' || host.endsWith('.youtube.com')) && videoId) {
+      return `https://i.ytimg.com/vi/${encodeURIComponent(videoId)}/hqdefault.jpg`;
+    }
+  } catch (_) {}
+  return '';
 }
 
 function mapItem(row) {
@@ -157,6 +190,10 @@ function isVideoFile(filePath) {
   return VIDEO_EXTS.includes(path.extname(filePath || '').replace('.', '').toLowerCase());
 }
 
+function isImageFile(filePath) {
+  return IMAGE_EXTS.includes(path.extname(filePath || '').replace('.', '').toLowerCase());
+}
+
 function thumbPathForMedia(filePath) {
   const dir = path.dirname(filePath);
   const base = path.basename(filePath, path.extname(filePath));
@@ -203,6 +240,147 @@ async function generateVideoThumb(filePath) {
   })().finally(() => thumbInflight.delete(filePath));
   thumbInflight.set(filePath, job);
   return job;
+}
+
+async function findSiblingImageFallback(filePath) {
+  const dir = path.dirname(filePath || '');
+  let entries = [];
+  try {
+    entries = await fs.promises.readdir(dir, { withFileTypes: true });
+  } catch (_) {
+    return null;
+  }
+  const images = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || entry.name.startsWith('.')) continue;
+    if (!isImageFile(entry.name)) continue;
+    if (/_thumb(_v[0-9]+)?\.(jpe?g|png|webp)$/i.test(entry.name) || /_logo\.(jpe?g|png|webp)$/i.test(entry.name)) continue;
+    const candidate = path.join(dir, entry.name);
+    let stat = null;
+    try { stat = await fs.promises.stat(candidate); } catch (_) { continue; }
+    if (!stat.size) continue;
+    images.push({
+      file: candidate,
+      isScreenshot: /^screenshot_.*\.(jpe?g|png|webp)$/i.test(entry.name),
+      mtimeMs: stat.mtimeMs,
+    });
+  }
+  images.sort((a, b) => {
+    if (a.isScreenshot !== b.isScreenshot) return a.isScreenshot ? -1 : 1;
+    return b.mtimeMs - a.mtimeMs;
+  });
+  return images[0]?.file || null;
+}
+
+function findSiblingImageFallbackSync(filePath) {
+  const dir = path.dirname(filePath || '');
+  let entries = [];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (_) { return null; }
+  const images = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || entry.name.startsWith('.')) continue;
+    if (!isImageFile(entry.name)) continue;
+    if (/_thumb(_v[0-9]+)?\.(jpe?g|png|webp)$/i.test(entry.name) || /_logo\.(jpe?g|png|webp)$/i.test(entry.name)) continue;
+    const candidate = path.join(dir, entry.name);
+    let stat = null;
+    try { stat = fs.statSync(candidate); } catch (_) { continue; }
+    if (!stat.size) continue;
+    images.push({
+      file: candidate,
+      isScreenshot: /^screenshot_.*\.(jpe?g|png|webp)$/i.test(entry.name),
+      mtimeMs: stat.mtimeMs,
+    });
+  }
+  images.sort((a, b) => {
+    if (a.isScreenshot !== b.isScreenshot) return a.isScreenshot ? -1 : 1;
+    return b.mtimeMs - a.mtimeMs;
+  });
+  return images[0]?.file || null;
+}
+
+function parseRecordingFile(filePath, stat) {
+  const rel = path.relative(BASE_DIR, filePath);
+  const parts = rel.split(path.sep).filter(Boolean);
+  const platform = parts[0] || platformFromUrl(filePath) || 'recording';
+  const channel = parts[1] || '';
+  const title = parts[2] || path.basename(filePath, path.extname(filePath));
+  const id = `recording-${crypto.createHash('sha1').update(filePath).digest('hex').slice(0, 20)}`;
+  const thumbPath = findSiblingImageFallbackSync(filePath);
+  if (thumbPath) activeThumbPaths.set(id, thumbPath);
+  return {
+    id,
+    source: 'recording',
+    status: 'recording',
+    platform,
+    channel,
+    title,
+    filename: path.basename(filePath),
+    filepath: filePath,
+    progress: 50,
+    filesize: stat.size,
+    updated_at: new Date(stat.mtimeMs).toISOString(),
+    created_at: new Date(stat.birthtimeMs || stat.mtimeMs).toISOString(),
+    type: 'video',
+    thumb_url: thumbPath ? `/active-thumb/${encodeURIComponent(id)}` : '',
+  };
+}
+
+async function listRecentRawRecordings(limit = 20) {
+  const root = path.join(BASE_DIR, 'tiktok');
+  const cutoff = Date.now() - 8 * 60 * 1000;
+  const files = [];
+  await new Promise((resolve) => {
+    let buffer = '';
+    let settled = false;
+    const child = spawn(RG_BIN, ['--files', root], { stdio: ['ignore', 'pipe', 'ignore'] });
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { child.kill(); } catch (_) {}
+      resolve();
+    };
+    const timer = setTimeout(done, 5000);
+    child.stdout.on('data', (chunk) => {
+      buffer += String(chunk);
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        if (!/_raw\.mp4$/i.test(line)) continue;
+        let stat = null;
+        try { stat = fs.statSync(line); } catch (_) { continue; }
+        if (!stat.size || stat.mtimeMs < cutoff) continue;
+        files.push({ file: line, stat });
+      }
+    });
+    child.on('error', done);
+    child.on('close', () => {
+      if (buffer && /_raw\.mp4$/i.test(buffer)) {
+        try {
+          const stat = fs.statSync(buffer);
+          if (stat.size && stat.mtimeMs >= cutoff) files.push({ file: buffer, stat });
+        } catch (_) {}
+      }
+      done();
+    });
+  });
+  files.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
+  const recent = files.slice(0, limit);
+  if (!recent.length) return [];
+  const { rows } = await pool.query('SELECT filepath FROM downloads WHERE filepath = ANY($1::text[])', [recent.map((f) => f.file)]);
+  const known = new Set(rows.map((r) => r.filepath));
+  return recent.filter((f) => !known.has(f.file)).map((f) => parseRecordingFile(f.file, f.stat));
+}
+
+function markThumbReady(idRaw) {
+  const id = String(idRaw || '');
+  if (/^\d+$/.test(id)) {
+    pool.query('UPDATE downloads SET is_thumb_ready = true WHERE id = $1', [Number(id)]).catch(() => {});
+  } else if (id.startsWith('file-')) {
+    pool.query('UPDATE download_files SET is_thumb_ready = true WHERE id = $1', [Number(id.slice(5))]).catch(() => {});
+  } else if (id.startsWith('s-')) {
+    pool.query('UPDATE screenshots SET is_thumb_ready = true WHERE id = $1', [Number(id.slice(2))]).catch(() => {});
+  }
 }
 
 async function scanJDownloaderKeep2ShareParts(limit = 40) {
@@ -453,7 +631,21 @@ async function resolveMediaPath(idRaw) {
   if (fileMatch) {
     const { rows } = await pool.query('SELECT relpath FROM download_files WHERE id=$1', [fileMatch[1]]);
     if (!rows.length || !rows[0].relpath) return null;
-    return path.resolve(BASE_DIR, rows[0].relpath);
+    const rel = rows[0].relpath;
+    if (path.isAbsolute(rel)) return rel;
+    const resolved = path.resolve(BASE_DIR, rel);
+    if (fs.existsSync(resolved)) return resolved;
+    const userPathMatch = String(rel).match(/(?:^|\/)(Users\/.+)$/);
+    if (userPathMatch) {
+      const absoluteUserPath = path.join('/', userPathMatch[1]);
+      if (fs.existsSync(absoluteUserPath)) return absoluteUserPath;
+    }
+    return resolved;
+  }
+  const screenshotMatch = id.match(/^s-(\d+)$/);
+  if (screenshotMatch) {
+    const { rows } = await pool.query('SELECT filepath FROM screenshots WHERE id=$1', [screenshotMatch[1]]);
+    return rows.length ? rows[0].filepath : null;
   }
   const numericId = parseInt(id, 10);
   if (!Number.isFinite(numericId) || numericId <= 0) return null;
@@ -461,7 +653,7 @@ async function resolveMediaPath(idRaw) {
   return rows.length ? rows[0].filepath : null;
 }
 
-function buildItemFilters({ req, params, fileExpr, extExpr, ratingExpr }) {
+function buildItemFilters({ req, params, fileExpr, extExpr, ratingExpr, includeChannel = true }) {
   const platform = req.query.platform ? String(req.query.platform) : null;
   const channel = req.query.channel ? String(req.query.channel) : null;
   const q = req.query.q ? String(req.query.q).trim() : null;
@@ -471,7 +663,7 @@ function buildItemFilters({ req, params, fileExpr, extExpr, ratingExpr }) {
 
   const where = [`${fileExpr} IS NOT NULL`, `${fileExpr} <> ''`];
   if (platform) { params.push(platform); where.push(`d.platform = $${params.length}`); }
-  if (channel)  { params.push(channel);  where.push(`d.channel = $${params.length}`); }
+  if (includeChannel && channel) { params.push(channel); where.push(`d.channel = $${params.length}`); }
   if (q) {
     params.push('%' + q.toLowerCase() + '%');
     where.push(`(LOWER(COALESCE(d.title, d.filename, '')) LIKE $${params.length} OR LOWER(${fileExpr}) LIKE $${params.length})`);
@@ -487,6 +679,27 @@ function buildItemFilters({ req, params, fileExpr, extExpr, ratingExpr }) {
        WHERE iut.tag_id = $${params.length}
     )`);
   }
+  return where;
+}
+
+function buildScreenshotFilters({ req, params, includeChannel = true }) {
+  const platform = req.query.platform ? String(req.query.platform) : null;
+  const channel = req.query.channel ? String(req.query.channel) : null;
+  const q = req.query.q ? String(req.query.q).trim() : null;
+  const minRating = req.query.min_rating != null ? Number(req.query.min_rating) : null;
+  const mediaType = req.query.media_type ? String(req.query.media_type) : null;
+  const tagId = req.query.tag_id ? parseInt(req.query.tag_id, 10) : null;
+
+  const where = [`s.filepath IS NOT NULL`, `s.filepath <> ''`];
+  if (platform) { params.push(platform); where.push(`s.platform = $${params.length}`); }
+  if (includeChannel && channel) { params.push(channel); where.push(`s.channel = $${params.length}`); }
+  if (q) {
+    params.push('%' + q.toLowerCase() + '%');
+    where.push(`(LOWER(COALESCE(s.title, s.filename, '')) LIKE $${params.length} OR LOWER(s.filepath) LIKE $${params.length})`);
+  }
+  if (Number.isFinite(minRating)) { params.push(minRating); where.push(`s.rating >= $${params.length}`); }
+  if (mediaType === 'video') where.push('false');
+  if (Number.isFinite(tagId)) where.push('false');
   return where;
 }
 
@@ -510,9 +723,10 @@ app.get('/api/health', async (_req, res) => {
 
 app.get('/api/active-items', async (_req, res) => {
   try {
-    const { rows } = await pool.query(`
+    const [{ rows }, hub, hubCounts, recordings] = await Promise.all([
+      pool.query(`
       SELECT id::text, status, platform, channel, title, filename, filepath,
-             progress, filesize, updated_at, created_at
+             progress, filesize, is_thumb_ready, updated_at, created_at
         FROM downloads
        WHERE status = ANY($1)
          AND url NOT LIKE 'recording:%'
@@ -524,13 +738,73 @@ app.get('/api/active-items', async (_req, res) => {
          END,
          COALESCE(updated_at, created_at) DESC,
          id DESC
-       LIMIT 80`, [ACTIVE_STATUSES]);
+       LIMIT 80`, [ACTIVE_STATUSES]),
+      pool.query(`
+        SELECT id::text, status, adapter, url, progress_pct AS progress,
+               options, locked_at AS updated_at, created_at
+          FROM webdl.jobs
+         WHERE status IN ('queued', 'running')
+         ORDER BY
+           CASE status
+             WHEN 'running' THEN 0
+             WHEN 'queued' THEN 1
+             ELSE 9
+           END,
+           locked_at DESC NULLS LAST,
+           created_at DESC NULLS LAST,
+           id DESC
+         LIMIT 40`),
+      pool.query(`
+        SELECT status,
+               COALESCE(options->>'platform', platform_guess, adapter, 'hub') AS platform,
+               COUNT(*)::int AS count
+          FROM (
+            SELECT status, adapter, options,
+                   CASE
+                     WHEN url LIKE '%youtube.com%' OR url LIKE '%youtu.be%' THEN 'youtube'
+                     WHEN url LIKE '%tiktok.com%' THEN 'tiktok'
+                     WHEN url LIKE '%xvideos.com%' THEN 'xvideos'
+                     WHEN url LIKE '%onlyfans.com%' THEN 'onlyfans'
+                     ELSE NULL
+                   END AS platform_guess
+              FROM webdl.jobs
+             WHERE status IN ('queued', 'running')
+          ) q
+         GROUP BY status, COALESCE(options->>'platform', platform_guess, adapter, 'hub')
+         ORDER BY status, count DESC`),
+      listRecentRawRecordings(20),
+    ]);
     const dbItems = rows.map((r) => ({
       ...r,
       source: 'db',
       title: r.title || r.filename || r.filepath || `download ${r.id}`,
+      thumb_url: `/thumb/${encodeURIComponent(String(r.id))}?v=${r.is_thumb_ready ? '1' : '0'}`,
     }));
-    res.json({ items: dbItems, count: dbItems.length });
+    const hubItems = hub.rows.map((r) => ({
+      id: `hub-${r.id}`,
+      source: 'hub',
+      status: r.status,
+      platform: r.options?.platform || platformFromUrl(r.options?.url || r.url) || r.adapter || 'hub',
+      channel: r.options?.channel || r.options?.expandName || '',
+      title: r.options?.title || r.options?.videoTitle || r.url || `hub job ${r.id}`,
+      filename: '',
+      filepath: '',
+      progress: Math.round(Number(r.progress) || 0),
+      filesize: null,
+      thumb_url: thumbnailFromHubJob(r),
+      updated_at: r.updated_at,
+      created_at: r.created_at,
+    }));
+    const summary = {
+      hub: hubCounts.rows,
+      hub_total: hubCounts.rows.reduce((sum, r) => sum + Number(r.count || 0), 0),
+      hub_queued: hubCounts.rows.filter((r) => r.status === 'queued').reduce((sum, r) => sum + Number(r.count || 0), 0),
+      hub_running: hubCounts.rows.filter((r) => r.status === 'running').reduce((sum, r) => sum + Number(r.count || 0), 0),
+      recordings: recordings.length,
+      db_active: dbItems.length,
+    };
+    const items = [...recordings, ...hubItems, ...dbItems].slice(0, 100);
+    res.json({ items, count: items.length, summary });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -556,7 +830,7 @@ app.get('/api/items', async (req, res) => {
          AND mf.relpath !~* '${AUX_RELPATH_RE}'
          AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
     )`);
-    directWhere.push(`COALESCE(d.status, 'completed') <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
+    directWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
     directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
     const fileWhere = buildItemFilters({
       req, params,
@@ -565,19 +839,25 @@ app.get('/api/items', async (req, res) => {
       ratingExpr: 'df.rating',
     });
     fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
-    fileWhere.push(`COALESCE(d.status, 'completed') <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
+    fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
     fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
+    const screenshotWhere = buildScreenshotFilters({ req, params });
 
     const directOrder = sort === 'random'
       ? 'RANDOM()'
       : sort === 'rating'
         ? 'd.rating DESC NULLS LAST, d.id DESC'
-        : 'COALESCE(d.finished_at, d.updated_at, d.created_at) DESC NULLS LAST, d.id DESC';
+        : 'd.finished_at DESC NULLS LAST, d.updated_at DESC NULLS LAST, d.created_at DESC NULLS LAST, d.id DESC';
     const fileOrder = sort === 'random'
       ? 'RANDOM()'
       : sort === 'rating'
         ? 'df.rating DESC NULLS LAST, df.id DESC'
-        : 'COALESCE(to_timestamp(NULLIF(df.mtime_ms,0) / 1000.0)::timestamp, df.updated_at, d.finished_at, d.updated_at, d.created_at) DESC NULLS LAST, df.id DESC';
+        : 'df.mtime_ms DESC NULLS LAST, df.updated_at DESC NULLS LAST, d.finished_at DESC NULLS LAST, d.updated_at DESC NULLS LAST, d.created_at DESC NULLS LAST, df.id DESC';
+    const screenshotOrder = sort === 'random'
+      ? 'RANDOM()'
+      : sort === 'rating'
+        ? 's.rating DESC NULLS LAST, s.id DESC'
+        : 's.created_at DESC NULLS LAST, s.updated_at DESC NULLS LAST, s.id DESC';
     const orderBy = sort === 'random'
       ? 'RANDOM()'
       : sort === 'rating'
@@ -587,7 +867,7 @@ app.get('/api/items', async (req, res) => {
     params.push(sourceLimit);
     const sourceLimitParam = params.length;
     const sql = `
-      WITH direct_items AS (
+      WITH direct_items AS MATERIALIZED (
           SELECT 'download' AS item_kind,
                  d.id::text AS id, d.id AS rating_id,
                  d.url, d.source_url, d.platform, d.channel, d.title, d.filename,
@@ -600,7 +880,7 @@ app.get('/api/items', async (req, res) => {
            ORDER BY ${directOrder}
            LIMIT $${sourceLimitParam}
       ),
-      file_items AS (
+      file_items AS MATERIALIZED (
           SELECT 'file' AS item_kind,
                  'file-' || df.id::text AS id, d.id AS rating_id,
                  d.url, d.source_url, d.platform, d.channel, d.title,
@@ -616,12 +896,28 @@ app.get('/api/items', async (req, res) => {
            WHERE ${fileWhere.join(' AND ')}
            ORDER BY ${fileOrder}
            LIMIT $${sourceLimitParam}
+      ),
+      screenshot_items AS MATERIALIZED (
+          SELECT 'screenshot' AS item_kind,
+                 's-' || s.id::text AS id, NULL::bigint AS rating_id,
+                 s.url, s.url AS source_url, s.platform, s.channel, s.title, s.filename,
+                 s.filepath, s.filesize, 'jpg' AS format, NULL::text AS duration,
+                 s.rating, s.is_thumb_ready,
+                 s.created_at AS finished_at, s.created_at,
+                 COALESCE(s.created_at, s.updated_at) AS sort_ts,
+                 (2000000000000 + s.id)::bigint AS source_order
+            FROM screenshots s
+           WHERE ${screenshotWhere.join(' AND ')}
+           ORDER BY ${screenshotOrder}
+           LIMIT $${sourceLimitParam}
       )
       SELECT *
         FROM (
           SELECT * FROM direct_items
           UNION ALL
           SELECT * FROM file_items
+          UNION ALL
+          SELECT * FROM screenshot_items
         ) media_items
       ORDER BY ${orderBy}
       LIMIT $${sourceLimitParam}`;
@@ -653,7 +949,7 @@ app.get('/api/items-since', async (req, res) => {
          AND mf.relpath !~* '${AUX_RELPATH_RE}'
          AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})
     )`);
-    directWhere.push(`COALESCE(d.status, 'completed') <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
+    directWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
     directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
     const fileWhere = buildItemFilters({
       req, params,
@@ -662,17 +958,28 @@ app.get('/api/items-since', async (req, res) => {
       ratingExpr: 'df.rating',
     });
     fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
-    fileWhere.push(`COALESCE(d.status, 'completed') <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
+    fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
     fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})`);
+    const screenshotWhere = buildScreenshotFilters({ req, params });
+    let sinceParam = null;
     if (since) {
       params.push(since);
-      directWhere.push(`COALESCE(d.finished_at, d.updated_at, d.created_at) > $${params.length}::timestamp`);
-      fileWhere.push(`COALESCE(to_timestamp(NULLIF(df.mtime_ms,0) / 1000.0)::timestamp, df.updated_at, d.finished_at, d.updated_at, d.created_at) > $${params.length}::timestamp`);
+      sinceParam = params.length;
+      directWhere.push(`(d.finished_at > $${sinceParam}::timestamp OR (d.finished_at IS NULL AND COALESCE(d.updated_at, d.created_at) > $${sinceParam}::timestamp))`);
+      const sinceMs = Date.parse(since);
+      if (Number.isFinite(sinceMs)) {
+        params.push(sinceMs);
+        fileWhere.push(`(df.mtime_ms > $${params.length} OR ((df.mtime_ms IS NULL OR df.mtime_ms = 0) AND COALESCE(df.updated_at, d.finished_at, d.updated_at, d.created_at) > $${sinceParam}::timestamp))`);
+      } else {
+        fileWhere.push(`COALESCE(df.updated_at, d.finished_at, d.updated_at, d.created_at) > $${sinceParam}::timestamp`);
+      }
+      screenshotWhere.push(`COALESCE(s.created_at, s.updated_at) > $${sinceParam}::timestamp`);
     }
+    params.push(500);
+    const sourceLimitParam = params.length;
 
     const sql = `
-      SELECT *
-        FROM (
+      WITH direct_items AS MATERIALIZED (
           SELECT 'download' AS item_kind,
                  d.id::text AS id, d.id AS rating_id,
                  d.url, d.source_url, d.platform, d.channel, d.title, d.filename,
@@ -681,7 +988,10 @@ app.get('/api/items-since', async (req, res) => {
                  COALESCE(d.finished_at, d.updated_at, d.created_at) AS sort_ts
             FROM downloads d
            WHERE ${directWhere.join(' AND ')}
-          UNION ALL
+           ORDER BY d.finished_at DESC NULLS LAST, d.updated_at DESC NULLS LAST, d.created_at DESC NULLS LAST, d.id DESC
+           LIMIT $${sourceLimitParam}
+      ),
+      file_items AS MATERIALIZED (
           SELECT 'file' AS item_kind,
                  'file-' || df.id::text AS id, d.id AS rating_id,
                  d.url, d.source_url, d.platform, d.channel, d.title,
@@ -694,6 +1004,29 @@ app.get('/api/items-since', async (req, res) => {
             FROM download_files df
             JOIN downloads d ON d.id = df.download_id
            WHERE ${fileWhere.join(' AND ')}
+           ORDER BY df.mtime_ms DESC NULLS LAST, df.updated_at DESC NULLS LAST, d.finished_at DESC NULLS LAST, d.updated_at DESC NULLS LAST, d.created_at DESC NULLS LAST, df.id DESC
+           LIMIT $${sourceLimitParam}
+      ),
+      screenshot_items AS MATERIALIZED (
+          SELECT 'screenshot' AS item_kind,
+                 's-' || s.id::text AS id, NULL::bigint AS rating_id,
+                 s.url, s.url AS source_url, s.platform, s.channel, s.title, s.filename,
+                 s.filepath, s.filesize, 'jpg' AS format, NULL::text AS duration,
+                 s.rating, s.is_thumb_ready,
+                 s.created_at AS finished_at, s.created_at,
+                 COALESCE(s.created_at, s.updated_at) AS sort_ts
+            FROM screenshots s
+           WHERE ${screenshotWhere.join(' AND ')}
+           ORDER BY s.created_at DESC NULLS LAST, s.updated_at DESC NULLS LAST, s.id DESC
+           LIMIT $${sourceLimitParam}
+      )
+      SELECT *
+        FROM (
+          SELECT * FROM direct_items
+          UNION ALL
+          SELECT * FROM file_items
+          UNION ALL
+          SELECT * FROM screenshot_items
         ) media_items
       ORDER BY sort_ts DESC, id DESC
       LIMIT 200`;
@@ -727,6 +1060,10 @@ app.get('/api/platforms', async (_req, res) => {
           JOIN downloads d ON d.id = df.download_id
          WHERE df.relpath !~* '${AUX_RELPATH_RE}'
            AND lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})
+        UNION ALL
+        SELECT s.platform
+          FROM screenshots s
+         WHERE s.filepath IS NOT NULL AND s.filepath <> ''
       ) media_items
       GROUP BY platform
       ORDER BY count DESC`);
@@ -739,32 +1076,49 @@ app.get('/api/platforms', async (_req, res) => {
 // ─── Channels lijst (per platform) ─────────────────────────────────────────
 app.get('/api/channels', async (req, res) => {
   try {
-    const platform = req.query.platform ? String(req.query.platform) : null;
     const params = [];
-    const platformClause = platform ? `AND d.platform = $1` : '';
-    if (platform) params.push(platform);
+    const directWhere = buildItemFilters({
+      req, params,
+      fileExpr: 'd.filepath',
+      extExpr: "COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))",
+      ratingExpr: 'd.rating',
+      includeChannel: false,
+    });
+    directWhere.push(`NOT EXISTS (
+      SELECT 1 FROM download_files mf
+       WHERE mf.download_id = d.id
+         AND mf.relpath !~* '${AUX_RELPATH_RE}'
+         AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
+    )`);
+    directWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
+    directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
+    const fileWhere = buildItemFilters({
+      req, params,
+      fileExpr: 'df.relpath',
+      extExpr: "regexp_replace(df.relpath, '^.*\\.', '')",
+      ratingExpr: 'df.rating',
+      includeChannel: false,
+    });
+    fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
+    fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
+    fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
+    const screenshotWhere = buildScreenshotFilters({ req, params, includeChannel: false });
+
     const { rows } = await pool.query(`
       SELECT channel, platform, COUNT(*) AS count
       FROM (
         SELECT d.channel, d.platform
           FROM downloads d
-         WHERE d.filepath IS NOT NULL AND d.filepath <> ''
-           AND lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})
-           ${platformClause}
-           AND NOT EXISTS (
-             SELECT 1 FROM download_files mf
-              WHERE mf.download_id = d.id
-                AND mf.relpath !~* '${AUX_RELPATH_RE}'
-                AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})
-           )
+         WHERE ${directWhere.join(' AND ')}
         UNION ALL
         SELECT d.channel, d.platform
           FROM download_files df
           JOIN downloads d ON d.id = df.download_id
-         WHERE 1=1
-           ${platformClause}
-           AND df.relpath !~* '${AUX_RELPATH_RE}'
-           AND lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})
+         WHERE ${fileWhere.join(' AND ')}
+        UNION ALL
+        SELECT s.channel, s.platform
+          FROM screenshots s
+         WHERE ${screenshotWhere.join(' AND ')}
       ) media_items
       GROUP BY channel, platform
       ORDER BY count DESC
@@ -780,7 +1134,8 @@ app.post('/api/rating', async (req, res) => {
   try {
     const rawId = String(req.body.id || '');
     const fileMatch = rawId.match(/^file-(\d+)$/);
-    const id = fileMatch ? Number(fileMatch[1]) : parseInt(rawId, 10);
+    const screenshotMatch = rawId.match(/^s-(\d+)$/);
+    const id = fileMatch ? Number(fileMatch[1]) : screenshotMatch ? Number(screenshotMatch[1]) : parseInt(rawId, 10);
     if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: 'id vereist' });
     let rating = null;
     if (req.body.rating !== null && req.body.rating !== '') {
@@ -790,9 +1145,11 @@ app.post('/api/rating', async (req, res) => {
     }
     const result = fileMatch
       ? await pool.query('UPDATE download_files SET rating=$1, updated_at=now() WHERE id=$2', [rating, id])
-      : await pool.query('UPDATE downloads SET rating=$1, updated_at=now() WHERE id=$2', [rating, id]);
+      : screenshotMatch
+        ? await pool.query('UPDATE screenshots SET rating=$1, updated_at=now() WHERE id=$2', [rating, id])
+        : await pool.query('UPDATE downloads SET rating=$1, updated_at=now() WHERE id=$2', [rating, id]);
     if (!result.rowCount) return res.status(404).json({ error: 'niet gevonden' });
-    res.json({ success: true, id: fileMatch ? `file-${id}` : id, rating });
+    res.json({ success: true, id: fileMatch ? `file-${id}` : screenshotMatch ? `s-${id}` : id, rating });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -805,6 +1162,17 @@ app.get('/media/:id', async (req, res) => {
     if (!fp) return res.status(404).send('not found');
     if (!fs.existsSync(fp)) return res.status(404).send('file missing');
     res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.sendFile(fp);
+  } catch (e) {
+    res.status(500).send(e.message);
+  }
+});
+
+app.get('/active-thumb/:id', async (req, res) => {
+  try {
+    const fp = activeThumbPaths.get(String(req.params.id || ''));
+    if (!fp || !fs.existsSync(fp)) return res.status(404).send('not found');
+    res.setHeader('Cache-Control', 'public, max-age=60');
     res.sendFile(fp);
   } catch (e) {
     res.status(500).send(e.message);
@@ -832,16 +1200,24 @@ app.get('/thumb/:id', async (req, res) => {
         return res.sendFile(c);
       }
     }
-    if (isVideo && fs.existsSync(fp)) {
-      const generated = await generateVideoThumb(fp);
-      if (generated && fs.existsSync(generated)) {
-        if (/^\d+$/.test(String(req.params.id))) {
-          pool.query('UPDATE downloads SET is_thumb_ready = true WHERE id = $1', [Number(req.params.id)]).catch(() => {});
-        } else if (String(req.params.id).startsWith('file-')) {
-          pool.query('UPDATE download_files SET is_thumb_ready = true WHERE id = $1', [Number(String(req.params.id).slice(5))]).catch(() => {});
+    if (isVideo) {
+      let canGenerate = false;
+      try {
+        canGenerate = fs.existsSync(fp) && fs.statSync(fp).size > 0;
+      } catch (_) {}
+      if (canGenerate) {
+        const generated = await generateVideoThumb(fp);
+        if (generated && fs.existsSync(generated)) {
+          markThumbReady(req.params.id);
+          res.setHeader('Cache-Control', 'public, max-age=86400');
+          return res.sendFile(generated);
         }
+      }
+      const fallbackImage = await findSiblingImageFallback(fp);
+      if (fallbackImage && fs.existsSync(fallbackImage)) {
+        markThumbReady(req.params.id);
         res.setHeader('Cache-Control', 'public, max-age=86400');
-        return res.sendFile(generated);
+        return res.sendFile(fallbackImage);
       }
     }
     res.status(404).send('no thumb');
@@ -854,12 +1230,19 @@ app.get('/thumb/:id', async (req, res) => {
 app.get('/api/tags', async (_req, res) => {
   try {
     const { rows } = await pool.query(`
-      SELECT t.id, t.name, COUNT(iut.download_id)::int AS uses
+      SELECT t.id, t.name, t.is_favorite,
+             COALESCE(t.user_use_count, 0)::int AS user_use_count,
+             t.last_used_at,
+             COUNT(iut.download_id)::int AS applied_count,
+             COALESCE(t.user_use_count, 0)::int AS uses
         FROM tags t
         LEFT JOIN item_user_tags iut ON iut.tag_id = t.id
        WHERE t.is_user = true
-       GROUP BY t.id, t.name
-       ORDER BY t.name ASC`);
+       GROUP BY t.id, t.name, t.is_favorite, t.user_use_count, t.last_used_at
+       ORDER BY t.is_favorite DESC,
+                COALESCE(t.user_use_count, 0) DESC,
+                t.last_used_at DESC NULLS LAST,
+                t.name ASC`);
     res.json({ tags: rows.filter((r) => !isJunkTagName(r.name)) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -869,8 +1252,27 @@ app.post('/api/tags', async (req, res) => {
     const name = cleanTagName(req.body.name);
     if (!name || name.length < 2) return res.status(400).json({ error: 'name vereist' });
     const { rows } = await pool.query(
-      'INSERT INTO tags (name, is_user) VALUES ($1, true) ON CONFLICT (name) DO UPDATE SET is_user=true RETURNING id, name',
+      `INSERT INTO tags (name, is_user)
+       VALUES ($1, true)
+       ON CONFLICT (name) DO UPDATE SET is_user=true
+       RETURNING id, name, is_favorite, user_use_count, last_used_at`,
       [name]);
+    res.json({ tag: rows[0] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.patch('/api/tags/:id', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const favorite = Boolean(req.body && req.body.is_favorite);
+    const { rows } = await pool.query(
+      `UPDATE tags
+          SET is_user=true,
+              is_favorite=$2
+        WHERE id=$1
+        RETURNING id, name, is_favorite, user_use_count, last_used_at`,
+      [id, favorite]);
+    if (!rows[0]) return res.status(404).json({ error: 'tag niet gevonden' });
     res.json({ tag: rows[0] });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -892,7 +1294,9 @@ app.delete('/api/tags/:id', async (req, res) => {
 // Tags op een item
 app.get('/api/items/:id/tags', async (req, res) => {
   try {
+    if (String(req.params.id || '').startsWith('s-')) return res.json({ tags: [] });
     const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) return res.json({ tags: [] });
     const { rows } = await pool.query(
       'SELECT t.id, t.name FROM tags t JOIN item_user_tags iut ON iut.tag_id=t.id WHERE iut.download_id=$1 ORDER BY t.name',
       [id]);
@@ -902,10 +1306,17 @@ app.get('/api/items/:id/tags', async (req, res) => {
 
 app.post('/api/items/:id/tags', async (req, res) => {
   try {
+    if (String(req.params.id || '').startsWith('s-')) return res.status(400).json({ error: 'screenshots ondersteunen nog geen tags' });
     const itemId = parseInt(req.params.id, 10);
     const tagId = parseInt(req.body.tag_id, 10);
     if (!Number.isFinite(tagId)) return res.status(400).json({ error: 'tag_id vereist' });
-    const tag = await pool.query('UPDATE tags SET is_user=true WHERE id=$1 RETURNING id', [tagId]);
+    const tag = await pool.query(`
+      UPDATE tags
+         SET is_user=true,
+             user_use_count = COALESCE(user_use_count, 0) + 1,
+             last_used_at = now()
+       WHERE id=$1
+       RETURNING id`, [tagId]);
     if (!tag.rows[0]) return res.status(404).json({ error: 'tag niet gevonden' });
     await pool.query(
       'INSERT INTO item_user_tags (download_id, tag_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
@@ -916,6 +1327,7 @@ app.post('/api/items/:id/tags', async (req, res) => {
 
 app.delete('/api/items/:id/tags/:tagId', async (req, res) => {
   try {
+    if (String(req.params.id || '').startsWith('s-')) return res.json({ success: true });
     const itemId = parseInt(req.params.id, 10);
     const tagId = parseInt(req.params.tagId, 10);
     await pool.query('DELETE FROM item_user_tags WHERE download_id=$1 AND tag_id=$2', [itemId, tagId]);

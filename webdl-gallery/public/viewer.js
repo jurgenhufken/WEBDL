@@ -14,6 +14,7 @@
     done: false,
     loading: false,
     typeFilter: 'all',    // 'all' | 'video' | 'image'
+    queryFilters: null,
 
     // Slideshow
     slideshow: false,
@@ -51,6 +52,8 @@
     scale: 1,
     panX: 0,
     panY: 0,
+    rotation: 0,
+    lastRotateAt: 0,
     currentMediaEl: null,
     dragging: false,
     dragMoved: false,
@@ -79,6 +82,75 @@
     return r.json();
   }
 
+  function mediaRotationKey(it) {
+    return `webdl:media-rotation:${String((it && it.id) || '')}`;
+  }
+
+  function loadMediaRotation(it) {
+    try {
+      const value = Number(localStorage.getItem(mediaRotationKey(it)) || 0);
+      return Number.isFinite(value) ? ((Math.round(value / 90) * 90) % 360 + 360) % 360 : 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  function saveMediaRotation(it, degrees) {
+    try {
+      const normalized = ((Math.round(Number(degrees || 0) / 90) * 90) % 360 + 360) % 360;
+      const key = mediaRotationKey(it);
+      if (normalized === 0) localStorage.removeItem(key);
+      else localStorage.setItem(key, String(normalized));
+    } catch (_) {}
+  }
+
+  function syncRotationUi() {
+    for (const btn of [el.vBtnRotate, el.vBtnRotateBottom, el.vBtnRotateStage]) {
+      if (!btn) continue;
+      const degrees = Number(vs.rotation || 0);
+      btn.textContent = degrees ? `↻ ${degrees}°` : '↻ +90°';
+      btn.title = degrees ? `Rotatie: ${degrees}° (klik voor +90°)` : 'Media 90° draaien';
+      btn.dataset.rotation = String(degrees);
+      btn.classList.toggle('active', Boolean(vs.rotation));
+    }
+  }
+
+  function thumbUrl(it, retry = 0) {
+    const params = new URLSearchParams();
+    params.set('v', it && it.is_thumb_ready ? '1' : '0');
+    if (retry) params.set('retry', String(retry));
+    return `/thumb/${encodeURIComponent(String(it.id))}?${params.toString()}`;
+  }
+
+  function snapshotGalleryFilters() {
+    const filters = { ...(gal().state.filters || {}) };
+    return {
+      platform: filters.platform || '',
+      channel: filters.channel || '',
+      q: filters.q || '',
+      sort: filters.sort || 'recent',
+      min_rating: filters.min_rating || '',
+      media_type: filters.media_type || '',
+      tag_id: el.vTagFilter ? el.vTagFilter.value || '' : '',
+    };
+  }
+
+  function viewerFilters() {
+    return vs.queryFilters || snapshotGalleryFilters();
+  }
+
+  function appendContextParams(params, { includeChannel = true } = {}) {
+    const filters = viewerFilters();
+    if (filters.platform) params.set('platform', filters.platform);
+    if (includeChannel && filters.channel) params.set('channel', filters.channel);
+    if (filters.q) params.set('q', filters.q);
+    if (filters.min_rating) params.set('min_rating', filters.min_rating);
+    if (filters.tag_id) params.set('tag_id', filters.tag_id);
+    const type = vs.typeFilter && vs.typeFilter !== 'all' ? vs.typeFilter : filters.media_type;
+    if (type) params.set('media_type', type);
+    return params;
+  }
+
   // ─── Init ──────────────────────────────────────────────────────────────────
   function init() {
     const ids = [
@@ -87,20 +159,23 @@
       'vSlideshow','vSlideshowSec','vWrap','vRandom','vVideoWait',
       'vNowTitle','vNowSub','vNowRating',
       'vRatingSelect',
-      'vBtnSidebar','vBtnOpen','vBtnFinder',
+      'vBtnSidebar','vBtnOpen','vBtnFinder','vBtnRotate',
       'vZoomRange','vZoomReset',
       'vVol','vBtnMute','vSeek',
       'vBtnTags','vBtnLog','vClose',
       'vSlideshow2','vRandom2',
       'vStage','vContent','vPrev','vNext','vHudLeft','vHudRight',
       'vProgressBar','vProgressFill','vProgressHandle',
-      'vBottomControls','vBtnPlayPause','vTimeLabel',
+      'vBottomControls','vBtnPlayPause','vTimeLabel','vBtnRotateBottom','vBtnRotateStage',
       'vTagDialog','vTagCurrent','vTagQuick','vTagSearch','vTagList','vNewTagInput','vBtnAddTag','vBtnCloseTagDialog',
       'vLogPanel','vLogBody',
     ];
     for (const id of ids) {
       el[id] = $(id);
       if (!el[id]) console.warn(`viewer: element #${id} niet gevonden`);
+    }
+    if (el.vBtnTags) {
+      el.vBtnTags.onclick = (e) => { e.stopPropagation(); openTagDialog(); };
     }
     bindControls();
     bindKeyboard();
@@ -112,6 +187,11 @@
   function open(idx) {
     // Kopieer gallery items als startpunt
     const gState = gal().state;
+    vs.queryFilters = snapshotGalleryFilters();
+    vs.typeFilter = vs.queryFilters.media_type || (el.vFilter ? el.vFilter.value : 'all') || 'all';
+    if (el.vFilter) el.vFilter.value = vs.typeFilter;
+    vs.channels = [];
+    vs.chIdx = 0;
     vs.items  = [...gState.items];
     vs.offset = gState.offset;
     vs.done   = gState.done;
@@ -151,18 +231,50 @@
   }
 
   // ─── Huidige item tonen ────────────────────────────────────────────────────
+  function showVideoFallback(videoEl, it) {
+    if (!videoEl || videoEl.dataset.fallbackShown === '1') return;
+    videoEl.dataset.fallbackShown = '1';
+    stopReverse();
+
+    const img = document.createElement('img');
+    img.src = thumbUrl(it, Date.now());
+    img.alt = it.title || '';
+    img.classList.add('zoom-media');
+    img.style.transition = 'transform 120ms ease-out';
+    img.onerror = () => { img.classList.add('media-fallback-empty'); };
+
+    videoEl.replaceWith(img);
+    vs.currentMediaEl = img;
+    attachZoomHandlers(img);
+    applyTransform();
+
+    el.vVol.disabled = true;
+    el.vSeek.disabled = true;
+    el.vSeek.value = '0';
+    if (el.vBottomControls) el.vBottomControls.classList.add('hidden');
+    if (el.vProgressBar) el.vProgressBar.style.display = 'none';
+    updatePlaybackControls(null);
+
+    const note = document.createElement('div');
+    note.className = 'media-error-note';
+    note.textContent = 'Video niet afspeelbaar · preview getoond';
+    el.vContent.appendChild(note);
+  }
+
   function showCurrent() {
     const it = vs.items[vs.idx];
     if (!it) { close(); return; }
 
     cleanupMedia();
     resetZoom(); // Reset zoom bij elk nieuw item (exact als oude viewer)
+    vs.rotation = loadMediaRotation(it);
+    syncRotationUi();
 
     let mediaEl;
     if (it.type === 'video') {
       mediaEl = document.createElement('video');
       mediaEl.src = `/media/${it.id}`;
-      mediaEl.poster = `/thumb/${it.id}`;   // thumbnail terwijl video laadt
+      mediaEl.poster = thumbUrl(it);        // thumbnail terwijl video laadt
       mediaEl.autoplay = true;
       mediaEl.playsinline = true;
       mediaEl.muted = true;                  // altijd muted starten (browser autoplay policy)
@@ -203,6 +315,7 @@
       mediaEl.addEventListener('loadedmetadata', () => {
         if (vs.playbackRate > 0) mediaEl.playbackRate = vs.playbackRate;
       });
+      mediaEl.addEventListener('error', () => showVideoFallback(mediaEl, it));
 
       el.vVol.disabled  = false;
       el.vSeek.disabled = false;
@@ -211,7 +324,7 @@
       mediaEl = document.createElement('img');
       mediaEl.src = `/media/${it.id}`;
       mediaEl.alt = it.title || '';
-      mediaEl.onerror = () => { mediaEl.src = `/thumb/${it.id}`; };
+      mediaEl.onerror = () => { mediaEl.src = thumbUrl(it, Date.now()); };
 
       el.vVol.disabled  = true;
       el.vSeek.disabled = true;
@@ -224,6 +337,7 @@
     mediaEl.style.transition = 'transform 120ms ease-out';
     vs.currentMediaEl = mediaEl;
     el.vContent.appendChild(mediaEl);
+    applyTransform();
     attachZoomHandlers(mediaEl);
 
     // Align progress bar exact op onderkant van de afgespeelde pixels
@@ -306,17 +420,12 @@
     if (vs.loading || vs.done) return;
     vs.loading = true;
     try {
-      const gFilters = gal().state.filters;
       const params = new URLSearchParams({
         limit: '100',
         offset: String(vs.offset),
-        sort: gFilters.sort || 'recent',
+        sort: viewerFilters().sort || 'recent',
       });
-      if (gFilters.platform) params.set('platform', gFilters.platform);
-      if (gFilters.channel)  params.set('channel',  gFilters.channel);
-      if (gFilters.q)        params.set('q',         gFilters.q);
-      if (gFilters.min_rating) params.set('min_rating', gFilters.min_rating);
-      if (vs.typeFilter !== 'all') params.set('media_type', vs.typeFilter);
+      appendContextParams(params);
 
       const data = await api('/api/items?' + params.toString());
       if (data.items && data.items.length > 0) {
@@ -367,24 +476,35 @@
     if (!vs.channels.length) {
       // Laad kanalen als nog niet aanwezig
       try {
-        const gf = gal().state.filters;
-        const data = await api(`/api/channels${gf.platform ? '?platform=' + encodeURIComponent(gf.platform) : ''}`);
+        const params = appendContextParams(new URLSearchParams(), { includeChannel: false });
+        const data = await api('/api/channels' + (params.toString() ? '?' + params.toString() : ''));
         vs.channels = (data.channels || []).filter(c => c.channel && c.channel !== 'unknown');
+        const currentChannel = viewerFilters().channel || (vs.items[vs.idx] && vs.items[vs.idx].channel) || '';
+        const currentIdx = vs.channels.findIndex(c => c.channel === currentChannel);
+        vs.chIdx = currentIdx >= 0 ? currentIdx : 0;
       } catch (e) { return; }
     }
     if (!vs.channels.length) return;
     vs.chIdx = ((vs.chIdx + dir) + vs.channels.length) % vs.channels.length;
     const ch = vs.channels[vs.chIdx];
+    if (!vs.queryFilters) vs.queryFilters = snapshotGalleryFilters();
+    vs.queryFilters.channel = ch.channel;
     gal().setFilter('channel', ch.channel);
     await reloadViewerItems();
   }
 
-  async function reloadViewerItems() {
+  async function reloadViewerItems({ preserveSelection = false } = {}) {
+    if (!vs.queryFilters) vs.queryFilters = snapshotGalleryFilters();
+    const currentId = preserveSelection && vs.items[vs.idx] ? String(vs.items[vs.idx].id) : '';
     vs.items = [];
     vs.offset = 0;
     vs.done = false;
     vs.idx = 0;
     await loadMoreViewerItems();
+    if (currentId) {
+      const nextIdx = vs.items.findIndex((it) => String(it.id) === currentId);
+      if (nextIdx >= 0) vs.idx = nextIdx;
+    }
     if (vs.items.length > 0) showCurrent();
     renderSidebarList();
   }
@@ -567,9 +687,15 @@
       const div = document.createElement('div');
       div.className = 'vsidebar-item' + (i === vs.idx ? ' active' : '');
       div.dataset.i = String(i);
-      const thumb = `/thumb/${it.id}?v=${it.is_thumb_ready ? 1 : 0}`;
       const title = (it.title || it.filename || '(untitled)').replace(/</g, '&lt;').slice(0, 64);
-      div.innerHTML = `<img class="vsidebar-thumb" src="${thumb}" loading="lazy" alt=""><span class="vsidebar-label">${title}</span>`;
+      div.innerHTML = `<img class="vsidebar-thumb" src="${thumbUrl(it)}" loading="eager" decoding="async" alt=""><span class="vsidebar-label">${title}</span>`;
+      const img = div.querySelector('img');
+      img.addEventListener('error', () => {
+        const tries = Number(img.dataset.retry || '0');
+        if (tries >= 2) return;
+        img.dataset.retry = String(tries + 1);
+        setTimeout(() => { img.src = thumbUrl(it, Date.now()); }, 700 * (tries + 1));
+      });
       div.addEventListener('click', () => navTo(i));
       frag.appendChild(div);
     }
@@ -612,17 +738,42 @@
     return String(value || '');
   }
 
+  function userTagUses(tag) {
+    return Number(tag && (tag.user_use_count ?? tag.uses) || 0);
+  }
+
+  function sortUserTags(a, b) {
+    const favDelta = Number(Boolean(b.is_favorite)) - Number(Boolean(a.is_favorite));
+    if (favDelta) return favDelta;
+    const useDelta = userTagUses(b) - userTagUses(a);
+    if (useDelta) return useDelta;
+    const bLast = Date.parse(b.last_used_at || '') || 0;
+    const aLast = Date.parse(a.last_used_at || '') || 0;
+    if (bLast !== aLast) return bLast - aLast;
+    return safeText(a.name).localeCompare(safeText(b.name));
+  }
+
+  async function toggleTagFavorite(tag) {
+    await api(`/api/tags/${tag.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ is_favorite: !tag.is_favorite }),
+    });
+  }
+
   async function loadTags() {
     try {
       const data = await api('/api/tags');
-      vs.availableTags = data.tags || [];
+      vs.availableTags = (data.tags || []).sort(sortUserTags);
       // Tag-filter select vullen
       const sel = el.vTagFilter;
       sel.innerHTML = '<option value="">Alle tags</option>';
       for (const t of vs.availableTags) {
         const o = document.createElement('option');
         o.value = String(t.id);
-        o.textContent = t.uses ? `${t.name} (${t.uses})` : t.name;
+        const prefix = t.is_favorite ? '★ ' : '';
+        const useCount = userTagUses(t);
+        o.textContent = useCount ? `${prefix}${t.name} (${useCount})` : `${prefix}${t.name}`;
         sel.appendChild(o);
       }
     } catch (e) {
@@ -695,8 +846,8 @@
     const q = (el.vTagSearch?.value || '').trim().toLowerCase();
     const quickTags = vs.availableTags
       .filter(t => !currentIds.has(Number(t.id)))
-      .filter(t => Number(t.uses || 0) > 0)
-      .sort((a, b) => Number(b.uses || 0) - Number(a.uses || 0) || safeText(a.name).localeCompare(safeText(b.name)))
+      .filter(t => t.is_favorite || userTagUses(t) > 0)
+      .sort(sortUserTags)
       .slice(0, 14);
 
     if (el.vTagQuick) {
@@ -704,15 +855,19 @@
       if (!quickTags.length) {
         const empty = document.createElement('span');
         empty.className = 'tag-empty';
-        empty.textContent = 'Nog geen veelgebruikte tags';
+        empty.textContent = 'Nog geen favoriete of gebruikte tags';
         el.vTagQuick.appendChild(empty);
       } else {
         for (const t of quickTags) {
           const chip = document.createElement('button');
           chip.type = 'button';
           chip.className = 'tag-chip tag-chip-quick';
-          chip.title = `${Number(t.uses || 0)}× gebruikt`;
-          chip.textContent = `#${safeText(t.name)}`;
+          const useCount = userTagUses(t);
+          chip.title = [
+            t.is_favorite ? 'Favoriet' : '',
+            useCount ? `${useCount}× door jou gebruikt` : '',
+          ].filter(Boolean).join(' / ');
+          chip.textContent = `${t.is_favorite ? '★ ' : ''}#${safeText(t.name)}`;
           chip.addEventListener('click', async () => {
             try {
               await api(`/api/items/${itemId}/tags`, {
@@ -721,6 +876,7 @@
                 body: JSON.stringify({ tag_id: t.id }),
               });
               await loadItemTags(itemId);
+              await loadTags();
               renderTagDialog();
             } catch (err) { log('Tag fout: ' + err.message); }
           });
@@ -750,9 +906,16 @@
       name.className = 'tag-name';
       name.textContent = `#${safeText(t.name)}`;
 
+      const fav = document.createElement('button');
+      fav.className = 'tag-fav' + (t.is_favorite ? ' active' : '');
+      fav.type = 'button';
+      fav.title = t.is_favorite ? 'Uit favorieten halen' : 'Als favoriete tag markeren';
+      fav.textContent = t.is_favorite ? '★' : '☆';
+
       const uses = document.createElement('span');
       uses.className = 'tag-uses';
-      uses.textContent = t.uses ? `${t.uses}×` : '';
+      uses.title = `${Number(t.applied_count || 0)}× toegepast`;
+      uses.textContent = userTagUses(t) ? `${userTagUses(t)}×` : '';
 
       const add = document.createElement('button');
       add.className = 'tag-toggle';
@@ -766,7 +929,15 @@
       del.title = 'Tag globaal verwijderen';
       del.textContent = '🗑';
 
-      row.append(name, uses, add, del);
+      row.append(fav, name, uses, add, del);
+
+      fav.addEventListener('click', async () => {
+        try {
+          await toggleTagFavorite(t);
+          await loadTags();
+          renderTagDialog();
+        } catch (err) { log('Favoriet fout: ' + err.message); }
+      });
 
       add.addEventListener('click', async () => {
         try {
@@ -776,6 +947,7 @@
             body: JSON.stringify({ tag_id: t.id }),
           });
           await loadItemTags(itemId);
+          await loadTags();
           renderTagDialog();
         } catch (err) { log('Tag fout: ' + err.message); }
       });
@@ -978,6 +1150,10 @@
           toggleLog();
           e.preventDefault();
           break;
+        case 'r': case 'R':
+          rotateCurrentMedia();
+          e.preventDefault();
+          break;
         case '[': changeSpeed(-1); e.preventDefault(); break;
         case ']': changeSpeed(1);  e.preventDefault(); break;
         case '\\': resetSpeed();   e.preventDefault(); break;
@@ -999,15 +1175,19 @@
     const mediaEl = vs.currentMediaEl || el.vContent.querySelector('video, img');
     if (mediaEl) {
       const transforms = [];
+      if (vs.rotation) transforms.push('rotate(' + vs.rotation + 'deg)');
       if (vs.scale > 1) {
         transforms.push('scale(' + vs.scale + ')');
         transforms.push('translate(' + vs.panX + 'px, ' + vs.panY + 'px)');
       }
       mediaEl.style.transform = transforms.join(' ');
+      mediaEl.dataset.rotation = String(Number(vs.rotation || 0));
+      mediaEl.classList.toggle('rotated', Boolean(vs.rotation));
       mediaEl.classList.toggle('zoomed', vs.scale > 1);
       if (vs.scale <= 1) mediaEl.classList.remove('dragging');
     }
     syncZoomUi();
+    syncRotationUi();
   }
 
   function syncZoomUi() {
@@ -1033,10 +1213,23 @@
     el.vStage.classList.remove('zoomed');
     const mediaEl = vs.currentMediaEl || el.vContent.querySelector('video, img');
     if (mediaEl) {
-      mediaEl.style.transform = '';
+      mediaEl.style.transform = vs.rotation ? 'rotate(' + vs.rotation + 'deg)' : '';
+      mediaEl.dataset.rotation = String(Number(vs.rotation || 0));
+      mediaEl.classList.toggle('rotated', Boolean(vs.rotation));
       mediaEl.classList.remove('zoomed', 'dragging');
     }
     syncZoomUi();
+    syncRotationUi();
+  }
+
+  function rotateCurrentMedia() {
+    const it = vs.items[vs.idx];
+    if (!it) return;
+    vs.rotation = (Number(vs.rotation || 0) + 90) % 360;
+    saveMediaRotation(it, vs.rotation);
+    applyTransform();
+    showHUD();
+    log(`Rotatie: ${vs.rotation || 0}°`);
   }
 
   // ─── Muis (exact als oude viewer: attachZoomHandlers) ──────────────────────
@@ -1237,6 +1430,22 @@
       } catch (e) { log('Finder fout: ' + e.message); }
     });
 
+    if (el.vBtnRotate) {
+      el.vBtnRotate.addEventListener('click', (e) => {
+        window.__wdRotateMedia(e);
+      });
+    }
+    if (el.vBtnRotateBottom) {
+      el.vBtnRotateBottom.addEventListener('click', (e) => {
+        window.__wdRotateMedia(e);
+      });
+    }
+    if (el.vBtnRotateStage) {
+      el.vBtnRotateStage.addEventListener('click', (e) => {
+        window.__wdRotateMedia(e);
+      });
+    }
+
     el.vBtnMute.addEventListener('click', () => {
       const v = el.vContent.querySelector('video');
       vs.muted = !vs.muted;
@@ -1318,26 +1527,35 @@
       });
     }
 
-    el.vReload.addEventListener('click', reloadViewerItems);
+    el.vReload.addEventListener('click', () => reloadViewerItems({ preserveSelection: true }));
 
     el.vMode.addEventListener('change', async () => {
       if (el.vMode.value === 'channel' && !vs.channels.length) {
         try {
-          const gf = gal().state.filters;
-          const data = await api(`/api/channels${gf.platform ? '?platform=' + encodeURIComponent(gf.platform) : ''}`);
+          if (!vs.queryFilters) vs.queryFilters = snapshotGalleryFilters();
+          const params = appendContextParams(new URLSearchParams(), { includeChannel: false });
+          const data = await api('/api/channels' + (params.toString() ? '?' + params.toString() : ''));
           vs.channels = (data.channels || []).filter(c => c.channel && c.channel !== 'unknown');
-          vs.chIdx = 0;
+          const currentChannel = viewerFilters().channel || (vs.items[vs.idx] && vs.items[vs.idx].channel) || '';
+          const currentIdx = vs.channels.findIndex(c => c.channel === currentChannel);
+          vs.chIdx = currentIdx >= 0 ? currentIdx : 0;
         } catch (e) { log('Kanalen laden mislukt: ' + e.message); }
       }
     });
 
     el.vFilter.addEventListener('change', async () => {
       vs.typeFilter = el.vFilter.value;
-      await reloadViewerItems();
+      if (!vs.queryFilters) vs.queryFilters = snapshotGalleryFilters();
+      vs.queryFilters.media_type = vs.typeFilter === 'all' ? '' : vs.typeFilter;
+      vs.channels = [];
+      await reloadViewerItems({ preserveSelection: true });
     });
 
     el.vTagFilter.addEventListener('change', async () => {
-      await reloadViewerItems();
+      if (!vs.queryFilters) vs.queryFilters = snapshotGalleryFilters();
+      vs.queryFilters.tag_id = el.vTagFilter.value || '';
+      vs.channels = [];
+      await reloadViewerItems({ preserveSelection: true });
     });
 
     // Tags dialog
@@ -1381,6 +1599,23 @@
   }
 
   // ─── Public API ───────────────────────────────────────────────────────────
+  window.__wdRotateMedia = (e) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    const now = Date.now();
+    if (now - vs.lastRotateAt < 250) return;
+    vs.lastRotateAt = now;
+    rotateCurrentMedia();
+  };
+  window.__wdOpenTags = (e) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    openTagDialog();
+  };
   window.__viewer = { init, open, close };
 
   // Auto-init zodra DOM klaar is (app.js laadt viewer.js na zichzelf)

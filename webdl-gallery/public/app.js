@@ -26,6 +26,7 @@
     activeRefreshTimer: null,
     newestFinishedAt: null,
     knownIds: new Set(),
+    queryVersion: 0,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -46,11 +47,56 @@
   }
 
 
-  function thumbUrl(it) { return `/thumb/${it.id}?v=${it.is_thumb_ready ? 1 : 0}`; }
+  function thumbUrl(it, retry = 0) {
+    const params = new URLSearchParams();
+    params.set('v', it && it.is_thumb_ready ? '1' : '0');
+    if (retry) params.set('retry', String(retry));
+    return `/thumb/${encodeURIComponent(String(it.id))}?${params.toString()}`;
+  }
   function escHtml(s) {
     return String(s || '').replace(/[&<>"']/g, (ch) => ({
       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
     }[ch]));
+  }
+
+  function mediaTypeOf(it) {
+    const explicit = String(it && (it.type || it.media_type || '') || '').toLowerCase();
+    if (explicit === 'video' || explicit === 'image') return explicit;
+    const value = String((it && (it.filepath || it.filename || it.format)) || '').toLowerCase();
+    if (/\.(mp4|webm|mkv|mov|m4v|avi|flv|ts)(?:$|[?#])/.test(value) || ['mp4', 'webm', 'mkv', 'mov', 'm4v', 'avi', 'flv', 'ts'].includes(value)) return 'video';
+    if (/\.(jpe?g|png|webp|gif|avif|bmp)(?:$|[?#])/.test(value) || ['jpg', 'jpeg', 'png', 'webp', 'gif', 'avif', 'bmp'].includes(value)) return 'image';
+    return '';
+  }
+
+  function mediaTypeLabel(it) {
+    const type = mediaTypeOf(it);
+    if (type === 'video') return 'video';
+    if (type === 'image') return 'afbeelding';
+    return '';
+  }
+
+  function attachThumbRetry(el, it) {
+    if (!el || !it || !it.id) return;
+    let tries = 0;
+    const load = (retry = 0) => {
+      el.classList.remove('thumb-missing');
+      const url = thumbUrl(it, retry);
+      el.style.backgroundImage = `url('${url}')`;
+      const img = new Image();
+      img.onload = () => { el.style.backgroundImage = `url('${url}')`; };
+      img.onerror = () => {
+        if (tries >= 2) {
+          el.style.backgroundImage = 'none';
+          el.dataset.kind = mediaTypeLabel(it) || 'media';
+          el.classList.add('thumb-missing');
+          return;
+        }
+        tries += 1;
+        setTimeout(() => load(Date.now()), 700 * tries);
+      };
+      img.src = url;
+    };
+    load();
   }
 
   // ─── Card rendering ───────────────────────────────────────────────────────
@@ -60,18 +106,20 @@
     c.dataset.idx = String(idx);
     c.dataset.id  = String(it.id);
     const badge = `<span class="card-badge">${it.platform || '?'}</span>`;
-    const vmark = it.type === 'video' ? '<span class="card-video-mark">▶ video</span>' : '';
+    const mediaLabel = mediaTypeLabel(it);
+    const mediaMark = mediaLabel ? `<span class="card-media-mark">${mediaLabel}</span>` : '';
     const title = escHtml(it.title || it.filename || '');
     const sub   = (it.channel && it.channel !== 'unknown') ? it.channel : '';
     c.innerHTML = `
-      <div class="card-thumb" style="background-image:url('${thumbUrl(it)}')">
-        ${badge}${vmark}
+      <div class="card-thumb">
+        ${badge}${mediaMark}
       </div>
       <div class="card-info">
         <div class="card-title">${title}</div>
         ${sub ? `<div class="card-sub">${escHtml(sub)}</div>` : ''}
         ${it.rating != null ? `<div class="card-stars">${starHtml(it.rating)}</div>` : ''}
       </div>`;
+    attachThumbRetry(c.querySelector('.card-thumb'), it);
     const sourceUrl = it.source_url || it.url || '';
     if (sourceUrl) {
       const srcBtn = document.createElement('button');
@@ -142,8 +190,10 @@
   function clearGrid() {
     grid.innerHTML = '';
     state.items = []; state.offset = 0; state.done = false;
+    state.loading = false;
     state.newestFinishedAt = null;
     state.knownIds = new Set();
+    state.queryVersion += 1;
   }
 
   function updateStats() {
@@ -158,25 +208,49 @@
     return v ? v + ' B' : '';
   }
 
-  function renderActiveItems(items) {
+  function renderActiveItems(items, summary = null) {
     if (!activeStrip) return;
-    const list = (Array.isArray(items) ? items : [])
-      .filter((it) => !['pending', 'queued'].includes(String(it.status || '').toLowerCase()))
+    const previews = (Array.isArray(items) ? items : [])
+      .filter((it) => it && it.thumb_url)
       .slice(0, 12);
-    activeStrip.classList.toggle('has-items', list.length > 0);
-    if (!list.length) {
+    const backlog = summary && Number(summary.hub_total || 0);
+    activeStrip.classList.toggle('has-items', previews.length > 0 || backlog > 0);
+    if (!previews.length && !backlog) {
       activeStrip.innerHTML = '';
       return;
     }
     activeStrip.innerHTML = '';
     const frag = document.createDocumentFragment();
-    for (const it of list) {
+    if (backlog > 0) {
+      const queued = Number(summary.hub_queued || 0);
+      const running = Number(summary.hub_running || 0);
+      const topPlatforms = Array.isArray(summary.hub)
+        ? summary.hub
+            .filter((r) => r.status === 'queued')
+            .sort((a, b) => Number(b.count || 0) - Number(a.count || 0))
+            .slice(0, 3)
+            .map((r) => `${r.platform} ${r.count}`)
+            .join(' · ')
+        : '';
       const card = document.createElement('div');
-      card.className = 'active-card';
-      const source = it.source === 'jdownloader' ? 'JDownloader' : (it.status || 'actief');
-      const sub = [it.platform, it.channel, compactBytes(it.filesize)].filter(Boolean).join(' / ');
+      card.className = 'active-card active-summary';
       card.innerHTML = `
-        <div class="active-top"><span>${escHtml(source)}</span><span>${escHtml(it.status || '')}</span></div>
+        <div class="active-top"><span>QUEUE</span><span>${running ? `${running} actief` : ''}</span></div>
+        <div class="active-title">${queued} wachtend · ${backlog} opdrachten totaal</div>
+        <div class="active-sub">${escHtml(topPlatforms)}</div>`;
+      frag.appendChild(card);
+    }
+    for (const it of previews) {
+      const card = document.createElement('div');
+      card.className = 'active-card active-thumb-card';
+      const rawPlatform = (it.platform || it.source || 'active').toString();
+      const source = rawPlatform.toLowerCase() === 'jdownloader' ? 'JDownloader' : rawPlatform.toUpperCase();
+      const status = (it.status || '').toString().toUpperCase();
+      const statusLabel = status && status !== source.toUpperCase() ? status : '';
+      const sub = [mediaTypeLabel(it), it.platform, it.channel, compactBytes(it.filesize)].filter(Boolean).join(' / ');
+      card.innerHTML = `
+        <div class="active-thumb" style="background-image:url('${escHtml(it.thumb_url)}')"></div>
+        <div class="active-top"><span>${escHtml(source)}</span><span>${escHtml(statusLabel)}</span></div>
         <div class="active-title">${escHtml(it.title || it.filename || it.filepath || '')}</div>
         <div class="active-sub">${escHtml(sub)}</div>`;
       frag.appendChild(card);
@@ -189,7 +263,7 @@
     const timer = setTimeout(() => ctrl.abort(), 5000);
     try {
       const data = await apiFetch('/api/active-items', { signal: ctrl.signal }).then(r => r.json());
-      renderActiveItems(data.items || []);
+      renderActiveItems(data.items || [], data.summary || null);
     } catch (e) {
       if (e.name !== 'AbortError') console.warn('active-items failed', e);
     } finally {
@@ -200,6 +274,7 @@
   // ─── API: laad meer ───────────────────────────────────────────────────────
   async function loadMore() {
     if (state.loading || state.done) return;
+    const queryVersion = state.queryVersion;
     state.loading = true;
     sentinel.textContent = 'Laden…';
     try {
@@ -210,6 +285,7 @@
       const resp = await apiFetch('/api/items?' + params.toString());
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
+      if (queryVersion !== state.queryVersion) return;
       if (!data.items) throw new Error(data.error || 'geen items');
       state.items.push(...data.items);
       state.offset += data.items.length;
@@ -217,10 +293,12 @@
       renderAppend(data.items);
       updateStats();
     } catch (e) {
+      if (queryVersion !== state.queryVersion) return;
       sentinel.textContent = 'Fout: ' + e.message;
       state.loading = false;
       return;
     }
+    if (queryVersion !== state.queryVersion) return;
     sentinel.textContent = state.done ? `Einde — ${state.items.length} items` : 'Scroll voor meer…';
     state.loading = false;
   }
@@ -345,7 +423,6 @@
   const io = new IntersectionObserver((entries) => {
     for (const en of entries) if (en.isIntersecting) loadMore();
   }, { rootMargin: '400px' });
-  io.observe(sentinel);
 
   // ─── Auto-refresh: poll voor nieuwe items ─────────────────────────────────
   async function pollNewItems() {
@@ -428,6 +505,7 @@
     readFiltersFromControls();
     if (state.filters.platform) await reloadChannels();
     await loadMore();
+    io.observe(sentinel);
     startActiveRefresh();
     startAutoRefresh();
   });

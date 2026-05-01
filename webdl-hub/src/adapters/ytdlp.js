@@ -43,6 +43,29 @@ function normalizeFlatEntryUrl(obj, seedUrl) {
   return raw || (id ? `https://www.youtube.com/watch?v=${encodeURIComponent(id)}` : '');
 }
 
+function bestThumbnail(obj, entryUrl) {
+  const direct = String(obj && (obj.thumbnail || obj.thumbnail_url) || '').trim();
+  if (/^https?:\/\//i.test(direct)) return direct;
+
+  const thumbs = Array.isArray(obj && obj.thumbnails) ? obj.thumbnails : [];
+  const urls = thumbs
+    .map((t) => String(t && t.url || '').trim())
+    .filter((u) => /^https?:\/\//i.test(u));
+  if (urls.length) return urls[urls.length - 1];
+
+  try {
+    const u = new URL(String(entryUrl || ''));
+    const host = u.hostname.replace(/^www\./, '').toLowerCase();
+    const videoId = host === 'youtu.be'
+      ? u.pathname.split('/').filter(Boolean)[0]
+      : u.searchParams.get('v');
+    if ((host === 'youtube.com' || host === 'youtu.be' || host.endsWith('.youtube.com')) && videoId) {
+      return `https://i.ytimg.com/vi/${encodeURIComponent(videoId)}/hqdefault.jpg`;
+    }
+  } catch {}
+  return '';
+}
+
 function plan(url, opts = {}) {
   const cwd = opts.cwd;
   const quality = opts.quality || 'bv*+ba/best';
@@ -129,7 +152,7 @@ function expandPlaylist(url) {
           const title = obj.title || obj.fulltitle || '';
           const entryUrl = normalizeFlatEntryUrl(obj, url);
           if (entryUrl) {
-            entries.push({ id, title, url: entryUrl });
+            entries.push({ id, title, url: entryUrl, thumbnail: bestThumbnail(obj, entryUrl) });
           }
         } catch { /* niet-JSON regel, skip */ }
       }
