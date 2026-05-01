@@ -99,6 +99,11 @@ function mapItem(row) {
   };
 }
 
+function hasNonEmptyMedia(row) {
+  const size = row.filesize == null ? null : Number(row.filesize);
+  return !Number.isFinite(size) || size > 0;
+}
+
 function parseDurationSeconds(value) {
   if (value == null || value === '') return null;
   if (typeof value === 'number' && Number.isFinite(value)) return Math.max(0, Math.round(value));
@@ -195,16 +200,16 @@ async function scanJDownloaderKeep2ShareParts(limit = 40) {
   return out;
 }
 
-function listKeep2ShareMediaFiles() {
+async function listKeep2ShareMediaFiles() {
   const files = [];
   let channels = [];
-  try { channels = fs.readdirSync(KEEP2SHARE_DIR, { withFileTypes: true }); } catch (_) { return files; }
+  try { channels = await fs.promises.readdir(KEEP2SHARE_DIR, { withFileTypes: true }); } catch (_) { return files; }
   for (const channelEntry of channels) {
     if (!channelEntry.isDirectory() || files.length >= KEEP2SHARE_SYNC_MAX_FILES) continue;
     const channel = channelEntry.name;
     const channelDir = path.join(KEEP2SHARE_DIR, channel);
     let entries = [];
-    try { entries = fs.readdirSync(channelDir, { withFileTypes: true }); } catch (_) { continue; }
+    try { entries = await fs.promises.readdir(channelDir, { withFileTypes: true }); } catch (_) { continue; }
     for (const entry of entries) {
       if (!entry.isFile() || entry.name.startsWith('.') || files.length >= KEEP2SHARE_SYNC_MAX_FILES) continue;
       const ext = path.extname(entry.name).replace('.', '').toLowerCase();
@@ -212,7 +217,7 @@ function listKeep2ShareMediaFiles() {
       if (/_thumb(_v[0-9]+)?\.(jpe?g|png|webp)$/i.test(entry.name) || /\.(part|tmp|ytdl)$/i.test(entry.name)) continue;
       const filepath = path.join(channelDir, entry.name);
       let stat = null;
-      try { stat = fs.statSync(filepath); } catch (_) { continue; }
+      try { stat = await fs.promises.stat(filepath); } catch (_) { continue; }
       files.push({ channel, filename: entry.name, filepath, ext, filesize: stat.size, mtimeMs: stat.mtimeMs });
     }
   }
@@ -346,7 +351,7 @@ print(json.dumps(out))
 
 async function listKeep2ShareSyncFiles() {
   const byPath = new Map();
-  for (const file of listKeep2ShareMediaFiles()) byPath.set(file.filepath, file);
+  for (const file of await listKeep2ShareMediaFiles()) byPath.set(file.filepath, file);
   const jdFiles = await readJDownloaderKeep2ShareFiles();
   for (const file of jdFiles) {
     const existing = byPath.get(file.filepath) || {};
@@ -503,7 +508,7 @@ app.get('/api/items', async (req, res) => {
     const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 100));
     const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
     const sort = String(req.query.sort || 'recent'); // recent | random | rating
-    const sourceLimit = limit + offset;
+    const sourceLimit = Math.min(5000, limit + offset + 500);
     const params = [];
     const directWhere = buildItemFilters({
       req, params,
@@ -518,7 +523,6 @@ app.get('/api/items', async (req, res) => {
          AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
     )`);
     directWhere.push(`COALESCE(d.status, 'completed') <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
-    directWhere.push(`COALESCE(d.filesize, 1) > 0`);
     directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
     const fileWhere = buildItemFilters({
       req, params,
@@ -528,7 +532,6 @@ app.get('/api/items', async (req, res) => {
     });
     fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
     fileWhere.push(`COALESCE(d.status, 'completed') <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
-    fileWhere.push(`COALESCE(df.filesize, 1) > 0`);
     fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
 
     const directOrder = sort === 'random'
@@ -547,7 +550,8 @@ app.get('/api/items', async (req, res) => {
         ? 'rating DESC NULLS LAST, source_order DESC'
         : 'sort_ts DESC NULLS LAST, source_order DESC';
 
-    params.push(sourceLimit, limit, offset);
+    params.push(sourceLimit);
+    const sourceLimitParam = params.length;
     const sql = `
       WITH direct_items AS (
           SELECT 'download' AS item_kind,
@@ -557,10 +561,10 @@ app.get('/api/items', async (req, res) => {
                  d.finished_at, d.created_at,
                  COALESCE(d.finished_at, d.updated_at, d.created_at) AS sort_ts,
                  d.id::bigint AS source_order
-            FROM downloads d
+           FROM downloads d
            WHERE ${directWhere.join(' AND ')}
            ORDER BY ${directOrder}
-           LIMIT $${params.length - 2}
+           LIMIT $${sourceLimitParam}
       ),
       file_items AS (
           SELECT 'file' AS item_kind,
@@ -574,10 +578,10 @@ app.get('/api/items', async (req, res) => {
                  COALESCE(to_timestamp(NULLIF(df.mtime_ms,0) / 1000.0)::timestamp, df.updated_at, d.finished_at, d.updated_at, d.created_at) AS sort_ts,
                  (1000000000000 + df.id)::bigint AS source_order
             FROM download_files df
-            JOIN downloads d ON d.id = df.download_id
+           JOIN downloads d ON d.id = df.download_id
            WHERE ${fileWhere.join(' AND ')}
            ORDER BY ${fileOrder}
-           LIMIT $${params.length - 2}
+           LIMIT $${sourceLimitParam}
       )
       SELECT *
         FROM (
@@ -586,10 +590,10 @@ app.get('/api/items', async (req, res) => {
           SELECT * FROM file_items
         ) media_items
       ORDER BY ${orderBy}
-      LIMIT $${params.length - 1} OFFSET $${params.length}`;
+      LIMIT $${sourceLimitParam}`;
     const { rows } = await pool.query(sql, params);
 
-    const items = rows.map(mapItem);
+    const items = rows.filter(hasNonEmptyMedia).slice(offset, offset + limit).map(mapItem);
     res.json({ items, limit, offset, count: items.length });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -616,7 +620,6 @@ app.get('/api/items-since', async (req, res) => {
          AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})
     )`);
     directWhere.push(`COALESCE(d.status, 'completed') <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
-    directWhere.push(`COALESCE(d.filesize, 1) > 0`);
     directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
     const fileWhere = buildItemFilters({
       req, params,
@@ -626,7 +629,6 @@ app.get('/api/items-since', async (req, res) => {
     });
     fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
     fileWhere.push(`COALESCE(d.status, 'completed') <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
-    fileWhere.push(`COALESCE(df.filesize, 1) > 0`);
     fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})`);
     if (since) {
       params.push(since);
@@ -662,7 +664,7 @@ app.get('/api/items-since', async (req, res) => {
       ORDER BY sort_ts DESC, id DESC
       LIMIT 200`;
     const { rows } = await pool.query(sql, params);
-    const items = rows.map(mapItem);
+    const items = rows.filter(hasNonEmptyMedia).map(mapItem);
     res.json({ items, since, count: items.length });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -676,9 +678,8 @@ app.get('/api/platforms', async (_req, res) => {
       SELECT platform, COUNT(*) AS count
       FROM (
         SELECT d.platform
-         FROM downloads d
+          FROM downloads d
          WHERE d.filepath IS NOT NULL AND d.filepath <> ''
-           AND COALESCE(d.filesize, 1) > 0
            AND lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})
            AND NOT EXISTS (
              SELECT 1 FROM download_files mf
@@ -688,10 +689,9 @@ app.get('/api/platforms', async (_req, res) => {
            )
         UNION ALL
         SELECT d.platform
-         FROM download_files df
+          FROM download_files df
           JOIN downloads d ON d.id = df.download_id
          WHERE df.relpath !~* '${AUX_RELPATH_RE}'
-           AND COALESCE(df.filesize, 1) > 0
            AND lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})
       ) media_items
       GROUP BY platform
@@ -713,9 +713,8 @@ app.get('/api/channels', async (req, res) => {
       SELECT channel, platform, COUNT(*) AS count
       FROM (
         SELECT d.channel, d.platform
-         FROM downloads d
+          FROM downloads d
          WHERE d.filepath IS NOT NULL AND d.filepath <> ''
-           AND COALESCE(d.filesize, 1) > 0
            AND lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})
            ${platformClause}
            AND NOT EXISTS (
@@ -726,12 +725,11 @@ app.get('/api/channels', async (req, res) => {
            )
         UNION ALL
         SELECT d.channel, d.platform
-         FROM download_files df
+          FROM download_files df
           JOIN downloads d ON d.id = df.download_id
          WHERE 1=1
            ${platformClause}
            AND df.relpath !~* '${AUX_RELPATH_RE}'
-           AND COALESCE(df.filesize, 1) > 0
            AND lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})
       ) media_items
       GROUP BY channel, platform
