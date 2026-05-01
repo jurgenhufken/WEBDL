@@ -41,7 +41,25 @@ function createQueue({ repo }) {
     events.emit('job:progress', { id, pct, speed: extra.speed || null, eta: extra.eta || null });
   }
 
-  return { events, enqueue, claimNext, complete, fail, cancel, progress };
+  async function pause(id) {
+    const job = await repo.pauseJob(id);
+    if (job) events.emit('job:paused', job);
+    return job;
+  }
+
+  async function resume(id) {
+    const job = await repo.resumeJob(id);
+    if (job) events.emit('job:resumed', job);
+    return job;
+  }
+
+  async function setPriority(id, priority) {
+    const job = await repo.setJobPriority(id, priority);
+    if (job) events.emit('job:updated', job);
+    return job;
+  }
+
+  return { events, enqueue, claimNext, complete, fail, cancel, progress, pause, resume, setPriority };
 }
 
 module.exports = { createQueue };

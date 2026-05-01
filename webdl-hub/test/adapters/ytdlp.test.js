@@ -31,6 +31,8 @@ test('plan houdt merge-voorkeur voor zware sites', () => {
   const p = ytdlp.plan('https://www.youtube.com/watch?v=abc', { cwd: '/tmp/jobdir' });
   const formatIndex = p.args.indexOf('-f');
   assert.equal(p.args[formatIndex + 1], 'bv*+ba/best');
+  assert.ok(p.idleTimeoutMs > 0);
+  assert.ok(p.timeoutMs > 0);
 });
 
 test('plan behandelt losse TikTok videos als directe video', () => {

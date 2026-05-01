@@ -19,6 +19,7 @@
         <span class="stats-label">Hub</span>
         <div class="stat"><div class="dot queued"></div> <span id="statQueued">0</span> wachtrij</div>
         <div class="stat"><div class="dot running"></div> <span id="statRunning">0</span> actief</div>
+        <div class="stat"><div class="dot paused"></div> <span id="statPaused">0</span> pauze</div>
         <div class="stat"><div class="dot done"></div> <span id="statDone">0</span> klaar</div>
         <div class="stat"><div class="dot failed"></div> <span id="statFailed">0</span> mislukt</div>
       </div>
@@ -72,6 +73,8 @@
         </div>
       </div>
       <div class="panel-bulk-actions" id="bulkActions">
+        <button id="btnBulkPause" class="btn-sm" title="Pauzeer alle wachtende">⏸ wacht</button>
+        <button id="btnBulkResume" class="btn-sm" title="Hervat alle gepauzeerde">▶ pauze</button>
         <button id="btnBulkCancel" class="btn-sm" title="Cancel alle wachtende">✕ wacht</button>
         <button id="btnBulkRetry" class="btn-sm" title="Retry alle mislukte">↻ failed</button>
         <button id="btnBulkClear" class="btn-sm" title="Wis voltooide">🧹 klaar</button>
@@ -82,8 +85,32 @@
     <!-- Right panel: Detail -->
     <section class="detail-panel">
       <div id="detailEmpty" class="empty-state">
-        <div class="empty-icon">📋</div>
-        <div class="empty-text">Selecteer een job om details te bekijken</div>
+        <div class="overview">
+          <div class="overview-header">
+            <h2>Queue overzicht</h2>
+            <span id="overviewTotal" class="overview-total"></span>
+          </div>
+          <div class="overview-cards">
+            <div class="overview-card"><span>Actief</span><strong id="ovRunning">0</strong></div>
+            <div class="overview-card"><span>Wachtend</span><strong id="ovQueued">0</strong></div>
+            <div class="overview-card"><span>Gepauzeerd</span><strong id="ovPaused">0</strong></div>
+            <div class="overview-card"><span>Mislukt</span><strong id="ovFailed">0</strong></div>
+          </div>
+          <div class="overview-sab" id="sabOverview">
+            <div class="overview-sab-head">
+              <h3>SABNZBD</h3>
+              <span id="sabState">laden...</span>
+            </div>
+            <div class="overview-sab-grid">
+              <div><span>Queue</span><strong id="sabQueue">0</strong></div>
+              <div><span>Snelheid</span><strong id="sabSpeed">-</strong></div>
+              <div><span>Resterend</span><strong id="sabLeft">-</strong></div>
+              <div><span>Vrij op Completed</span><strong id="sabFree">-</strong></div>
+            </div>
+            <div id="sabSlots" class="overview-sab-slots"></div>
+          </div>
+          <div id="overviewGroups" class="overview-groups"></div>
+        </div>
       </div>
 
       <div id="detail" class="detail-content" hidden>
@@ -98,6 +125,9 @@
             </div>
           </div>
           <div class="detail-actions">
+            <button id="btnPause" class="btn-action" title="Pauzeer wachtende job">⏸ Pauze</button>
+            <button id="btnResume" class="btn-action" title="Hervat gepauzeerde job">▶ Hervat</button>
+            <button id="btnBoost" class="btn-action" title="Geef voorrang">↑ Voorrang</button>
             <button id="btnRetry" class="btn-action" title="Opnieuw proberen">⟳ Retry</button>
             <button id="btnCancel" class="btn-action btn-danger" title="Annuleren">✕ Stop</button>
           </div>

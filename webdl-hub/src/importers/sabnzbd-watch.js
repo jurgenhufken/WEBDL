@@ -61,24 +61,106 @@ function buildSabnzbdUrl(config, explicitUrl = '') {
   return `${scheme}://${host}:${port}`;
 }
 
-async function fetchSabnzbdHistory({ configPath = '', url = '', apiKey = '', logger = null } = {}) {
+async function fetchSabnzbdJson({ mode, configPath = '', url = '', apiKey = '', extra = {}, timeoutMs = 5000 } = {}) {
   const cfg = readSabnzbdConfig(configPath);
   const key = apiKey || cfg.api_key || '';
-  if (!key) return [];
+  if (!key) {
+    throw Object.assign(new Error('SABNZBD API key ontbreekt'), { code: 'NO_API_KEY' });
+  }
+  const base = buildSabnzbdUrl(cfg, url);
+  const endpoint = new URL('/api', base);
+  endpoint.searchParams.set('mode', mode);
+  endpoint.searchParams.set('output', 'json');
+  endpoint.searchParams.set('apikey', key);
+  for (const [k, v] of Object.entries(extra || {})) {
+    if (v !== undefined && v !== null && v !== '') endpoint.searchParams.set(k, String(v));
+  }
+  const res = await fetch(endpoint, { signal: AbortSignal.timeout(timeoutMs) });
+  if (!res.ok) throw new Error(`SABNZBD ${mode}: HTTP ${res.status}`);
+  return { base, data: await res.json() };
+}
+
+async function fetchSabnzbdHistory({ configPath = '', url = '', apiKey = '', logger = null } = {}) {
   try {
-    const base = buildSabnzbdUrl(cfg, url);
-    const endpoint = new URL('/api', base);
-    endpoint.searchParams.set('mode', 'history');
-    endpoint.searchParams.set('output', 'json');
-    endpoint.searchParams.set('limit', '500');
-    endpoint.searchParams.set('apikey', key);
-    const res = await fetch(endpoint, { signal: AbortSignal.timeout(5000) });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
+    const { data } = await fetchSabnzbdJson({
+      mode: 'history',
+      configPath,
+      url,
+      apiKey,
+      extra: { limit: 500 },
+    });
     return Array.isArray(data?.history?.slots) ? data.history.slots : [];
   } catch (e) {
+    if (e && e.code === 'NO_API_KEY') return [];
     if (logger) logger.warn('sabnzbd.history.error', { err: String(e.message || e) });
     return [];
+  }
+}
+
+function statfsInfo(dir) {
+  try {
+    const stat = fs.statfsSync(dir);
+    const blockSize = Number(stat.bsize || stat.frsize || 0);
+    const total = Number(stat.blocks || 0) * blockSize;
+    const free = Number(stat.bavail || stat.bfree || 0) * blockSize;
+    return { path: dir, total, free, used: total > 0 ? total - free : 0 };
+  } catch (e) {
+    return { path: dir, error: String(e.message || e) };
+  }
+}
+
+async function fetchSabnzbdStatus({ configPath = '', url = '', apiKey = '', completedDir = '', downloadRoot = '', logger = null } = {}) {
+  const startedAt = Date.now();
+  try {
+    const [{ base, data: queueData }, { data: historyData }] = await Promise.all([
+      fetchSabnzbdJson({ mode: 'queue', configPath, url, apiKey }),
+      fetchSabnzbdJson({ mode: 'history', configPath, url, apiKey, extra: { limit: 20 } }),
+    ]);
+    const queue = queueData.queue || {};
+    const slots = Array.isArray(queue.slots) ? queue.slots : [];
+    const history = historyData.history || {};
+    const historySlots = Array.isArray(history.slots) ? history.slots : [];
+    return {
+      ok: true,
+      baseUrl: base,
+      ms: Date.now() - startedAt,
+      queue: {
+        status: queue.status || '',
+        paused: Boolean(queue.paused),
+        noOfSlots: Number(queue.noofslots || slots.length || 0),
+        speed: queue.speed || '',
+        speedLimit: queue.speedlimit_abs || queue.speedlimit || '',
+        size: queue.size || '',
+        sizeLeft: queue.sizeleft || '',
+        timeLeft: queue.timeleft || '',
+        slots: slots.slice(0, 12).map((slot) => ({
+          nzoId: slot.nzo_id || '',
+          name: slot.filename || slot.name || '',
+          status: slot.status || '',
+          percentage: Number.parseFloat(slot.percentage || '0') || 0,
+          size: slot.size || '',
+          sizeLeft: slot.sizeleft || '',
+          timeLeft: slot.timeleft || '',
+        })),
+      },
+      history: {
+        noOfSlots: Number(history.noofslots || historySlots.length || 0),
+        slots: historySlots.slice(0, 8).map((slot) => ({
+          nzoId: slot.nzo_id || '',
+          name: slot.name || slot.nzb_name || '',
+          status: slot.status || '',
+          category: slot.category || '',
+          completed: slot.completed || null,
+        })),
+      },
+      disks: {
+        completed: completedDir ? statfsInfo(completedDir) : null,
+        downloadRoot: downloadRoot ? statfsInfo(downloadRoot) : null,
+      },
+    };
+  } catch (e) {
+    if (logger) logger.warn('sabnzbd.status.error', { err: String(e.message || e) });
+    return { ok: false, error: String(e.message || e), ms: Date.now() - startedAt };
   }
 }
 
@@ -323,6 +405,8 @@ function startSabnzbdWatcher({ repo, logger, rootDir, pollMs = 30_000, minFileAg
 module.exports = {
   isMediaPath,
   readSabnzbdConfig,
+  buildSabnzbdUrl,
+  fetchSabnzbdStatus,
   findHistoryForFile,
   scanSabnzbdCompleted,
   startSabnzbdWatcher,

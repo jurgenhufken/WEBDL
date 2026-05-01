@@ -268,55 +268,25 @@ function startWorkerPool({
   const workerId = `w-${crypto.randomBytes(3).toString('hex')}`;
   let stopping = false;
   const active = new Set();
+  const heartbeatMs = intEnv('WEBDL_WORKER_HEARTBEAT_MS', 30_000);
+  const staleRunningMinutes = intEnv('WEBDL_STALE_RUNNING_MINUTES', 15);
 
-  // Reclaim stale jobs at startup: jobs marked 'running' from previous worker
-  // processes that died without cleanup. 100%-jobs → done, rest → requeued.
-  (async () => {
+  async function reclaimStaleJobs() {
     try {
-      const { rows: doneRows } = await repo.pool.query(
-        `UPDATE ${repo.schema}.jobs
-            SET status='queued',
-                locked_by=NULL, locked_at=NULL, started_at=NULL
-          WHERE status='running'
-            AND adapter <> 'slave-delegate'
-            AND progress_pct >= 100
-            AND error IS NULL
-            AND (locked_at IS NULL OR locked_at < NOW() - INTERVAL '10 minutes')
-        RETURNING id`,
-      );
-      const { rows: failedRows } = await repo.pool.query(
-        `UPDATE ${repo.schema}.jobs
-            SET status='failed',
-                error=COALESCE(error, 'stale running job exceeded max attempts'),
-                finished_at=now(),
-                locked_by=NULL, locked_at=NULL
-          WHERE status='running'
-            AND adapter <> 'slave-delegate'
-            AND attempts >= max_attempts
-            AND (locked_at IS NULL OR locked_at < NOW() - INTERVAL '10 minutes')
-        RETURNING id`,
-      );
-      const { rows: requeuedRows } = await repo.pool.query(
-        `UPDATE ${repo.schema}.jobs
-            SET status='queued',
-                locked_by=NULL, locked_at=NULL, started_at=NULL
-          WHERE status='running'
-            AND adapter <> 'slave-delegate'
-            AND attempts < max_attempts
-            AND (locked_at IS NULL OR locked_at < NOW() - INTERVAL '10 minutes')
-        RETURNING id`,
-      );
-      if (doneRows.length || failedRows.length || requeuedRows.length) {
-        logger.info('worker.startup.reclaim', {
-          requeuedCompleteProgress: doneRows.map((r) => r.id),
-          markedFailed: failedRows.map((r) => r.id),
-          requeued: requeuedRows.map((r) => r.id),
-        });
+      const reclaimed = await repo.reclaimStaleRunning({ olderThanMinutes: staleRunningMinutes });
+      if (reclaimed.markedFailed.length || reclaimed.requeued.length) {
+        logger.info('worker.stale.reclaim', reclaimed);
       }
     } catch (e) {
-      logger.warn('worker.startup.reclaim.error', { err: String(e.message || e) });
+      logger.warn('worker.stale.reclaim.error', { err: String(e.message || e) });
     }
-  })();
+  }
+
+  // Reclaim stale jobs at startup and periodically. Active jobs refresh
+  // locked_at through the heartbeat below, so stale means "worker died/stuck".
+  reclaimStaleJobs();
+  const staleTimer = setInterval(reclaimStaleJobs, Math.max(60_000, heartbeatMs * 2));
+  if (typeof staleTimer.unref === 'function') staleTimer.unref();
 
   async function runOne(job) {
     const workdir = path.join(downloadRoot, String(job.id));
@@ -367,6 +337,12 @@ function startWorkerPool({
     let rateLimited = false;
     let rateLimitMessage = '';
     const proc = runProcess(planned);
+    const heartbeatTimer = setInterval(() => {
+      repo.heartbeatJob(job.id, workerId).catch((e) => {
+        logger.warn('job.heartbeat.error', { job: job.id, err: String(e.message || e) });
+      });
+    }, heartbeatMs);
+    if (typeof heartbeatTimer.unref === 'function') heartbeatTimer.unref();
 
     proc.on('line', async ({ stream, line }) => {
       if (isYoutubeRateLimitMessage(line)) {
@@ -460,6 +436,7 @@ function startWorkerPool({
 
     try {
       const { code, signal, timedOut, idleTimedOut } = await proc.done;
+      clearInterval(heartbeatTimer);
       if (code === 0) {
         await importOutputs();
         return true; // success
@@ -484,6 +461,7 @@ function startWorkerPool({
         return false; // failure
       }
     } catch (err) {
+      clearInterval(heartbeatTimer);
       const retry = job.attempts < job.max_attempts;
       await queue.fail(job.id, String(err.message || err), { retry });
       logger.error('job.error', { job: job.id, err: String(err.message || err) });
@@ -646,6 +624,7 @@ function startWorkerPool({
 
   async function stop() {
     stopping = true;
+    clearInterval(staleTimer);
     await Promise.all(loopPromises);
   }
 

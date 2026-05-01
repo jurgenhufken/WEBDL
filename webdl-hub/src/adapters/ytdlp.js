@@ -12,6 +12,8 @@ const YOUTUBE_SLEEP_REQUESTS = process.env.WEBDL_YTDLP_YOUTUBE_SLEEP_REQUESTS ||
 const YOUTUBE_SLEEP_INTERVAL = process.env.WEBDL_YTDLP_YOUTUBE_SLEEP_INTERVAL || '2';
 const YOUTUBE_MAX_SLEEP_INTERVAL = process.env.WEBDL_YTDLP_YOUTUBE_MAX_SLEEP_INTERVAL || '8';
 const XVIDEOS_EXPAND_LIMIT = Number.parseInt(process.env.WEBDL_XVIDEOS_EXPAND_LIMIT || '50', 10) || 50;
+const YTDLP_TIMEOUT_MS = Number.parseInt(process.env.WEBDL_YTDLP_TIMEOUT_MS || String(4 * 60 * 60 * 1000), 10);
+const YTDLP_IDLE_TIMEOUT_MS = Number.parseInt(process.env.WEBDL_YTDLP_IDLE_TIMEOUT_MS || String(12 * 60 * 1000), 10);
 const MERGE_VIDEO_HOSTS = [
   'youtube.com', 'youtu.be', 'vimeo.com', 'twitch.tv',
   'reddit.com', 'redd.it', 'v.redd.it',
@@ -201,7 +203,7 @@ function plan(url, opts = {}) {
     );
   }
   args.push(url);
-  return { cmd: YT_DLP, args, cwd, env: {} };
+  return { cmd: YT_DLP, args, cwd, env: {}, timeoutMs: YTDLP_TIMEOUT_MS, idleTimeoutMs: YTDLP_IDLE_TIMEOUT_MS };
 }
 
 // Matcht op onze custom progress-template hierboven.

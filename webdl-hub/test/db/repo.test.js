@@ -77,6 +77,30 @@ test('DB-tests', { concurrency: false }, async (t) => {
     assert.equal(first.attempts, 1);
   });
 
+  await t.test('listJobs toont werk boven recente klaar-items', async () => {
+    await repo.truncateAll();
+    const queued = await repo.createJob({ url: 'old', adapter: 'ytdlp', priority: 0 });
+    const done = await repo.createJob({ url: 'new', adapter: 'ytdlp', priority: 0 });
+    await repo.claimNextJob('w');
+    await repo.completeJob(queued.id);
+    await repo.claimNextJob('w');
+    await repo.failJob(done.id, 'retry', { retry: true });
+    const jobs = await repo.listJobs({ limit: 10 });
+    assert.equal(jobs[0].id, done.id);
+    assert.equal(jobs[0].status, 'queued');
+  });
+
+  await t.test('pauseJob haalt queued job uit claimbare lanes', async () => {
+    await repo.truncateAll();
+    const j = await repo.createJob({ url: 'u', adapter: 'ytdlp' });
+    const paused = await repo.pauseJob(j.id);
+    assert.equal(paused.lane, 'paused');
+    const claimed = await repo.claimNextJob('w');
+    assert.equal(claimed, null);
+    const resumed = await repo.resumeJob(j.id);
+    assert.notEqual(resumed.lane, 'paused');
+  });
+
   await t.test('claimNextJob wist oude foutstatus bij retry', async () => {
     await repo.truncateAll();
     const j = await repo.createJob({ url: 'u1', adapter: 'ytdlp' });
@@ -162,5 +186,14 @@ test('DB-tests', { concurrency: false }, async (t) => {
     await repo.updateProgress(j.id, 37.5);
     const again = await repo.getJob(j.id);
     assert.equal(Math.round(again.progress_pct * 10) / 10, 37.5);
+  });
+
+  await t.test('getJobStats telt paused apart', async () => {
+    await repo.truncateAll();
+    const j = await repo.createJob({ url: 'u', adapter: 'ytdlp' });
+    await repo.pauseJob(j.id);
+    const stats = await repo.getJobStats();
+    assert.equal(stats.queued, 0);
+    assert.equal(stats.paused, 1);
   });
 });
