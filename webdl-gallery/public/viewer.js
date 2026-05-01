@@ -92,9 +92,9 @@
       'vVol','vBtnMute','vSeek',
       'vBtnTags','vBtnLog','vClose',
       'vSlideshow2','vRandom2',
-      'vStage','vContent','vPrev','vNext','vHudLeft','vHudMeta','vHudRight',
+      'vStage','vContent','vPrev','vNext','vHudLeft','vHudRight',
       'vProgressBar','vProgressFill','vProgressHandle',
-      'vBottomControls','vBtnPlayPause','vTimeLabel','vBottomSeek',
+      'vBottomControls','vBtnPlayPause','vTimeLabel',
       'vTagDialog','vTagList','vNewTagInput','vBtnAddTag','vBtnCloseTagDialog',
       'vLogPanel','vLogBody',
     ];
@@ -178,7 +178,6 @@
         if (!vs.seekDragging && mediaEl.duration) {
           const pct = (mediaEl.currentTime / mediaEl.duration) * 100;
           el.vSeek.value = String(Math.round(pct * 10));
-          if (el.vBottomSeek) el.vBottomSeek.value = String(Math.round(pct * 10));
           if (el.vProgressFill) el.vProgressFill.style.width = pct + '%';
           if (el.vProgressHandle) el.vProgressHandle.style.left = pct + '%';
 
@@ -205,7 +204,6 @@
 
       el.vVol.disabled  = false;
       el.vSeek.disabled = false;
-      if (el.vBottomSeek) el.vBottomSeek.disabled = false;
       if (el.vBottomControls) el.vBottomControls.classList.remove('hidden');
     } else {
       mediaEl = document.createElement('img');
@@ -216,10 +214,6 @@
       el.vVol.disabled  = true;
       el.vSeek.disabled = true;
       el.vSeek.value = '0';
-      if (el.vBottomSeek) {
-        el.vBottomSeek.disabled = true;
-        el.vBottomSeek.value = '0';
-      }
       if (el.vBottomControls) el.vBottomControls.classList.add('hidden');
       updatePlaybackControls(null);
     }
@@ -302,7 +296,6 @@
     el.vContent.innerHTML = '';
     vs.currentMediaEl = null;
     el.vSeek.value = '0';
-    if (el.vBottomSeek) el.vBottomSeek.value = '0';
     updatePlaybackControls(null);
   }
 
@@ -493,17 +486,13 @@
   function updateHUD(it) {
     const total = vs.items.length;
     const plus = vs.done ? '' : '+';
-    const meta =
+    el.vHudLeft.textContent =
       `${vs.idx + 1} / ${total}${plus}  ·  ${it.platform || '?'}  ·  ` +
       `${(it.channel && it.channel !== 'unknown') ? it.channel : '—'}`;
-    if (el.vHudMeta) el.vHudMeta.textContent = meta;
-    else el.vHudLeft.textContent = meta;
     el.vHudRight.textContent = it.duration ? String(it.duration) : '';
-    el.vHudLeft.classList.toggle('has-controls', it.type === 'video');
     // Reset progress bar
     if (el.vProgressFill) el.vProgressFill.style.width = '0%';
     if (el.vProgressHandle) el.vProgressHandle.style.left = '0%';
-    if (el.vBottomSeek) el.vBottomSeek.value = '0';
     // Show progress bar alleen bij video
     if (el.vProgressBar) el.vProgressBar.style.display = it.type === 'video' ? '' : 'none';
     if (el.vBottomControls) el.vBottomControls.classList.toggle('hidden', it.type !== 'video');
@@ -525,9 +514,7 @@
   }
 
   function hideHUD() {
-    const v = el.vContent.querySelector('video');
-    if (v) el.vHudLeft.classList.remove('hud-hidden');
-    else el.vHudLeft.classList.add('hud-hidden');
+    el.vHudLeft.classList.add('hud-hidden');
     el.vHudRight.classList.add('hud-hidden');
     el.vStage.classList.add('hud-hidden');
     // Topbar mee verbergen
@@ -1180,27 +1167,6 @@
       vs.seekDragging = false;
       seekVideoFromRange(el.vSeek);
     });
-    el.vSeek.addEventListener('input', () => {
-      if (el.vBottomSeek) el.vBottomSeek.value = el.vSeek.value;
-    });
-
-    if (el.vBottomSeek) {
-      el.vBottomSeek.addEventListener('mousedown', () => { vs.seekDragging = true; });
-      el.vBottomSeek.addEventListener('mouseup', () => {
-        vs.seekDragging = false;
-        if (el.vSeek) el.vSeek.value = el.vBottomSeek.value;
-        seekVideoFromRange(el.vBottomSeek);
-      });
-      el.vBottomSeek.addEventListener('touchend', () => {
-        vs.seekDragging = false;
-        if (el.vSeek) el.vSeek.value = el.vBottomSeek.value;
-        seekVideoFromRange(el.vBottomSeek);
-      });
-      el.vBottomSeek.addEventListener('input', () => {
-        if (el.vSeek) el.vSeek.value = el.vBottomSeek.value;
-      });
-    }
-
     el.vSlideshow.addEventListener('click', () => {
       if (vs.slideshow) stopSlideshow(); else startSlideshow();
     });

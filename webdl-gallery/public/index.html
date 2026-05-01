@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WEBDL Gallery</title>
-<link rel="stylesheet" href="/styles.css?v=20260501-07">
+<link rel="stylesheet" href="/styles.css?v=20260501-08">
 </head>
 <body>
   <header class="topbar">
@@ -129,6 +129,10 @@
         <div class="vtop-right">
           <label class="vtop-ctrl" title="Volume"><span>Vol</span> <input id="vVol" type="range" min="0" max="1" step="0.01" value="0.8"></label>
           <button id="vBtnMute" class="vtop-btn" title="Geluid dempen (M)">🔊</button>
+          <div class="vbottom-controls hidden" id="vBottomControls" aria-label="Video bediening">
+            <button id="vBtnPlayPause" class="vplay-btn" title="Afspelen/pauzeren (spatie)">▶</button>
+            <div class="vtime-label" id="vTimeLabel">0:00 / 0:00</div>
+          </div>
           <label class="vtop-ctrl" title="Positie in video"><span>Tijd</span> <input id="vSeek" type="range" min="0" max="1000" step="1" value="0"></label>
           <span class="vtop-sep"></span>
           <button id="vBtnOpen" class="vtop-btn" title="Bron-URL openen in browser">🔗 Bron</button>
@@ -150,14 +154,7 @@
         </div>
         <button class="viewer-nav prev" id="vPrev" title="Vorige (←)">‹</button>
         <button class="viewer-nav next" id="vNext" title="Volgende (→)">›</button>
-        <div class="hud-pill hud-left" id="vHudLeft">
-          <span class="vhud-meta" id="vHudMeta"></span>
-          <div class="vbottom-controls hidden" id="vBottomControls" aria-label="Video bediening">
-            <button id="vBtnPlayPause" class="vplay-btn" title="Afspelen/pauzeren (spatie)">▶</button>
-            <div class="vtime-label" id="vTimeLabel">0:00 / 0:00</div>
-            <input id="vBottomSeek" class="vbottom-seek" type="range" min="0" max="1000" step="1" value="0" title="Positie in video">
-          </div>
-        </div>
+        <div class="hud-pill hud-left" id="vHudLeft"></div>
         <div class="hud-pill hud-right" id="vHudRight"></div>
       </div>
 
@@ -186,8 +183,8 @@
 
   </div><!-- /viewer -->
 
-  <script src="/app.js?v=20260501-07"></script>
-  <script src="/viewer.js?v=20260501-07"></script>
+  <script src="/app.js?v=20260501-08"></script>
+  <script src="/viewer.js?v=20260501-08"></script>
   <script>
   // ─── Thema switcher ─────────────────────────────────────────────────────
   (function() {
