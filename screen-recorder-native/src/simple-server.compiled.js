@@ -1682,6 +1682,11 @@ async function emitDownloadStatusActivity(downloadId, status, progress, error, e
 const updateDownload = {
   run: async (status, progress, filepath, filename, filesize, format, metadata, error, id) => {
     const out = await rawUpdateDownload.run(status, progress, filepath, filename, filesize, format, metadata, error, id);
+    if (String(status || '').toLowerCase() === 'completed') {
+      try {
+        await normalizeYoutubeDownloadTimestamp(id, filepath);
+      } catch (e) { }
+    }
     setDownloadActivityContext(id, { filepath, filename });
     await emitDownloadStatusActivity(id, status, progress, error, { filepath, filename });
     return out;
@@ -7843,6 +7848,41 @@ function getYtdlpSourceTimestamp(info) {
   } catch (e) {
     return null;
   }
+}
+
+function findYtdlpInfoJsonForMediaPath(fpRaw) {
+  try {
+    const fp = String(fpRaw || '').trim();
+    if (!fp || !fs.existsSync(fp)) return null;
+    const st = fs.statSync(fp);
+    const dir = st.isDirectory() ? fp : path.dirname(fp);
+    const files = fs.readdirSync(dir).filter(f => f.endsWith('.info.json'));
+    if (!files.length) return null;
+    const stem = st.isDirectory() ? '' : path.basename(fp, path.extname(fp));
+    const exact = stem ? files.find(f => path.basename(f, '.info.json') === stem) : null;
+    return path.join(dir, exact || files[0]);
+  } catch (e) {
+    return null;
+  }
+}
+
+async function normalizeYoutubeDownloadTimestamp(downloadId, filepath) {
+  try {
+    if (!downloadId) return;
+    const row = await rawGetDownload.get(downloadId);
+    if (!row || String(row.platform || '').toLowerCase() !== 'youtube') return;
+    const fp = filepath || row.filepath || '';
+    const infoPath = findYtdlpInfoJsonForMediaPath(fp);
+    if (!infoPath) return;
+    const info = JSON.parse(fs.readFileSync(infoPath, 'utf8'));
+    const sourcePublishedAt = getYtdlpSourceTimestamp(info);
+    if (!sourcePublishedAt) return;
+    await updateDownloadContentTimestamp.run(sourcePublishedAt, sourcePublishedAt, sourcePublishedAt, downloadId);
+    const sourceUrl = String(info.webpage_url || info.original_url || '').trim();
+    if (sourceUrl) {
+      try { await updateDownloadSourceUrl.run(sourceUrl, downloadId); } catch (e) { }
+    }
+  } catch (e) { }
 }
 
 function looksCompleteOnDisk(fpRaw) {
