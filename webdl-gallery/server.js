@@ -165,7 +165,7 @@ async function generateVideoThumb(filePath) {
       if (ok) return outPath;
     }
     return null;
-  }).finally(() => thumbInflight.delete(filePath));
+  })().finally(() => thumbInflight.delete(filePath));
   thumbInflight.set(filePath, job);
   return job;
 }
