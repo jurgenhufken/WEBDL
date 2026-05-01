@@ -8,6 +8,7 @@ const {
   findHistoryForFile,
   normalizeRootDirs,
   readSabnzbdConfig,
+  scanSabnzbdCompleted,
 } = require('../../src/importers/sabnzbd-watch');
 
 test('SABNZBD watcher herkent media en negeert tijdelijke bestanden', () => {
@@ -61,4 +62,31 @@ test('SABNZBD roots worden genormaliseerd en gededuped', () => {
     normalizeRootDirs({ rootDir: '/old/Completed', rootDirs: ['/old/Completed', '/new/Completed'] }),
     ['/old/Completed', '/new/Completed'],
   );
+});
+
+test('SABNZBD scan kan stoppen voordat DB-imports starten', async (t) => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'sabnzbd-stop-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(dir, 'video.mp4'), Buffer.alloc(1024));
+
+  const repo = {
+    schema: 'webdl',
+    pool: {
+      query() {
+        throw new Error('DB should not be touched after stop');
+      },
+    },
+  };
+  const result = await scanSabnzbdCompleted({
+    repo,
+    rootDir: dir,
+    minFileAgeMs: 0,
+    shouldStop: () => true,
+  });
+  assert.equal(result.success, true);
+  assert.equal(result.files, 1);
+  assert.equal(result.imported, 0);
+  assert.equal(result.skipped, 0);
 });

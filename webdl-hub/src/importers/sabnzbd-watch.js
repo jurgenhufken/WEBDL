@@ -367,7 +367,7 @@ async function importSabnzbdFile({ repo, filePath, rootDir, history = [], minFil
   }
 }
 
-async function scanSabnzbdCompleted({ repo, rootDir, configPath = '', sabnzbdUrl = '', sabnzbdApiKey = '', minFileAgeMs = 15_000, logger = null } = {}) {
+async function scanSabnzbdCompleted({ repo, rootDir, configPath = '', sabnzbdUrl = '', sabnzbdApiKey = '', minFileAgeMs = 15_000, logger = null, shouldStop = null } = {}) {
   if (!rootDir || !fs.existsSync(rootDir)) {
     return { success: false, rootDir, error: 'completed dir missing', imported: 0, skipped: 0, errors: 0 };
   }
@@ -378,6 +378,7 @@ async function scanSabnzbdCompleted({ repo, rootDir, configPath = '', sabnzbdUrl
   let errors = 0;
   const details = [];
   for (const filePath of files) {
+    if (shouldStop && shouldStop()) break;
     const result = await importSabnzbdFile({ repo, filePath, rootDir, history, minFileAgeMs, logger });
     if (result.imported) imported++;
     else if (result.reason === 'error') errors++;
@@ -392,33 +393,52 @@ function startSabnzbdWatcher({ repo, logger, rootDir, rootDirs = [], pollMs = 30
   let stopped = false;
   let inProgress = false;
   let timer = null;
+  let startupTimer = null;
+  let currentTick = null;
 
   async function tick(reason) {
     if (stopped || inProgress) return;
     inProgress = true;
-    try {
+    currentTick = (async () => {
       for (const currentRoot of roots) {
-        const result = await scanSabnzbdCompleted({ repo, rootDir: currentRoot, configPath, sabnzbdUrl, sabnzbdApiKey, minFileAgeMs, logger });
+        if (stopped) break;
+        const result = await scanSabnzbdCompleted({
+          repo,
+          rootDir: currentRoot,
+          configPath,
+          sabnzbdUrl,
+          sabnzbdApiKey,
+          minFileAgeMs,
+          logger,
+          shouldStop: () => stopped,
+        });
         if (!result.success) {
           if (logger) logger.warn('sabnzbd.scan.skipped', { reason: result.error, rootDir: currentRoot });
         } else if (result.imported || reason === 'startup') {
           if (logger) logger.info('sabnzbd.scan.done', { reason, rootDir: currentRoot, files: result.files, imported: result.imported, skipped: result.skipped, errors: result.errors });
         }
       }
+    })();
+    try {
+      await currentTick;
     } finally {
       inProgress = false;
+      currentTick = null;
     }
   }
 
   if (logger) logger.info('sabnzbd.watch.started', { rootDirs: roots, pollMs, minFileAgeMs });
   timer = setInterval(() => tick('poll'), pollMs);
-  setTimeout(() => tick('startup'), 1500);
+  startupTimer = setTimeout(() => tick('startup'), 1500);
 
   return {
     async stop() {
       stopped = true;
       if (timer) clearInterval(timer);
+      if (startupTimer) clearTimeout(startupTimer);
       timer = null;
+      startupTimer = null;
+      if (currentTick) await currentTick;
     },
     scanNow: () => tick('manual'),
   };
