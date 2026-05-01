@@ -12,6 +12,7 @@ const HOSTS = [
   'danbooru.donmai.us', 'gelbooru.com', 'rule34.xxx', 'e621.net',
   '4chan.org', 'kemono.su', 'coomer.su', 'tumblr.com',
   'pinterest.com', 'bsky.app', 'twitter.com', 'x.com', 'mastodon.social',
+  'instagram.com',
 ];
 
 function hostMatches(hostname) {
@@ -33,6 +34,7 @@ function plan(url, opts = {}) {
   const args = [
     '--no-colors',
     '-D', opts.cwd,
+    '--cookies-from-browser', process.env.WEBDL_GALLERYDL_BROWSER_COOKIES || 'firefox',
     '-o', 'output.progress=true',
     url,
   ];

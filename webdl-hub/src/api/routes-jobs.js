@@ -14,6 +14,10 @@ function isMultiItemUrl(url) {
     const host = u.hostname.replace(/^www\./, '').toLowerCase();
     const pathname = u.pathname.toLowerCase();
     const isYoutubeHost = host === 'youtube.com' || host === 'youtu.be' || host.endsWith('.youtube.com');
+    const isXvideosHost = host === 'xvideos.com' || host.endsWith('.xvideos.com');
+    if (isXvideosHost) {
+      return !/^\/video[./]/i.test(pathname);
+    }
     if (!isYoutubeHost) return false;
     // /playlist?list=... of watch?list=... (playlist param met echte waarde)
     const list = u.searchParams.get('list');

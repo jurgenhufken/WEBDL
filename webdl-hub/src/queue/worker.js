@@ -238,6 +238,14 @@ async function syncToGallery(job, outputFiles, logger) {
   }
 }
 
+function isImportableMedia(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (!VIDEO_EXTS.has(ext) && !IMAGE_EXTS.has(ext)) return false;
+  if (/_thumb(_v\d+)?\.(jpe?g|png|webp)$/i.test(path.basename(filePath))) return false;
+  if (SKIP_EXTS.has(ext)) return false;
+  return true;
+}
+
 function startWorkerPool({
   queue,
   repo,
@@ -389,39 +397,64 @@ function startWorkerPool({
       }
     });
 
+    async function importOutputs({ partialReason = '' } = {}) {
+      const outs = await adapter.collectOutputs(workdir, { job, startedAtMs });
+      const mediaOuts = outs.filter((f) => isImportableMedia(f.path));
+      if (partialReason && mediaOuts.length === 0) return 0;
+
+      // Thumbnails genereren
+      for (const f of outs) {
+        try {
+          const thumbPath = await generateThumbnail(f.path);
+          if (thumbPath) {
+            f._thumbPath = thumbPath;
+            await repo.appendLog(job.id, 'info', `🖼️ thumbnail: ${path.basename(thumbPath)}`);
+          }
+        } catch (_) {}
+      }
+
+      for (const f of outs) await repo.addFile(job.id, f);
+      if (partialReason) {
+        await repo.pool.query(
+          `UPDATE ${repo.schema}.jobs
+              SET options = COALESCE(options, '{}'::jsonb) || jsonb_build_object('partial_success', true, 'partial_reason', $2)
+            WHERE id = $1`,
+          [job.id, partialReason],
+        );
+      }
+      await queue.complete(job.id);
+      await repo.appendLog(
+        job.id,
+        partialReason ? 'warn' : 'info',
+        partialReason
+          ? `⚠️ gedeeltelijk klaar, ${mediaOuts.length} media-bestand(en) geïmporteerd; oorzaak: ${partialReason}`
+          : `✅ klaar, ${outs.length} bestand(en)`,
+      );
+      logger.info(partialReason ? 'job.partial.done' : 'job.done', {
+        job: job.id,
+        files: outs.length,
+        mediaFiles: mediaOuts.length,
+        partialReason,
+      });
+
+      // Gallery sync — alleen voltooide of gedeeltelijk bruikbare downloads
+      try {
+        const freshJob = await repo.getJob(job.id);
+        await syncToGallery(freshJob || job, outs, logger);
+        await repo.markGallerySynced(job.id);
+        await repo.appendLog(job.id, 'info', '📺 gallery sync voltooid');
+      } catch (e) {
+        await repo.appendLog(job.id, 'warn', `gallery sync mislukt: ${e.message}`);
+      }
+      return mediaOuts.length;
+    }
+
     try {
       const { code, signal, timedOut, idleTimedOut } = await proc.done;
       if (code === 0) {
-        const outs = await adapter.collectOutputs(workdir, { job, startedAtMs });
-
-        // Thumbnails genereren
-        for (const f of outs) {
-          try {
-            const thumbPath = await generateThumbnail(f.path);
-            if (thumbPath) {
-              f._thumbPath = thumbPath;
-              await repo.appendLog(job.id, 'info', `🖼️ thumbnail: ${path.basename(thumbPath)}`);
-            }
-          } catch (_) {}
-        }
-
-        for (const f of outs) await repo.addFile(job.id, f);
-        await queue.complete(job.id);
-        await repo.appendLog(job.id, 'info', `✅ klaar, ${outs.length} bestand(en)`);
-        logger.info('job.done', { job: job.id, files: outs.length });
-
-        // Gallery sync — alleen voltooide downloads
-        try {
-          const freshJob = await repo.getJob(job.id);
-          await syncToGallery(freshJob || job, outs, logger);
-          await repo.markGallerySynced(job.id);
-          await repo.appendLog(job.id, 'info', '📺 gallery sync voltooid');
-        } catch (e) {
-          await repo.appendLog(job.id, 'warn', `gallery sync mislukt: ${e.message}`);
-        }
+        await importOutputs();
         return true; // success
       } else {
-        const retry = rateLimited ? true : job.attempts < job.max_attempts;
         const reason = rateLimited
           ? `youtube rate limit: ${rateLimitMessage || 'Video unavailable; account tijdelijk rate-limited'}`
           : idleTimedOut
@@ -429,6 +462,13 @@ function startWorkerPool({
             : timedOut
               ? `timeout (${Math.round((planned.timeoutMs || 0) / 1000)}s)`
               : `exit ${code}${signal ? ` (${signal})` : ''}`;
+        try {
+          const imported = await importOutputs({ partialReason: reason });
+          if (imported > 0) return true;
+        } catch (e) {
+          logger.warn('job.partial.import.error', { job: job.id, err: String(e.message || e) });
+        }
+        const retry = rateLimited ? true : job.attempts < job.max_attempts;
         await queue.fail(job.id, reason, { retry });
         await repo.appendLog(job.id, retry ? 'warn' : 'error', `${reason}${retry ? ' (retry)' : ''}`);
         logger.warn('job.failed', { job: job.id, code, signal, retry, timedOut, idleTimedOut });

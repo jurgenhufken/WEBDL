@@ -13,6 +13,36 @@ const { execFile } = require('node:child_process');
 
 const FFMPEG = process.env.WEBDL_FFMPEG || '/opt/homebrew/bin/ffmpeg';
 const VIDEO_EXTS = new Set(['.mp4', '.mkv', '.webm', '.mov', '.m4v', '.avi', '.flv', '.ts']);
+const MEDIA_EXTS = new Set([...VIDEO_EXTS, '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.avif']);
+
+async function inspectSlaveFile(filePath) {
+  let st;
+  try {
+    st = await fs.stat(filePath);
+  } catch (_) {
+    return { ok: false, size: null, reason: 'slave bestand bestaat niet op disk' };
+  }
+
+  const ext = path.extname(filePath).toLowerCase();
+  if (!MEDIA_EXTS.has(ext)) return { ok: true, size: st.size, reason: '' };
+
+  let head = '';
+  try {
+    const fh = await fs.open(filePath, 'r');
+    try {
+      const buf = Buffer.alloc(Math.min(4096, Math.max(0, st.size)));
+      const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
+      head = buf.subarray(0, bytesRead).toString('utf8').toLowerCase();
+    } finally {
+      await fh.close();
+    }
+  } catch (_) {}
+
+  if (/<html\b|<!doctype html|<head\b|<body\b|login|cloudflare|keep2share|k2s\.cc/.test(head)) {
+    return { ok: false, size: st.size, reason: 'slave kreeg HTML/login-pagina terug in plaats van media' };
+  }
+  return { ok: true, size: st.size, reason: '' };
+}
 
 function generateThumbnail(videoPath) {
   return new Promise((resolve) => {
@@ -60,9 +90,22 @@ function startSlavePoller({ repo, logger, intervalMs = 5000 }) {
         return;
       }
       try {
-        // Bestands-metadata uit filesystem
-        let size = null;
-        try { const st = await fs.stat(row.filepath); size = st.size; } catch (_) {}
+        const inspected = await inspectSlaveFile(row.filepath);
+        if (!inspected.ok) {
+          await repo.pool.query(
+            `UPDATE downloads
+                SET status='error',
+                    error=$2,
+                    updated_at=now()
+              WHERE id=$1`,
+            [row.id, inspected.reason],
+          );
+          await repo.failJob(hubJobId, inspected.reason, { retry: false });
+          await repo.appendLog(hubJobId, 'error', `❌ ${inspected.reason}: ${row.filepath}`);
+          logger.warn('slave.invalid_file', { hubJob: hubJobId, downloadId: row.id, filepath: row.filepath, reason: inspected.reason });
+          return;
+        }
+        const size = inspected.size;
 
         // File toevoegen aan webdl.files
         await repo.addFile(hubJobId, { path: row.filepath, size, mime: null, checksum: null });
