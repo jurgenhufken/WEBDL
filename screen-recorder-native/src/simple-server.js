@@ -7828,7 +7828,7 @@ function parseSqliteDateMs(s) {
 function getYtdlpSourceTimestamp(info) {
   try {
     if (!info || typeof info !== 'object') return null;
-    const rawTimestamp = Number(info.timestamp);
+    const rawTimestamp = Number(info.release_timestamp || info.timestamp || info.modified_timestamp || 0);
     if (Number.isFinite(rawTimestamp) && rawTimestamp > 0) {
       const dt = new Date(rawTimestamp * 1000);
       const ms = dt.getTime();
@@ -7841,6 +7841,16 @@ function getYtdlpSourceTimestamp(info) {
       const y = parseInt(m[1], 10);
       const mo = parseInt(m[2], 10);
       const d = parseInt(m[3], 10);
+      const dt = new Date(Date.UTC(y, Math.max(0, mo - 1), d, 12, 0, 0));
+      const ms = dt.getTime();
+      if (Number.isFinite(ms)) return dt.toISOString();
+    }
+    const releaseDate = String(info.release_date || info.date || '').trim();
+    const rm = releaseDate.match(/^(\d{4})(\d{2})(\d{2})$/);
+    if (rm) {
+      const y = parseInt(rm[1], 10);
+      const mo = parseInt(rm[2], 10);
+      const d = parseInt(rm[3], 10);
       const dt = new Date(Date.UTC(y, Math.max(0, mo - 1), d, 12, 0, 0));
       const ms = dt.getTime();
       if (Number.isFinite(ms)) return dt.toISOString();
@@ -12238,6 +12248,7 @@ async function importExistingVideosFromDisk(options = {}) {
             moveFileSyncWithFallback(fp, targetPath);
           } else {
             fs.copyFileSync(fp, targetPath);
+            try { fs.utimesSync(targetPath, st.atime, st.mtime); } catch (e) { }
           }
         }
 
@@ -12276,6 +12287,11 @@ async function importExistingVideosFromDisk(options = {}) {
             JSON.stringify(importMeta)
           );
           const newId = Number(info && info.lastInsertRowid);
+          if (Number.isFinite(newId)) {
+            const sourceMtime = new Date(st.mtimeMs).toISOString();
+            await updateDownloadContentTimestamp.run(sourceMtime, sourceMtime, sourceMtime, newId);
+            if (platform === 'youtube') await normalizeYoutubeDownloadTimestamp(newId, storedPath);
+          }
           if (Number.isFinite(newId) && sourceUrl && sourceUrl !== canonicalSource) {
             try { await updateDownloadSourceUrl.run(sourceUrl, newId); } catch (e) { }
           }
@@ -16113,6 +16129,7 @@ async function scan4KDownloaderDir() {
         );
         const newId = ins && ins.lastInsertRowid ? ins.lastInsertRowid : null;
         if (newId) {
+          await normalizeYoutubeDownloadTimestamp(newId, filePath);
           console.log(`[4K-SCAN] Indexed #${newId}: ${title} (${channel})`);
           // Queue thumbnail generation
           try {

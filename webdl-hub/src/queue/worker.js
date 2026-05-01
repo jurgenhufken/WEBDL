@@ -85,8 +85,28 @@ async function readInfoJson(workdir) {
           title: data.fulltitle || data.title || '',
           sourceUrl: data.webpage_url || data.original_url || data.url || '',
           platform: data.extractor_key ? data.extractor_key.toLowerCase() : '',
+          duration: data.duration_string || (Number.isFinite(Number(data.duration)) ? String(Math.round(Number(data.duration))) : null),
+          sourcePublishedAt: getYtdlpSourceTimestamp(data),
         };
       }
+    }
+  } catch {}
+  return null;
+}
+
+function getYtdlpSourceTimestamp(info) {
+  try {
+    if (!info || typeof info !== 'object') return null;
+    const rawTimestamp = Number(info.release_timestamp || info.timestamp || info.modified_timestamp || 0);
+    if (Number.isFinite(rawTimestamp) && rawTimestamp > 0) {
+      const dt = new Date(rawTimestamp * 1000);
+      if (Number.isFinite(dt.getTime())) return dt.toISOString();
+    }
+    const rawDate = String(info.upload_date || info.release_date || info.date || '').trim();
+    const m = rawDate.match(/^(\d{4})(\d{2})(\d{2})$/);
+    if (m) {
+      const dt = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0));
+      if (Number.isFinite(dt.getTime())) return dt.toISOString();
     }
   } catch {}
   return null;
@@ -161,12 +181,13 @@ async function syncToGallery(job, outputFiles, logger) {
       }
 
       const stat = fsSync.statSync(f.path);
+      const galleryTimestamp = info?.sourcePublishedAt || stat.mtime.toISOString();
       await galleryPool.query(
         `INSERT INTO downloads
           (url, platform, channel, title, filename, filepath, filesize, format,
-           status, progress, metadata, source_url, created_at, updated_at, finished_at, is_thumb_ready)
+           status, progress, metadata, source_url, duration, created_at, updated_at, finished_at, is_thumb_ready)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-                 'completed', 100, $9::jsonb, $10, now(), now(), now(), $11)
+                 'completed', 100, $9::jsonb, $10, $11, $12::timestamp, $12::timestamp, $12::timestamp, $13)
          ON CONFLICT DO NOTHING`,
         [
           sourceUrl,
@@ -179,6 +200,8 @@ async function syncToGallery(job, outputFiles, logger) {
           ext.replace('.', ''),
           JSON.stringify({ hub_job_id: job.id, adapter: job.adapter }),
           sourceUrl,
+          info?.duration || null,
+          galleryTimestamp,
           f._thumbPath ? true : false,
         ],
       );
