@@ -8,6 +8,9 @@ const { defineAdapter } = require('./base');
 
 const YT_DLP = process.env.WEBDL_YT_DLP || 'yt-dlp';
 const FFMPEG_LOCATION = process.env.WEBDL_FFMPEG || '/opt/homebrew/bin/ffmpeg';
+const YOUTUBE_SLEEP_REQUESTS = process.env.WEBDL_YTDLP_YOUTUBE_SLEEP_REQUESTS || '2';
+const YOUTUBE_SLEEP_INTERVAL = process.env.WEBDL_YTDLP_YOUTUBE_SLEEP_INTERVAL || '2';
+const YOUTUBE_MAX_SLEEP_INTERVAL = process.env.WEBDL_YTDLP_YOUTUBE_MAX_SLEEP_INTERVAL || '8';
 
 // Generieke matcher: yt-dlp ondersteunt duizenden sites, dus we accepteren
 // elke http(s)-URL. Andere adapters (reddit, instagram, tdl) hebben hogere
@@ -43,6 +46,7 @@ function normalizeFlatEntryUrl(obj, seedUrl) {
 function plan(url, opts = {}) {
   const cwd = opts.cwd;
   const quality = opts.quality || 'bv*+ba/best';
+  const isYoutube = /(?:youtube\.com|youtu\.be)/i.test(String(url || ''));
   const args = [
     '--no-colors',
     '--newline',                // progress per regel i.p.v. \r-updates
@@ -54,8 +58,15 @@ function plan(url, opts = {}) {
     '--cookies-from-browser', 'firefox',   // Fix age verification
     '--write-info-json',                   // Metadata voor gallery sync
     '--no-playlist',                       // NOOIT een hele playlist in 1 job
-    url,
   ];
+  if (isYoutube) {
+    args.push(
+      '--sleep-requests', YOUTUBE_SLEEP_REQUESTS,
+      '--sleep-interval', YOUTUBE_SLEEP_INTERVAL,
+      '--max-sleep-interval', YOUTUBE_MAX_SLEEP_INTERVAL,
+    );
+  }
+  args.push(url);
   return { cmd: YT_DLP, args, cwd, env: {} };
 }
 

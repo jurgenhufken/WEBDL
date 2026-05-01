@@ -211,6 +211,20 @@ function stripAnsiCodes(input) {
 const IMPORTABLE_VIDEO_EXTS = new Set([
   '.mp4', '.mov', '.m4v', '.webm', '.mkv', '.avi', '.wmv', '.flv', '.ts', '.m2ts']
 );
+const IMPORTABLE_IMAGE_EXTS = new Set([
+  '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.avif', '.heic', '.heif']
+);
+
+function isImageUrlLike(input) {
+  try {
+    const u = new URL(String(input || ''));
+    const ext = String(path.extname(String(u.pathname || '')).toLowerCase() || '');
+    return IMPORTABLE_IMAGE_EXTS.has(ext);
+  } catch (e) {
+    const ext = String(path.extname(String(input || '').split(/[?#]/)[0]).toLowerCase() || '');
+    return IMPORTABLE_IMAGE_EXTS.has(ext);
+  }
+}
 
 // Auto-import settings en Startup rehydrate settings worden nu beheerd in src/config.js.
 // De variabelen zijn bovenaan via destructuring beschikbaar.
@@ -4659,6 +4673,9 @@ function detectLane(platform, url = '') {
   const p = String(platform || '').toLowerCase();
   const u = String(url || '').toLowerCase();
 
+  // Images are cheap direct transfers and must never sit behind video jobs.
+  if (isImageUrlLike(u)) return 'light';
+
   // If this is a live stream or explicitly a video, definitely heavy
   if (u.includes('is_live=true') || u.includes('/live/') || u.includes('tiktok.com/@') && !u.includes('/photo/')) {
     return 'heavy';
@@ -4744,9 +4761,25 @@ function runDownloadSchedulerSoon() {
   if (schedulerTimer) return;
   schedulerTimer = setTimeout(() => {
     schedulerTimer = null;
-    runDownloadScheduler();
-    syncRuntimeActiveState().catch(() => { });
+    Promise.resolve(runDownloadScheduler()).catch((e) => {
+      console.error('Download scheduler error:', e && e.stack ? e.stack : e && e.message ? e.message : String(e));
+    }).finally(() => {
+      syncRuntimeActiveState().catch(() => { });
+    });
   }, 120);
+}
+
+function hasQueuedWorkWithCapacity() {
+  try {
+    const heavyLimit = Math.max(0, HEAVY_DOWNLOAD_CONCURRENCY);
+    const lightLimit = Math.max(0, LIGHT_DOWNLOAD_CONCURRENCY);
+    const batchLimit = Math.max(0, BATCH_DOWNLOAD_CONCURRENCY);
+    return heavyLimit > 0 && queuedHeavy.length > 0 && activeLaneCount('heavy') < heavyLimit ||
+      lightLimit > 0 && queuedLight.length > 0 && activeLaneCount('light') < lightLimit ||
+      batchLimit > 0 && queuedBatch.length > 0 && activeLaneCount('batch') < batchLimit;
+  } catch (e) {
+    return false;
+  }
 }
 
 async function runDownloadScheduler() {
@@ -4985,10 +5018,13 @@ function scheduleAutoRehydrate() {
 
 // Periodic check: if in-memory queues are empty but pending items exist, trigger rehydrate
 setInterval(() => {
+  if (hasQueuedWorkWithCapacity()) {
+    runDownloadSchedulerSoon();
+  }
   if (shouldAutoRehydrate()) {
     scheduleAutoRehydrate();
   }
-}, 10000);
+}, 5000);
 
 let postprocessSchedulerTimer = null;
 function runPostprocessSchedulerSoon() {

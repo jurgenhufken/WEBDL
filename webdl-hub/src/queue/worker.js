@@ -319,9 +319,16 @@ function startWorkerPool({
 
     let lastReported = -1;
     let lastLoggedTitle = '';
+    let rateLimited = false;
+    let rateLimitMessage = '';
     const proc = runProcess(planned);
 
     proc.on('line', async ({ stream, line }) => {
+      if (isYoutubeRateLimitMessage(line)) {
+        rateLimited = true;
+        rateLimitMessage = String(line || '').trim();
+        job._rateLimited = true;
+      }
       const prog = adapter.parseProgress(line);
       if (prog && typeof prog.pct === 'number') {
         const pct = Math.max(0, Math.min(100, prog.pct));
@@ -386,12 +393,14 @@ function startWorkerPool({
         }
         return true; // success
       } else {
-        const retry = job.attempts < job.max_attempts;
-        const reason = idleTimedOut
-          ? `idle timeout (${Math.round((planned.idleTimeoutMs || 0) / 1000)}s zonder output)`
-          : timedOut
-            ? `timeout (${Math.round((planned.timeoutMs || 0) / 1000)}s)`
-            : `exit ${code}${signal ? ` (${signal})` : ''}`;
+        const retry = rateLimited ? true : job.attempts < job.max_attempts;
+        const reason = rateLimited
+          ? `youtube rate limit: ${rateLimitMessage || 'Video unavailable; account tijdelijk rate-limited'}`
+          : idleTimedOut
+            ? `idle timeout (${Math.round((planned.idleTimeoutMs || 0) / 1000)}s zonder output)`
+            : timedOut
+              ? `timeout (${Math.round((planned.timeoutMs || 0) / 1000)}s)`
+              : `exit ${code}${signal ? ` (${signal})` : ''}`;
         await queue.fail(job.id, reason, { retry });
         await repo.appendLog(job.id, retry ? 'warn' : 'error', `${reason}${retry ? ' (retry)' : ''}`);
         logger.warn('job.failed', { job: job.id, code, signal, retry, timedOut, idleTimedOut });
@@ -409,7 +418,11 @@ function startWorkerPool({
   // Houdt per domein bij wanneer de laatste download startte en hoeveel
   // opeenvolgende failures er waren. Bij failures groeit de wachttijd
   // exponentieel (backoff). Bij successen reset de backoff.
-  const domainState = new Map(); // domain → { lastStartMs, consecutiveFails }
+  const domainState = new Map(); // domain → { lastStartMs, consecutiveFails, pauseUntilMs }
+  const youtubeRateLimitBackoffMs = Math.max(
+    5 * 60 * 1000,
+    Number.parseInt(process.env.WEBDL_YOUTUBE_RATE_LIMIT_BACKOFF_MS || String(65 * 60 * 1000), 10) || 65 * 60 * 1000,
+  );
 
   // Configuratie per domein-patroon (defaults voor onbekende domeinen)
   const DOMAIN_THROTTLE = {
@@ -437,15 +450,25 @@ function startWorkerPool({
 
   function getDomainState(domain) {
     if (!domainState.has(domain)) {
-      domainState.set(domain, { lastStartMs: 0, consecutiveFails: 0 });
+      domainState.set(domain, { lastStartMs: 0, consecutiveFails: 0, pauseUntilMs: 0 });
     }
     return domainState.get(domain);
+  }
+
+  function isYoutubeRateLimitMessage(text) {
+    return /rate-limited by youtube|content isn't available,\s*try again later|try again later.*rate-limit/i.test(String(text || ''));
+  }
+
+  function getDomainPauseWaitMs(domain) {
+    const ds = getDomainState(domain);
+    return Math.max(0, Number(ds.pauseUntilMs || 0) - Date.now());
   }
 
   function computeWaitMs(domain) {
     const conf = getThrottleConfig(domain);
     const ds = getDomainState(domain);
     const elapsed = Date.now() - ds.lastStartMs;
+    const pauseWait = getDomainPauseWaitMs(domain);
 
     // Backoff: spacing verdubbelt per opeenvolgende failure, met plafond
     const backoffMultiplier = Math.min(Math.pow(2, ds.consecutiveFails), 32);
@@ -453,7 +476,7 @@ function startWorkerPool({
     const jitter = Math.floor(Math.random() * conf.jitterMs);
     const needed = spacing + jitter;
 
-    return Math.max(0, needed - elapsed);
+    return Math.max(pauseWait, needed - elapsed);
   }
 
   function markDomainStarted(domain) {
@@ -465,11 +488,21 @@ function startWorkerPool({
     ds.consecutiveFails = 0;
   }
 
-  function markDomainFailed(domain) {
+  function markDomainFailed(domain, { rateLimited = false } = {}) {
     const ds = getDomainState(domain);
     ds.consecutiveFails++;
     const conf = getThrottleConfig(domain);
     const backoff = Math.min(conf.baseSpacingMs * Math.pow(2, ds.consecutiveFails), conf.maxBackoffMs);
+    if (domain === 'youtube' && rateLimited) {
+      ds.pauseUntilMs = Math.max(Number(ds.pauseUntilMs || 0), Date.now() + youtubeRateLimitBackoffMs);
+      logger.warn('throttle.youtube.rate_limit_pause', {
+        domain,
+        fails: ds.consecutiveFails,
+        pauseMs: youtubeRateLimitBackoffMs,
+        resumeAt: new Date(ds.pauseUntilMs).toISOString(),
+      });
+      return;
+    }
     logger.info('throttle.backoff', { domain, fails: ds.consecutiveFails, nextDelayMs: backoff });
   }
 
@@ -479,7 +512,7 @@ function startWorkerPool({
     markDomainStarted(domain);
     const ok = await runOne(job);
     if (ok === false) {
-      markDomainFailed(domain);
+      markDomainFailed(domain, { rateLimited: job._rateLimited === true });
     } else {
       markDomainSuccess(domain);
     }
@@ -501,6 +534,14 @@ function startWorkerPool({
     const laneSet = laneActive.get(lane);
     while (!stopping) {
       if (laneSet.size >= maxConcurrency) { await sleep(pollMs); continue; }
+      if (lane === 'process-video') {
+        const youtubePauseWaitMs = getDomainPauseWaitMs('youtube');
+        if (youtubePauseWaitMs > 0) {
+          logger.info('throttle.youtube.paused', { waitMs: youtubePauseWaitMs, lane });
+          await sleep(Math.min(youtubePauseWaitMs, 30_000));
+          continue;
+        }
+      }
 
       const job = await queue.claimNext(workerId, { lane }).catch((e) => {
         logger.error('queue.claim.error', { lane, err: String(e.message || e) });
