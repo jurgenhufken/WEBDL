@@ -370,7 +370,7 @@ input[type="range"]:disabled { opacity: 0.35; cursor: default; }
 .vbottom-controls {
   position: absolute; left: 50%; bottom: 18px; z-index: 30;
   transform: translateX(-50%);
-  display: grid; grid-template-columns: 42px auto minmax(180px, 420px);
+  display: grid; grid-template-columns: 42px minmax(150px, auto) minmax(180px, 420px);
   align-items: center; gap: 10px;
   width: min(720px, calc(100vw - 120px));
   padding: 9px 12px;
@@ -395,6 +395,8 @@ input[type="range"]:disabled { opacity: 0.35; cursor: default; }
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .vbottom-seek {
   width: 100%;

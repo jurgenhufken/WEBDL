@@ -85,6 +85,8 @@ function mapItem(row) {
   const ext = fileExt(row.filepath, row.format);
   const isVideo = VIDEO_EXTS.includes(ext);
   const filename = row.filename || path.basename(row.filepath || '');
+  const durationText = row.duration == null ? null : String(row.duration);
+  const durationSeconds = parseDurationSeconds(durationText);
   return {
     ...row,
     id: String(row.id),
@@ -92,7 +94,23 @@ function mapItem(row) {
     filename,
     ext,
     type: isVideo ? 'video' : 'image',
+    duration: durationText,
+    duration_seconds: durationSeconds,
   };
+}
+
+function parseDurationSeconds(value) {
+  if (value == null || value === '') return null;
+  if (typeof value === 'number' && Number.isFinite(value)) return Math.max(0, Math.round(value));
+  const text = String(value).trim();
+  if (!text) return null;
+  if (/^\d+(?:\.\d+)?$/.test(text)) return Math.max(0, Math.round(Number(text)));
+  const parts = text.split(':').map((p) => Number(p));
+  if (parts.length < 2 || parts.length > 3 || parts.some((n) => !Number.isFinite(n))) return null;
+  const seconds = parts.length === 3
+    ? parts[0] * 3600 + parts[1] * 60 + parts[2]
+    : parts[0] * 60 + parts[1];
+  return Math.max(0, Math.round(seconds));
 }
 
 function isVideoFile(filePath) {
@@ -527,7 +545,7 @@ app.get('/api/items', async (req, res) => {
           SELECT 'download' AS item_kind,
                  d.id::text AS id, d.id AS rating_id,
                  d.url, d.source_url, d.platform, d.channel, d.title, d.filename,
-                 d.filepath, d.filesize, d.format, d.rating, d.is_thumb_ready,
+                 d.filepath, d.filesize, d.format, d.duration, d.rating, d.is_thumb_ready,
                  d.finished_at, d.created_at,
                  COALESCE(d.finished_at, d.updated_at, d.created_at) AS sort_ts,
                  d.id::bigint AS source_order
@@ -543,7 +561,7 @@ app.get('/api/items', async (req, res) => {
                  regexp_replace(df.relpath, '^.*/', '') AS filename,
                  df.relpath AS filepath, df.filesize,
                  regexp_replace(df.relpath, '^.*\\.', '') AS format,
-                 df.rating, COALESCE(df.is_thumb_ready, d.is_thumb_ready) AS is_thumb_ready,
+                 d.duration, df.rating, COALESCE(df.is_thumb_ready, d.is_thumb_ready) AS is_thumb_ready,
                  d.finished_at, d.created_at,
                  COALESCE(to_timestamp(NULLIF(df.mtime_ms,0) / 1000.0)::timestamp, df.updated_at, d.finished_at, d.updated_at, d.created_at) AS sort_ts,
                  (1000000000000 + df.id)::bigint AS source_order
@@ -612,7 +630,7 @@ app.get('/api/items-since', async (req, res) => {
           SELECT 'download' AS item_kind,
                  d.id::text AS id, d.id AS rating_id,
                  d.url, d.source_url, d.platform, d.channel, d.title, d.filename,
-                 d.filepath, d.filesize, d.format, d.rating, d.is_thumb_ready,
+                 d.filepath, d.filesize, d.format, d.duration, d.rating, d.is_thumb_ready,
                  d.finished_at, d.created_at,
                  COALESCE(d.finished_at, d.updated_at, d.created_at) AS sort_ts
             FROM downloads d
@@ -624,7 +642,7 @@ app.get('/api/items-since', async (req, res) => {
                  regexp_replace(df.relpath, '^.*/', '') AS filename,
                  df.relpath AS filepath, df.filesize,
                  regexp_replace(df.relpath, '^.*\\.', '') AS format,
-                 df.rating, COALESCE(df.is_thumb_ready, d.is_thumb_ready) AS is_thumb_ready,
+                 d.duration, df.rating, COALESCE(df.is_thumb_ready, d.is_thumb_ready) AS is_thumb_ready,
                  d.finished_at, d.created_at,
                  COALESCE(to_timestamp(NULLIF(df.mtime_ms,0) / 1000.0)::timestamp, df.updated_at, d.finished_at, d.updated_at, d.created_at) AS sort_ts
             FROM download_files df

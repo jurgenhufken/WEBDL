@@ -459,11 +459,18 @@
     return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
   }
 
+  function formatSeconds(sec) {
+    if (!Number.isFinite(sec) || sec < 0) return '--s';
+    return `${Math.round(sec)}s`;
+  }
+
   function updatePlaybackControls(video) {
     const v = video || el.vContent.querySelector('video');
     if (el.vBtnPlayPause) el.vBtnPlayPause.textContent = v && !v.paused && !v.ended ? '⏸' : '▶';
     if (el.vTimeLabel) {
-      el.vTimeLabel.textContent = v ? `${formatTime(v.currentTime)} / ${formatTime(v.duration)}` : '0:00 / 0:00';
+      el.vTimeLabel.textContent = v
+        ? `${formatTime(v.currentTime)} (${formatSeconds(v.currentTime)}) / ${formatTime(v.duration)} (${formatSeconds(v.duration)})`
+        : '0:00 (0s) / 0:00 (--s)';
     }
   }
 
