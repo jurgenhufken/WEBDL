@@ -1478,6 +1478,7 @@ const updateDownloadThumbnail = db.prepare(`UPDATE downloads SET thumbnail=?, up
 const updateDownloadRating = db.prepare(`UPDATE downloads SET rating=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`);
 const updateDownloadUrl = db.prepare(`UPDATE downloads SET url=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`);
 const updateDownloadContentTimestamp = db.prepare(`UPDATE downloads SET created_at=?, updated_at=?, finished_at=? WHERE id=?`);
+const updateDownloadFilesContentTimestamp = db.prepare(`UPDATE download_files SET mtime_ms=?, updated_at=? WHERE download_id=?`);
 const rawGetDownload = db.prepare(`SELECT * FROM downloads WHERE id=?`);
 const getDownload = rawGetDownload;
 const updateScreenshotRating = db.prepare(`UPDATE screenshots SET rating=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`);
@@ -7878,6 +7879,10 @@ async function normalizeYoutubeDownloadTimestamp(downloadId, filepath) {
     const sourcePublishedAt = getYtdlpSourceTimestamp(info);
     if (!sourcePublishedAt) return;
     await updateDownloadContentTimestamp.run(sourcePublishedAt, sourcePublishedAt, sourcePublishedAt, downloadId);
+    const sourceMs = new Date(sourcePublishedAt).getTime();
+    if (Number.isFinite(sourceMs)) {
+      try { await updateDownloadFilesContentTimestamp.run(Math.floor(sourceMs), sourcePublishedAt, downloadId); } catch (e) { }
+    }
     const sourceUrl = String(info.webpage_url || info.original_url || '').trim();
     if (sourceUrl) {
       try { await updateDownloadSourceUrl.run(sourceUrl, downloadId); } catch (e) { }
