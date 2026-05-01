@@ -4147,6 +4147,7 @@
   let recordingUiMode = 'idle';
   let recordingUiLockUntil = 0;
   let recordingPendingKey = '';
+  let recordingHeartbeatMisses = 0;
   const RECORDING_UI_LOCK_MS = 6000;
   const recordingClientId = (() => {
     try {
@@ -4251,6 +4252,14 @@
     renderRecButtons(recordingUiMode);
   }
 
+  function stopRecordingHeartbeat() {
+    if (recordingHeartbeatTimer) {
+      clearInterval(recordingHeartbeatTimer);
+      recordingHeartbeatTimer = null;
+    }
+    recordingHeartbeatMisses = 0;
+  }
+
   function renderRecButtons(mode) {
     const state = mode || (isRecording ? 'recording' : 'idle');
     if (state === 'starting') {
@@ -4314,14 +4323,19 @@
         return;
       }
     }
+    if (!myRecording && recordingHeartbeatTimer && currentRecordingKey && recordingUiMode !== 'stopping') {
+      isRecording = true;
+      captureFrame.style.display = 'none';
+      renderRecButtons('recording');
+      return;
+    }
     isRecording = myRecording;
     if (!myRecording && cropUpdateTimer) {
       clearInterval(cropUpdateTimer);
       cropUpdateTimer = null;
     }
     if (!myRecording && recordingHeartbeatTimer) {
-      clearInterval(recordingHeartbeatTimer);
-      recordingHeartbeatTimer = null;
+      stopRecordingHeartbeat();
       currentRecordingKey = '';
     }
     if (myRecording) {
@@ -4336,13 +4350,32 @@
   function ensureRecordingHeartbeat(meta) {
     currentRecordingKey = normalizeRecordingKeyFromMeta(meta || scrapeMetadata());
     if (recordingHeartbeatTimer) clearInterval(recordingHeartbeatTimer);
-    const send = () => {
-      if (!isRecording || !currentRecordingKey) return;
-      postServerJson('recording/heartbeat', {
+    recordingHeartbeatMisses = 0;
+    const send = async () => {
+      if (!currentRecordingKey) return;
+      try {
+        const result = await postServerJson('recording/heartbeat', {
         recordingKey: currentRecordingKey,
         recordingClientId,
         metadata: meta || scrapeMetadata()
-      }, 5000).catch(() => {});
+        }, 5000);
+        if (result && result.active === false) {
+          recordingHeartbeatMisses += 1;
+          if (recordingHeartbeatMisses >= 2) {
+            stopRecordingHeartbeat();
+            currentRecordingKey = '';
+            isRecording = false;
+            updateRecUI(false);
+          }
+          return;
+        }
+        recordingHeartbeatMisses = 0;
+        if (result && result.recordingKey) currentRecordingKey = result.recordingKey;
+        isRecording = true;
+        if (recordingUiMode !== 'stopping') renderRecButtons('recording');
+      } catch (e) {
+        recordingHeartbeatMisses += 1;
+      }
     };
     send();
     recordingHeartbeatTimer = setInterval(send, 10000);
@@ -4497,6 +4530,8 @@
         const toggleResult = await stopRecordingRequest({});
         if (toggleResult.success) {
           applyConnectionState(true);
+          stopRecordingHeartbeat();
+          currentRecordingKey = '';
           updateRecUI(false);
           clearRecordingUiLock('idle');
           showNotification('Opname succesvol afgesloten.');
@@ -4560,6 +4595,8 @@
       const result = await stopRecordingRequest({ metadata: meta, recordingKey: stopKey, recordingClientId });
       if (result.success) {
         applyConnectionState(true);
+        stopRecordingHeartbeat();
+        currentRecordingKey = '';
         updateRecUI(false);
         clearRecordingUiLock('idle');
         ensureFrameUpdatesRunning();
