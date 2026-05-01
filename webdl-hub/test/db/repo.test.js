@@ -98,6 +98,13 @@ test('DB-tests', { concurrency: false }, async (t) => {
     assert.equal(claimed.length, 1);
   });
 
+  await t.test('claimNextJob negeert slave-delegate bookkeeping jobs', async () => {
+    await repo.truncateAll();
+    await repo.createJob({ url: 'https://bunkr.cr/f/x', adapter: 'slave-delegate', lane: 'image' });
+    const claimed = await repo.claimNextJob('w', { lane: 'image' });
+    assert.equal(claimed, null);
+  });
+
   await t.test('completeJob zet status done', async () => {
     await repo.truncateAll();
     const j = await repo.createJob({ url: 'u', adapter: 'ytdlp' });
