@@ -467,8 +467,7 @@ app.get('/api/active-items', async (_req, res) => {
       source: 'db',
       title: r.title || r.filename || r.filepath || `download ${r.id}`,
     }));
-    const jdItems = await scanJDownloaderKeep2ShareParts(40);
-    res.json({ items: [...jdItems, ...dbItems], count: jdItems.length + dbItems.length });
+    res.json({ items: dbItems, count: dbItems.length });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
