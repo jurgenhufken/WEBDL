@@ -9,6 +9,7 @@ const adapters = [
   require('../../src/adapters/tdl'),
   require('../../src/adapters/ofscraper'),
   require('../../src/adapters/instaloader'),
+  require('../../src/adapters/reddit'),
   require('../../src/adapters/gallerydl'),
   require('../../src/adapters/ytdlp'),
 ];
@@ -21,6 +22,8 @@ const cases = [
   ['https://telegram.me/x/1',                  'tdl'],
   ['https://imgur.com/gallery/xyz',            'gallerydl'],
   ['https://x.com/user/status/1',              'gallerydl'],
+  ['https://www.reddit.com/r/test/comments/abc/title/', 'reddit'],
+  ['https://redd.it/abc',                      'reddit'],
   ['https://vipergirls.to/threads/6777850-MyFav-Czechcasting-Model-Collection-Sets', 'gallerydl'],
   ['https://vipergirls.to/forum.php',          'gallerydl'],
   ['https://onlyfans.com/johndoe',             'ofscraper'],

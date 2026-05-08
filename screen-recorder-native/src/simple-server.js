@@ -30,7 +30,7 @@ const getDashboardHTML = require('./views/dashboard');
 
 const {
   PORT, BASE_DIR, DB_PATH, POSTGRES_URL, DB_ENGINE, LOG_FILE, DIRECTORY_FILTER_CONFIG,
-  YT_DLP, FFMPEG, FFPROBE, OFSCRAPER, OFSCRAPER_CONFIG_DIR, GALLERY_DL, INSTALOADER, REDDIT_DL,
+  YT_DLP, FFMPEG, FFPROBE, OFSCRAPER, OFSCRAPER_CONFIG_DIR, GALLERY_DL, INSTALOADER, REDDIT_DL, REDDIT_BDFR, REDDIT_BACKEND,
   TDL, TDL_NAMESPACE, TDL_THREADS, TDL_CONCURRENCY,
   REDDIT_DL_CLIENT_ID, REDDIT_DL_CLIENT_SECRET, REDDIT_DL_USERNAME, REDDIT_DL_PASSWORD, REDDIT_DL_AUTH_FILE, REDDIT_INDEX_MAX_ITEMS, REDDIT_INDEX_MAX_PAGES,
   VIDEO_DEVICE, AUDIO_DEVICE, RECORDING_FPS, VIDEO_CODEC, VIDEO_BITRATE, LIBX264_PRESET, AUDIO_BITRATE, RECORDING_AUDIO_CODEC, RECORDING_INPUT_PIXEL_FORMAT, RECORDING_FPS_MODE,
@@ -514,6 +514,55 @@ function toRedditDlTarget(input) {
   }
 }
 
+function commandPathLooksUsable(cmd) {
+  const value = String(cmd || '').trim();
+  if (!value) return false;
+  if (value.includes('/') || value.startsWith('.')) return fs.existsSync(value);
+  return true;
+}
+
+function redditBackendChoice() {
+  const requested = String(REDDIT_BACKEND || 'auto').trim().toLowerCase();
+  const bdfrOk = commandPathLooksUsable(REDDIT_BDFR);
+  const redditDlOk = commandPathLooksUsable(REDDIT_DL);
+  if (requested === 'bdfr') return bdfrOk ? 'bdfr' : '';
+  if (requested === 'reddit-dl' || requested === 'redditdl') return redditDlOk ? 'reddit-dl' : '';
+  if (bdfrOk) return 'bdfr';
+  if (redditDlOk) return 'reddit-dl';
+  return '';
+}
+
+function redditBdfrSourceArgs(input) {
+  const canonical = canonicalizeRedditCandidateUrl(input) || input;
+  const postId = extractRedditPostIdFromUrl(canonical);
+  if (postId) return ['--link', postId];
+  try {
+    const u = new URL(String(canonical || input || ''));
+    const p = String(u.pathname || '');
+    const subMatch = p.match(/^\/r\/([^\/\?#]+)/i);
+    if (subMatch && subMatch[1]) return ['--subreddit', decodeURIComponent(subMatch[1])];
+    const userMatch = p.match(/^\/(?:user|u)\/([^\/\?#]+)/i);
+    if (userMatch && userMatch[1]) return ['--user', decodeURIComponent(userMatch[1]), '--submitted'];
+  } catch (e) { }
+  return [];
+}
+
+function writeTempBdfrConfig(downloadId) {
+  if (!REDDIT_DL_CLIENT_ID || !REDDIT_DL_CLIENT_SECRET) return { path: '', created: false };
+  const cfgPath = path.join(os.tmpdir(), `webdl-bdfr-${process.pid}-${downloadId}.cfg`);
+  fs.writeFileSync(cfgPath, [
+    '[DEFAULT]',
+    `client_id = ${REDDIT_DL_CLIENT_ID}`,
+    `client_secret = ${REDDIT_DL_CLIENT_SECRET}`,
+    'scopes = identity, history, read, save, mysubreddits',
+    'backup_log_count = 3',
+    'max_wait_time = 120',
+    'time_format = ISO',
+    ''
+  ].join('\n'), 'utf8');
+  return { path: cfgPath, created: true };
+}
+
 function isLikelyRedditMediaPostData(data) {
   try {
     if (!data || typeof data !== 'object') return false;
@@ -904,6 +953,27 @@ async function loadCookiesForDomain(hostname) {
   const value = Array.from(cookies.entries()).map(([name, value]) => `${name}=${value}`).join('; ');
   browserCookieCache.set(host, { at: Date.now(), value });
   return value;
+}
+
+function cookieHeaderFromMetadataCookies(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return '';
+  const skip = new Set(['domain', 'path', 'expires', 'max-age', 'samesite']);
+  const cookies = [];
+  const seen = new Set();
+  for (const part of text.split(';')) {
+    const p = String(part || '').trim();
+    if (!p || !p.includes('=')) continue;
+    const idx = p.indexOf('=');
+    const name = p.slice(0, idx).trim();
+    const value = p.slice(idx + 1).trim();
+    const key = name.toLowerCase();
+    if (!name || skip.has(key) || seen.has(key)) continue;
+    if (key === 'secure' || key === 'httponly') continue;
+    seen.add(key);
+    cookies.push(`${name}=${value}`);
+  }
+  return cookies.join('; ');
 }
 
 // Geeft het absolute pad terug van het eerste (alfabetisch) geïndexeerde bestand
@@ -10054,7 +10124,7 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
             platform === 'aznudefeet' && !looksLikeDirectFileUrl(url) ||
             platform === 'tiktok' && isTikTokPhotoUrl(url)
           ) driver = 'gallery-dl'; else
-            if (isKnownHtmlWrapperUrl(url) || looksLikeDirectFileUrl(url)) driver = 'direct';
+            if (platform !== 'footfetishforum' && (isKnownHtmlWrapperUrl(url) || looksLikeDirectFileUrl(url))) driver = 'direct';
   setDownloadActivityContext(downloadId, { url, platform, channel, title, lane: jobLane.get(downloadId) || '', driver });
   emitDownloadEventActivity('dispatch', downloadId, { url, platform, channel, title, lane: jobLane.get(downloadId) || '', driver }).catch(() => { });
 
@@ -10101,7 +10171,7 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
   }
 
   if (platform === 'reddit') {
-    return startRedditDlDownload(downloadId, url, platform, channel, title, metadata);
+    return startRedditDownload(downloadId, url, platform, channel, title, metadata);
   }
 
   if (platform === 'telegram') {
@@ -10123,7 +10193,7 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
     return startGalleryDlDownload(downloadId, url, platform, channel, title, metadata);
   }
 
-  if (isKnownHtmlWrapperUrl(url)) {
+  if (platform !== 'footfetishforum' && isKnownHtmlWrapperUrl(url)) {
     try {
       const wrapperReferer = String(
         metadata && typeof metadata === 'object' && metadata.origin_thread && metadata.origin_thread.url ? metadata.origin_thread.url :
@@ -10142,11 +10212,120 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
     return startDirectFileDownload(downloadId, url, platform, channel, title, metadata);
   }
 
-  if (looksLikeDirectFileUrl(url)) {
+  if (platform !== 'footfetishforum' && looksLikeDirectFileUrl(url)) {
     return startDirectFileDownload(downloadId, url, platform, channel, title, metadata);
   }
 
   return startYtDlpDownload(downloadId, url, platform, channel, title, metadata);
+}
+
+async function startRedditDownload(downloadId, url, platform, channel, title, metadata) {
+  const backend = redditBackendChoice();
+  if (backend === 'bdfr') return startRedditBdfrDownload(downloadId, url, platform, channel, title, metadata);
+  if (backend === 'reddit-dl') return startRedditDlDownload(downloadId, url, platform, channel, title, metadata);
+  await updateDownloadStatus.run('error', 0, `Geen Reddit-downloader gevonden. Installeer BDFR (python3 -m pip install --user bdfr) of configureer WEBDL_REDDIT_DL.`, downloadId);
+}
+
+async function startRedditBdfrDownload(downloadId, url, platform, channel, title, metadata) {
+  let createdConfigPath = '';
+  try {
+    if (isCancelled(downloadId)) {
+      clearCancelled(downloadId);
+      jobLane.delete(downloadId);
+      await updateDownloadStatus.run('cancelled', 0, null, downloadId);
+      return;
+    }
+
+    const sourceArgs = redditBdfrSourceArgs(url);
+    if (!sourceArgs.length) {
+      await updateDownloadStatus.run('error', 0, 'Reddit URL wordt niet ondersteund door BDFR', downloadId);
+      return;
+    }
+
+    if (!REDDIT_BDFR || REDDIT_BDFR.includes('/') && !fs.existsSync(REDDIT_BDFR)) {
+      await updateDownloadStatus.run('error', 0, `BDFR niet gevonden: ${REDDIT_BDFR}`, downloadId);
+      return;
+    }
+
+    const outChannel = channel && channel !== 'unknown' ? channel : deriveChannelFromUrl('reddit', url) || 'unknown';
+    const dir = getDownloadDirChannelOnly('reddit', outChannel);
+    try { await updateDownloadFilepath.run(dir, downloadId); } catch (e) { }
+    await updateDownloadStatus.run('downloading', 0, null, downloadId);
+
+    const configFile = writeTempBdfrConfig(downloadId);
+    if (configFile.created) createdConfigPath = configFile.path;
+
+    const args = [
+      'download',
+      dir,
+      '--folder-scheme', '',
+      '--file-scheme', '{SUBREDDIT}_{REDDITOR}_{TITLE}_{POSTID}',
+      '--filename-restriction-scheme', 'linux',
+      '--no-dupes',
+      '--search-existing',
+      '--max-wait-time', '120'
+    ];
+    if (configFile.path) args.push('--config', configFile.path);
+    args.push(...sourceArgs);
+
+    const result = await new Promise((resolve) => {
+      const proc = spawnNice(REDDIT_BDFR, args);
+      activeProcesses.set(downloadId, proc);
+      try { startingJobs.delete(downloadId); } catch (e) { }
+      let stderr = '';
+      let stdout = '';
+      proc.stderr.on('data', (d) => { stderr += d.toString(); });
+      proc.stdout.on('data', (d) => { stdout += d.toString(); });
+      const finish = (code) => {
+        activeProcesses.delete(downloadId);
+        resolve({ code, stderr, stdout });
+      };
+      proc.on('close', finish);
+      proc.on('error', (err) => {
+        stderr += String(err && err.message ? err.message : err);
+        finish(-1);
+      });
+    });
+
+    const mediaSummary = summarizeMediaDir(dir, 12000);
+    const mediaCount = Number(mediaSummary && mediaSummary.count);
+    const totalBytes = Number(mediaSummary && mediaSummary.totalBytes);
+    const safeCount = Number.isFinite(mediaCount) ? Math.max(0, mediaCount) : 0;
+    const safeTotalBytes = Number.isFinite(totalBytes) ? Math.max(0, totalBytes) : 0;
+
+    if (result.code === 0 && safeCount > 0) {
+      const filenameLabel = `(multiple: ${safeCount} files)`;
+      const metaObj = {
+        tool: 'bdfr',
+        implementation: REDDIT_BDFR,
+        platform: 'reddit',
+        channel: outChannel,
+        title,
+        url,
+        source_args: sourceArgs,
+        outputDir: dir,
+        media_count: safeCount,
+        media_bytes: safeTotalBytes
+      };
+      await indexDownloadDirImmediately(downloadId);
+      await updateDownload.run('completed', 100, dir, filenameLabel, safeTotalBytes, '', JSON.stringify(metaObj), null, downloadId);
+      return;
+    }
+
+    const stderrMsg = stripAnsiCodes(result.stderr).trim();
+    const stdoutMsg = stripAnsiCodes(result.stdout).trim();
+    const details = stderrMsg || stdoutMsg || (result.code === 0 ? 'BDFR afgerond maar geen media-bestanden gevonden' : `BDFR exit code: ${result.code}`);
+    const authHint = /401|403|oauth|forbidden|unauthori[sz]ed|blocked|ratelimit/i.test(details)
+      ? ' Controleer Reddit OAuth/BDFR-configuratie: WEBDL_REDDIT_CLIENT_ID en WEBDL_REDDIT_CLIENT_SECRET of WEBDL_REDDIT_BDFR_CONFIG.'
+      : '';
+    await updateDownloadStatus.run('error', 0, (`BDFR: ${details}${authHint}`).slice(0, 1200), downloadId);
+  } catch (err) {
+    await updateDownloadStatus.run('error', 0, err.message, downloadId);
+  } finally {
+    if (createdConfigPath) {
+      try { fs.unlinkSync(createdConfigPath); } catch (e) { }
+    }
+  }
 }
 
 async function startRedditDlDownload(downloadId, url, platform, channel, title, metadata) {
@@ -11059,7 +11238,8 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
     }
     if (curlHost === 'footfetishforum.com' || curlHost.endsWith('.footfetishforum.com')) {
       try {
-        const cookieStr = await loadCookiesForDomain(curlHost);
+        const metadataCookies = metadata && typeof metadata === 'object' ? cookieHeaderFromMetadataCookies(metadata.cookies) : '';
+        const cookieStr = metadataCookies || await loadCookiesForDomain(curlHost);
         if (cookieStr) curlArgs.push('-b', cookieStr);
       } catch (e) { }
     }

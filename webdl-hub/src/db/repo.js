@@ -35,8 +35,8 @@ function classifyLane(url, adapter) {
     return 'image';
   }
   if (IMAGE_URL_RE.test(u)) return 'image';
-  if (adapter === 'gallerydl' || adapter === 'reddit-dl') {
-    // gallery-dl/reddit-dl zijn meestal images; videos in deze flow zijn zeldzaam.
+  if (adapter === 'gallerydl' || adapter === 'reddit-dl' || adapter === 'reddit') {
+    // gallery-dl/reddit zijn meestal images; videos in deze flow zijn zeldzaam.
     return 'image';
   }
   if (adapter === 'ofscraper') {

@@ -281,7 +281,7 @@ Centrale download-orchestrator op `http://localhost:35730`.
 - `yt-dlp` — YouTube, TikTok, etc.
 - `gallery-dl` — diverse image sites
 - `ofscraper` — OnlyFans
-- `reddit-dl` — Reddit
+- `bdfr` / `reddit-dl` — Reddit (BDFR heeft voorkeur; `reddit-dl` blijft fallback)
 - `instaloader` — Instagram
 - `vbulletin` — AmateurVoyeurForum (cookie-auth via `AVF_COOKIE` in `.env`)
 
@@ -369,6 +369,17 @@ Chaturbate overrides:
 
 - **`WEBDL_GALLERY_DL`**
 - **`WEBDL_FFPROBE`**
+
+### Reddit / BDFR
+
+- **`WEBDL_REDDIT_BACKEND`** (default `auto`)
+  - `auto` gebruikt BDFR als `bdfr` beschikbaar is, anders de legacy `reddit-dl`.
+  - `bdfr` forceert Bulk Downloader for Reddit.
+  - `reddit-dl` forceert de legacy downloader.
+- **`WEBDL_REDDIT_BDFR`** (pad naar `bdfr`; auto-detect via `StartServer.command`)
+- **`WEBDL_REDDIT_BDFR_CONFIG`** (optioneel pad naar BDFR `config.cfg`)
+- **`WEBDL_REDDIT_CLIENT_ID`** / **`WEBDL_REDDIT_CLIENT_SECRET`** worden gebruikt om tijdelijk een BDFR-config te maken wanneer geen expliciete config is gezet.
+- Installeren/herstellen: `./setup-bdfr.sh` installeert BDFR met een compatibele PRAW-pin.
 
 ### Scheduler / queue
 

@@ -1,6 +1,14 @@
 require('dotenv').config();
 const path = require('path');
 const os = require('os');
+const fs = require('fs');
+
+function firstExisting(paths) {
+  for (const p of paths) {
+    if (p && fs.existsSync(p)) return p;
+  }
+  return '';
+}
 
 // ========================
 // CORE CONFIGURATIE
@@ -25,6 +33,12 @@ const OFSCRAPER_CONFIG_DIR = process.env.WEBDL_OFSCRAPER_CONFIG_DIR || path.join
 const GALLERY_DL = process.env.WEBDL_GALLERY_DL || path.join(os.homedir(), '.local', 'bin', 'gallery-dl');
 const INSTALOADER = process.env.WEBDL_INSTALOADER || path.join(os.homedir(), '.local', 'bin', 'instaloader');
 const REDDIT_DL = process.env.WEBDL_REDDIT_DL || path.join(os.homedir(), '.local', 'bin', 'reddit-dl');
+const REDDIT_BDFR = process.env.WEBDL_REDDIT_BDFR || firstExisting([
+  path.join(os.homedir(), 'Library', 'Python', `${process.version.match(/^v(\d+\.\d+)/)?.[1] || '3.9'}`, 'bin', 'bdfr'),
+  path.join(os.homedir(), 'Library', 'Python', '3.9', 'bin', 'bdfr'),
+  path.join(os.homedir(), '.local', 'bin', 'bdfr'),
+]) || 'bdfr';
+const REDDIT_BACKEND = String(process.env.WEBDL_REDDIT_BACKEND || 'auto').trim().toLowerCase();
 
 // ========================
 // TDL (Telegram Downloader) 
@@ -160,6 +174,8 @@ module.exports = {
   GALLERY_DL,
   INSTALOADER,
   REDDIT_DL,
+  REDDIT_BDFR,
+  REDDIT_BACKEND,
   TDL,
   TDL_NAMESPACE,
   TDL_THREADS,

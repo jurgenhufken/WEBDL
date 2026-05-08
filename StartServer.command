@@ -211,6 +211,16 @@ check_port_and_kill 35731
         WEBDL_REDDIT_DL="$(command -v reddit-dl)"
     fi
  fi
+ if [ -z "$WEBDL_REDDIT_BDFR" ]; then
+    if command -v bdfr >/dev/null 2>&1; then
+        WEBDL_REDDIT_BDFR="$(command -v bdfr)"
+    elif [ -x "$HOME/Library/Python/3.9/bin/bdfr" ]; then
+        WEBDL_REDDIT_BDFR="$HOME/Library/Python/3.9/bin/bdfr"
+    elif [ -x "$HOME/.local/bin/bdfr" ]; then
+        WEBDL_REDDIT_BDFR="$HOME/.local/bin/bdfr"
+    fi
+ fi
+ : "${WEBDL_REDDIT_BACKEND:=auto}"
  if [ -z "$WEBDL_REDDIT_AUTH_FILE" ]; then
    if [ -f "$HOME/.config/reddit-dl/auth.conf" ]; then
        WEBDL_REDDIT_AUTH_FILE="$HOME/.config/reddit-dl/auth.conf"
@@ -280,6 +290,8 @@ check_port_and_kill 35731
  export WEBDL_STARTUP_REHYDRATE_DELAY_MS
  export WEBDL_ADDON_SOURCE_DIR
  export WEBDL_REDDIT_DL
+ export WEBDL_REDDIT_BDFR
+ export WEBDL_REDDIT_BACKEND
  export WEBDL_REDDIT_AUTH_FILE
  export WEBDL_FFMPEG
  export WEBDL_OFSCRAPER
