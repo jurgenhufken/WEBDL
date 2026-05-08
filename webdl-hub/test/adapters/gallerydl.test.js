@@ -10,6 +10,7 @@ test('matches typische gallery-dl hosts', () => {
   assert.equal(a.matches('https://www.pixiv.net/en/artworks/123'), true);
   assert.equal(a.matches('https://twitter.com/user/status/1'), true);
   assert.equal(a.matches('https://x.com/user/status/1'), true);
+  assert.equal(a.matches('https://x.com/FeetOmegle43663?t=7k1bLwYzJ5aqMlyuHvk8QQ&s=09'), true);
   assert.equal(a.matches('https://danbooru.donmai.us/posts/1'), true);
 });
 

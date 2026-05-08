@@ -581,7 +581,7 @@
             const looksLikeFile = /\.(jpe?g|png|gif|webp|bmp|svg|avif|heic|heif|mp4|mov|m4v|webm|mkv|mp3|m4a|zip|rar|7z)(\?|$)/i.test(s);
             const looksLikeAttachment = /\battachment\b|\battachments\b|\/attachments\//i.test(path) || /attachment|download|full\s*size/i.test(text) || /attachment|download/i.test(cls);
             let looksLikeExternalMedia = looksLikeExternalMediaPageUrl(s, text);
-            if (looksLikeExternalMedia && (host === 'twitter.com' || host === 'x.com') && !/\/status\//i.test(path)) {
+            if (looksLikeExternalMedia && isTwitterHost(host) && !isDownloadableTwitterUrl(abs)) {
               looksLikeExternalMedia = false;
             }
             if (looksLikeFile || looksLikeAttachment || looksLikeExternalMedia) push(s, 'a', a);
@@ -1143,11 +1143,35 @@
       if (host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) return false;
       if (host === 'upload.footfetishforum.com' || host.endsWith('.upload.footfetishforum.com')) return false;
       if (/\.(jpe?g|png|gif|webp|bmp|svg|avif|heic|heif|mp4|mov|m4v|webm|mkv|mp3|m4a|zip|rar|7z)(\?|$)/i.test(p)) return true;
+      if (isDownloadableTwitterUrl(u)) return true;
       if (isKnownExternalMediaWrapperHost(host)) return true;
       if (/(youtube\.com|youtu\.be|vimeo\.com|redgifs\.com|gfycat\.com|imgur\.com|instagram\.com|tiktok\.com|reddit\.com|redd\.it|t\.me|telegram\.me)/i.test(host)) return true;
       if (/\/(video|videos|gallery|galleries|album|albums|watch|view|clip|movie|media|embed|post|posts|photo|photos|set|sets|show|download|file)\b/i.test(p)) return true;
       if (/\b(video|videos|gallery|galleries|album|albums|clip|movie|download|teaser|trailer|watch|part\s*\d+)\b/i.test(text)) return true;
       if (text && text.length >= 6 && /[a-z]/i.test(text) && !/^(like|quote|reply|report|bookmark|share|profile|member|click to expand|last edited)/i.test(text)) return true;
+    } catch (e) {}
+    return false;
+  }
+
+  function isTwitterHost(hostname) {
+    const host = String(hostname || '').toLowerCase().replace(/^www\./, '');
+    return host === 'twitter.com' || host === 'x.com' || host === 'mobile.twitter.com';
+  }
+
+  function isDownloadableTwitterUrl(input) {
+    try {
+      const u = input instanceof URL ? input : new URL(String(input || ''), window.location.href);
+      if (!isTwitterHost(u.hostname)) return false;
+      const segments = String(u.pathname || '').split('/').filter(Boolean);
+      if (!segments.length) return false;
+      const first = String(segments[0] || '').replace(/^@/, '');
+      const blocked = new Set([
+        'home', 'explore', 'search', 'hashtag', 'i', 'intent', 'settings',
+        'notifications', 'messages', 'login', 'signup', 'tos', 'privacy',
+      ]);
+      if (!first || blocked.has(first.toLowerCase())) return false;
+      if (segments.length === 1) return /^[a-z0-9_]{1,15}$/i.test(first);
+      if (String(segments[1] || '').toLowerCase() === 'status' && /^\d+$/.test(String(segments[2] || ''))) return true;
     } catch (e) {}
     return false;
   }
@@ -2329,9 +2353,7 @@
         const looksLikeFile = /\.(jpe?g|png|gif|webp|bmp|svg|avif|heic|heif|mp4|mov|m4v|webm|mkv|mp3|m4a|zip|rar|7z)(\?|$)/i.test(s);
         const looksLikeAttachment = /\battachment\b|\battachments\b|\/attachments\//i.test(path) || /attachment|download|full\s*size/i.test(text) || /attachment|download/i.test(cls);
         let looksLikeExternalMedia = looksLikeExternalMediaPageUrl(s, text);
-        if (looksLikeExternalMedia && (host === 'twitter.com' || host === 'x.com')) {
-          if (!/\/status\//i.test(path)) looksLikeExternalMedia = false;
-        }
+        if (looksLikeExternalMedia && isTwitterHost(host) && !isDownloadableTwitterUrl(abs)) looksLikeExternalMedia = false;
 
         if (looksLikeFile || looksLikeAttachment || looksLikeExternalMedia) push(s, a, 'a');
       } catch (e) {}
@@ -2444,7 +2466,7 @@
           const isThreadLink = isAvfHost && path === '/showthread.php' && !!String(abs.searchParams.get('t') || abs.searchParams.get('p') || '').trim();
           const looksLikeFile = /\.(jpe?g|png|gif|webp|bmp|svg|avif|heic|heif|mp4|mov|m4v|webm|mkv|mp3|m4a|zip|rar|7z)(\?|$)/i.test(s);
           let looksLikeExternalMedia = !isAvfHost && looksLikeExternalMediaPageUrl(s, text);
-          if (looksLikeExternalMedia && (host === 'twitter.com' || host === 'x.com') && !/\/status\//i.test(path)) looksLikeExternalMedia = false;
+          if (looksLikeExternalMedia && isTwitterHost(host) && !isDownloadableTwitterUrl(abs)) looksLikeExternalMedia = false;
 
           if (isAttachment || looksLikeFile || looksLikeExternalMedia) {
             push(s, isAttachment ? 'attachment' : 'a');

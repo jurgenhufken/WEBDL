@@ -23,6 +23,7 @@ const cases = [
   ['https://telegram.me/x/1',                  'tdl'],
   ['https://imgur.com/gallery/xyz',            'gallerydl'],
   ['https://x.com/user/status/1',              'gallerydl'],
+  ['https://x.com/FeetOmegle43663?t=7k1bLwYzJ5aqMlyuHvk8QQ&s=09', 'gallerydl'],
   ['https://www.reddit.com/r/test/comments/abc/title/', 'reddit'],
   ['https://redd.it/abc',                      'reddit'],
   ['https://www.redgifs.com/watch/SomeClipId', 'redgifs'],

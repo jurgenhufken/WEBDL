@@ -13,6 +13,7 @@ const { Pool } = require('pg');
 const PORT = Number(process.env.PORT || 35731);
 const DATABASE_URL = process.env.DATABASE_URL || 'postgres://localhost/webdl';
 const FFMPEG_BIN = process.env.FFMPEG_BIN || 'ffmpeg';
+const FFPROBE_BIN = process.env.FFPROBE_BIN || 'ffprobe';
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
@@ -110,6 +111,7 @@ const DEBUG_GALLERY_QUERY = /^(1|true|yes|on)$/i.test(process.env.DEBUG_GALLERY_
 let keep2shareSyncRunning = false;
 const thumbInflight = new Map();
 const activeThumbPaths = new Map();
+const videoStreamProbeCache = new Map();
 
 function collectPartFiles(root, limit = 40) {
   return new Promise((resolve) => {
@@ -320,6 +322,89 @@ function isJunkTagName(value) {
 function hasNonEmptyMedia(row) {
   const size = row.filesize == null ? null : Number(row.filesize);
   return !Number.isFinite(size) || size > 0;
+}
+
+function mediaPathForRow(row) {
+  const raw = String(row && row.filepath || '').trim();
+  if (!raw) return '';
+  return path.isAbsolute(raw) ? raw : resolveRelativeMediaPath(raw);
+}
+
+function videoProbeCacheKey(filePath) {
+  try {
+    const st = fs.statSync(filePath);
+    return `${filePath}|${st.size}|${st.mtimeMs}`;
+  } catch (_) {
+    return `${filePath}|missing`;
+  }
+}
+
+function rememberVideoProbe(key, value) {
+  videoStreamProbeCache.set(key, value);
+  if (videoStreamProbeCache.size > 5000) {
+    const firstKey = videoStreamProbeCache.keys().next().value;
+    if (firstKey) videoStreamProbeCache.delete(firstKey);
+  }
+}
+
+function hasVideoStream(filePath) {
+  if (!filePath || !isVideoFile(filePath)) return Promise.resolve(true);
+  const cacheKey = videoProbeCacheKey(filePath);
+  if (videoStreamProbeCache.has(cacheKey)) return Promise.resolve(videoStreamProbeCache.get(cacheKey));
+  return new Promise((resolve) => {
+    let settled = false;
+    let stdout = '';
+    const finish = (value, cache = true) => {
+      if (settled) return;
+      settled = true;
+      if (cache) rememberVideoProbe(cacheKey, value);
+      resolve(value);
+    };
+    const proc = spawn(FFPROBE_BIN, [
+      '-v', 'error',
+      '-select_streams', 'v:0',
+      '-show_entries', 'stream=codec_type',
+      '-of', 'csv=p=0',
+      filePath,
+    ], { stdio: ['ignore', 'pipe', 'ignore'] });
+    const timer = setTimeout(() => {
+      try { proc.kill('SIGKILL'); } catch (_) {}
+      finish(true, false);
+    }, 3500);
+    proc.stdout.on('data', (buf) => { stdout += String(buf || ''); });
+    proc.on('error', () => {
+      clearTimeout(timer);
+      finish(true, false);
+    });
+    proc.on('close', () => {
+      clearTimeout(timer);
+      finish(/\bvideo\b/i.test(stdout));
+    });
+  });
+}
+
+async function rowHasPlayableMedia(row) {
+  if (!hasNonEmptyMedia(row)) return false;
+  const ext = fileExt(row.filepath, row.format);
+  if (!VIDEO_EXTS.includes(ext)) return true;
+  const fp = mediaPathForRow(row);
+  if (!fp) return false;
+  if (!fs.existsSync(fp)) return false;
+  return hasVideoStream(fp);
+}
+
+async function filterPlayableMediaRows(rows, maxNeeded = rows.length) {
+  const out = [];
+  const batchSize = 12;
+  for (let i = 0; i < rows.length && out.length < maxNeeded; i += batchSize) {
+    const batch = rows.slice(i, i + batchSize);
+    const keep = await Promise.all(batch.map((row) => rowHasPlayableMedia(row)));
+    for (let j = 0; j < batch.length; j += 1) {
+      if (keep[j]) out.push(batch[j]);
+      if (out.length >= maxNeeded) break;
+    }
+  }
+  return out;
 }
 
 function galleryDedupeKey(row) {
@@ -1167,7 +1252,8 @@ app.get('/api/items', async (req, res) => {
       LIMIT $${sourceLimitParam}`;
     const { rows } = await pool.query(sql, params);
 
-    const pageRows = dedupeGalleryRows(rows.filter(hasNonEmptyMedia));
+    const pageTarget = useCursor ? limit : offset + limit;
+    const pageRows = await filterPlayableMediaRows(dedupeGalleryRows(rows), pageTarget);
     const items = (useCursor ? pageRows.slice(0, limit) : pageRows.slice(offset, offset + limit)).map(mapItem);
     const last = items[items.length - 1] || null;
     const moreRecentRowsLikely = sort === 'recent' && (items.length === limit || rows.length >= sourceLimit);
