@@ -1088,6 +1088,14 @@
       if (um) meta.channel = `u_${um[1]}`;
     }
 
+    else if (/redgifs\.com|gifdeliverynetwork\.com|gfycat\.com/i.test(url)) {
+      meta.platform = 'redgifs';
+      const um = url.match(/redgifs\.com\/users\/([^\/\?#]+)/i);
+      if (um && um[1]) meta.channel = um[1];
+      const titleEl = document.querySelector('h1, [data-testid*="title"], [class*="title"]');
+      if (titleEl && titleEl.textContent && titleEl.textContent.trim()) meta.title = titleEl.textContent.trim();
+    }
+
     else if (/facebook\.com|fb\.watch/i.test(url)) {
       meta.platform = 'facebook';
       const m = url.match(/facebook\.com\/([^\/\?#]+)/i);
@@ -3113,8 +3121,8 @@
     position: 'fixed', bottom: '20px', right: '20px', zIndex: '2147483647',
     backgroundColor: '#1a1a2e', color: 'white', padding: '12px', borderRadius: '8px',
     boxShadow: '0 4px 20px rgba(0,0,0,0.6)', fontFamily: '-apple-system, BlinkMacSystemFont, sans-serif',
-    fontSize: '13px', minWidth: '280px', maxWidth: '350px',
-    height: '380px', boxSizing: 'border-box',
+    fontSize: '13px', minWidth: '240px', maxWidth: '350px',
+    height: 'auto', maxHeight: '70vh', boxSizing: 'border-box',
     display: 'flex', flexDirection: 'column'
   });
 
@@ -3129,9 +3137,31 @@
   Object.assign(title.style, {
     fontWeight: 'bold', marginBottom: '8px', textAlign: 'center',
     cursor: 'grab', userSelect: 'none', padding: '4px',
-    borderBottom: '1px solid #333', color: '#00d4ff', fontSize: '14px'
+    borderBottom: '1px solid #333', color: '#00d4ff', fontSize: '14px',
+    display: 'flex', alignItems: 'center', gap: '6px'
   });
+  const titleLabel = document.createElement('span');
+  titleLabel.textContent = title.textContent;
+  const toolbarFullTitle = titleLabel.textContent;
+  Object.assign(titleLabel.style, { flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' });
+  title.textContent = '';
+  title.appendChild(titleLabel);
+  const smartToggleBtn = document.createElement('button');
+  smartToggleBtn.textContent = 'Auto';
+  Object.assign(smartToggleBtn.style, { border: '1px solid #155e75', background: '#0e7490', color: '#fff', borderRadius: '4px', padding: '2px 6px', cursor: 'pointer', fontSize: '10px' });
+  smartToggleBtn.title = 'Auto: toon alleen knoppen die op deze pagina werken';
+  const collapseBtn = document.createElement('button');
+  collapseBtn.textContent = '−';
+  Object.assign(collapseBtn.style, { border: '1px solid #334155', background: '#111827', color: '#fff', borderRadius: '4px', padding: '2px 7px', cursor: 'pointer', fontSize: '12px', lineHeight: '14px' });
+  collapseBtn.title = 'Toolbar in-/uitklappen';
+  title.appendChild(smartToggleBtn);
+  title.appendChild(collapseBtn);
+  smartToggleBtn.addEventListener('mousedown', (e) => e.stopPropagation());
+  collapseBtn.addEventListener('mousedown', (e) => e.stopPropagation());
   toolbar.appendChild(title);
+
+  let toolbarCollapsed = false;
+  let smartButtons = true;
 
   let isDragging = false, dragX = 0, dragY = 0;
   title.addEventListener('mousedown', (e) => {
@@ -3175,23 +3205,75 @@
     } catch (e) {}
   }
 
+  function setButtonAvailable(btn, ok) {
+    if (!btn) return;
+    const available = !!ok;
+    try { btn.disabled = !available; } catch (e) {}
+    try { btn.style.opacity = available ? '1' : '0.45'; } catch (e) {}
+    try { btn.style.cursor = available ? 'pointer' : 'not-allowed'; } catch (e) {}
+    try { btn.style.display = smartButtons && !available ? 'none' : ''; } catch (e) {}
+  }
+
+  function hasVisibleVideoElement() {
+    try {
+      return Array.from(document.querySelectorAll('video')).some((v) => {
+        const r = v.getBoundingClientRect ? v.getBoundingClientRect() : null;
+        return r && r.width > 80 && r.height > 60 && r.bottom > 0 && r.right > 0 && r.top < window.innerHeight && r.left < window.innerWidth;
+      });
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function hasUsableLinksOnPage(meta) {
+    try {
+      if (meta && meta.platform && meta.platform !== 'unknown') return true;
+      return collectBatchUrls(meta || scrapeMetadata()).length > 0;
+    } catch (e) {
+      return false;
+    }
+  }
+
   function updateMetaDisplay() {
     const m = scrapeMetadata();
     metaInfo.innerHTML = `<span style="color:#00d4ff">${m.platform}</span> | ${m.channel}<br><span style="color:#ccc">${m.title.substring(0, 60)}${m.title.length > 60 ? '...' : ''}</span>`;
     if (m.url) checkUrlStatus(m.url);
     try {
+      const redgifsHere = isRedgifsUrl(window.location.href) || collectRedgifsUrls(1).length > 0;
+      const redgifsFeedHere = isRedgifsExpandableUrl(window.location.href) || collectRedgifsUrls(1).some((u) => isRedgifsExpandableUrl(u));
+      const youtubeHere = m.platform === 'youtube';
+      const redditHere = m.platform === 'reddit' && isRedditBatchSeedUrl(m.url);
+      const threadHere = isFootFetishForumThreadPage() || isFootFetishForumForumPage() || isVipergirlsThreadPage() || isVipergirlsForumPage();
+      const k2sHere = isVipergirlsThreadPage();
+      const visibleMediaHere = collectVisibleMediaUrls(1).length > 0;
+      const batchHere = hasUsableLinksOnPage(m);
+
+      setButtonAvailable(downloadBtn, m.platform !== 'unknown' || batchHere || redgifsHere);
+      setButtonAvailable(batchDownloadBtn, batchHere);
+      setButtonAvailable(forceBatchDownloadBtn, batchHere);
+      setButtonAvailable(mediaDownloadBtn, visibleMediaHere);
+      setButtonAvailable(redditAllBtn, redditHere);
+      setButtonAvailable(ytShortsBtn, youtubeHere);
+      setButtonAvailable(ytVideosBtn, youtubeHere);
+      setButtonAvailable(openAllBtn, batchHere);
+      setButtonAvailable(vdhHintBtn, m.platform !== 'unknown');
+      setButtonAvailable(recStartBtn, hasVisibleVideoElement());
+      setButtonAvailable(recStopBtn, isRecording === true);
+
       if (threadBatchDownloadBtn) {
-        const ok = isFootFetishForumThreadPage() || isFootFetishForumForumPage() || isVipergirlsThreadPage() || isVipergirlsForumPage();
-        try { threadBatchDownloadBtn.disabled = !ok; } catch (e) {}
-        try { threadBatchDownloadBtn.style.opacity = ok ? '1' : '0.55'; } catch (e) {}
-        try { threadBatchDownloadBtn.style.cursor = ok ? 'pointer' : 'not-allowed'; } catch (e) {}
+        setButtonAvailable(threadBatchDownloadBtn, threadHere);
       }
       if (keep2ShareBatchBtn) {
-        const ok = isVipergirlsThreadPage();
-        try { keep2ShareBatchBtn.disabled = !ok; } catch (e) {}
-        try { keep2ShareBatchBtn.style.opacity = ok ? '1' : '0.55'; } catch (e) {}
-        try { keep2ShareBatchBtn.style.cursor = ok ? 'pointer' : 'not-allowed'; } catch (e) {}
+        setButtonAvailable(keep2ShareBatchBtn, k2sHere);
         try { keep2ShareBatchBtn.title = 'Klik: Keep2Share-links op deze pagina. Shift/Alt: hele thread. Cmd/Ctrl: limieten.'; } catch (e) {}
+      }
+      if (redgifsClipBtn) {
+        setButtonAvailable(redgifsClipBtn, redgifsHere);
+        try { redgifsClipBtn.title = 'Redgifs clip of Redgifs-links op deze pagina naar de hub sturen.'; } catch (e) {}
+      }
+      if (redgifsFeedBtn) {
+        setButtonAvailable(redgifsFeedBtn, redgifsFeedHere);
+        try { redgifsFeedBtn.title = 'Redgifs profiel/search/collection downloaden. Cmd/Ctrl-klik voor limiet.'; } catch (e) {}
       }
     } catch (e) {}
   }
@@ -3233,6 +3315,8 @@
   const keep2ShareBatchBtn = null;
   const vdhHintBtn = makeBtnIn(extraBtnContainer, '🧩 VDH hint', '#2e7d32');
   const redditAllBtn = makeBtnIn(extraBtnContainer, '🧵 Reddit all', '#ff4500');
+  const redgifsClipBtn = makeBtnIn(extraBtnContainer, 'RG clip', '#dc2626');
+  const redgifsFeedBtn = makeBtnIn(extraBtnContainer, 'RG feed', '#991b1b');
   const ytShortsBtn = makeBtnIn(extraBtnContainer, '⏬ Shorts', '#7c3aed');
   const ytVideosBtn = makeBtnIn(extraBtnContainer, '⏬ Videos', '#5b21b6');
   const openAllBtn = makeBtnIn(extraBtnContainer, 'Open alle', '#03A9F4');
@@ -3328,6 +3412,50 @@
     color: '#888', border: 'none', borderRadius: '3px', fontSize: '10px', cursor: 'pointer'
   });
   toolbar.appendChild(logToggle);
+
+  function toolbarPanels() {
+    return [metaInfo, btnContainer, extraBtnContainer, recContainer, statusBar, notifArea, logContainer, logToggle];
+  }
+
+  function applyToolbarCollapsed() {
+    for (const el of toolbarPanels()) {
+      try { el.style.display = toolbarCollapsed ? 'none' : ''; } catch (e) {}
+    }
+    try {
+      toolbar.style.minWidth = toolbarCollapsed ? '150px' : '240px';
+      toolbar.style.maxWidth = toolbarCollapsed ? '220px' : '350px';
+      toolbar.style.padding = toolbarCollapsed ? '8px 10px' : '12px';
+      collapseBtn.textContent = toolbarCollapsed ? '+' : '−';
+      title.style.marginBottom = toolbarCollapsed ? '0' : '8px';
+      titleLabel.textContent = toolbarCollapsed ? '⠿ WEBDL' : toolbarFullTitle;
+    } catch (e) {}
+    if (!toolbarCollapsed) updateMetaDisplay();
+  }
+
+  function applySmartButtonMode() {
+    try {
+      smartToggleBtn.dataset.active = smartButtons ? '1' : '0';
+      smartToggleBtn.textContent = smartButtons ? 'Auto' : 'Alles';
+      smartToggleBtn.style.background = smartButtons ? '#0e7490' : '#374151';
+      smartToggleBtn.style.borderColor = smartButtons ? '#155e75' : '#4b5563';
+      smartToggleBtn.title = smartButtons ? 'Auto actief: alleen werkende knoppen zichtbaar' : 'Alles actief: ook niet-passende knoppen tonen';
+    } catch (e) {}
+    updateMetaDisplay();
+  }
+
+  collapseBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    toolbarCollapsed = !toolbarCollapsed;
+    applyToolbarCollapsed();
+  });
+
+  smartToggleBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    smartButtons = !smartButtons;
+    applySmartButtonMode();
+  });
 
   document.body.appendChild(toolbar);
 
@@ -4402,6 +4530,182 @@
     };
   }
 
+  function isRedgifsUrl(rawUrl) {
+    try {
+      const u = new URL(String(rawUrl || ''), window.location.href);
+      const host = String(u.hostname || '').replace(/^www\./, '').toLowerCase();
+      return host === 'redgifs.com'
+        || host.endsWith('.redgifs.com')
+        || host === 'gifdeliverynetwork.com'
+        || host.endsWith('.gifdeliverynetwork.com')
+        || host === 'gfycat.com'
+        || host.endsWith('.gfycat.com');
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function isRedgifsExpandableUrl(rawUrl) {
+    try {
+      const u = new URL(String(rawUrl || ''), window.location.href);
+      if (!isRedgifsUrl(u.toString())) return false;
+      const p = String(u.pathname || '').replace(/\/+$/, '').toLowerCase();
+      return /^\/users\/[^/]+$/.test(p)
+        || /^\/users\/[^/]+\/collections\/[^/]+$/.test(p)
+        || /^\/niches\/[^/]+$/.test(p)
+        || /^\/(?:gifs\/[^/]+|search(?:\/gifs)?|browse)$/.test(p);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function isRedgifsSingleClipUrl(rawUrl) {
+    try {
+      const u = new URL(String(rawUrl || ''), window.location.href);
+      if (!isRedgifsUrl(u.toString())) return false;
+      const p = String(u.pathname || '').replace(/\/+$/, '');
+      return /^\/(?:watch|ifr)\/[A-Za-z0-9]+$/i.test(p)
+        || /^\/[A-Za-z0-9]+$/i.test(p)
+        || /\.(?:mp4|webm|mov|m4v)(?:$|[?#])/i.test(u.pathname);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function collectRedgifsUrls(maxItems = 200) {
+    const out = [];
+    const seen = new Set();
+    const push = (raw) => {
+      try {
+        const value = String(raw || '').trim();
+        if (!value || /^(javascript:|mailto:|data:|blob:)/i.test(value)) return;
+        const u = new URL(value, window.location.href);
+        u.hash = '';
+        const final = u.toString();
+        if (!isRedgifsUrl(final) || seen.has(final)) return;
+        seen.add(final);
+        out.push(final);
+      } catch (e) {}
+    };
+
+    push(window.location.href);
+    for (const el of Array.from(document.querySelectorAll('a[href], video[src], source[src]'))) {
+      try {
+        push(el.getAttribute('href') || el.currentSrc || el.src || el.getAttribute('src'));
+        if (out.length >= maxItems) break;
+      } catch (e) {}
+    }
+    return out.slice(0, maxItems);
+  }
+
+  async function runRedgifsClipDownload(triggerBtn) {
+    if (!(await ensureHubReachable(true))) return;
+    const meta = scrapeMetadata();
+    const original = triggerBtn ? triggerBtn.textContent : 'RG clip';
+    if (triggerBtn) {
+      triggerBtn.textContent = 'RG...';
+      triggerBtn.style.opacity = '0.6';
+    }
+    try {
+      if (isRedgifsSingleClipUrl(meta.url) || isRedgifsExpandableUrl(meta.url)) {
+        const result = await queueDownloadRequest(meta);
+        if (result && result.success) {
+          showNotification(`Redgifs: ${result.duplicate ? 'bestaat al' : 'gestart'} #${result.downloadId || result.hubJobId || ''}`);
+          addLog(`Redgifs clip gestart: ${result.downloadId || result.hubJobId || meta.url}`);
+        } else {
+          showNotification(`Redgifs fout: ${(result && result.error) ? result.error : 'unknown'}`, true);
+          addLog(`Redgifs fout: ${(result && result.error) ? result.error : 'unknown'}`, 'error');
+        }
+        return;
+      }
+
+      const urls = collectRedgifsUrls(200).filter((u) => isRedgifsSingleClipUrl(u));
+      if (!urls.length) {
+        showNotification('Geen Redgifs clips gevonden op deze pagina', true);
+        return;
+      }
+      const ok = window.confirm(`Redgifs clips downloaden: ${urls.length} items?`);
+      if (!ok) return;
+      const result = await queueBatchDownloadRequest(urls, { ...meta, platform: 'redgifs' });
+      if (result && result.success) {
+        const stats = summarizeBatchResult(result);
+        showNotification(`Redgifs clips: ${formatBatchStats(stats)}`);
+        addLog(`Redgifs clips gestart: ${formatBatchStats(stats)}`);
+      } else {
+        showNotification(`Redgifs fout: ${(result && result.error) ? result.error : 'unknown'}`, true);
+      }
+    } catch (e) {
+      showNotification(`Redgifs fout: ${e && e.message ? e.message : String(e)}`, true);
+      addLog(`Redgifs fout: ${e && e.message ? e.message : String(e)}`, 'error');
+    } finally {
+      if (triggerBtn) {
+        triggerBtn.textContent = original;
+        triggerBtn.style.opacity = '1';
+      }
+    }
+  }
+
+  async function runRedgifsFeedDownload(triggerBtn, clickEvent) {
+    if (!(await ensureHubReachable(true))) return;
+    const meta = scrapeMetadata();
+    const original = triggerBtn ? triggerBtn.textContent : 'RG feed';
+    if (triggerBtn) {
+      triggerBtn.textContent = 'RG feed...';
+      triggerBtn.style.opacity = '0.6';
+    }
+    try {
+      const wantsSettings = !!(clickEvent && (clickEvent.metaKey || clickEvent.ctrlKey));
+      if (wantsSettings) {
+        const input = window.prompt('Redgifs feed: max clips verzamelen? Leeg/0 = standaard', '');
+        if (input === null) return;
+        const n = parseInt(String(input || '').trim(), 10);
+        if (Number.isFinite(n) && n > 0) meta.limit = Math.max(1, Math.min(5000, n));
+      }
+
+      if (isRedgifsExpandableUrl(meta.url)) {
+        const result = await queueDownloadRequest(meta);
+        if (result && result.success) {
+          const stats = summarizeBatchResult(result);
+          const suffix = result.expanded ? `: ${formatBatchStats(stats)}` : ` gestart #${result.downloadId || result.hubJobId || ''}`;
+          showNotification(`Redgifs feed${suffix}`);
+          addLog(`Redgifs feed gestart${suffix}`);
+        } else {
+          showNotification(`Redgifs feed fout: ${(result && result.error) ? result.error : 'unknown'}`, true);
+        }
+        return;
+      }
+
+      const urls = collectRedgifsUrls(500);
+      if (!urls.length) {
+        showNotification('Geen Redgifs feed/profiel of links gevonden', true);
+        return;
+      }
+      const selected = urls.filter((u) => isRedgifsSingleClipUrl(u));
+      if (!selected.length) {
+        showNotification('Geen downloadbare Redgifs clip-links gevonden', true);
+        return;
+      }
+      const ok = window.confirm(`Redgifs links op deze pagina downloaden: ${selected.length} items?`);
+      if (!ok) return;
+      const result = await queueBatchDownloadRequest(selected, { ...meta, platform: 'redgifs' });
+      if (result && result.success) {
+        const stats = summarizeBatchResult(result);
+        showNotification(`Redgifs links: ${formatBatchStats(stats)}`);
+        addLog(`Redgifs links gestart: ${formatBatchStats(stats)}`);
+      } else {
+        showNotification(`Redgifs links fout: ${(result && result.error) ? result.error : 'unknown'}`, true);
+      }
+    } catch (e) {
+      showNotification(`Redgifs feed fout: ${e && e.message ? e.message : String(e)}`, true);
+      addLog(`Redgifs feed fout: ${e && e.message ? e.message : String(e)}`, 'error');
+    } finally {
+      if (triggerBtn) {
+        triggerBtn.textContent = original;
+        triggerBtn.style.opacity = '1';
+      }
+    }
+  }
+
   async function runRedditAllBatchFromCurrentPage(triggerBtn) {
     if (!(await ensureHubReachable(true))) return;
 
@@ -4645,6 +4949,14 @@
 
   redditAllBtn.addEventListener('click', async function() {
     await runRedditAllBatchFromCurrentPage(redditAllBtn);
+  });
+
+  redgifsClipBtn.addEventListener('click', async function() {
+    await runRedgifsClipDownload(redgifsClipBtn);
+  });
+
+  redgifsFeedBtn.addEventListener('click', async function(e) {
+    await runRedgifsFeedDownload(redgifsFeedBtn, e);
   });
 
   async function runBatchFromCurrentPage(triggerBtn, opts, clickEvent) {
