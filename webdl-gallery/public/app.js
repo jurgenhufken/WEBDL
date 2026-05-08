@@ -14,14 +14,14 @@
   const state = {
     items: [],
     offset: 0,
-    limit: 100,
+    limit: 200,
     loading: false,
     done: false,
     filters: { platform: '', channel: '', q: '', sort: 'recent', min_rating: '', media_type: '', channel_sort: 'count' },
     // Auto-refresh
     autoRefresh: true,
     liveAllMedia: true,
-    autoRefreshMs: 8000,
+    autoRefreshMs: 3000,
     autoInjectMax: 30,
     autoInjectPumpMs: 700,
     autoRefreshTimer: null,
@@ -33,6 +33,7 @@
     queryVersion: 0,
     pendingNewItems: new Map(),
     nextCursor: null,
+    totalHint: null,
     channelsLoadedFor: null,
   };
 
@@ -82,12 +83,40 @@
     return '';
   }
 
+  function formatDurationBadge(it) {
+    if (mediaTypeOf(it) !== 'video') return '';
+    const explicitSeconds = Number(it && it.duration_seconds);
+    let seconds = Number.isFinite(explicitSeconds) && explicitSeconds > 0 ? Math.round(explicitSeconds) : 0;
+    const raw = String(it && it.duration || '').trim();
+    if (!seconds && /^\d+(?:\.\d+)?$/.test(raw)) seconds = Math.round(Number(raw));
+    if (seconds > 0) {
+      const h = Math.floor(seconds / 3600);
+      const m = Math.floor((seconds % 3600) / 60);
+      const s = seconds % 60;
+      return h > 0
+        ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+        : `${m}:${String(s).padStart(2, '0')}`;
+    }
+    if (/^\d{1,2}:\d{2}(?::\d{2})?$/.test(raw)) return raw;
+    return '';
+  }
+
+  function looksLikeFilenameTitle(value) {
+    const text = String(value || '').trim();
+    if (!text) return false;
+    if (/\.(jpe?g|png|webp|gif|avif|bmp|mp4|webm|mkv|mov|m4v|avi|flv|ts)$/i.test(text)) return true;
+    if (/^[a-f0-9]{12,}$/i.test(text) && /\d/.test(text)) return true;
+    if (/^[0-9]+[-_][a-f0-9-]{12,}$/i.test(text)) return true;
+    if (/^[a-f0-9-]{24,}$/i.test(text) && /\d/.test(text)) return true;
+    return false;
+  }
+
   function displayTitle(it) {
     const title = String(it && it.title || '').trim();
-    if (title && title.toLowerCase() !== 'untitled') return title;
-    const filename = String(it && it.filename || '').trim();
-    if (filename) return filename.replace(/\.[a-z0-9]{2,5}$/i, '');
-    return 'Zonder titel';
+    if (title && title.toLowerCase() !== 'untitled' && !looksLikeFilenameTitle(title)) return title;
+    const pageTitle = String(it && (it.source_thread_title || it.channel) || '').trim();
+    if (pageTitle && pageTitle.toLowerCase() !== 'unknown' && !looksLikeFilenameTitle(pageTitle)) return pageTitle;
+    return '';
   }
 
   function canonicalSiteLabel(value) {
@@ -97,14 +126,26 @@
     if (raw === 'twitter' || raw === 'x.com' || raw === 'twitter.com' || raw.endsWith('.x.com') || raw.endsWith('.twitter.com')) return 'twitter';
     if (raw === 'reddit' || raw === 'reddit.com' || raw === 'redd.it' || raw.endsWith('.reddit.com')) return 'reddit';
     if (raw === 'redgifs' || raw === 'redgifs.com' || raw === 'gifdeliverynetwork.com' || raw.endsWith('.redgifs.com') || raw.endsWith('.gifdeliverynetwork.com')) return 'redgifs';
+    if (raw === 'footfetishforum' || raw === 'footfetishforum.com' || raw.endsWith('.footfetishforum.com')) return 'footfetishforum';
     if (raw === 'vipergirls' || raw === 'vipergirls.to' || raw === 'viper.to' || raw.endsWith('.vipergirls.to') || raw.endsWith('.viper.to')) return 'vipergirls';
     if (raw === 'keep2share' || raw === 'keep2share.cc' || raw === 'k2s.cc' || raw === 'k2s.io' || raw.endsWith('.keep2share.cc') || raw.endsWith('.k2s.cc') || raw.endsWith('.k2s.io')) return 'keep2share';
     return raw;
   }
 
+  function comparableSiteKey(value) {
+    let key = canonicalSiteLabel(value);
+    if (!key) return '';
+    key = key.replace(/^https?:\/\//, '').split(/[/?#]/, 1)[0].replace(/^www\./, '');
+    if (key.includes('.')) {
+      const parts = key.split('.').filter(Boolean);
+      if (parts.length >= 2) key = parts[parts.length - 2];
+    }
+    return key.replace(/[^a-z0-9]+/g, '');
+  }
+
   function shouldShowSourceSite(platform, sourceSite) {
-    const platformKey = canonicalSiteLabel(platform);
-    const sourceKey = canonicalSiteLabel(sourceSite);
+    const platformKey = comparableSiteKey(platform);
+    const sourceKey = comparableSiteKey(sourceSite);
     return !!sourceKey && sourceKey !== platformKey;
   }
 
@@ -136,7 +177,7 @@
         it.title, it.filename, it.channel, it.platform, it.source_site,
         ...(Array.isArray(it.source_sites) ? it.source_sites : []),
         ...(Array.isArray(it.content_sites) ? it.content_sites : []),
-        it.source_thread_title, it.source_host,
+        it.source_thread_title, it.source_post_title, it.source_post_num, it.source_post_id, it.source_host,
         it.source_url, it.url,
       ].map(v => String(v || '').toLowerCase()).join(' ');
       if (!haystack.includes(String(f.q).toLowerCase())) return false;
@@ -174,31 +215,38 @@
     c.className = 'card';
     c.dataset.idx = String(idx);
     c.dataset.id  = String(it.id);
-    const platformText = String(it.platform || '?').trim() || '?';
+    const platformText = canonicalSiteLabel(it.platform) || String(it.platform || '?').trim() || '?';
     const sourceText = String(it.source_site || '').trim();
     const showSource = shouldShowSourceSite(platformText, sourceText);
     const badgeTitle = displayPlatformBadge(it);
     const badge = `<div class="card-badge-stack" title="${escHtml(badgeTitle)}">
         <span class="card-badge">${escHtml(platformText)}</span>
-        ${showSource ? `<span class="card-badge card-badge-source">via ${escHtml(sourceText)}</span>` : ''}
+        ${showSource ? `<span class="card-badge card-badge-source">via ${escHtml(canonicalSiteLabel(sourceText) || sourceText)}</span>` : ''}
       </div>`;
     const mediaLabel = mediaTypeLabel(it);
     const mediaMark = mediaLabel ? `<span class="card-media-mark">${mediaLabel}</span>` : '';
-    const title = escHtml(displayTitle(it));
+    const durationBadge = formatDurationBadge(it);
+    const durationMark = durationBadge ? `<span class="card-duration">${escHtml(durationBadge)}</span>` : '';
+    const titleText = displayTitle(it);
+    const title = escHtml(titleText);
     const sourceSite = String(it.source_site || '').trim();
     const channel = (it.channel && it.channel !== 'unknown') ? String(it.channel) : '';
-    const subSource = shouldShowSourceSite(platformText, sourceSite) ? sourceSite : '';
-    const sub = subSource && channel && subSource !== channel
-      ? `${subSource} / ${channel}`
-      : (subSource || channel);
+    const pageTitle = String(it.source_thread_title || channel || '').trim();
+    const subSource = shouldShowSourceSite(platformText, sourceSite) ? (canonicalSiteLabel(sourceSite) || sourceSite) : '';
+    const sub = pageTitle && pageTitle !== titleText
+      ? pageTitle
+      : (subSource && subSource !== titleText ? subSource : '');
     const contentSites = Array.isArray(it.content_sites) ? it.content_sites.filter(Boolean).slice(0, 3) : [];
-    const subParts = [sub, contentSites.length ? `inhoud: ${contentSites.join(', ')}` : ''].filter(Boolean);
+    const postLabel = it.source_post_num
+      ? `post ${it.source_post_num}${it.source_post_title && it.source_post_title !== titleText ? ` · ${it.source_post_title}` : ''}`
+      : (it.source_post_title && it.source_post_title !== titleText ? it.source_post_title : '');
+    const subParts = [postLabel, sub, contentSites.length ? `inhoud: ${contentSites.join(', ')}` : ''].filter(Boolean);
     c.innerHTML = `
       <div class="card-thumb">
-        ${badge}${mediaMark}
+        ${badge}${mediaMark}${durationMark}
       </div>
       <div class="card-info">
-        <div class="card-title">${title}</div>
+        ${title ? `<div class="card-title">${title}</div>` : ''}
         ${subParts.length ? `<div class="card-sub">${escHtml(subParts.join(' · '))}</div>` : ''}
         ${it.rating != null ? `<div class="card-stars">${starHtml(it.rating)}</div>` : ''}
       </div>`;
@@ -208,7 +256,7 @@
       const srcBtn = document.createElement('button');
       srcBtn.type = 'button';
       srcBtn.className = 'src-btn';
-      srcBtn.textContent = 'Bron';
+      srcBtn.textContent = '↗';
       srcBtn.title = 'Open bronpagina';
       srcBtn.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -288,7 +336,6 @@
   function pumpPendingNewItems() {
     if (state.viewerActive) return;
     if (!state.pendingNewItems || state.pendingNewItems.size === 0) return;
-    if (window.scrollY >= 320) { updateStats(); return; }
     const inject = Array.from(state.pendingNewItems.values()).slice(0, state.autoInjectMax);
     for (const it of inject) state.pendingNewItems.delete(String(it.id));
     if (inject.length) renderPrepend(inject);
@@ -311,7 +358,21 @@
     state.knownIds = new Set();
     state.pendingNewItems = new Map();
     state.nextCursor = null;
+    state.totalHint = selectedTotalHint();
     state.queryVersion += 1;
+  }
+
+  function countFromOptionText(text) {
+    const match = String(text || '').match(/\((\d+)\)\s*$/);
+    return match ? Number(match[1]) : null;
+  }
+
+  function selectedTotalHint() {
+    const channel = $('channel');
+    if (channel && channel.value) return countFromOptionText(channel.options[channel.selectedIndex]?.textContent);
+    const platform = $('platform');
+    if (platform && platform.value) return countFromOptionText(platform.options[platform.selectedIndex]?.textContent);
+    return null;
   }
 
   function activeFilterText() {
@@ -321,6 +382,7 @@
     if (f.channel) parts.push(f.channel);
     if (f.media_type) parts.push(f.media_type === 'video' ? 'video' : 'afbeelding');
     if (f.min_rating) parts.push(`${f.min_rating}+ sterren`);
+    if (f.sort === 'channel') parts.push('sort: kanaal/model');
     if (f.q) parts.push(`"${f.q}"`);
     return parts.join(' / ');
   }
@@ -328,7 +390,11 @@
   function updateStats() {
     const pending = state.pendingNewItems ? state.pendingNewItems.size : 0;
     const filterText = activeFilterText();
-    const parts = [`${state.items.length} items${state.done ? '' : '+'}`];
+    const total = Number.isFinite(Number(state.totalHint)) ? Number(state.totalHint) : null;
+    const loadedText = total && total >= state.items.length
+      ? `${state.items.length} / ${total} geladen`
+      : `${state.items.length} items${state.done ? '' : '+'}`;
+    const parts = [loadedText];
     if (pending) parts.push(`${pending} nieuw`);
     if (filterText) parts.push(`filter: ${filterText}`);
     $('stats').textContent = parts.join(' · ');
@@ -487,8 +553,10 @@
       } else {
         pSel.value = '';
         state.filters.platform = '';
-        resetChannels();
+        await reloadChannels();
       }
+      state.totalHint = selectedTotalHint();
+      updateStats();
     } catch (e) { console.warn('filters load failed', e); }
   }
 
@@ -503,10 +571,6 @@
   async function reloadChannels() {
     try {
       const plat = state.filters.platform;
-      if (!plat) {
-        resetChannels();
-        return;
-      }
       const params = new URLSearchParams();
       if (plat) params.set('platform', plat);
       if (state.filters.q) params.set('q', state.filters.q);
@@ -743,8 +807,7 @@
   // ─── Init ─────────────────────────────────────────────────────────────────
   async function init() {
     readFiltersFromControls();
-    await loadFilterDropdowns();
-    readFiltersFromControls();
+    loadFilterDropdowns().catch((e) => console.warn('filters load failed', e));
     await loadMore();
     io.observe(sentinel);
     startActiveRefresh();

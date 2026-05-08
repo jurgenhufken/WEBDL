@@ -53,6 +53,7 @@
     mediaResetSeq: 0,
     mediaSeq: 0,
     hudMessageTimer: null,
+    forceTranscodeIds: new Set(),
 
     // Zoom (exact als oude viewer)
     zoomed: false,
@@ -112,6 +113,9 @@
     }
     if (it && it.source_thread_title && it.source_thread_title !== it.channel) {
       parts.push(it.source_thread_title);
+    }
+    if (it && (it.source_post_num || it.source_post_title)) {
+      parts.push(`post ${it.source_post_num || '?'}${it.source_post_title ? ` · ${it.source_post_title}` : ''}`);
     }
     return parts;
   }
@@ -320,6 +324,12 @@
   function mediaUrl(it) {
     const params = new URLSearchParams();
     if (vs.mediaReloadNonce) params.set('reload', String(vs.mediaReloadNonce));
+    if (it && it.type === 'video') {
+      const ext = String(it.ext || it.format || '').toLowerCase();
+      const nativeVideo = ext === 'mp4' || ext === 'webm' || ext === 'ogv';
+      if (!nativeVideo) params.set('play', '1');
+      if (vs.forceTranscodeIds.has(String(it.id))) params.set('transcode', '1');
+    }
     return `/media/${encodeURIComponent(String(it.id))}${params.toString() ? '?' + params.toString() : ''}`;
   }
 
@@ -432,22 +442,11 @@
 
       mediaEl.addEventListener('timeupdate', () => {
         if (mediaSeq !== vs.mediaSeq || mediaEl !== vs.currentMediaEl) return;
-        if (!vs.seekDragging && mediaEl.duration) {
-          const pct = (mediaEl.currentTime / mediaEl.duration) * 100;
-          el.vSeek.value = String(Math.round(pct * 10));
-          if (el.vProgressFill) el.vProgressFill.style.width = pct + '%';
-          if (el.vProgressHandle) el.vProgressHandle.style.left = pct + '%';
-
-          // Loop sectie: spring terug naar begin als we voorbij het einde zijn
-          if (vs.loopStart != null && vs.loopEnd != null && mediaEl.currentTime >= vs.loopEnd) {
-            mediaEl.currentTime = vs.loopStart;
-          }
-        }
-        updatePlaybackControls(mediaEl);
+        syncVideoProgress(mediaEl);
       });
-      mediaEl.addEventListener('loadedmetadata', () => updatePlaybackControls(mediaEl));
-      mediaEl.addEventListener('play', () => updatePlaybackControls(mediaEl));
-      mediaEl.addEventListener('pause', () => updatePlaybackControls(mediaEl));
+      mediaEl.addEventListener('loadedmetadata', () => syncVideoProgress(mediaEl));
+      mediaEl.addEventListener('play', () => syncVideoProgress(mediaEl));
+      mediaEl.addEventListener('pause', () => syncVideoProgress(mediaEl));
       mediaEl.addEventListener('ended', () => {
         if (mediaSeq !== vs.mediaSeq || mediaEl !== vs.currentMediaEl) return;
         stopReverse();
@@ -473,6 +472,12 @@
       }, { once: true });
       mediaEl.addEventListener('error', () => {
         if (mediaSeq !== vs.mediaSeq || mediaEl !== vs.currentMediaEl) return;
+        if (!vs.forceTranscodeIds.has(String(it.id))) {
+          vs.forceTranscodeIds.add(String(it.id));
+          rebuildCurrentMedia({ reason: 'Compatibele videostream geprobeerd', quiet: true })
+            .catch((err) => log('Video-herstel fout: ' + err.message));
+          return;
+        }
         const recoveries = Number(mediaEl.dataset.autoRecoveries || 0);
         if (recoveries < 1) {
           mediaEl.dataset.autoRecoveries = String(recoveries + 1);
@@ -869,7 +874,7 @@
   function updatePlaybackControls(video) {
     const v = video || el.vContent.querySelector('video');
     if (el.vBtnPlayPause) el.vBtnPlayPause.textContent = v && !v.paused && !v.ended ? '⏸' : '▶';
-    if (el.vSpeedSelect) el.vSpeedSelect.value = String(vs.playbackRate);
+    if (el.vSpeedSelect) el.vSpeedSelect.value = String(vs.playbackRate > 0 ? vs.playbackRate : 1);
     if (el.vBtnReverse) el.vBtnReverse.classList.toggle('active', vs.playbackRate < 0);
     if (el.vTimeLabel) {
       el.vTimeLabel.textContent = v
@@ -881,11 +886,35 @@
     }
   }
 
+  function syncVideoProgress(video, opts = {}) {
+    const v = video || el.vContent.querySelector('video');
+    const checkLoop = opts.checkLoop !== false;
+    if (!v) {
+      updatePlaybackControls(null);
+      return;
+    }
+    if (
+      checkLoop &&
+      vs.loopStart != null &&
+      vs.loopEnd != null &&
+      v.currentTime >= vs.loopEnd
+    ) {
+      v.currentTime = vs.loopStart;
+    }
+    if (!vs.seekDragging && Number.isFinite(v.duration) && v.duration > 0) {
+      const pct = Math.max(0, Math.min(100, (v.currentTime / v.duration) * 100));
+      el.vSeek.value = String(Math.round(pct * 10));
+      if (el.vProgressFill) el.vProgressFill.style.width = pct + '%';
+      if (el.vProgressHandle) el.vProgressHandle.style.left = pct + '%';
+    }
+    updatePlaybackControls(v);
+  }
+
   function seekVideoFromRange(rangeEl) {
     const v = el.vContent.querySelector('video');
     if (!v || !v.duration || !rangeEl) return;
     v.currentTime = (parseInt(rangeEl.value, 10) / 1000) * v.duration;
-    updatePlaybackControls(v);
+    syncVideoProgress(v);
   }
 
   function seekRelative(seconds) {
@@ -893,7 +922,7 @@
     if (!v || !Number.isFinite(v.duration)) return;
     const delta = Number(seconds) || 0;
     v.currentTime = Math.max(0, Math.min(v.duration, v.currentTime + delta));
-    updatePlaybackControls(v);
+    syncVideoProgress(v);
     showHudMessage(`${delta > 0 ? '+' : ''}${delta}s`, 900);
   }
 
@@ -1304,7 +1333,7 @@
 
   // ─── Afspeelsnelheid ─────────────────────────────────────────────────────
   const FORWARD_SPEED_STEPS = [0.25, 0.5, 1, 1.5, 2, 3, 4];
-  const SPEED_STEPS = [-2, -1, -0.5, ...FORWARD_SPEED_STEPS];
+  const SPEED_STEPS = FORWARD_SPEED_STEPS;
 
   function changeSpeed(dir) {
     const cur = vs.playbackRate > 0 ? vs.playbackRate : 1;
@@ -1323,13 +1352,15 @@
     rate = Number(rate);
     if (!Number.isFinite(rate) || rate === 0) rate = 1;
     vs.playbackRate = rate;
-    try { localStorage.setItem(VIEWER_SPEED_KEY, String(rate)); } catch (_) {}
+    if (rate > 0) {
+      try { localStorage.setItem(VIEWER_SPEED_KEY, String(rate)); } catch (_) {}
+    }
     const v = el.vContent.querySelector('video');
 
     if (rate <= 0) {
       if (v) {
         if (v.currentTime <= 0.15 && Number.isFinite(v.duration) && v.duration > 0) {
-          v.currentTime = v.duration;
+          v.currentTime = Math.max(0, v.duration - 0.05);
         }
         v.pause();
         v.playbackRate = 1;
@@ -1346,21 +1377,38 @@
       }
     }
     updateSpeedIndicator();
-    updatePlaybackControls(v);
+    syncVideoProgress(v);
     showHudMessage(rate > 0 ? `Snelheid ${rate}x` : `Achteruit ${Math.abs(rate)}x`, 1100);
     log(`Snelheid: ${rate > 0 ? rate + '×' : rate + '× (achteruit)'}`);
   }
 
   function startReverse(speed) {
     stopReverse();
+    const activeVideo = el.vContent.querySelector('video');
+    if (!activeVideo) return;
+    if (activeVideo.currentTime <= 0.15 && Number.isFinite(activeVideo.duration) && activeVideo.duration > 0) {
+      activeVideo.currentTime = Math.max(0, activeVideo.duration - 0.05);
+    }
+    activeVideo.pause();
+    activeVideo.playbackRate = 1;
+    syncVideoProgress(activeVideo, { checkLoop: false });
     vs.reverseLastT = performance.now();
     function tick(now) {
       const v = el.vContent.querySelector('video');
       if (!v || vs.playbackRate > 0) { stopReverse(); return; }
       const dt = (now - vs.reverseLastT) / 1000;
       vs.reverseLastT = now;
-      v.currentTime = Math.max(0, v.currentTime - dt * speed);
-      if (v.currentTime <= 0) { stopReverse(); return; }
+      const step = Math.max(dt * speed, 1 / 120);
+      v.currentTime = Math.max(0, v.currentTime - step);
+      syncVideoProgress(v, { checkLoop: false });
+      if (v.currentTime <= 0) {
+        vs.playbackRate = 1;
+        stopReverse();
+        updateSpeedIndicator();
+        syncVideoProgress(v, { checkLoop: false });
+        showHudMessage('Begin video', 900);
+        return;
+      }
       vs.reverseRAF = requestAnimationFrame(tick);
     }
     vs.reverseRAF = requestAnimationFrame(tick);
@@ -1392,7 +1440,7 @@
       ind.style.background = r < 0 ? 'rgba(255,80,80,.25)' : 'rgba(80,200,255,.2)';
       ind.style.color = r < 0 ? '#ff8080' : '#80d0ff';
     }
-    if (el.vSpeedSelect) el.vSpeedSelect.value = String(r);
+    if (el.vSpeedSelect) el.vSpeedSelect.value = String(r > 0 ? r : 1);
     if (el.vBtnReverse) el.vBtnReverse.classList.toggle('active', r < 0);
     if (el.vSpeedDown) el.vSpeedDown.classList.toggle('active', r > 0 && r < 1);
     if (el.vSpeedUp) el.vSpeedUp.classList.toggle('active', r > 1);
@@ -1461,12 +1509,25 @@
   }
 
   // ─── Keyboard ─────────────────────────────────────────────────────────────
+  function ratingFromNumberKey(e) {
+    if (!e || !/^[0-9]$/.test(String(e.key || ''))) return null;
+    return (10 - parseInt(e.key, 10)) / 2; // 0→5.0, 9→0.5
+  }
+
   function bindKeyboard() {
     window.addEventListener('keydown', async (e) => {
       if (!vs.open) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       const tag = (e.target.tagName || '').toUpperCase();
-      if (['INPUT', 'SELECT', 'TEXTAREA'].includes(tag)) return;
+      if (['INPUT', 'TEXTAREA'].includes(tag)) return;
+      const numericRating = ratingFromNumberKey(e);
+      if (numericRating != null) {
+        await setRating(numericRating);
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      if (tag === 'SELECT') return;
 
       switch (e.key) {
         case 'Escape':
@@ -1506,12 +1567,6 @@
         case 'i': case 'I': setLoopPoint('start'); e.preventDefault(); break;
         case 'o': case 'O': setLoopPoint('end');   e.preventDefault(); break;
         case 'p': case 'P': clearLoop();            e.preventDefault(); break;
-        default:
-          if (/^[0-9]$/.test(e.key)) {
-            const r = (10 - parseInt(e.key, 10)) / 2; // 0→5.0, 9→0.5
-            await setRating(r);
-            e.preventDefault();
-          }
       }
     }, { capture: true });
   }

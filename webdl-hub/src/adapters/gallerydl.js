@@ -12,7 +12,7 @@ const HOSTS = [
   'danbooru.donmai.us', 'gelbooru.com', 'rule34.xxx', 'e621.net',
   '4chan.org', 'kemono.su', 'coomer.su', 'tumblr.com',
   'pinterest.com', 'bsky.app', 'twitter.com', 'x.com', 'mastodon.social',
-  'instagram.com', 'vipergirls.to',
+  'instagram.com', 'vipergirls.to', 'viper.to',
 ];
 
 function hostMatches(hostname) {
@@ -37,7 +37,20 @@ function isTwitterUrl(url) {
   }
 }
 
+function normalizeGalleryDlUrl(url) {
+  try {
+    const u = new URL(String(url || ''));
+    const host = u.hostname.toLowerCase().replace(/^www\./, '');
+    if (host === 'viper.to' || host.endsWith('.viper.to')) {
+      u.hostname = 'vipergirls.to';
+      return u.toString();
+    }
+  } catch {}
+  return url;
+}
+
 function plan(url, opts = {}) {
+  const targetUrl = normalizeGalleryDlUrl(url);
   // -D <cwd> zet álle files direct in onze jobdir (geen sub-mappen per site).
   // -q = quiet, -v geeft één regel per bestand voor progress.
   const args = [
@@ -45,8 +58,10 @@ function plan(url, opts = {}) {
     '-D', opts.cwd,
     '--cookies-from-browser', process.env.WEBDL_GALLERYDL_BROWSER_COOKIES || 'firefox',
     '-o', 'output.progress=true',
+    '--write-metadata',
+    '--write-info-json',
   ];
-  if (isTwitterUrl(url)) {
+  if (isTwitterUrl(targetUrl)) {
     args.push(
       '-o', 'conversations=true',
       '-o', 'replies=true',
@@ -56,7 +71,7 @@ function plan(url, opts = {}) {
       '-o', 'videos=true',
     );
   }
-  args.push(url);
+  args.push(targetUrl);
   return { cmd: 'gallery-dl', args, cwd: opts.cwd, env: {} };
 }
 

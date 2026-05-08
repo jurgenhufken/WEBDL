@@ -10,6 +10,7 @@ const VALID_SCHEMA = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 //  - 'process-video': video + ffmpeg merge / zware sessie-adapters,
 //    max 1 tegelijk wegens zware CPU (ffmpeg-merge + transcodes)
 //  - 'video':         directe video download zonder merge
+//  - 'gallery':       gallery-dl thread/galleries; snel binnen job, 1 job tegelijk
 //  - 'image':         images/attachments (netwerk-bound)
 const IMAGE_URL_RE = /\.(jpe?g|png|webp|gif|avif|bmp|tiff?)(\?|$)/i;
 const DIRECT_VIDEO_RE = /\.(mp4|webm|mkv|mov|m4v|avi|wmv|flv|ts|m2ts|mpg|mpeg|ogv|3gp|3g2)(\?|$)/i;
@@ -35,7 +36,12 @@ function classifyLane(url, adapter) {
     return 'image';
   }
   if (IMAGE_URL_RE.test(u)) return 'image';
-  if (adapter === 'gallerydl' || adapter === 'reddit-dl' || adapter === 'reddit') {
+  if (adapter === 'gallerydl') {
+    // gallery-dl batches kunnen zelf veel media bevatten. Houd ze serieel,
+    // zodat grote Viper/forum threads elkaar niet beconcurreren.
+    return 'gallery';
+  }
+  if (adapter === 'reddit-dl' || adapter === 'reddit') {
     // gallery-dl/reddit zijn meestal images; videos in deze flow zijn zeldzaam.
     return 'image';
   }

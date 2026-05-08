@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS __SCHEMA__.jobs (
   -- Lane voor concurrency-buckets:
   --  'process-video': video + ffmpeg merge (YouTube enz.), max 1 tegelijk
   --  'video':         directe video download zonder merge, max 2 tegelijk
-  --  'image':         images/attachments, max 6 tegelijk
+  --  'gallery':       gallery-dl thread/galleries, max 1 tegelijk
+  --  'image':         images/attachments, max 8 tegelijk
   lane          TEXT        NOT NULL DEFAULT 'video'
 );
 

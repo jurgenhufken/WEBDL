@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WEBDL Gallery</title>
-<link rel="stylesheet" href="/styles.css?v=20260502-54">
+<link rel="stylesheet" href="/styles.css?v=20260508-60">
 </head>
 <body>
   <header class="topbar">
@@ -21,6 +21,7 @@
       </select>
       <select id="sort">
         <option value="recent">Nieuwste</option>
+        <option value="channel">Kanaal/model</option>
         <option value="rating">Rating</option>
         <option value="random">Random</option>
       </select>
@@ -167,13 +168,15 @@
               <button class="vjump-btn" data-seek="-10" title="10 seconden terug">10s</button>
               <button class="vjump-btn" data-seek="-5" title="5 seconden terug">5s</button>
             </div>
+            <div class="vjump-group" aria-label="Vooruit spoelen">
+              <span class="vcontrol-label">Vooruit</span>
+              <button class="vjump-btn" data-seek="5" title="5 seconden vooruit">5s</button>
+              <button class="vjump-btn" data-seek="10" title="10 seconden vooruit">10s</button>
+              <button class="vjump-btn" data-seek="30" title="30 seconden vooruit">30s</button>
+            </div>
             <div class="vspeed-group" aria-label="Afspeelsnelheid">
               <button id="vSpeedDown" class="vspeed-btn" title="Langzamer ([)">Trager</button>
-              <button id="vBtnReverse" class="vspeed-btn" title="Achteruit afspelen">Achteruit</button>
               <select id="vSpeedSelect" class="vspeed-select" title="Afspeelsnelheid">
-                <option value="-2">-2×</option>
-                <option value="-1">-1×</option>
-                <option value="-0.5">-0.5×</option>
                 <option value="0.25">0.25×</option>
                 <option value="0.5">0.5×</option>
                 <option value="1" selected>1×</option>
@@ -184,12 +187,7 @@
               </select>
               <button id="vSpeedUp" class="vspeed-btn" title="Sneller (])">Sneller</button>
             </div>
-            <div class="vjump-group" aria-label="Vooruit spoelen">
-              <span class="vcontrol-label">Vooruit</span>
-              <button class="vjump-btn" data-seek="5" title="5 seconden vooruit">5s</button>
-              <button class="vjump-btn" data-seek="10" title="10 seconden vooruit">10s</button>
-              <button class="vjump-btn" data-seek="30" title="30 seconden vooruit">30s</button>
-            </div>
+            <button id="vBtnReverse" class="vreverse-btn" title="Speel de video achteruit af">Terugspelen</button>
             <button id="vBtnRotateBottom" class="vbottom-rotate" title="Media 90° draaien">Draai 90°</button>
           </div>
         </div>
@@ -238,8 +236,8 @@
 
   </div><!-- /viewer -->
 
-  <script src="/app.js?v=20260508-56"></script>
-  <script src="/viewer.js?v=20260508-17"></script>
+  <script src="/app.js?v=20260509-62"></script>
+  <script src="/viewer.js?v=20260508-20"></script>
   <script>
   // ─── Thema switcher ─────────────────────────────────────────────────────
   (function() {

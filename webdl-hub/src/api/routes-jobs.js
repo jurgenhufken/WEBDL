@@ -76,6 +76,18 @@ function stableExpandGroupId(url) {
   return crypto.createHash('sha1').update(canonicalExpandUrl(url)).digest('hex').slice(0, 12);
 }
 
+function normalizeVipergirlsThreadUrl(url) {
+  try {
+    const u = new URL(String(url || ''));
+    const host = u.hostname.toLowerCase().replace(/^www\./, '');
+    if (host === 'viper.to' || host.endsWith('.viper.to')) {
+      u.hostname = 'vipergirls.to';
+      return u.toString();
+    }
+  } catch {}
+  return String(url || '');
+}
+
 async function expandAndEnqueue({ repo, queue, adapters, url, priority, options, maxAttempts, force }) {
   const adapter = adapters.find((a) => a.expandPlaylist && a.matches(url));
   if (!adapter || !adapter.expandPlaylist) {
@@ -256,7 +268,37 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
   const r = express.Router();
 
   async function enqueueOneUrl({ url, hint = null, options = {}, maxAttempts = 3, force = false, requestedPriority = null }) {
-    const slave = isSlaveUrl(url);
+    const sourceContext = options.webdl_source_contexts?.[url] || options.sourceContext || null;
+    const contextUrl = sourceContext?.url || options.contextUrl || options.pageUrl || '';
+    const sourcePlatform = String(sourceContext?.platform || options.platform || '').toLowerCase();
+    const isVipergirlsContext = sourcePlatform === 'vipergirls'
+      || /(?:vipergirls\.to|viper\.to)\/threads\//i.test(String(contextUrl || ''));
+    const isThreadUrl = /(?:vipergirls\.to|viper\.to)\/threads\//i.test(String(url || ''));
+    const jobUrl = isThreadUrl ? normalizeVipergirlsThreadUrl(url) : url;
+    if (!hint && isVipergirlsContext && contextUrl && !isThreadUrl) {
+      const threadUrl = normalizeVipergirlsThreadUrl(contextUrl);
+      if (!force) {
+        const existing = await repo.findRecentJobByUrl(threadUrl);
+        if (existing) return { ...existing, duplicate: true, redirected_from: url };
+      }
+      const priority = requestedPriority ?? defaultJobPriority(threadUrl, 'gallerydl');
+      return queue.enqueue({
+        url: threadUrl,
+        adapter: 'gallerydl',
+        priority,
+        options: {
+          ...options,
+          platform: 'vipergirls',
+          channel: sourceContext?.channel || options.channel || '',
+          title: sourceContext?.title || options.title || '',
+          contextUrl: threadUrl,
+          redirected_from_host_url: url,
+        },
+        maxAttempts,
+      });
+    }
+
+    const slave = isSlaveUrl(jobUrl);
     if (slave && !hint) {
       if (slave.platform === 'keep2share' && !hasKeep2ShareApiAuthConfigured()) {
         throw Object.assign(
@@ -266,7 +308,7 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
       }
       const slavePriority = requestedPriority ?? defaultJobPriority(url, 'slave-delegate');
       if (!force) {
-        const existingDownload = await repo.findGalleryDownloadByUrl(url);
+        const existingDownload = await repo.findGalleryDownloadByUrl(jobUrl);
         if (existingDownload) {
           return {
             id: existingDownload.id,
@@ -282,7 +324,7 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
         }
       }
       const bookJob = await queue.enqueue({
-        url,
+        url: jobUrl,
         adapter: 'slave-delegate',
         priority: slavePriority,
         options: {
@@ -292,11 +334,10 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
         },
         maxAttempts: 1,
       });
-      const sourceContext = options.webdl_source_contexts?.[url] || options.sourceContext || null;
       const originalUrl = sourceContext?.url || options.contextUrl || options.pageUrl || '';
       const originalSite = hostnameFromUrl(originalUrl) || sourceContext?.platform || options.platform || '';
       const result = await delegateToSlave(repo.pool, {
-        url,
+        url: jobUrl,
         platform: slave.platform,
         metadata: {
           delegated_from_hub: true,
@@ -339,15 +380,15 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
       };
     }
 
-    const adapter = detect(url, adapters, { hint });
+    const adapter = detect(jobUrl, adapters, { hint });
     if (!adapter) {
       throw Object.assign(new Error('geen passende adapter voor deze URL'), { httpStatus: 400 });
     }
-    const priority = requestedPriority ?? defaultJobPriority(url, adapter.name);
+    const priority = requestedPriority ?? defaultJobPriority(jobUrl, adapter.name);
     if (!force) {
-      const existing = await repo.findRecentJobByUrl(url);
+      const existing = await repo.findRecentJobByUrl(jobUrl);
       if (existing) return { ...existing, duplicate: true };
-      const existingDownload = await repo.findGalleryDownloadByUrl(url);
+      const existingDownload = await repo.findGalleryDownloadByUrl(jobUrl);
       if (existingDownload) {
         return {
           id: existingDownload.id,
@@ -359,7 +400,7 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
         };
       }
     }
-    return queue.enqueue({ url, adapter: adapter.name, priority, options, maxAttempts });
+    return queue.enqueue({ url: jobUrl, adapter: adapter.name, priority, options, maxAttempts });
   }
 
   // ─── Enqueue single URL ─────────────────────────────────────────────────────

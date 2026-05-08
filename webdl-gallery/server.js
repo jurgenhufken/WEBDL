@@ -95,6 +95,7 @@ const RG_BIN = process.env.RG_BIN || (fs.existsSync('/Applications/Codex.app/Con
 const VIDEO_EXTS = ['mp4','webm','mkv','mov','m4v','avi','wmv','flv','ts','m2ts','mpg','mpeg','ogv','3gp','3g2'];
 const IMAGE_EXTS = ['jpg','jpeg','png','gif','webp','avif','bmp'];
 const MEDIA_EXTS = [...VIDEO_EXTS, ...IMAGE_EXTS];
+const BROWSER_NATIVE_VIDEO_EXTS = new Set(['.mp4', '.webm', '.ogv']);
 const AUX_RELPATH_RE = String.raw`((^|[\\/])\d{1,3}[-_. ]?thumbnail\.(jpe?g|png|webp|gif|bmp|avif)$|(^|[-_. ])thumbnail\.(jpe?g|png|webp|gif|bmp|avif)$|_thumb(_v[0-9]+)?\.(jpe?g|png|webp)$|_preview\.(jpe?g|png|webp|gif|bmp|avif)$|_logo\.(jpe?g|png|webp)$|\.(json|part|tmp|ytdl)$)`;
 const TEMP_RELPATH_RE = String.raw`(^|[\\/])(_UNPACK_|_FAILED_|_ADMIN_|__ADMIN__|incomplete)([^\\/]*)([\\/]|$)`;
 const MEDIA_EXT_SQL = MEDIA_EXTS.map(e => `'${e}'`).join(',');
@@ -218,6 +219,10 @@ function platformFromUrl(url) {
   if (value.includes('youtube.com') || value.includes('youtu.be')) return 'youtube';
   if (value.includes('instagram.com')) return 'instagram';
   if (value.includes('reddit.com') || value.includes('redd.it')) return 'reddit';
+  if (value.includes('vipergirls.to') || value.includes('viper.to')) return 'vipergirls';
+  if (value.includes('footfetishforum.com') || value.includes('flc.nyc3.digitaloceanspaces.com')) return 'footfetishforum';
+  if (value.includes('redgifs.com') || value.includes('gifdeliverynetwork.com')) return 'redgifs';
+  if (value.includes('x.com') || value.includes('twitter.com')) return 'twitter';
   if (value.includes('keep2share') || value.includes('k2s.cc')) return 'keep2share';
   return '';
 }
@@ -285,10 +290,18 @@ function sourceGraphSummary(parsedMetadata) {
     : null;
   const nodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
   const thread = nodes.find((n) => n && n.type === 'thread') || null;
+  const post = nodes.find((n) => n && n.type === 'post') || null;
   const host = nodes.find((n) => n && n.type === 'host') || null;
+  const postNum = parsedMetadata?.source_post_num || parsedMetadata?.post_num || post?.num || '';
+  const postId = parsedMetadata?.source_post_id || parsedMetadata?.post_id || post?.id || '';
+  const postTitle = parsedMetadata?.source_post_title || parsedMetadata?.post_title || (post && post.title) || '';
   return {
-    source_thread_title: thread && thread.title ? String(thread.title) : '',
-    source_thread_url: thread && thread.url ? String(thread.url) : '',
+    source_thread_title: parsedMetadata?.source_thread_title || parsedMetadata?.thread_title || (thread && thread.title) ? String(parsedMetadata?.source_thread_title || parsedMetadata?.thread_title || thread.title) : '',
+    source_thread_url: parsedMetadata?.source_thread_url || (thread && thread.url) ? String(parsedMetadata?.source_thread_url || thread.url) : '',
+    source_post_title: postTitle ? String(postTitle) : '',
+    source_post_num: postNum ? String(postNum) : '',
+    source_post_id: postId ? String(postId) : '',
+    source_post_url: parsedMetadata?.source_post_url || (post && post.url) ? String(parsedMetadata?.source_post_url || post.url) : '',
     source_host: host && host.platform ? normalizeSourceSiteLabel(host.platform) : '',
   };
 }
@@ -343,6 +356,10 @@ function mapItem(row) {
     source_sites: sourceSites,
     source_thread_title: graphSummary.source_thread_title || null,
     source_thread_url: graphSummary.source_thread_url || null,
+    source_post_title: graphSummary.source_post_title || null,
+    source_post_num: graphSummary.source_post_num || null,
+    source_post_id: graphSummary.source_post_id || null,
+    source_post_url: graphSummary.source_post_url || null,
     source_host: graphSummary.source_host || null,
     content_sites: contentSitesFromRow(row, parsedMetadata),
   };
@@ -508,6 +525,60 @@ function parseDurationSeconds(value) {
 
 function isVideoFile(filePath) {
   return VIDEO_EXTS.includes(path.extname(filePath || '').replace('.', '').toLowerCase());
+}
+
+function wantsTranscodedPlayback(req, filePath) {
+  if (!isVideoFile(filePath)) return false;
+  const ext = path.extname(filePath || '').toLowerCase();
+  if (req.query.transcode === '1') return true;
+  return req.query.play === '1' && !BROWSER_NATIVE_VIDEO_EXTS.has(ext);
+}
+
+function streamTranscodedVideo(req, res, filePath) {
+  res.status(200);
+  res.setHeader('Content-Type', 'video/mp4');
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Accept-Ranges', 'none');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  if (req.method === 'HEAD') return res.end();
+
+  const ffmpeg = spawn(FFMPEG_BIN, [
+    '-hide_banner',
+    '-loglevel', 'error',
+    '-i', filePath,
+    '-map', '0:v:0',
+    '-map', '0:a:0?',
+    '-c:v', 'libx264',
+    '-preset', 'veryfast',
+    '-crf', '23',
+    '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac',
+    '-b:a', '128k',
+    '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
+    '-f', 'mp4',
+    'pipe:1',
+  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+  let stderr = '';
+  ffmpeg.stderr.on('data', (chunk) => {
+    if (stderr.length < 4000) stderr += String(chunk || '');
+  });
+  ffmpeg.stdout.pipe(res);
+  const stop = () => {
+    if (!ffmpeg.killed) {
+      try { ffmpeg.kill('SIGKILL'); } catch (_) {}
+    }
+  };
+  req.on('close', stop);
+  res.on('close', stop);
+  ffmpeg.on('error', (err) => {
+    if (!res.headersSent) res.status(500).send(err.message);
+  });
+  ffmpeg.on('close', (code) => {
+    if (code && code !== 255) {
+      console.warn(`transcode playback failed (${code}) ${filePath}: ${stderr.trim()}`);
+    }
+  });
 }
 
 function isImageFile(filePath) {
@@ -1104,8 +1175,13 @@ app.get('/api/active-items', async (_req, res) => {
                    CASE
                      WHEN url LIKE '%youtube.com%' OR url LIKE '%youtu.be%' THEN 'youtube'
                      WHEN url LIKE '%tiktok.com%' THEN 'tiktok'
+                     WHEN url LIKE '%vipergirls.to%' OR url LIKE '%viper.to%' THEN 'vipergirls'
+                     WHEN url LIKE '%footfetishforum.com%' OR url LIKE '%flc.nyc3.digitaloceanspaces.com%' THEN 'footfetishforum'
+                     WHEN url LIKE '%redgifs.com%' OR url LIKE '%gifdeliverynetwork.com%' THEN 'redgifs'
+                     WHEN url LIKE '%x.com%' OR url LIKE '%twitter.com%' THEN 'twitter'
                      WHEN url LIKE '%xvideos.com%' THEN 'xvideos'
                      WHEN url LIKE '%onlyfans.com%' THEN 'onlyfans'
+                     WHEN url LIKE '%keep2share%' OR url LIKE '%k2s.cc%' THEN 'keep2share'
                      ELSE NULL
                    END AS platform_guess
               FROM webdl.jobs
@@ -1158,7 +1234,7 @@ app.get('/api/items', async (req, res) => {
   try {
     const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 100));
     const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
-    const sort = String(req.query.sort || 'recent'); // recent | random | rating
+    const sort = String(req.query.sort || 'recent'); // recent | channel | random | rating
     const cursorTs = req.query.cursor_ts ? String(req.query.cursor_ts) : '';
     const cursorOrder = req.query.cursor_order != null ? Number(req.query.cursor_order) : NaN;
     const useCursor = sort === 'recent' && cursorTs && Number.isFinite(cursorOrder);
@@ -1230,21 +1306,29 @@ app.get('/api/items', async (req, res) => {
       ? 'RANDOM()'
       : sort === 'rating'
         ? 'd.rating DESC NULLS LAST, d.id DESC'
+      : sort === 'channel'
+        ? 'LOWER(NULLIF(d.channel, \'\')) ASC NULLS LAST, d.finished_at DESC NULLS LAST, d.updated_at DESC NULLS LAST, d.created_at DESC NULLS LAST, d.id DESC'
         : 'd.finished_at DESC NULLS LAST, d.updated_at DESC NULLS LAST, d.created_at DESC NULLS LAST, d.id DESC';
     const fileOrder = sort === 'random'
       ? 'RANDOM()'
       : sort === 'rating'
         ? 'df.rating DESC NULLS LAST, df.id DESC'
+      : sort === 'channel'
+        ? 'LOWER(NULLIF(d.channel, \'\')) ASC NULLS LAST, df.mtime_ms DESC NULLS LAST, df.updated_at DESC NULLS LAST, d.finished_at DESC NULLS LAST, d.updated_at DESC NULLS LAST, d.created_at DESC NULLS LAST, df.id DESC'
         : 'df.mtime_ms DESC NULLS LAST, df.updated_at DESC NULLS LAST, d.finished_at DESC NULLS LAST, d.updated_at DESC NULLS LAST, d.created_at DESC NULLS LAST, df.id DESC';
     const screenshotOrder = sort === 'random'
       ? 'RANDOM()'
       : sort === 'rating'
         ? 's.rating DESC NULLS LAST, s.id DESC'
+      : sort === 'channel'
+        ? 'LOWER(NULLIF(s.channel, \'\')) ASC NULLS LAST, s.created_at DESC NULLS LAST, s.updated_at DESC NULLS LAST, s.id DESC'
         : 's.created_at DESC NULLS LAST, s.updated_at DESC NULLS LAST, s.id DESC';
     const orderBy = sort === 'random'
       ? 'RANDOM()'
       : sort === 'rating'
         ? 'rating DESC NULLS LAST, source_order DESC'
+      : sort === 'channel'
+        ? 'LOWER(NULLIF(channel, \'\')) ASC NULLS LAST, sort_ts DESC NULLS LAST, source_order DESC'
         : 'sort_ts DESC NULLS LAST, source_order DESC';
 
     params.push(sourceLimit);
@@ -1533,6 +1617,9 @@ app.get('/media/:id', async (req, res) => {
     const fp = await resolveMediaPath(req.params.id);
     if (!fp) return res.status(404).send('not found');
     if (!fs.existsSync(fp)) return res.status(404).send('file missing');
+    if (wantsTranscodedPlayback(req, fp)) {
+      return streamTranscodedVideo(req, res, fp);
+    }
     res.setHeader('Cache-Control', 'public, max-age=3600');
     res.sendFile(fp);
   } catch (e) {

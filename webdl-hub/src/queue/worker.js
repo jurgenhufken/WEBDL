@@ -16,6 +16,14 @@ const VIDEO_EXTS = new Set(['.mp4', '.mkv', '.webm', '.mov', '.m4v', '.avi', '.w
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.avif']);
 const SKIP_EXTS = new Set(['.part', '.ytdl', '.tmp']);
 const AUX_IMAGE_BASENAME_RE = /(^\d{1,3}[-_. ]?thumbnail|(?:^|[-_. ])thumbnail|_thumb(_v\d+)?|_preview|_logo)\.(jpe?g|png|webp|gif|bmp|avif)$/i;
+const SITE_SHELL_IMAGE_BASENAME_RE = /^(?:vipergirls|viper)[-_.]\d+\.(jpe?g|png|webp|gif|bmp|avif)$/i;
+const FORUM_CHROME_IMAGE_BASENAME_RE = /(?:^|[-_. ])(?:statusicon|reputation|avatar|button|spacer|blank)(?:[-_. ]|$)/i;
+
+function isAuxiliaryImageBasename(name) {
+  return AUX_IMAGE_BASENAME_RE.test(name)
+    || SITE_SHELL_IMAGE_BASENAME_RE.test(name)
+    || FORUM_CHROME_IMAGE_BASENAME_RE.test(name);
+}
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
@@ -66,6 +74,7 @@ function detectPlatform(url) {
   try {
     const h = new URL(url).hostname.toLowerCase();
     const p = new URL(url).pathname.toLowerCase();
+    if (h.includes('vipergirls.to') || h.includes('viper.to')) return 'vipergirls';
     if (h.includes('youtube') || h.includes('youtu.be')) return 'youtube';
     if (h === 'flc.nyc3.digitaloceanspaces.com' && /\/data\/(?:attachments|video)\//i.test(p)) return 'footfetishforum';
     if (h.includes('footfetishforum.com')) return 'footfetishforum';
@@ -79,6 +88,35 @@ function detectPlatform(url) {
     if (h.includes('danbooru')) return 'danbooru';
     return h.replace(/^www\./, '').split('.')[0];
   } catch { return 'unknown'; }
+}
+
+function titleFromThreadUrl(rawUrl) {
+  try {
+    const last = String(new URL(String(rawUrl || '')).pathname || '').split('/').filter(Boolean).pop() || '';
+    return decodeURIComponent(last.replace(/^\d+-/, '').replace(/[-_]+/g, ' ')).trim();
+  } catch {
+    const m = String(rawUrl || '').match(/\/threads\/\d+-([^/?#]+)/i);
+    return m ? m[1].replace(/[-_]+/g, ' ').trim() : '';
+  }
+}
+
+function comparableTitle(input) {
+  return String(input || '')
+    .toLowerCase()
+    .replace(/\.(?:com|net|org)\b/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function isThreadShellImage(filePath, job, sourceUrl, fileInfo) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (!IMAGE_EXTS.has(ext)) return false;
+  const stem = path.basename(filePath, ext);
+  if (!new RegExp(`(?:^|[-_. ])${String(job?.id || '')}$`).test(stem)) return false;
+  if (sourceUrl && isImageUrlLike(sourceUrl)) return false;
+  const threadTitle = comparableTitle(job?.options?.title || job?.options?.channel || titleFromThreadUrl(job?.options?.contextUrl || job?.url));
+  const fileTitle = comparableTitle(fileInfo?.title || stem);
+  return Boolean(threadTitle && fileTitle && (fileTitle === threadTitle || fileTitle.startsWith(threadTitle)));
 }
 
 // ─── Kanaal/uploader uit yt-dlp info.json ─────────────────────────────────────
@@ -98,6 +136,7 @@ async function readInfoJson(workdir) {
           platform: data.extractor_key ? data.extractor_key.toLowerCase() : '',
           duration: data.duration_string || (Number.isFinite(Number(data.duration)) ? String(Math.round(Number(data.duration))) : null),
           sourcePublishedAt: getYtdlpSourceTimestamp(data),
+          ...galleryDlForumInfo(data),
         };
       }
     }
@@ -109,19 +148,26 @@ async function readInfoJsonForMedia(mediaPath, fallbackInfo = null) {
   try {
     const dir = path.dirname(mediaPath);
     const ext = path.extname(mediaPath);
-    const exact = path.join(dir, `${path.basename(mediaPath, ext)}.info.json`);
-    if (fsSync.existsSync(exact)) {
+    const base = path.basename(mediaPath, ext);
+    const candidates = [
+      path.join(dir, `${base}.info.json`),
+      `${mediaPath}.json`,
+      path.join(dir, `${base}.json`),
+    ];
+    for (const exact of candidates) {
+      if (!fsSync.existsSync(exact)) continue;
       const raw = await fs.readFile(exact, 'utf8');
       const data = JSON.parse(raw);
       return {
         channel: data.channel || data.uploader || data.uploader_id || data.playlist_title || '',
         channelId: data.channel_id || data.uploader_id || '',
         channelUrl: data.channel_url || data.uploader_url || '',
-        title: data.fulltitle || data.title || '',
+        title: data.fulltitle || data.title || data.filename || '',
         sourceUrl: data.webpage_url || data.original_url || data.url || '',
         platform: data.extractor_key ? data.extractor_key.toLowerCase() : '',
         duration: data.duration_string || (Number.isFinite(Number(data.duration)) ? String(Math.round(Number(data.duration))) : null),
         sourcePublishedAt: getYtdlpSourceTimestamp(data),
+        ...galleryDlForumInfo(data),
       };
     }
   } catch {}
@@ -167,6 +213,93 @@ function idFromMediaUrl(rawUrl) {
     }
   } catch {}
   return '';
+}
+
+function galleryDlForumInfo(data) {
+  if (!data || typeof data !== 'object') return {};
+  const threadTitle = data.thread_title || data.source_thread_title || '';
+  const threadId = data.thread_id || data.source_thread_id || '';
+  const postTitle = data.post_title || data.source_post_title || '';
+  const postNum = data.post_num || data.source_post_num || '';
+  const postId = data.post_id || data.source_post_id || '';
+  const forumTitle = data.forum_title || data.source_forum_title || '';
+  const category = data.category || data.source_site || '';
+  if (!threadTitle && !threadId && !postTitle && !postNum && !postId && !forumTitle) return {};
+  return {
+    sourceThreadTitle: threadTitle ? String(threadTitle) : '',
+    sourceThreadId: threadId ? String(threadId) : '',
+    sourcePostTitle: postTitle ? String(postTitle) : '',
+    sourcePostNum: postNum ? String(postNum) : '',
+    sourcePostId: postId ? String(postId) : '',
+    sourceForumTitle: forumTitle ? String(forumTitle) : '',
+    sourceSite: category ? String(category).toLowerCase() : '',
+  };
+}
+
+function forumThreadIdFromUrl(rawUrl) {
+  try {
+    const m = String(new URL(String(rawUrl || '')).pathname || '').match(/\/threads\/(\d+)/i);
+    return m ? m[1] : '';
+  } catch {
+    const m = String(rawUrl || '').match(/\/threads\/(\d+)/i);
+    return m ? m[1] : '';
+  }
+}
+
+function forumInfoFromJob(job) {
+  const options = job?.options || {};
+  const sourceUrl = options.contextUrl || options.url || job?.url || '';
+  const pinnedVipergirls = isPinnedVipergirlsJob(job);
+  const sourceThreadTitle = String(options.title || options.channel || titleFromThreadUrl(sourceUrl)).replace(/^thread_\d+$/i, '').trim();
+  const sourceThreadId = forumThreadIdFromUrl(sourceUrl);
+  if (!pinnedVipergirls && !sourceThreadTitle && !sourceThreadId) return null;
+  return {
+    sourceThreadTitle,
+    sourceThreadId,
+    sourcePostTitle: '',
+    sourcePostNum: '',
+    sourcePostId: '',
+    sourceForumTitle: '',
+    sourceSite: pinnedVipergirls ? 'vipergirls' : detectPlatform(sourceUrl || job?.url),
+  };
+}
+
+function mergeForumInfo(primary, fallback) {
+  if (!primary && !fallback) return null;
+  const out = {};
+  for (const key of [
+    'sourceThreadTitle',
+    'sourceThreadId',
+    'sourcePostTitle',
+    'sourcePostNum',
+    'sourcePostId',
+    'sourceForumTitle',
+    'sourceSite',
+  ]) {
+    out[key] = (primary && primary[key]) || (fallback && fallback[key]) || '';
+  }
+  return Object.values(out).some(Boolean) ? out : null;
+}
+
+function sourceGraphFromForumInfo(info, sourceUrl, platform) {
+  if (!info || (!info.sourceThreadTitle && !info.sourceThreadId && !info.sourcePostId && !info.sourcePostNum)) return null;
+  const nodes = [];
+  if (info.sourceSite || platform) nodes.push({ type: 'host', platform: info.sourceSite || platform });
+  if (info.sourceForumTitle) nodes.push({ type: 'forum', title: info.sourceForumTitle });
+  nodes.push({
+    type: 'thread',
+    id: info.sourceThreadId || null,
+    title: info.sourceThreadTitle || '',
+    url: sourceUrl || null,
+  });
+  nodes.push({
+    type: 'post',
+    id: info.sourcePostId || null,
+    num: info.sourcePostNum || null,
+    title: info.sourcePostTitle || '',
+    url: sourceUrl || null,
+  });
+  return { nodes };
 }
 
 function isImageUrlLike(input) {
@@ -272,7 +405,7 @@ async function checkGalleryDuplicate(url) {
 }
 
 // ─── Gallery sync: insert voltooide download in public.downloads ──────────────
-async function syncToGallery(job, outputFiles, logger) {
+async function syncToGallery(job, outputFiles, logger, repo) {
   const { Pool } = require('pg');
   const galleryPool = new Pool({ connectionString: DATABASE_URL, max: 2 });
 
@@ -283,26 +416,30 @@ async function syncToGallery(job, outputFiles, logger) {
   const info = await readInfoJson(workdir);
 
   try {
+    let inserted = 0;
     for (const f of outputFiles) {
       const ext = path.extname(f.path).toLowerCase();
       const isVideo = VIDEO_EXTS.has(ext);
       const isImage = IMAGE_EXTS.has(ext);
       if (!isVideo && !isImage) continue;
       // Skip thumbnails en temp files
-      if (AUX_IMAGE_BASENAME_RE.test(path.basename(f.path))) continue;
+      if (isAuxiliaryImageBasename(path.basename(f.path))) continue;
       if (SKIP_EXTS.has(ext)) continue;
 
       const fileInfo = await readInfoJsonForMedia(f.path, info);
       const pinnedVipergirls = isPinnedVipergirlsJob(job);
       const pinnedTarget = pinnedVipergirls ? pinnedVipergirlsTarget(job) : null;
       const rawSourceUrl = fileInfo?.sourceUrl || job.url;
+      if (isThreadShellImage(f.path, job, rawSourceUrl, fileInfo)) continue;
       const imageQuality = isImage && isImageUrlLike(rawSourceUrl)
         ? (isLikelyThumbnailImageUrl(rawSourceUrl)
           ? { quality: 'thumbnail_rejected', wasThumbnail: true, rejected: true }
           : { quality: 'direct_image', wasThumbnail: false, rejected: false })
         : { quality: isImage ? 'unknown_source' : 'not_image', wasThumbnail: false, rejected: false };
       if (imageQuality.rejected) {
-        await repo.appendLog(job.id, 'warn', `thumbnail overgeslagen, geen fullscale bron bevestigd: ${rawSourceUrl}`);
+        if (repo && repo.appendLog) {
+          await repo.appendLog(job.id, 'warn', `thumbnail overgeslagen, geen fullscale bron bevestigd: ${rawSourceUrl}`);
+        }
         logger.warn('gallery.sync.thumbnail_skipped', { job: job.id, sourceUrl: rawSourceUrl, file: path.basename(f.path) });
         continue;
       }
@@ -313,9 +450,16 @@ async function syncToGallery(job, outputFiles, logger) {
         } catch (_) {}
         f.path = finalPath;
       }
-      const channel = pinnedVipergirls
+      const fileForumInfo = fileInfo && (fileInfo.sourceThreadTitle || fileInfo.sourceThreadId || fileInfo.sourcePostId || fileInfo.sourcePostNum)
+        ? fileInfo
+        : null;
+      const forumInfo = mergeForumInfo(fileForumInfo, forumInfoFromJob(job));
+      const forumThreadChannel = forumInfo?.sourceThreadTitle
+        ? String(forumInfo.sourceThreadTitle).trim().toLowerCase()
+        : '';
+      const channel = forumThreadChannel || (pinnedVipergirls
         ? pinnedTarget.channel
-        : (fileInfo?.channel || job.options?.channel || job.options?.playlistTitle || '');
+        : (fileInfo?.channel || job.options?.channel || job.options?.playlistTitle || ''));
       const infoPlatform = String(fileInfo?.platform || '').toLowerCase();
       const realPlatform = pinnedVipergirls
         ? pinnedTarget.platform
@@ -349,7 +493,7 @@ async function syncToGallery(job, outputFiles, logger) {
       // publish date of a TikTok/YouTube post. Keep the source date only as
       // metadata so newly completed downloads actually surface at the top.
       const importedAt = new Date().toISOString();
-      await galleryPool.query(
+      const result = await galleryPool.query(
         `INSERT INTO downloads
           (url, platform, channel, title, filename, filepath, filesize, format,
            status, progress, metadata, source_url, duration, created_at, updated_at, finished_at, is_thumb_ready)
@@ -369,6 +513,14 @@ async function syncToGallery(job, outputFiles, logger) {
             hub_job_id: job.id,
             adapter: job.adapter,
             source_published_at: fileInfo?.sourcePublishedAt || null,
+            source_site: forumInfo?.sourceSite || null,
+            source_thread_title: forumInfo?.sourceThreadTitle || null,
+            source_thread_id: forumInfo?.sourceThreadId || null,
+            source_forum_title: forumInfo?.sourceForumTitle || null,
+            source_post_title: forumInfo?.sourcePostTitle || null,
+            source_post_num: forumInfo?.sourcePostNum || null,
+            source_post_id: forumInfo?.sourcePostId || null,
+            source_graph: sourceGraphFromForumInfo(forumInfo, job.options?.contextUrl || job.url, realPlatform),
             youtube_channel_id: fileInfo?.channelId || job.options?.youtubeChannelId || null,
             youtube_channel_url: fileInfo?.channelUrl || job.options?.youtubeChannelUrl || null,
             indexed_channel: channel || null,
@@ -389,10 +541,13 @@ async function syncToGallery(job, outputFiles, logger) {
           f._thumbPath ? true : false,
         ],
       );
+      inserted += result.rowCount || 0;
       logger.info('gallery.synced', { job: job.id, file: path.basename(f.path), platform: realPlatform, channel });
     }
+    return inserted;
   } catch (e) {
     logger.warn('gallery.sync.error', { job: job.id, err: e.message });
+    return 0;
   } finally {
     await galleryPool.end();
   }
@@ -401,9 +556,22 @@ async function syncToGallery(job, outputFiles, logger) {
 function isImportableMedia(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   if (!VIDEO_EXTS.has(ext) && !IMAGE_EXTS.has(ext)) return false;
-  if (AUX_IMAGE_BASENAME_RE.test(path.basename(filePath))) return false;
+  if (isAuxiliaryImageBasename(path.basename(filePath))) return false;
   if (SKIP_EXTS.has(ext)) return false;
   return true;
+}
+
+async function filterSettledMediaOutputs(outputs, minAgeMs = 2500) {
+  const now = Date.now();
+  const out = [];
+  for (const f of outputs) {
+    if (!isImportableMedia(f.path)) continue;
+    try {
+      const st = await fs.stat(f.path);
+      if (st.size > 0 && now - st.mtimeMs >= minAgeMs) out.push(f);
+    } catch {}
+  }
+  return out;
 }
 
 function startWorkerPool({
@@ -496,6 +664,34 @@ function startWorkerPool({
     }, heartbeatMs);
     if (typeof heartbeatTimer.unref === 'function') heartbeatTimer.unref();
 
+    const liveGallerySyncMs = intEnv('WEBDL_LIVE_GALLERY_SYNC_MS', 3_000);
+    const enableLiveGallerySync = liveGallerySyncMs > 0 && typeof adapter.collectOutputs === 'function';
+    let liveGallerySyncRunning = false;
+    let lastLiveGallerySynced = 0;
+    async function runLiveGallerySync() {
+      if (liveGallerySyncRunning) return;
+      liveGallerySyncRunning = true;
+      try {
+        const outs = await adapter.collectOutputs(workdir, { job, startedAtMs });
+        const mediaOuts = await filterSettledMediaOutputs(outs, intEnv('WEBDL_LIVE_GALLERY_MIN_AGE_MS', 1_500));
+        if (mediaOuts.length > lastLiveGallerySynced) {
+          const freshJob = await repo.getJob(job.id).catch(() => null);
+          const inserted = await syncToGallery(freshJob || job, mediaOuts, logger, repo);
+          lastLiveGallerySynced = Math.max(lastLiveGallerySynced, mediaOuts.length);
+          if (inserted > 0) {
+            await repo.appendLog(job.id, 'info', `📺 live gallery sync: ${inserted} nieuw`);
+          }
+        }
+      } catch (e) {
+        logger.warn('gallery.live_sync.error', { job: job.id, err: String(e.message || e) });
+      } finally {
+        liveGallerySyncRunning = false;
+      }
+    }
+    const liveGalleryTimer = enableLiveGallerySync ? setInterval(runLiveGallerySync, liveGallerySyncMs) : null;
+    if (liveGalleryTimer && typeof liveGalleryTimer.unref === 'function') liveGalleryTimer.unref();
+    if (enableLiveGallerySync) setTimeout(runLiveGallerySync, Math.min(1000, liveGallerySyncMs)).unref?.();
+
     proc.on('line', async ({ stream, line }) => {
       if (isYoutubeRateLimitMessage(line)) {
         rateLimited = true;
@@ -577,7 +773,7 @@ function startWorkerPool({
       // Gallery sync — alleen voltooide of gedeeltelijk bruikbare downloads
       try {
         const freshJob = await repo.getJob(job.id);
-        await syncToGallery(freshJob || job, outs, logger);
+        await syncToGallery(freshJob || job, outs, logger, repo);
         await repo.markGallerySynced(job.id);
         await repo.appendLog(job.id, 'info', '📺 gallery sync voltooid');
       } catch (e) {
@@ -589,6 +785,7 @@ function startWorkerPool({
     try {
       const { code, signal, timedOut, idleTimedOut } = await proc.done;
       clearInterval(heartbeatTimer);
+      if (liveGalleryTimer) clearInterval(liveGalleryTimer);
       if (code === 0) {
         await importOutputs();
         return true; // success
@@ -614,6 +811,7 @@ function startWorkerPool({
       }
     } catch (err) {
       clearInterval(heartbeatTimer);
+      if (liveGalleryTimer) clearInterval(liveGalleryTimer);
       const retry = job.attempts < job.max_attempts;
       await queue.fail(job.id, String(err.message || err), { retry });
       logger.error('job.error', { job: job.id, err: String(err.message || err) });
@@ -731,10 +929,12 @@ function startWorkerPool({
   // Elke lane heeft eigen concurrency-limiet en eigen worker-loop.
   //   process-video: 1 (ffmpeg merge CPU-zwaar)
   //   video:         4 (directe video, geen merge; netwerk-bound)
+  //   gallery:       1 (gallery-dl batches; intern snel, onderling serieel)
   //   image:         8 (snel, netwerk-bound)
   const LANES = [
     { name: 'process-video', concurrency: intEnv('WEBDL_PROCESS_VIDEO_CONCURRENCY', 1) },
     { name: 'video',         concurrency: intEnv('WEBDL_DIRECT_VIDEO_CONCURRENCY', 2) },
+    { name: 'gallery',       concurrency: intEnv('WEBDL_GALLERY_CONCURRENCY', 1) },
     { name: 'image',         concurrency: intEnv('WEBDL_IMAGE_CONCURRENCY', 8) },
   ];
   const laneActive = new Map(LANES.map((l) => [l.name, new Set()]));
@@ -800,4 +1000,4 @@ function startWorkerPool({
   return { stop, workerId, stats };
 }
 
-module.exports = { startWorkerPool };
+module.exports = { startWorkerPool, syncToGallery, filterSettledMediaOutputs, isImportableMedia };
