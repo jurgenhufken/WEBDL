@@ -14,7 +14,7 @@
   const state = {
     items: [],
     offset: 0,
-    limit: 200,
+    limit: 80,
     loading: false,
     done: false,
     filters: { platform: '', channel: '', q: '', sort: 'recent', min_rating: '', media_type: '', channel_sort: 'count' },
@@ -156,6 +156,21 @@
     return `${platform} via ${sourceSite}`;
   }
 
+  function sourceLinkForItem(it) {
+    return String((it && (it.source_post_url || it.source_url || it.url)) || '').trim();
+  }
+
+  function postLabelForItem(it, titleText = '') {
+    if (!it) return '';
+    const postNum = String(it.source_post_num || '').trim();
+    const postId = String(it.source_post_id || '').trim();
+    const postTitle = String(it.source_post_title || '').trim();
+    const suffix = postTitle && postTitle !== titleText ? ` · ${postTitle}` : '';
+    if (postNum) return `post ${postNum}${suffix}`;
+    if (postId) return `post ${postId}${suffix}`;
+    return postTitle && postTitle !== titleText ? postTitle : '';
+  }
+
   function itemMatchesCurrentFilters(it) {
     const f = state.filters || {};
     if (f.platform && String(it.platform || '') !== String(f.platform)) return false;
@@ -237,9 +252,7 @@
       ? pageTitle
       : (subSource && subSource !== titleText ? subSource : '');
     const contentSites = Array.isArray(it.content_sites) ? it.content_sites.filter(Boolean).slice(0, 3) : [];
-    const postLabel = it.source_post_num
-      ? `post ${it.source_post_num}${it.source_post_title && it.source_post_title !== titleText ? ` · ${it.source_post_title}` : ''}`
-      : (it.source_post_title && it.source_post_title !== titleText ? it.source_post_title : '');
+    const postLabel = postLabelForItem(it, titleText);
     const subParts = [postLabel, sub, contentSites.length ? `inhoud: ${contentSites.join(', ')}` : ''].filter(Boolean);
     c.innerHTML = `
       <div class="card-thumb">
@@ -251,7 +264,7 @@
         ${it.rating != null ? `<div class="card-stars">${starHtml(it.rating)}</div>` : ''}
       </div>`;
     attachThumbRetry(c.querySelector('.card-thumb'), it);
-    const sourceUrl = it.source_url || it.url || '';
+    const sourceUrl = sourceLinkForItem(it);
     if (sourceUrl) {
       const srcBtn = document.createElement('button');
       srcBtn.type = 'button';

@@ -201,10 +201,13 @@ async function ensureSearchIndexes() {
     'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_downloads_filename_trgm ON downloads USING gin (filename gin_trgm_ops)',
     'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_downloads_filepath_trgm ON downloads USING gin (filepath gin_trgm_ops)',
     'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_downloads_metadata_trgm ON downloads USING gin (metadata gin_trgm_ops)',
+    'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_downloads_thumb_ready_recent ON downloads (finished_at DESC NULLS LAST, updated_at DESC NULLS LAST, created_at DESC NULLS LAST, id DESC) WHERE is_thumb_ready = true',
     'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_download_files_relpath_trgm ON download_files USING gin (relpath gin_trgm_ops)',
+    'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_download_files_thumb_ready_recent ON download_files (mtime_ms DESC NULLS LAST, updated_at DESC NULLS LAST, id DESC) WHERE is_thumb_ready = true',
     'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_screenshots_title_trgm ON screenshots USING gin (title gin_trgm_ops)',
     'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_screenshots_filename_trgm ON screenshots USING gin (filename gin_trgm_ops)',
     'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_screenshots_filepath_trgm ON screenshots USING gin (filepath gin_trgm_ops)',
+    'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_screenshots_thumb_ready_recent ON screenshots (created_at DESC NULLS LAST, updated_at DESC NULLS LAST, id DESC) WHERE is_thumb_ready = true',
   ];
   const client = await pool.connect();
   try {
@@ -371,8 +374,10 @@ function mapItem(row) {
   const sourceSites = Array.isArray(parsedMetadata?.source_sites) ? parsedMetadata.source_sites.slice() : [];
   if (sourceSite && !sourceSites.some((s) => String(s || '').toLowerCase() === sourceSite.toLowerCase())) sourceSites.unshift(sourceSite);
   const graphSummary = sourceGraphSummary(parsedMetadata);
+  const sourceUrl = graphSummary.source_post_url || row.source_url || row.url || '';
   return {
     ...row,
+    source_url: sourceUrl,
     id: String(row.id),
     rating_id: row.rating_id || row.id,
     filename,
@@ -1444,6 +1449,31 @@ app.get('/api/items', async (req, res) => {
     if (thumbReadyOnly) directWhere.push(`COALESCE(d.is_thumb_ready, false) = true`);
     if (useCursor) {
       addRecentCursor(directWhere, 'COALESCE(d.finished_at, d.updated_at, d.created_at)', 'd.id::bigint');
+    }
+    if (thumbReadyOnly && sort === 'recent') {
+      params.push(useCursor ? limit : offset + limit);
+      const fastLimitParam = params.length;
+      const { rows } = await pool.query(`
+        SELECT 'download' AS item_kind,
+               d.id::text AS id, d.id AS rating_id,
+               d.url, d.source_url, d.platform, d.channel, d.title, d.filename,
+               d.filepath, d.filesize, d.format, d.duration, d.rating, d.is_thumb_ready, d.metadata,
+               d.finished_at, d.created_at,
+               COALESCE(d.finished_at, d.updated_at, d.created_at) AS sort_ts,
+               d.id::bigint AS source_order
+          FROM downloads d
+         WHERE ${directWhere.join(' AND ')}
+         ORDER BY d.finished_at DESC NULLS LAST, d.updated_at DESC NULLS LAST, d.created_at DESC NULLS LAST, d.id DESC
+         LIMIT $${fastLimitParam}`,
+        params,
+      );
+      const pageRows = await filterPlayableMediaRows(dedupeGalleryRows(rows), useCursor ? limit : offset + limit);
+      const items = (useCursor ? pageRows.slice(0, limit) : pageRows.slice(offset, offset + limit)).map(mapItem);
+      const last = items[items.length - 1] || null;
+      const nextCursor = last && items.length === limit
+        ? { sort_ts: last.sort_ts, source_order: last.source_order }
+        : null;
+      return res.json({ items, limit, offset, count: items.length, next_cursor: nextCursor, fast_thumb_ready: true });
     }
     const fileWhere = directOnlyPlatform ? ['false'] : buildItemFilters({
       req, params,

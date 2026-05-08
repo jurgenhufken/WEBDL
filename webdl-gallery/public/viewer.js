@@ -114,10 +114,16 @@
     if (it && it.source_thread_title && it.source_thread_title !== it.channel) {
       parts.push(it.source_thread_title);
     }
-    if (it && (it.source_post_num || it.source_post_title)) {
-      parts.push(`post ${it.source_post_num || '?'}${it.source_post_title ? ` · ${it.source_post_title}` : ''}`);
+    if (it && (it.source_post_num || it.source_post_id || it.source_post_title)) {
+      const postLabel = it.source_post_num || it.source_post_id || '';
+      const postTitle = it.source_post_title ? ` · ${it.source_post_title}` : '';
+      parts.push(postLabel ? `post ${postLabel}${postTitle}` : it.source_post_title);
     }
     return parts;
+  }
+
+  function sourceLinkForItem(it) {
+    return String((it && (it.source_post_url || it.source_url || it.url)) || '').trim();
   }
 
   function loadMediaRotation(it) {
@@ -1817,8 +1823,8 @@
 
     el.vBtnOpen.addEventListener('click', () => {
       const it = vs.items[vs.idx];
-      if (it && it.source_url) window.open(it.source_url, '_blank', 'noopener');
-      else if (it && it.url)   window.open(it.url, '_blank', 'noopener');
+      const sourceUrl = sourceLinkForItem(it);
+      if (sourceUrl) window.open(sourceUrl, '_blank', 'noopener');
     });
 
     el.vBtnFinder.addEventListener('click', async () => {
