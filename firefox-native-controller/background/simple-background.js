@@ -12,7 +12,7 @@ const HTTP_TIMEOUT_MS = 6000;
 const PROBE_FAILURES_BEFORE_DISCONNECT = 2; // Reduced so it detects faster
 const PROBE_DISCONNECT_GRACE_MS = 12000; // Drop after 12s of no heartbeat
 const SOCKET_ENABLED = false;
-const BACKGROUND_BUILD = 'simple-background-v3-hub-downloads';
+const BACKGROUND_BUILD = 'simple-background-v4-hub-intake-only';
 const HUB_URL = 'http://localhost:35730';
 
 
@@ -99,7 +99,10 @@ async function postHubJob(url, metadata = {}) {
     }
     return {
       success: true,
-      downloadId: data.id || null,
+      downloadId: data.simple_server_download_id || data.id || data.groupId || null,
+      hubJobId: data.id || null,
+      simpleServerDownloadId: data.simple_server_download_id || null,
+      hub: true,
       expanded: !!data.expanded,
       queued: Number.isFinite(Number(data.queued)) ? Number(data.queued) : undefined,
       duplicate: !!data.duplicate,
@@ -146,6 +149,14 @@ async function postHubBatch(urls, metadata = {}, force = false) {
       duplicates: Number(data.duplicates) || 0,
       errors: Number(data.errors) || 0,
       jobs: Array.isArray(data.jobs) ? data.jobs : [],
+      downloads: (Array.isArray(data.jobs) ? data.jobs : []).map((job) => ({
+        downloadId: job && (job.simple_server_download_id || job.id) || null,
+        hubJobId: job && job.id || null,
+        url: job && job.url || '',
+        duplicate: !!(job && job.duplicate),
+        status: job && job.status || null,
+        title: job && job.title || job && job.video_title || '',
+      })),
       failed: Array.isArray(data.failed) ? data.failed : [],
       raw: data,
     };

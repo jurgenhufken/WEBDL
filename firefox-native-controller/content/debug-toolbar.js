@@ -5,10 +5,12 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-05-08-thread-unlimited-origin';
+  const WEBDL_BUILD = 'debug-toolbar-2026-05-08-thread-unlimited-origin-hub-intake';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
+  const HUB = 'http://localhost:35730';
+  const HUB_FALLBACK = 'http://127.0.0.1:35730';
   const REQUEST_TIMEOUT_MS = 15000;
   const WEBDL_UNLIMITED = Number.POSITIVE_INFINITY;
 
@@ -263,6 +265,18 @@
     const seen = new Set();
     const out = [];
     for (const base of [SERVER, SERVER_FALLBACK]) {
+      const s = String(base || '').trim().replace(/\/+$/, '');
+      if (!s || seen.has(s)) continue;
+      seen.add(s);
+      out.push(s);
+    }
+    return out;
+  }
+
+  function getHubCandidates() {
+    const seen = new Set();
+    const out = [];
+    for (const base of [HUB, HUB_FALLBACK]) {
       const s = String(base || '').trim().replace(/\/+$/, '');
       if (!s || seen.has(s)) continue;
       seen.add(s);
@@ -3541,6 +3555,34 @@
     return { success: false, error: lastError || 'Server niet bereikbaar' };
   }
 
+  async function postHubJson(endpoint, payload, timeoutMs = REQUEST_TIMEOUT_MS) {
+    const cleanEndpoint = String(endpoint || '').replace(/^\/+/, '');
+    let lastError = null;
+    for (const base of getHubCandidates()) {
+      const controller = new AbortController();
+      const t = setTimeout(() => controller.abort(), Math.max(500, Number(timeoutMs) || REQUEST_TIMEOUT_MS));
+      try {
+        const resp = await fetch(`${base}/${cleanEndpoint}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload || {}),
+          signal: controller.signal
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          lastError = (data && data.error) ? data.error : `Hub fout: ${resp.status}`;
+          continue;
+        }
+        return data;
+      } catch (e) {
+        lastError = e && e.message ? e.message : String(e);
+      } finally {
+        clearTimeout(t);
+      }
+    }
+    return { success: false, error: lastError || 'Hub niet bereikbaar' };
+  }
+
   async function getServerJson(endpoint, timeoutMs = REQUEST_TIMEOUT_MS) {
     let lastError = null;
     for (const base of getServerCandidates()) {
@@ -3567,6 +3609,34 @@
     return { success: false, error: lastError || 'Server niet bereikbaar' };
   }
 
+  async function getHubJson(endpoint, timeoutMs = REQUEST_TIMEOUT_MS) {
+    const cleanEndpoint = String(endpoint || '').replace(/^\/+/, '');
+    let lastError = null;
+    for (const base of getHubCandidates()) {
+      const controller = new AbortController();
+      const t = setTimeout(() => controller.abort(), Math.max(500, Number(timeoutMs) || REQUEST_TIMEOUT_MS));
+      try {
+        const resp = await fetch(`${base}/${cleanEndpoint}`, {
+          method: 'GET',
+          headers: { 'Accept': 'application/json' },
+          signal: controller.signal,
+          cache: 'no-store'
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          lastError = (data && data.error) ? data.error : `Hub fout: ${resp.status}`;
+          continue;
+        }
+        return data;
+      } catch (e) {
+        lastError = e && e.message ? e.message : String(e);
+      } finally {
+        clearTimeout(t);
+      }
+    }
+    return { success: false, error: lastError || 'Hub niet bereikbaar' };
+  }
+
   async function getStatusViaHttp(timeoutMs = 5000) {
     let lastError = null;
     for (const base of getServerCandidates()) {
@@ -3589,6 +3659,59 @@
     return { success: false, error: lastError || 'Status endpoint niet bereikbaar' };
   }
 
+  function normalizeHubSingleResult(data, url) {
+    const raw = data && typeof data === 'object' ? data : {};
+    const simpleServerDownloadId = raw.simple_server_download_id || raw.simpleServerDownloadId || null;
+    const hubJobId = raw.id || raw.jobId || null;
+    const expandedId = raw.groupId || raw.group_id || null;
+    return {
+      success: true,
+      hub: true,
+      raw,
+      url,
+      downloadId: simpleServerDownloadId || hubJobId || expandedId || null,
+      hubJobId,
+      simpleServerDownloadId,
+      expanded: !!raw.expanded,
+      queued: Number.isFinite(Number(raw.queued)) ? Number(raw.queued) : undefined,
+      duplicate: !!raw.duplicate,
+      delegated: !!raw.delegated,
+      status: raw.status || null,
+      title: raw.title || raw.playlistName || '',
+      message: raw.expanded ? 'Expanded in WebDL-Hub' : 'Added to WebDL-Hub',
+    };
+  }
+
+  function normalizeHubBatchResult(data) {
+    const raw = data && typeof data === 'object' ? data : {};
+    const jobs = Array.isArray(raw.jobs) ? raw.jobs : [];
+    return {
+      success: true,
+      hub: true,
+      raw,
+      total: Number(raw.total) || jobs.length,
+      queued: Number(raw.queued) || 0,
+      duplicates: Number(raw.duplicates) || 0,
+      errors: Number(raw.errors) || 0,
+      skipped: Number(raw.skipped) || 0,
+      jobs,
+      failed: Array.isArray(raw.failed) ? raw.failed : [],
+      downloads: jobs.map((job) => ({
+        downloadId: job && (job.simple_server_download_id || job.id) || null,
+        hubJobId: job && job.id || null,
+        url: job && job.url || '',
+        duplicate: !!(job && job.duplicate),
+        status: job && job.status || null,
+        title: job && job.title || job && job.video_title || '',
+      })),
+    };
+  }
+
+  function shouldPollNativeDownload(result) {
+    if (!result || !result.downloadId) return false;
+    return !result.hub || !!result.simpleServerDownloadId;
+  }
+
   async function queueDownloadRequest(meta) {
     let url = meta.url;
     try {
@@ -3607,23 +3730,39 @@
         }
       }
     } catch (e) {}
-    const payload = { url, metadata: meta };
-    const viaBg = await sendBackgroundAction('queueDownload', payload, 12000);
+    const payload = {
+      url,
+      priority: 10,
+      options: {
+        ...(meta && typeof meta === 'object' ? meta : {}),
+        queued_from: 'firefox-toolbar',
+      },
+    };
+    const backgroundPayload = { url, metadata: meta };
+    const viaBg = await sendBackgroundAction('queueDownload', backgroundPayload, 12000);
     if (viaBg && viaBg.success) return viaBg;
-    const viaHttp = await postServerJson('download', payload, 12000);
-    if (viaHttp && viaHttp.success) return viaHttp;
-    return viaBg && viaBg.error ? viaBg : viaHttp;
+    const viaHub = await postHubJson('api/jobs', payload, 12000);
+    if (viaHub && !viaHub.error) return normalizeHubSingleResult(viaHub, url);
+    return viaBg && viaBg.error ? viaBg : viaHub;
   }
 
   async function queueDownloadRequestWithOverride(meta, urlOverride) {
     const target = String(urlOverride || '').trim();
     if (!target) return queueDownloadRequest(meta);
-    const payload = { url: target, metadata: meta };
-    const viaBg = await sendBackgroundAction('queueDownload', payload, 12000);
+    const backgroundPayload = { url: target, metadata: meta };
+    const hubPayload = {
+      url: target,
+      priority: 10,
+      options: {
+        ...(meta && typeof meta === 'object' ? meta : {}),
+        queued_from: 'firefox-toolbar',
+      },
+    };
+    const viaBg = await sendBackgroundAction('queueDownload', backgroundPayload, 12000);
     if (viaBg && viaBg.success) return viaBg;
-    const viaHttp = await postServerJson('download', payload, 12000);
-    if (viaHttp && viaHttp.success) return viaHttp;
-    return viaBg && viaBg.error ? viaBg : viaHttp;
+    const viaHub = await postHubJson('api/jobs', hubPayload, 12000);
+    if (viaHub && !viaHub.error) return normalizeHubSingleResult(viaHub, target);
+    return viaBg && viaBg.error ? viaBg : viaHub;
   }
 
   async function queueBatchDownloadRequest(urls, meta, options) {
@@ -3639,9 +3778,15 @@
     if (opt.force === true) payload.force = true;
     const viaBg = await sendBackgroundAction('queueBatchDownload', payload, 20000);
     if (viaBg && viaBg.success) return viaBg;
-    const viaHttp = await postServerJson('download/batch', payload, 20000);
-    if (viaHttp && viaHttp.success) return viaHttp;
-    return viaBg && viaBg.error ? viaBg : viaHttp;
+    const viaHub = await postHubJson('api/jobs/batch', {
+      urls,
+      metadata: payloadMeta,
+      options: { queued_from: 'firefox-toolbar' },
+      force: opt.force === true,
+      priority: 10,
+    }, 20000);
+    if (viaHub && !viaHub.error) return normalizeHubBatchResult(viaHub);
+    return viaBg && viaBg.error ? viaBg : viaHub;
   }
 
   function confirmBatchStart({ count, force, label, redditHint }) {
@@ -3710,6 +3855,22 @@
       if (showError) {
         showNotification(`Niet verbonden met server: ${msg}`, true);
         addLog(`Status-check mislukt: ${msg}`, 'error');
+      }
+      return false;
+    }
+  }
+
+  async function ensureHubReachable(showError = false) {
+    try {
+      const health = await getHubJson('api/health', 5000);
+      if (health && health.ok === true) return true;
+      if (health && health.success !== false && health.db === 'up') return true;
+      throw new Error((health && health.error) ? health.error : 'Hub health endpoint niet bereikbaar');
+    } catch (e) {
+      const msg = e && e.message ? e.message : String(e);
+      if (showError) {
+        showNotification(`WebDL-Hub niet bereikbaar: ${msg}`, true);
+        addLog(`Hub-check mislukt: ${msg}`, 'error');
       }
       return false;
     }
@@ -3962,10 +4123,10 @@
   });
 
   // ========================
-  // DOWNLOAD VIDEO (yt-dlp via server)
+  // DOWNLOAD VIDEO (queue via WebDL-Hub)
   // ========================
   downloadBtn.addEventListener('click', async function() {
-    if (!(await ensureServerReachable(true))) return;
+    if (!(await ensureHubReachable(true))) return;
     const meta = scrapeMetadata();
 
     if (isFootFetishForumThreadPage() || isVipergirlsThreadPage()) {
@@ -3986,13 +4147,13 @@
             const statusHint = status ? ` (${status})` : '';
             showNotification(`Bestaat al: #${id}${statusHint} — ${title}`);
             addLog(`Bestaat al #${id}${statusHint}`);
-            if (status && status !== 'completed' && status !== 'error' && status !== 'cancelled') {
+            if (shouldPollNativeDownload(result) && status && status !== 'completed' && status !== 'error' && status !== 'cancelled') {
               pollDownload(id);
             }
           } else {
             showNotification(`Download #${id} gestart: ${title}`);
             addLog(`Download #${id} gestart`);
-            pollDownload(id);
+            if (shouldPollNativeDownload(result)) pollDownload(id);
           }
         } else {
           showNotification(`Download fout: ${result && result.error ? result.error : 'unknown'}`, true);
@@ -4043,7 +4204,7 @@
             showNotification(`Bestaat al: #${id} — ${title}`);
           } else {
             showNotification(`Gallery download #${id} gestart: ${title}`);
-            pollDownload(id);
+            if (shouldPollNativeDownload(result)) pollDownload(id);
           }
         } else {
           showNotification(`Download fout: ${result && result.error ? result.error : 'unknown'}`, true);
@@ -4082,13 +4243,13 @@
           const displayMsg = msg || `Bestaat al: #${id}${statusHint} — ${title}`;
           showNotification(displayMsg);
           addLog(`Bestaat al #${id}${statusHint}`);
-          if (status && status !== 'completed' && status !== 'error' && status !== 'cancelled') {
+          if (shouldPollNativeDownload(result) && status && status !== 'completed' && status !== 'error' && status !== 'cancelled') {
             pollDownload(id);
           }
         } else {
           showNotification(`Download #${id} gestart: ${title}`);
           addLog(`Download #${id} gestart`);
-          pollDownload(id);
+          if (shouldPollNativeDownload(result)) pollDownload(id);
         }
       } else {
         const err = (result && result.error) ? result.error : 'unknown';
@@ -4242,7 +4403,7 @@
   }
 
   async function runRedditAllBatchFromCurrentPage(triggerBtn) {
-    if (!(await ensureServerReachable(true))) return;
+    if (!(await ensureHubReachable(true))) return;
 
     const meta = scrapeMetadata();
     if (meta.platform !== 'reddit' || !isRedditBatchSeedUrl(meta.url)) {
@@ -4353,7 +4514,7 @@
   }
 
   async function runYouTubeBatch(mode) {
-    if (!(await ensureServerReachable(true))) return;
+    if (!(await ensureHubReachable(true))) return;
 
     const meta = scrapeMetadata();
     if (meta.platform !== 'youtube') {
@@ -4380,8 +4541,9 @@
     try {
       const result = await queueBatchDownloadRequest(urls, meta);
       if (result.success) {
-        showNotification(`YouTube ${label}: gestart (${result.downloads.length})`);
-        addLog(`YouTube ${label}: gestart (${result.downloads.length})`);
+        const stats = summarizeBatchResult(result);
+        showNotification(`YouTube ${label}: ${formatBatchStats(stats)}`);
+        addLog(`YouTube ${label}: ${formatBatchStats(stats)}`);
       } else {
         showNotification(`YouTube ${label} fout: ${result.error}`, true);
         addLog(`YouTube ${label} fout: ${result.error}`, 'error');
@@ -4445,7 +4607,7 @@
   }
 
   mediaDownloadBtn.addEventListener('click', async function() {
-    if (!(await ensureServerReachable(true))) return;
+    if (!(await ensureHubReachable(true))) return;
 
     const meta = scrapeMetadata();
     const urls = collectVisibleMediaUrls(60);
@@ -4489,7 +4651,7 @@
     const options = opts && typeof opts === 'object' ? opts : {};
     const force = options.force === true;
 
-    if (!(await ensureServerReachable(true))) return;
+    if (!(await ensureHubReachable(true))) return;
 
     const meta = scrapeMetadata();
     let urls = [];
@@ -4703,7 +4865,7 @@
     const options = opts && typeof opts === 'object' ? opts : {};
     const force = options.force === true;
 
-    if (!(await ensureServerReachable(true))) return;
+    if (!(await ensureHubReachable(true))) return;
 
     const isForumPage = isFootFetishForumForumPage();
     const isThreadPage = isFootFetishForumThreadPage();
@@ -4846,7 +5008,7 @@
   });
 
   async function runVipergirlsKeep2ShareBatch(triggerBtn, clickEvent) {
-    if (!(await ensureServerReachable(true))) return;
+    if (!(await ensureHubReachable(true))) return;
     if (!isVipergirlsThreadPage()) {
       showNotification('K2S: alleen op ViperGirls thread-pagina\'s', true);
       return;
