@@ -21,13 +21,15 @@
     // Auto-refresh
     autoRefresh: true,
     liveAllMedia: true,
-    autoRefreshMs: 3000,
+    autoRefreshMs: 5000,
     autoInjectMax: 30,
     autoInjectPumpMs: 700,
     autoRefreshTimer: null,
     autoInjectTimer: null,
-    activeRefreshMs: 30000,
+    autoRefreshInFlight: false,
+    activeRefreshMs: 60000,
     activeRefreshTimer: null,
+    activeRefreshInFlight: false,
     newestFinishedAt: null,
     knownIds: new Set(),
     queryVersion: 0,
@@ -472,6 +474,8 @@
   }
 
   async function pollActiveItems() {
+    if (state.activeRefreshInFlight) return;
+    state.activeRefreshInFlight = true;
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 5000);
     try {
@@ -481,6 +485,7 @@
       if (e.name !== 'AbortError') console.warn('active-items failed', e);
     } finally {
       clearTimeout(timer);
+      state.activeRefreshInFlight = false;
     }
   }
 
@@ -502,7 +507,14 @@
         params.set('offset', String(state.offset));
       }
       for (const [k, v] of Object.entries(state.filters)) if (v) params.set(k, v);
-      const resp = await apiFetch('/api/items?' + params.toString());
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 10000);
+      let resp;
+      try {
+        resp = await apiFetch('/api/items?' + params.toString(), { signal: ctrl.signal });
+      } finally {
+        clearTimeout(timer);
+      }
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
       if (queryVersion !== state.queryVersion) return;
@@ -714,6 +726,10 @@
   async function pollNewItems() {
     if (!state.autoRefresh) return;
     if (!state.liveAllMedia && state.filters.sort !== 'recent') return;
+    if (state.autoRefreshInFlight) return;
+    state.autoRefreshInFlight = true;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8000);
     try {
       const params = new URLSearchParams({
         limit: String(Math.min(state.limit, 50)),
@@ -726,7 +742,7 @@
           if (v) params.set(k, v);
         }
       }
-      const data = await apiFetch('/api/items?' + params.toString()).then(r => r.json());
+      const data = await apiFetch('/api/items?' + params.toString(), { signal: ctrl.signal }).then(r => r.json());
       if (!data.items || data.items.length === 0) return;
       const fresh = data.items.filter(it => !state.knownIds.has(String(it.id)) && itemMatchesCurrentFilters(it));
       if (fresh.length > 0) {
@@ -734,7 +750,12 @@
         pumpPendingNewItems();
         updateStats();
       }
-    } catch (e) { console.warn('auto-refresh failed', e); }
+    } catch (e) {
+      if (e.name !== 'AbortError') console.warn('auto-refresh failed', e);
+    } finally {
+      clearTimeout(timer);
+      state.autoRefreshInFlight = false;
+    }
   }
 
   function startAutoRefresh() {

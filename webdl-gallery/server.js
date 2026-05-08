@@ -17,15 +17,21 @@ const FFPROBE_BIN = process.env.FFPROBE_BIN || 'ffprobe';
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
-  max: 20,                        // meer ruimte voor meerdere tabs
+  max: 8,                         // begrens gallery-load; voorkomt query-stapeling bij meerdere tabs
   idleTimeoutMillis: 30000,       // idle verbindingen na 30s sluiten
   connectionTimeoutMillis: 5000,  // max 5s wachten op verbinding uit pool
-  statement_timeout: 30000,       // zware zoekqueries mogen onder load iets langer lopen
+  statement_timeout: 30000,       // startup/indexchecks mogen niet afkappen onder IO-load
 });
 
 const app = express();
 app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'), {
+  etag: false,
+  maxAge: 0,
+  setHeaders(res) {
+    res.setHeader('Cache-Control', 'no-store');
+  },
+}));
 
 const BASE_DIR = process.env.WEBDL_BASE_DIR || '/Users/jurgen/Downloads/WEBDL';
 
@@ -98,9 +104,9 @@ const MEDIA_EXTS = [...VIDEO_EXTS, ...IMAGE_EXTS];
 const BROWSER_NATIVE_VIDEO_EXTS = new Set(['.mp4', '.webm', '.ogv']);
 const THUMB_WIDTH = Math.max(160, Number(process.env.WEBDL_GALLERY_THUMB_WIDTH || 480));
 const THUMB_HEIGHT = Math.max(90, Number(process.env.WEBDL_GALLERY_THUMB_HEIGHT || 270));
-const THUMB_CONCURRENCY = Math.max(1, Number(process.env.WEBDL_GALLERY_THUMB_CONCURRENCY || 4));
-const THUMB_WARM_INTERVAL_MS = Math.max(500, Number(process.env.WEBDL_GALLERY_THUMB_WARM_INTERVAL_MS || 1500));
-const THUMB_WARM_BATCH = Math.max(1, Number(process.env.WEBDL_GALLERY_THUMB_WARM_BATCH || 80));
+const THUMB_CONCURRENCY = Math.max(1, Number(process.env.WEBDL_GALLERY_THUMB_CONCURRENCY || 2));
+const THUMB_WARM_INTERVAL_MS = Math.max(1000, Number(process.env.WEBDL_GALLERY_THUMB_WARM_INTERVAL_MS || 5000));
+const THUMB_WARM_BATCH = Math.max(1, Number(process.env.WEBDL_GALLERY_THUMB_WARM_BATCH || 20));
 const AUX_RELPATH_RE = String.raw`((^|[\\/])\d{1,3}[-_. ]?thumbnail\.(jpe?g|png|webp|gif|bmp|avif)$|(^|[-_. ])thumbnail\.(jpe?g|png|webp|gif|bmp|avif)$|_thumb(_v[0-9]+)?\.(jpe?g|png|webp)$|_preview\.(jpe?g|png|webp|gif|bmp|avif)$|_logo\.(jpe?g|png|webp)$|\.(json|part|tmp|ytdl)$)`;
 const TEMP_RELPATH_RE = String.raw`(^|[\\/])(_UNPACK_|_FAILED_|_ADMIN_|__ADMIN__|incomplete)([^\\/]*)([\\/]|$)`;
 const MEDIA_EXT_SQL = MEDIA_EXTS.map(e => `'${e}'`).join(',');
@@ -202,6 +208,7 @@ async function ensureSearchIndexes() {
     'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_downloads_filepath_trgm ON downloads USING gin (filepath gin_trgm_ops)',
     'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_downloads_metadata_trgm ON downloads USING gin (metadata gin_trgm_ops)',
     'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_downloads_thumb_ready_recent ON downloads (finished_at DESC NULLS LAST, updated_at DESC NULLS LAST, created_at DESC NULLS LAST, id DESC) WHERE is_thumb_ready = true',
+    'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_downloads_thumb_pending_recent ON downloads (finished_at DESC NULLS LAST, updated_at DESC NULLS LAST, created_at DESC NULLS LAST, id DESC) WHERE is_thumb_ready = false',
     'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_download_files_relpath_trgm ON download_files USING gin (relpath gin_trgm_ops)',
     'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_download_files_thumb_ready_recent ON download_files (mtime_ms DESC NULLS LAST, updated_at DESC NULLS LAST, id DESC) WHERE is_thumb_ready = true',
     'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_screenshots_title_trgm ON screenshots USING gin (title gin_trgm_ops)',
@@ -904,47 +911,16 @@ async function warmThumbBacklog(reason = 'timer') {
   try {
     const { rows } = await pool.query(`
       SELECT id, filepath
-        FROM (
-          SELECT d.id::text AS id,
-                 d.filepath,
-                 COALESCE(d.finished_at, d.updated_at, d.created_at) AS sort_ts,
-                 d.id::bigint AS source_order
-            FROM downloads d
-           WHERE COALESCE(d.is_thumb_ready, false) = false
-             AND d.filepath IS NOT NULL
-             AND d.filepath <> ''
-             AND d.status <> ALL($1::text[])
-             AND d.filepath !~* $2
-             AND lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})
-          UNION ALL
-          SELECT 'file-' || df.id::text AS id,
-                 df.relpath AS filepath,
-                 COALESCE(to_timestamp(NULLIF(df.mtime_ms,0) / 1000.0)::timestamp, df.updated_at, d.finished_at, d.updated_at, d.created_at) AS sort_ts,
-                 (1000000000000 + df.id)::bigint AS source_order
-            FROM download_files df
-            JOIN downloads d ON d.id = df.download_id
-           WHERE COALESCE(df.is_thumb_ready, d.is_thumb_ready, false) = false
-             AND df.relpath IS NOT NULL
-             AND df.relpath <> ''
-             AND df.relpath !~* $3
-             AND df.relpath !~* $2
-             AND d.filepath !~* $2
-             AND d.status <> ALL($1::text[])
-             AND lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
-          UNION ALL
-          SELECT 's-' || s.id::text AS id,
-                 s.filepath,
-                 COALESCE(s.created_at, s.updated_at) AS sort_ts,
-                 (2000000000000 + s.id)::bigint AS source_order
-            FROM screenshots s
-           WHERE COALESCE(s.is_thumb_ready, false) = false
-             AND s.filepath IS NOT NULL
-             AND s.filepath <> ''
-             AND s.filepath !~* $2
-        ) pending
-       ORDER BY sort_ts DESC NULLS LAST, source_order DESC
-       LIMIT $4`,
-      [HIDDEN_GALLERY_STATUSES, TEMP_RELPATH_RE, AUX_RELPATH_RE, THUMB_WARM_BATCH],
+        FROM downloads d
+       WHERE d.is_thumb_ready = false
+         AND d.filepath IS NOT NULL
+         AND d.filepath <> ''
+         AND d.status <> ALL($1::text[])
+         AND d.filepath !~* $2
+         AND lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})
+       ORDER BY d.finished_at DESC NULLS LAST, d.updated_at DESC NULLS LAST, d.created_at DESC NULLS LAST, d.id DESC
+       LIMIT $3`,
+      [HIDDEN_GALLERY_STATUSES, TEMP_RELPATH_RE, THUMB_WARM_BATCH],
     );
     await Promise.all(rows.map(async (row) => {
       if (await warmThumbForItem(row)) warmed += 1;
@@ -1434,23 +1410,16 @@ app.get('/api/items', async (req, res) => {
       extExpr: "COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))",
       ratingExpr: 'd.rating',
     });
-    if (!directOnlyPlatform) {
-      directWhere.push(`NOT EXISTS (
-        SELECT 1 FROM download_files mf
-         WHERE mf.download_id = d.id
-           AND mf.relpath !~* '${AUX_RELPATH_RE}'
-           AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
-      )`);
-    }
     directWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
     directWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
     directWhere.push(`(d.filesize IS NULL OR d.filesize > 0)`);
     directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
-    if (thumbReadyOnly) directWhere.push(`COALESCE(d.is_thumb_ready, false) = true`);
+    const fastRecentDirectOnly = sort === 'recent' && !hasSearchQuery;
+    if (thumbReadyOnly || fastRecentDirectOnly) directWhere.push(`d.is_thumb_ready = true`);
     if (useCursor) {
       addRecentCursor(directWhere, 'COALESCE(d.finished_at, d.updated_at, d.created_at)', 'd.id::bigint');
     }
-    if (thumbReadyOnly && sort === 'recent') {
+    if (fastRecentDirectOnly) {
       params.push(useCursor ? limit : offset + limit);
       const fastLimitParam = params.length;
       const { rows } = await pool.query(`
@@ -1473,7 +1442,15 @@ app.get('/api/items', async (req, res) => {
       const nextCursor = last && items.length === limit
         ? { sort_ts: last.sort_ts, source_order: last.source_order }
         : null;
-      return res.json({ items, limit, offset, count: items.length, next_cursor: nextCursor, fast_thumb_ready: true });
+      return res.json({ items, limit, offset, count: items.length, next_cursor: nextCursor, fast_thumb_ready: true, fast_recent_direct: true });
+    }
+    if (!directOnlyPlatform) {
+      directWhere.push(`NOT EXISTS (
+        SELECT 1 FROM download_files mf
+         WHERE mf.download_id = d.id
+           AND mf.relpath !~* '${AUX_RELPATH_RE}'
+           AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
+      )`);
     }
     const fileWhere = directOnlyPlatform ? ['false'] : buildItemFilters({
       req, params,
@@ -2027,23 +2004,24 @@ app.post('/api/finder', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-ensureSchema()
-  .then(() => {
-	    const server = app.listen(PORT, () => {
-	      console.log(`webdl-gallery listening on http://localhost:${PORT}`);
-	      ensureSearchIndexes().catch((e) => console.warn('[search-indexes] failed:', e.message));
-	      syncKeep2ShareFiles('startup').catch((e) => console.warn('[keep2share-sync] failed:', e.message));
-	      warmThumbBacklog('startup').catch((e) => console.warn('[thumb-warm] failed:', e.message));
-      setInterval(() => {
-        syncKeep2ShareFiles('timer').catch((e) => console.warn('[keep2share-sync] failed:', e.message));
-      }, KEEP2SHARE_SYNC_MS).unref();
-      setInterval(() => {
-        warmThumbBacklog('timer').catch((e) => console.warn('[thumb-warm] failed:', e.message));
-      }, THUMB_WARM_INTERVAL_MS).unref();
-    });
-    global.__webdlGalleryServer = server;
-  })
-  .catch((e) => {
-    console.error('webdl-gallery schema init failed:', e);
-    process.exit(1);
-  });
+const server = app.listen(PORT, () => {
+  console.log(`webdl-gallery listening on http://localhost:${PORT}`);
+  setTimeout(() => {
+    ensureSchema()
+      .then(() => ensureSearchIndexes())
+      .catch((e) => console.warn('[schema-init] failed:', e.message));
+  }, 30000).unref();
+  setTimeout(() => {
+    warmThumbBacklog('startup').catch((e) => console.warn('[thumb-warm] failed:', e.message));
+  }, 3000).unref();
+  setTimeout(() => {
+    syncKeep2ShareFiles('startup').catch((e) => console.warn('[keep2share-sync] failed:', e.message));
+  }, 60000).unref();
+  setInterval(() => {
+    syncKeep2ShareFiles('timer').catch((e) => console.warn('[keep2share-sync] failed:', e.message));
+  }, KEEP2SHARE_SYNC_MS).unref();
+  setInterval(() => {
+    warmThumbBacklog('timer').catch((e) => console.warn('[thumb-warm] failed:', e.message));
+  }, THUMB_WARM_INTERVAL_MS).unref();
+});
+global.__webdlGalleryServer = server;
