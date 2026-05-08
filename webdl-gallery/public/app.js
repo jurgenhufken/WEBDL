@@ -21,13 +21,13 @@
     // Auto-refresh
     autoRefresh: true,
     liveAllMedia: true,
-    autoRefreshMs: 5000,
-    autoInjectMax: 30,
-    autoInjectPumpMs: 700,
+    autoRefreshMs: 3000,
+    autoInjectMax: 60,
+    autoInjectPumpMs: 350,
     autoRefreshTimer: null,
     autoInjectTimer: null,
     autoRefreshInFlight: false,
-    activeRefreshMs: 60000,
+    activeRefreshMs: 30000,
     activeRefreshTimer: null,
     activeRefreshInFlight: false,
     newestFinishedAt: null,
@@ -280,7 +280,11 @@
       c.appendChild(srcBtn);
     }
     c.addEventListener('click', () => {
-      if (window.__viewer) window.__viewer.open(idx);
+      if (window.__viewer) {
+        const itemId = String(c.dataset.id || it.id || '');
+        const currentIdx = state.items.findIndex((item) => String(item.id) === itemId);
+        window.__viewer.open(currentIdx >= 0 ? currentIdx : idx);
+      }
     });
     return c;
   }
@@ -316,7 +320,11 @@
     if (window.__viewer && window.__wdGallery._viewerOpen && window.__wdGallery._viewerIdx >= 0) {
       window.__wdGallery._viewerIdx += newItems.length;
     }
-    redrawGrid();
+    const frag = document.createDocumentFragment();
+    for (let i = 0; i < newItems.length; i++) {
+      frag.appendChild(cardEl(newItems[i], i));
+    }
+    grid.insertBefore(frag, grid.firstChild);
     trackNewest();
     flashNewBanner(newItems.length);
   }
