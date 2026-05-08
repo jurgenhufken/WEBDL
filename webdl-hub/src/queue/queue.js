@@ -6,7 +6,7 @@ const { EventEmitter } = require('node:events');
 function createQueue({ repo }) {
   const events = new EventEmitter();
 
-  async function enqueue({ url, adapter, priority = 0, options = {}, maxAttempts = 3, lane = null }) {
+  async function enqueue({ url, adapter, priority = null, options = {}, maxAttempts = 3, lane = null }) {
     const job = await repo.createJob({ url, adapter, priority, options, maxAttempts, lane });
     events.emit('job:created', job);
     return job;

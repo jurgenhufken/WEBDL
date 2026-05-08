@@ -37,7 +37,7 @@
   <!-- New job composer -->
   <section class="composer">
     <form id="newJobForm" autocomplete="off">
-      <input id="url" type="url" name="url" placeholder="Plak een URL om te downloaden…" required>
+      <input id="url" type="text" inputmode="url" name="url" placeholder="Plak een URL om te downloaden…" required>
       <div class="form-actions">
         <button type="submit" class="btn-download" id="btnSubmit">⬇ Download</button>
         <button type="button" id="btnExpand" class="btn-expand">📋 Playlist</button>
@@ -46,6 +46,16 @@
         </label>
       </div>
     </form>
+    <div class="quick-actions reddit-actions" aria-label="Reddit downloader">
+      <span class="quick-label">Reddit</span>
+      <button type="button" id="btnRedditPost" class="btn-sm" title="Download een Reddit post of redd.it link">Post</button>
+      <button type="button" id="btnRedditSubreddit" class="btn-sm" title="Download een subreddit">Subreddit</button>
+      <button type="button" id="btnRedditUser" class="btn-sm" title="Download user submissions">User</button>
+      <label class="quick-field" title="Maximaal aantal Reddit posts voor subreddit/user">
+        <span>limiet</span>
+        <input id="redditLimit" type="number" min="1" max="5000" step="1" placeholder="auto">
+      </label>
+    </div>
     <div id="msg" class="msg"></div>
   </section>
 

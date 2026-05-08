@@ -1056,6 +1056,55 @@ function setMsg(text, isErr = false, isOk = false) {
   m.className = 'msg' + (isErr ? ' err' : '') + (isOk ? ' ok' : '');
 }
 
+function redditLimitOption() {
+  const raw = String($('redditLimit')?.value || '').trim();
+  const limit = Number(raw);
+  if (!raw || !Number.isFinite(limit) || limit <= 0) return {};
+  return { limit: Math.max(1, Math.min(5000, Math.floor(limit))) };
+}
+
+function redditUrlForMode(mode, rawValue) {
+  const raw = String(rawValue || '').trim();
+  if (!raw) throw new Error('Vul een Reddit URL, subreddit of username in');
+  if (/^https?:\/\//i.test(raw)) return raw;
+  const clean = raw.replace(/^[@/]+/, '').replace(/^r\//i, '').replace(/^u(?:ser)?\//i, '').replace(/\/+$/, '');
+  if (!clean) throw new Error('Reddit invoer is leeg');
+  if (mode === 'subreddit') return `https://www.reddit.com/r/${encodeURIComponent(clean)}/`;
+  if (mode === 'user') return `https://www.reddit.com/user/${encodeURIComponent(clean)}/`;
+  return /^[a-z0-9]{5,10}$/i.test(clean)
+    ? `https://redd.it/${encodeURIComponent(clean)}`
+    : raw;
+}
+
+async function enqueueReddit(mode) {
+  const btns = ['btnRedditPost', 'btnRedditSubreddit', 'btnRedditUser'].map($).filter(Boolean);
+  const raw = $('url').value.trim();
+  const force = $('force')?.checked;
+  try {
+    const url = redditUrlForMode(mode, raw);
+    const options = redditLimitOption();
+    btns.forEach((btn) => { btn.disabled = true; });
+    setMsg('⏳ Reddit download inplannen…');
+    const job = await api('POST', '/api/jobs', { url, adapter: 'reddit', options, force });
+    state.source = 'hub';
+    updateSourceControls();
+    if (job && job.id != null && job.id !== '') {
+      state.jobs.set(job.id, job);
+      renderList();
+      selectJob(job.id);
+      if (job.duplicate) setMsg(`Reddit duplicaat — bestaande job #${job.id} (${job.status})`);
+      else setMsg(`✅ Reddit #${job.id} ingepland met voorrang ${job.priority}`, false, true);
+    } else {
+      await loadJobs();
+      setMsg('Reddit download is verwerkt', false, true);
+    }
+  } catch (e) {
+    setMsg(e.message, true);
+  } finally {
+    btns.forEach((btn) => { btn.disabled = false; });
+  }
+}
+
 // ─── WebSocket ────────────────────────────────────────────────────────────────
 let ws;
 function connectWs() {
@@ -1262,6 +1311,10 @@ function bind() {
       $('btnExpand').disabled = false;
     }
   });
+
+  $('btnRedditPost')?.addEventListener('click', () => enqueueReddit('post'));
+  $('btnRedditSubreddit')?.addEventListener('click', () => enqueueReddit('subreddit'));
+  $('btnRedditUser')?.addEventListener('click', () => enqueueReddit('user'));
 
   $('source').addEventListener('change', (ev) => switchSource(ev.target.value).catch((e) => setMsg(e.message, true)));
   $('filter').addEventListener('change', async (ev) => {

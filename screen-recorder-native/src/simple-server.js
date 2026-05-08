@@ -11236,6 +11236,12 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
         if (cookieStr) curlArgs.push('-b', cookieStr);
       } catch (e) {}
     }
+    if (curlHost === 'k2s.cc' || curlHost.endsWith('.k2s.cc') || curlHost === 'keep2share.cc' || curlHost.endsWith('.keep2share.cc')) {
+      try {
+        const cookieStr = await loadCookiesForDomain(curlHost) || await loadCookiesForDomain('k2s.cc') || await loadCookiesForDomain('keep2share.cc');
+        if (cookieStr) curlArgs.push('-b', cookieStr);
+      } catch (e) { }
+    }
     if (curlHost === 'footfetishforum.com' || curlHost.endsWith('.footfetishforum.com')) {
       try {
         const metadataCookies = metadata && typeof metadata === 'object' ? cookieHeaderFromMetadataCookies(metadata.cookies) : '';

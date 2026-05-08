@@ -66,6 +66,16 @@ function classifyLane(url, adapter) {
   return 'video';
 }
 
+function defaultJobPriority(url, adapter, lane = null) {
+  const finalLane = lane || classifyLane(url, adapter);
+  if (adapter === 'slave-delegate') return 70;
+  if (adapter === 'reddit' || adapter === 'reddit-dl') return 65;
+  if (adapter === 'gallerydl') return 60;
+  if (finalLane === 'image') return 55;
+  if (finalLane === 'video') return 20;
+  return 0;
+}
+
 function normalizeJobOptionsForUrl(url, options = {}) {
   const normalized = options && typeof options === 'object' && !Array.isArray(options)
     ? { ...options }
@@ -114,14 +124,19 @@ function createRepo({ databaseUrl = config.databaseUrl, schema = config.dbSchema
     return rows[0].ok === 1;
   }
 
-  async function createJob({ url, adapter, priority = 0, options = {}, maxAttempts = 3, lane = null }) {
+  async function createJob({ url, adapter, priority = null, options = {}, maxAttempts = 3, lane = null }) {
     const finalLane = lane || classifyLane(url, adapter);
+    const hasPriority = priority !== null && priority !== undefined && priority !== '';
+    const requestedPriority = hasPriority ? Number(priority) : NaN;
+    const finalPriority = Number.isFinite(requestedPriority)
+      ? Math.round(requestedPriority)
+      : defaultJobPriority(url, adapter, finalLane);
     const finalOptions = normalizeJobOptionsForUrl(url, options);
     const { rows } = await query(
       `INSERT INTO ${T.jobs} (url, adapter, status, priority, options, max_attempts, lane)
        VALUES ($1, $2, 'queued', $3, $4::jsonb, $5, $6)
        RETURNING *`,
-      [url, adapter, priority, JSON.stringify(finalOptions), maxAttempts, finalLane],
+      [url, adapter, finalPriority, JSON.stringify(finalOptions), maxAttempts, finalLane],
     );
     return rows[0];
   }
@@ -612,4 +627,4 @@ function createRepo({ databaseUrl = config.databaseUrl, schema = config.dbSchema
   };
 }
 
-module.exports = { createRepo, classifyLane };
+module.exports = { createRepo, classifyLane, defaultJobPriority };

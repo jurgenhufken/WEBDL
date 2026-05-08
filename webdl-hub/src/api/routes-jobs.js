@@ -4,6 +4,7 @@
 const express = require('express');
 const crypto = require('node:crypto');
 const { isSlaveUrl, delegateToSlave } = require('../queue/slave-router');
+const { defaultJobPriority } = require('../db/repo');
 
 // Detecteer URLs die uit meerdere items bestaan (playlist/kanaal/shorts-tab).
 // Als een URL een playlist-list param heeft of een kanaal/shorts-pagina is,
@@ -76,7 +77,7 @@ async function expandAndEnqueue({ repo, queue, adapters, url, priority, options,
       const job = await queue.enqueue({
         url: entry.url,
         adapter: adapter.name,
-        priority,
+        priority: Number.isFinite(Number(priority)) ? priority : defaultJobPriority(entry.url, adapter.name),
         options: {
           ...options,
           expandGroup: groupId,
@@ -106,6 +107,11 @@ function hostnameFromUrl(value) {
   }
 }
 
+function requestedPriorityFromBody(body) {
+  const value = Number(body && body.priority);
+  return Number.isFinite(value) ? Math.round(value) : null;
+}
+
 function createJobsRouter({ repo, queue, adapters, detect }) {
   const r = express.Router();
 
@@ -116,15 +122,15 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
       if (!url || typeof url !== 'string') {
         return res.status(400).json({ error: 'url ontbreekt' });
       }
-      const requestedPriority = Number(req.body && req.body.priority);
+      const requestedPriority = requestedPriorityFromBody(req.body);
       const isExpandedRequest = !hint && isMultiItemUrl(url);
-      const priority = Number.isFinite(requestedPriority) ? requestedPriority : 0;
 
       // Master/slave routing: sommige hosts worden door simple-server
       // afgehandeld. Hub inserteert dan een pending download rij; de
       // simple-server scheduler picks it up via auto-rehydrate.
       const slave = isSlaveUrl(url);
       if (slave && !hint) {
+        const slavePriority = requestedPriority ?? defaultJobPriority(url, 'slave-delegate');
         if (!force) {
           const existingDownload = await repo.findGalleryDownloadByUrl(url);
           if (existingDownload) {
@@ -145,7 +151,7 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
         const bookJob = await queue.enqueue({
           url,
           adapter: 'slave-delegate',
-          priority,
+          priority: slavePriority,
           options: {
             ...options,
             delegated_to: 'simple-server',
@@ -172,7 +178,7 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
             original_title: sourceContext?.title || options.title || null,
             original_url: originalUrl || null,
           },
-          priority,
+          priority: slavePriority,
         });
         // Markeer hub-job als 'running' en sla simple_server_download_id op.
         await repo.pool.query(
@@ -208,7 +214,7 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
       if (isExpandedRequest) {
         try {
           const result = await expandAndEnqueue({
-            repo, queue, adapters, url, priority, options, maxAttempts, force,
+            repo, queue, adapters, url, priority: requestedPriority, options, maxAttempts, force,
           });
           return res.status(201).json({ expanded: true, ...result });
         } catch (e) {
@@ -220,6 +226,7 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
 
       const adapter = detect(url, adapters, { hint });
       if (!adapter) return res.status(400).json({ error: 'geen passende adapter voor deze URL' });
+      const priority = requestedPriority ?? defaultJobPriority(url, adapter.name);
       if (!force) {
         const existing = await repo.findRecentJobByUrl(url);
         if (existing) {
@@ -247,10 +254,11 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
   // ─── Expand playlist/channel → enqueue individual videos ────────────────────
   r.post('/expand', async (req, res, next) => {
     try {
-      const { url, priority = 0, options = {}, maxAttempts = 3, force = false } = req.body || {};
+      const { url, options = {}, maxAttempts = 3, force = false } = req.body || {};
       if (!url || typeof url !== 'string') {
         return res.status(400).json({ error: 'url ontbreekt' });
       }
+      const priority = requestedPriorityFromBody(req.body);
       const result = await expandAndEnqueue({
         repo, queue, adapters, url, priority, options, maxAttempts, force,
       });

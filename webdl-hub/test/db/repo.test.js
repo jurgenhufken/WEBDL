@@ -6,7 +6,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const { Client } = require('pg');
 const { migrate } = require('../../src/db/migrate');
-const { createRepo, classifyLane } = require('../../src/db/repo');
+const { createRepo, classifyLane, defaultJobPriority } = require('../../src/db/repo');
 
 const DATABASE_URL = process.env.DATABASE_URL || 'postgres://jurgen@localhost:5432/webdl';
 const TEST_SCHEMA = 'webdl_test';
@@ -18,6 +18,14 @@ test('classifyLane zet losse TikTok videos in de snelle video-lane', () => {
 test('classifyLane houdt TikTok tags en profielen in process-video', () => {
   assert.equal(classifyLane('https://www.tiktok.com/tag/girlfoot', 'ytdlp'), 'process-video');
   assert.equal(classifyLane('https://www.tiktok.com/@toetokqueen', 'ytdlp'), 'process-video');
+});
+
+test('defaultJobPriority geeft snelle image/reddit jobs voorrang', () => {
+  assert.equal(defaultJobPriority('https://example.com/a.jpg', 'ytdlp'), 55);
+  assert.equal(defaultJobPriority('https://www.reddit.com/r/test/', 'reddit'), 65);
+  assert.equal(defaultJobPriority('https://imgur.com/gallery/abc', 'gallerydl'), 60);
+  assert.equal(defaultJobPriority('https://www.youtube.com/watch?v=abc', 'ytdlp'), 0);
+  assert.equal(defaultJobPriority('https://cdn.example.com/video.mp4', 'ytdlp'), 20);
 });
 
 async function canConnect() {
@@ -55,11 +63,22 @@ test('DB-tests', { concurrency: false }, async (t) => {
     await repo.truncateAll();
     const j = await repo.createJob({ url: 'https://x/a', adapter: 'ytdlp', priority: 5 });
     assert.equal(j.status, 'queued');
+    assert.equal(j.priority, 5);
     assert.equal(j.attempts, 0);
     const again = await repo.getJob(j.id);
     assert.equal(again.url, 'https://x/a');
     const list = await repo.listJobs({ status: 'queued' });
     assert.equal(list.length, 1);
+  });
+
+  await t.test('createJob gebruikt default-priority als priority ontbreekt', async () => {
+    await repo.truncateAll();
+    const img = await repo.createJob({ url: 'https://example.com/a.jpg', adapter: 'ytdlp' });
+    const reddit = await repo.createJob({ url: 'https://www.reddit.com/r/test/', adapter: 'reddit' });
+    const explicit = await repo.createJob({ url: 'https://imgur.com/gallery/x', adapter: 'gallerydl', priority: 0 });
+    assert.equal(img.priority, 55);
+    assert.equal(reddit.priority, 65);
+    assert.equal(explicit.priority, 0);
   });
 
   await t.test('claimNextJob: priority + FIFO', async () => {
