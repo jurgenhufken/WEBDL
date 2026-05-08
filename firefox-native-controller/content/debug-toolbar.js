@@ -5,7 +5,7 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-05-02-09';
+  const WEBDL_BUILD = 'debug-toolbar-2026-05-08-fff-thread-full';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
@@ -182,6 +182,18 @@
       const host = String(u.hostname || '').toLowerCase();
       if (!(host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com'))) return false;
       return /\/(attachments?|attach)\//i.test(String(u.pathname || ''));
+    } catch (e) {}
+    return false;
+  }
+
+  function isFootFetishForumDirectAttachmentMediaUrl(rawUrl, baseHref) {
+    try {
+      const u = new URL(String(rawUrl || ''), baseHref || window.location.href);
+      const host = String(u.hostname || '').toLowerCase();
+      const p = String(u.pathname || '').toLowerCase();
+      if (host === 'flc.nyc3.digitaloceanspaces.com') return /\/data\/(?:attachments|video)\//i.test(p);
+      if (host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) return /\/data\/(?:attachments|video)\//i.test(p);
+      return false;
     } catch (e) {}
     return false;
   }
@@ -800,6 +812,7 @@
       u0.hash = '';
       url = u0.toString();
     } catch (e) {}
+    url = firstFootFetishForumThreadPageUrl(url, window.location.href) || url;
     const sourceContext = parseFootFetishForumThreadContext(url, '');
 
     let pages = 0;
@@ -1227,6 +1240,21 @@
     } catch (e) {
       return false;
     }
+  }
+
+  function firstFootFetishForumThreadPageUrl(rawUrl, baseHref) {
+    try {
+      const u = new URL(String(rawUrl || ''), baseHref || window.location.href);
+      const host = String(u.hostname || '').toLowerCase();
+      if (!(host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com'))) return '';
+      const m = String(u.pathname || '').match(/^(\/threads\/[^\/?#]+\.\d+)(?:\/page-\d+)?\/?$/i);
+      if (!m || !m[1]) return '';
+      u.pathname = m[1] + '/';
+      u.search = '';
+      u.hash = '';
+      return u.toString();
+    } catch (e) {}
+    return '';
   }
 
   function isVipergirlsThreadPage() {
@@ -2701,6 +2729,23 @@
           console.log('[WEBDL][batch] thumb_link.dedupe', stats);
         } catch (e) {}
 
+        candidates = candidates.filter((c) => {
+          try {
+            const kind = String((c && c.kind) ? c.kind : '');
+            if (!/thumb_link/i.test(kind)) return true;
+            const url = normalizeUrl((c && c.url) ? c.url : '');
+            const mappedSet = thumbLinkToDirectSet.get(url);
+            if (mappedSet && mappedSet.size) {
+              for (const direct of mappedSet) {
+                if (direct && looksLikeMediaFileUrl(direct) && candidateUrlSet.has(direct)) return false;
+              }
+            }
+            const direct = inferDirectMediaUrlFromLink(c && c.el ? c.el : null);
+            if (direct && looksLikeMediaFileUrl(direct) && candidateUrlSet.has(direct)) return false;
+          } catch (e) {}
+          return true;
+        });
+
         const defaultCheckedForCandidate = (c) => {
           try {
             const url = c && c.url ? normalizeUrl(c.url) : '';
@@ -2713,11 +2758,13 @@
               ''
             ).trim();
             const isLikelyExternalPage = looksLikeExternalMediaPageUrl(url, candidateText);
-            if (/_under_link/i.test(kind)) return false;
             if (looksLikeMediaFileUrl(url)) {
-              if (underLinkDirectSet.has(url)) return false;
+              const isFffDirectAttachment = isFootFetishForumDirectAttachmentMediaUrl(url, window.location.href);
+              if (/_under_link/i.test(kind) && !isFffDirectAttachment) return false;
+              if (underLinkDirectSet.has(url) && !isFffDirectAttachment) return false;
               return true;
             }
+            if (/_under_link/i.test(kind)) return false;
             if (/^text$/i.test(kind)) return isLikelyExternalPage;
 
             let host = '';
