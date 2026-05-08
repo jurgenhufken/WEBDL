@@ -499,16 +499,17 @@ input[type="range"]:disabled { opacity: 0.35; cursor: default; }
 .vprogressbar-handle { position: absolute; bottom: 3px; width: 14px; height: 14px; border-radius: 50%; background: var(--accent); transform: translateX(-50%); opacity: 0; transition: opacity 0.2s ease; pointer-events: none; left: 0%; box-shadow: 0 0 8px var(--accent-glow); }
 .vprogressbar:hover .vprogressbar-handle { opacity: 1; }
 .vbottom-controls {
-  position: absolute; left: 0; right: 0; bottom: 0; z-index: 30;
+  position: absolute; left: 50%; right: auto; bottom: 14px; z-index: 30;
+  transform: translateX(-50%);
   display: flex; flex-direction: column; gap: 8px;
-  width: 100%;
+  width: min(980px, calc(100vw - 28px));
   min-width: 0;
-  padding: 16px 18px 12px;
-  border: 0;
-  border-radius: 0;
-  background: linear-gradient(180deg, rgba(0,0,0,0), rgba(0,0,0,.62) 34%, rgba(0,0,0,.78));
-  box-shadow: none;
-  backdrop-filter: none;
+  padding: 10px 12px 9px;
+  border: 1px solid rgba(255,255,255,.18);
+  border-radius: 14px;
+  background: rgba(8, 8, 14, .82);
+  box-shadow: 0 14px 34px rgba(0,0,0,.42);
+  backdrop-filter: blur(12px);
   transition: opacity .4s ease;
 }
 .vbottom-controls.hidden { display: none; }
@@ -516,16 +517,16 @@ input[type="range"]:disabled { opacity: 0.35; cursor: default; }
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 10px;
   min-width: 0;
   flex-wrap: wrap;
 }
 .vplay-btn {
-  width: 30px; height: 30px; padding: 0;
+  width: 34px; height: 34px; padding: 0;
   display: flex; align-items: center; justify-content: center;
   border-radius: 50%;
-  font-size: 14px;
-  background: rgba(0,0,0,.34);
+  font-size: 16px;
+  background: var(--accent-soft);
   border: 1px solid var(--accent);
   color: #fff;
   box-shadow: 0 0 10px var(--accent-glow);
@@ -536,58 +537,63 @@ input[type="range"]:disabled { opacity: 0.35; cursor: default; }
   color: rgba(255,255,255,.82);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-  min-width: 92px;
+  min-width: 96px;
   text-shadow: 0 1px 2px rgba(0,0,0,.8);
 }
 .vjump-group,
 .vspeed-group {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
   min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
-.vjump-btn {
-  min-width: 38px;
+.vcontrol-label {
+  margin-right: 3px;
+  color: rgba(255,255,255,.56);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.vjump-btn,
+.vspeed-btn,
+.vbottom-rotate {
   height: 28px;
-  padding: 0 7px;
-  border: 1px solid rgba(255,255,255,.24);
-  border-radius: 999px;
-  background: rgba(0,0,0,.28);
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
   color: rgba(255,255,255,.88);
   font-size: 12px;
   font-weight: 700;
   cursor: pointer;
 }
+.vjump-btn {
+  min-width: 34px;
+  padding: 0 6px;
+}
 .vjump-btn:hover {
-  background: var(--accent-soft);
-  border-color: var(--accent-neon);
+  background: rgba(255,255,255,.12);
   color: #fff;
-  box-shadow: 0 0 10px var(--accent-glow);
 }
 .vspeed-btn {
-  min-width: 34px;
-  height: 28px;
-  padding: 0 8px;
-  border: 1px solid rgba(255,255,255,.24);
-  border-radius: 999px;
-  background: rgba(0,0,0,.28);
-  color: rgba(255,255,255,.88);
-  font-size: 13px;
-  cursor: pointer;
+  min-width: 56px;
+  padding: 0 9px;
 }
 .vspeed-btn:hover,
 .vspeed-btn.active {
-  background: var(--accent-soft);
-  border-color: var(--accent-neon);
+  background: rgba(255,255,255,.12);
   color: #fff;
-  box-shadow: 0 0 10px var(--accent-glow);
 }
 .vspeed-select {
   height: 28px;
   min-width: 72px;
-  border: 1px solid rgba(255,255,255,.24);
-  border-radius: 999px;
-  background: rgba(0,0,0,.34);
+  border: 1px solid rgba(255,255,255,.18);
+  border-radius: 7px;
+  background: rgba(255,255,255,.08);
   color: rgba(255,255,255,.9);
   padding: 0 8px;
   font-size: 12px;
@@ -602,21 +608,13 @@ input[type="range"]:disabled { opacity: 0.35; cursor: default; }
 }
 .vbottom-rotate {
   min-width: 58px;
-  height: 26px;
-  padding: 0 9px;
-  border: 1px solid rgba(255,255,255,.24);
-  border-radius: 999px;
-  background: rgba(0,0,0,.28);
-  color: rgba(255,255,255,.86);
-  font-size: 11px;
-  font-weight: 700;
+  padding: 0 8px;
   white-space: nowrap;
 }
 .vbottom-rotate:hover,
 .vbottom-rotate.active {
-  border-color: var(--accent);
   color: var(--title-color);
-  background: var(--accent-soft);
+  background: rgba(255,255,255,.12);
 }
 .vbottom-seek::-webkit-slider-runnable-track {
   height: 4px;
@@ -671,7 +669,12 @@ input[type="range"]:disabled { opacity: 0.35; cursor: default; }
 
 @media (max-width: 720px) {
   .vbottom-controls {
-    padding: 14px 8px 8px;
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+    transform: none;
+    width: auto;
+    padding: 9px 8px 8px;
     gap: 6px;
   }
   .vbottom-row { justify-content: flex-start; gap: 6px; overflow-x: auto; flex-wrap: nowrap; padding-bottom: 2px; }
@@ -679,7 +682,8 @@ input[type="range"]:disabled { opacity: 0.35; cursor: default; }
   .vspeed-group { flex: 0 0 auto; }
   .vtime-label { min-width: 82px; font-size: 11px; }
   .vjump-btn { min-width: 34px; padding: 0 6px; }
-  .vbottom-rotate { min-width: 50px; padding: 0 7px; }
+  .vspeed-btn { min-width: 48px; padding: 0 7px; }
+  .vbottom-rotate { min-width: 68px; padding: 0 7px; }
 }
 
 /* ─── Tag dialog ──────────────────────────────────────────────────────────── */

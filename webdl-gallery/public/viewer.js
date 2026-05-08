@@ -1303,38 +1303,51 @@
   }
 
   // ─── Afspeelsnelheid ─────────────────────────────────────────────────────
-  const SPEED_STEPS = [-2, -1, -0.5, 0.25, 0.5, 1, 1.5, 2, 3, 4];
+  const FORWARD_SPEED_STEPS = [0.25, 0.5, 1, 1.5, 2, 3, 4];
+  const SPEED_STEPS = [-2, -1, -0.5, ...FORWARD_SPEED_STEPS];
 
   function changeSpeed(dir) {
-    const cur = vs.playbackRate;
-    let idx = SPEED_STEPS.indexOf(cur);
+    const cur = vs.playbackRate > 0 ? vs.playbackRate : 1;
+    let idx = FORWARD_SPEED_STEPS.indexOf(cur);
     if (idx === -1) {
-      // Zoek dichtstbijzijnde
-      idx = SPEED_STEPS.findIndex(s => s >= cur);
-      if (idx === -1) idx = SPEED_STEPS.length - 1;
+      idx = FORWARD_SPEED_STEPS.findIndex(s => s >= cur);
+      if (idx === -1) idx = FORWARD_SPEED_STEPS.length - 1;
     }
-    idx = Math.max(0, Math.min(SPEED_STEPS.length - 1, idx + dir));
-    setSpeed(SPEED_STEPS[idx]);
+    idx = Math.max(0, Math.min(FORWARD_SPEED_STEPS.length - 1, idx + dir));
+    setSpeed(FORWARD_SPEED_STEPS[idx]);
   }
 
   function resetSpeed() { setSpeed(1); }
 
   function setSpeed(rate) {
+    rate = Number(rate);
+    if (!Number.isFinite(rate) || rate === 0) rate = 1;
     vs.playbackRate = rate;
     try { localStorage.setItem(VIEWER_SPEED_KEY, String(rate)); } catch (_) {}
     const v = el.vContent.querySelector('video');
 
     if (rate <= 0) {
-      // Achteruit: zet video op pause, start RAF-loop
-      if (v) { v.pause(); v.playbackRate = 1; }
+      if (v) {
+        if (v.currentTime <= 0.15 && Number.isFinite(v.duration) && v.duration > 0) {
+          v.currentTime = v.duration;
+        }
+        v.pause();
+        v.playbackRate = 1;
+      }
       startReverse(Math.abs(rate) || 1);
     } else {
-      // Vooruit: stop eventuele reverse loop
       stopReverse();
-      if (v) { v.playbackRate = rate; if (v.paused) v.play(); }
+      if (v) {
+        v.playbackRate = rate;
+        if (v.paused) {
+          const p = v.play();
+          if (p && typeof p.catch === 'function') p.catch(() => {});
+        }
+      }
     }
     updateSpeedIndicator();
     updatePlaybackControls(v);
+    showHudMessage(rate > 0 ? `Snelheid ${rate}x` : `Achteruit ${Math.abs(rate)}x`, 1100);
     log(`Snelheid: ${rate > 0 ? rate + '×' : rate + '× (achteruit)'}`);
   }
 
@@ -1381,6 +1394,8 @@
     }
     if (el.vSpeedSelect) el.vSpeedSelect.value = String(r);
     if (el.vBtnReverse) el.vBtnReverse.classList.toggle('active', r < 0);
+    if (el.vSpeedDown) el.vSpeedDown.classList.toggle('active', r > 0 && r < 1);
+    if (el.vSpeedUp) el.vSpeedUp.classList.toggle('active', r > 1);
   }
 
   // ─── Loop sectie ─────────────────────────────────────────────────────────

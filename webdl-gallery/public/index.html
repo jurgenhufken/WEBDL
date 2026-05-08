@@ -162,13 +162,14 @@
             <button id="vBtnPlayPause" class="vplay-btn" title="Afspelen/pauzeren (spatie)">▶</button>
             <div class="vtime-label" id="vTimeLabel">0:00 / 0:00</div>
             <div class="vjump-group" aria-label="Achteruit spoelen">
-              <button class="vjump-btn" data-seek="-30" title="30 seconden terug">-30</button>
-              <button class="vjump-btn" data-seek="-10" title="10 seconden terug">-10</button>
-              <button class="vjump-btn" data-seek="-5" title="5 seconden terug">-5</button>
+              <span class="vcontrol-label">Terug</span>
+              <button class="vjump-btn" data-seek="-30" title="30 seconden terug">30s</button>
+              <button class="vjump-btn" data-seek="-10" title="10 seconden terug">10s</button>
+              <button class="vjump-btn" data-seek="-5" title="5 seconden terug">5s</button>
             </div>
             <div class="vspeed-group" aria-label="Afspeelsnelheid">
-              <button id="vSpeedDown" class="vspeed-btn" title="Langzamer ([)">−</button>
-              <button id="vBtnReverse" class="vspeed-btn" title="Achteruit afspelen">⏪</button>
+              <button id="vSpeedDown" class="vspeed-btn" title="Langzamer ([)">Trager</button>
+              <button id="vBtnReverse" class="vspeed-btn" title="Achteruit afspelen">Achteruit</button>
               <select id="vSpeedSelect" class="vspeed-select" title="Afspeelsnelheid">
                 <option value="-2">-2×</option>
                 <option value="-1">-1×</option>
@@ -181,14 +182,15 @@
                 <option value="3">3×</option>
                 <option value="4">4×</option>
               </select>
-              <button id="vSpeedUp" class="vspeed-btn" title="Sneller (])">+</button>
+              <button id="vSpeedUp" class="vspeed-btn" title="Sneller (])">Sneller</button>
             </div>
             <div class="vjump-group" aria-label="Vooruit spoelen">
-              <button class="vjump-btn" data-seek="5" title="5 seconden vooruit">+5</button>
-              <button class="vjump-btn" data-seek="10" title="10 seconden vooruit">+10</button>
-              <button class="vjump-btn" data-seek="30" title="30 seconden vooruit">+30</button>
+              <span class="vcontrol-label">Vooruit</span>
+              <button class="vjump-btn" data-seek="5" title="5 seconden vooruit">5s</button>
+              <button class="vjump-btn" data-seek="10" title="10 seconden vooruit">10s</button>
+              <button class="vjump-btn" data-seek="30" title="30 seconden vooruit">30s</button>
             </div>
-            <button id="vBtnRotateBottom" class="vbottom-rotate" title="Media 90° draaien">↻ +90°</button>
+            <button id="vBtnRotateBottom" class="vbottom-rotate" title="Media 90° draaien">Draai 90°</button>
           </div>
         </div>
         <button id="vBtnRotateStage" class="vrotate-float" title="Media 90° draaien">↻ +90°</button>
@@ -237,7 +239,7 @@
   </div><!-- /viewer -->
 
   <script src="/app.js?v=20260508-56"></script>
-  <script src="/viewer.js?v=20260508-15"></script>
+  <script src="/viewer.js?v=20260508-17"></script>
   <script>
   // ─── Thema switcher ─────────────────────────────────────────────────────
   (function() {
