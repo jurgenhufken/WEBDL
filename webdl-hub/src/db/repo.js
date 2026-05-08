@@ -39,6 +39,7 @@ function classifyLane(url, adapter) {
     // gallery-dl/reddit zijn meestal images; videos in deze flow zijn zeldzaam.
     return 'image';
   }
+  if (adapter === 'redgifs') return 'video';
   if (adapter === 'ofscraper') {
     // ofscraper gebruikt een gedeeld profiel/cache; parallelle runs raken elkaar.
     return 'process-video';
@@ -70,6 +71,7 @@ function defaultJobPriority(url, adapter, lane = null) {
   const finalLane = lane || classifyLane(url, adapter);
   if (adapter === 'slave-delegate') return 70;
   if (adapter === 'reddit' || adapter === 'reddit-dl') return 65;
+  if (adapter === 'redgifs') return 25;
   if (adapter === 'gallerydl') return 60;
   if (finalLane === 'image') return 55;
   if (finalLane === 'video') return 20;

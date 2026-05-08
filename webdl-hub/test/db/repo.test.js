@@ -23,6 +23,8 @@ test('classifyLane houdt TikTok tags en profielen in process-video', () => {
 test('defaultJobPriority geeft snelle image/reddit jobs voorrang', () => {
   assert.equal(defaultJobPriority('https://example.com/a.jpg', 'ytdlp'), 55);
   assert.equal(defaultJobPriority('https://www.reddit.com/r/test/', 'reddit'), 65);
+  assert.equal(classifyLane('https://www.redgifs.com/watch/SomeClipId', 'redgifs'), 'video');
+  assert.equal(defaultJobPriority('https://www.redgifs.com/watch/SomeClipId', 'redgifs'), 25);
   assert.equal(defaultJobPriority('https://imgur.com/gallery/abc', 'gallerydl'), 60);
   assert.equal(defaultJobPriority('https://www.youtube.com/watch?v=abc', 'ytdlp'), 0);
   assert.equal(defaultJobPriority('https://cdn.example.com/video.mp4', 'ytdlp'), 20);

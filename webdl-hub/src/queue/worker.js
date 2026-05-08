@@ -72,6 +72,7 @@ function detectPlatform(url) {
     if (h.includes('vimeo')) return 'vimeo';
     if (h.includes('tiktok')) return 'tiktok';
     if (h.includes('reddit')) return 'reddit';
+    if (h.includes('redgifs') || h.includes('gifdeliverynetwork') || h.includes('gfycat')) return 'redgifs';
     if (h.includes('instagram')) return 'instagram';
     if (h.includes('twitter') || h.includes('x.com')) return 'twitter';
     if (h.includes('twitch')) return 'twitch';
@@ -636,6 +637,7 @@ function startWorkerPool({
     'tiktok':    { baseSpacingMs: 3000,  maxBackoffMs: 30000, jitterMs: 1500 },
     'instagram': { baseSpacingMs: 4000,  maxBackoffMs: 45000, jitterMs: 2000 },
     'reddit':    { baseSpacingMs: 2000,  maxBackoffMs: 20000, jitterMs: 1000 },
+    'redgifs':   { baseSpacingMs: 2500,  maxBackoffMs: 30000, jitterMs: 1500 },
     '_default':  { baseSpacingMs: 500,   maxBackoffMs: 10000, jitterMs: 500  },
   };
 
@@ -646,6 +648,7 @@ function startWorkerPool({
       if (h.includes('tiktok')) return 'tiktok';
       if (h.includes('instagram')) return 'instagram';
       if (h.includes('reddit')) return 'reddit';
+      if (h.includes('redgifs') || h.includes('gifdeliverynetwork') || h.includes('gfycat')) return 'redgifs';
       return h;
     } catch { return 'unknown'; }
   }

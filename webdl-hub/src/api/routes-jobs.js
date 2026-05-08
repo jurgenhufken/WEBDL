@@ -23,8 +23,16 @@ function isMultiItemUrl(url) {
     const pathname = u.pathname.toLowerCase();
     const isYoutubeHost = host === 'youtube.com' || host === 'youtu.be' || host.endsWith('.youtube.com');
     const isXvideosHost = host === 'xvideos.com' || host.endsWith('.xvideos.com');
+    const isRedgifsHost = host === 'redgifs.com' || host.endsWith('.redgifs.com');
     if (isXvideosHost) {
       return !/^\/video[./]/i.test(pathname);
+    }
+    if (isRedgifsHost) {
+      if (/^\/users\/[^/]+\/?$/.test(pathname)) return true;
+      if (/^\/users\/[^/]+\/collections\/[^/]+\/?$/.test(pathname)) return true;
+      if (/^\/niches\/[^/]+\/?$/.test(pathname)) return true;
+      if (/^\/(?:gifs\/[^/]+|search(?:\/gifs)?|browse)\/?$/.test(pathname)) return true;
+      return false;
     }
     if (!isYoutubeHost) return false;
     // /playlist?list=... of watch?list=... (playlist param met echte waarde)
@@ -92,7 +100,7 @@ async function expandAndEnqueue({ repo, queue, adapters, url, priority, options,
       };
     }
   }
-  const entries = await adapter.expandPlaylist(url);
+  const entries = await adapter.expandPlaylist(url, options || {});
   if (!entries || entries.length === 0) {
     return { total: 0, queued: 0, duplicates: 0, errors: 0, jobs: [] };
   }

@@ -17,6 +17,7 @@ const adapters = [
   require('./adapters/ofscraper'),
   require('./adapters/instaloader'),
   require('./adapters/reddit'),
+  require('./adapters/redgifs'),
   require('./adapters/gallerydl'),
   require('./adapters/ytdlp'),
 ];

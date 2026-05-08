@@ -10,6 +10,7 @@ const adapters = [
   require('../../src/adapters/ofscraper'),
   require('../../src/adapters/instaloader'),
   require('../../src/adapters/reddit'),
+  require('../../src/adapters/redgifs'),
   require('../../src/adapters/gallerydl'),
   require('../../src/adapters/ytdlp'),
 ];
@@ -24,6 +25,8 @@ const cases = [
   ['https://x.com/user/status/1',              'gallerydl'],
   ['https://www.reddit.com/r/test/comments/abc/title/', 'reddit'],
   ['https://redd.it/abc',                      'reddit'],
+  ['https://www.redgifs.com/watch/SomeClipId', 'redgifs'],
+  ['https://www.redgifs.com/users/somecreator', 'redgifs'],
   ['https://vipergirls.to/threads/6777850-MyFav-Czechcasting-Model-Collection-Sets', 'gallerydl'],
   ['https://vipergirls.to/forum.php',          'gallerydl'],
   ['https://onlyfans.com/johndoe',             'ofscraper'],

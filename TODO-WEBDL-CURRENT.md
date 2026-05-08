@@ -21,11 +21,14 @@ Last updated: 2026-05-08
 - Add Keep2Share premium resolve support through `WEBDL_KEEP2SHARE_AUTH_TOKEN`, `K2S_AUTH_TOKEN`, `WEBDL_KEEP2SHARE_USERNAME`/`WEBDL_KEEP2SHARE_PASSWORD`, plus cookie env fallback.
 - Disable native-server automatic `kill -9` on port conflict; server restarts must not close or disturb Firefox.
 - Make the gallery viewer top overlay auto-hide with the rest of the HUD.
+- Route Firefox toolbar/contextmenu download intake through `webdl-hub` while keeping recording/screenshot/status on native server.
+- Add `webdl-hub` Redgifs adapter with single-clip download, profile/search/collection expansion, hub registration, thumbnail generation path, and gallery sync.
 
 ## In Progress / Watch
 
 - FootFetishForum page-60 recovery batch is running via attachment-page URLs only.
 - Keep checking that completed FootFetishForum items are fullscale files, not direct CDN preview images.
+- Redgifs support is live in the hub; verify with a real Redgifs clip/profile URL that completed media appears in the gallery.
 
 ## Still To Verify
 
