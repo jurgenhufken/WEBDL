@@ -395,6 +395,70 @@ function createRepo({ databaseUrl = config.databaseUrl, schema = config.dbSchema
     return rows;
   }
 
+  async function getGroupSummary(groupId) {
+    const { rows } = await query(
+      `SELECT
+         j.options->>'expandGroup' AS group_id,
+         COALESCE(
+           NULLIF(MIN(j.options->>'expandName'), ''),
+           NULLIF(MIN(j.options->>'playlistTitle'), ''),
+           NULLIF(MIN(j.options->>'expandUrl'), ''),
+           'Playlist'
+         ) AS name,
+         MIN(j.options->>'expandUrl') AS url,
+         MAX(NULLIF(j.options->>'expandTotal','')::int) AS total,
+         COUNT(*)::int AS jobs,
+         COUNT(*) FILTER (WHERE j.status = 'queued' AND j.lane <> 'paused')::int AS queued,
+         COUNT(*) FILTER (WHERE j.status = 'queued' AND j.lane = 'paused')::int AS paused,
+         COUNT(*) FILTER (WHERE j.status = 'running')::int AS running,
+         COUNT(*) FILTER (WHERE j.status = 'done')::int AS done,
+         COUNT(*) FILTER (WHERE j.status = 'failed')::int AS failed,
+         MIN(j.created_at) AS first_created,
+         MAX(j.finished_at) AS last_finished
+       FROM ${T.jobs} j
+       WHERE j.options->>'expandGroup' = $1
+       GROUP BY j.options->>'expandGroup'
+       LIMIT 1`,
+      [String(groupId || '')],
+    );
+    return rows[0] || null;
+  }
+
+  async function findGroupSummaryByExpandUrl(urls) {
+    const values = Array.from(new Set((Array.isArray(urls) ? urls : [urls])
+      .map((value) => String(value || '').trim())
+      .filter(Boolean)));
+    if (!values.length) return null;
+    const { rows } = await query(
+      `SELECT
+         j.options->>'expandGroup' AS group_id,
+         COALESCE(
+           NULLIF(MIN(j.options->>'expandName'), ''),
+           NULLIF(MIN(j.options->>'playlistTitle'), ''),
+           NULLIF(MIN(j.options->>'expandUrl'), ''),
+           'Playlist'
+         ) AS name,
+         MIN(j.options->>'expandUrl') AS url,
+         MAX(NULLIF(j.options->>'expandTotal','')::int) AS total,
+         COUNT(*)::int AS jobs,
+         COUNT(*) FILTER (WHERE j.status = 'queued' AND j.lane <> 'paused')::int AS queued,
+         COUNT(*) FILTER (WHERE j.status = 'queued' AND j.lane = 'paused')::int AS paused,
+         COUNT(*) FILTER (WHERE j.status = 'running')::int AS running,
+         COUNT(*) FILTER (WHERE j.status = 'done')::int AS done,
+         COUNT(*) FILTER (WHERE j.status = 'failed')::int AS failed,
+         MIN(j.created_at) AS first_created,
+         MAX(j.finished_at) AS last_finished
+       FROM ${T.jobs} j
+       WHERE options->>'expandUrl' = ANY($1::text[])
+          OR options->>'expandOriginalUrl' = ANY($1::text[])
+       GROUP BY j.options->>'expandGroup'
+       ORDER BY COUNT(*) DESC, MIN(j.created_at) ASC
+       LIMIT 1`,
+      [values],
+    );
+    return rows[0] || null;
+  }
+
   async function listJobsByGroup(groupId, { limit = 1500 } = {}) {
     const { rows } = await query(
       `WITH download_rows AS MATERIALIZED (
@@ -619,7 +683,7 @@ function createRepo({ databaseUrl = config.databaseUrl, schema = config.dbSchema
 
   return {
     pool, schema, close, ping,
-    createJob, getJob, findRecentJobByUrl, findGalleryDownloadByUrl, listJobs, getJobStats, getLaneStats, getQueueDiagnostics, listGroups, listJobsByGroup,
+    createJob, getJob, findRecentJobByUrl, findGalleryDownloadByUrl, listJobs, getJobStats, getLaneStats, getQueueDiagnostics, listGroups, getGroupSummary, findGroupSummaryByExpandUrl, listJobsByGroup,
     claimNextJob, completeJob, failJob, cancelJob, updateProgress, heartbeatJob,
     pauseJob, resumeJob, setJobPriority, reclaimStaleRunning,
     addFile, listFiles, appendLog, listLogs,

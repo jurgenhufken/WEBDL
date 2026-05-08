@@ -4,7 +4,14 @@
 const express = require('express');
 const crypto = require('node:crypto');
 const { isSlaveUrl, delegateToSlave } = require('../queue/slave-router');
-const { defaultJobPriority } = require('../db/repo');
+const { classifyLane, defaultJobPriority } = require('../db/repo');
+
+function intEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
 
 // Detecteer URLs die uit meerdere items bestaan (playlist/kanaal/shorts-tab).
 // Als een URL een playlist-list param heeft of een kanaal/shorts-pagina is,
@@ -34,20 +41,65 @@ function isMultiItemUrl(url) {
   } catch { return false; }
 }
 
+function canonicalExpandUrl(url) {
+  try {
+    const u = new URL(String(url || '').trim());
+    const host = u.hostname.replace(/^www\./, '').toLowerCase();
+    u.hash = '';
+    if (host === 'youtube.com' || host.endsWith('.youtube.com') || host === 'youtu.be') {
+      const list = u.searchParams.get('list');
+      if (list && !/^RD|^UL|^WL$/i.test(list)) {
+        return `https://www.youtube.com/playlist?list=${encodeURIComponent(list)}`;
+      }
+      u.search = '';
+      u.hostname = host === 'youtu.be' ? 'www.youtube.com' : u.hostname;
+      u.pathname = u.pathname.replace(/\/+$/, '') || '/';
+      return u.toString();
+    }
+    return u.toString();
+  } catch {
+    return String(url || '').trim();
+  }
+}
+
+function stableExpandGroupId(url) {
+  return crypto.createHash('sha1').update(canonicalExpandUrl(url)).digest('hex').slice(0, 12);
+}
+
 async function expandAndEnqueue({ repo, queue, adapters, url, priority, options, maxAttempts, force }) {
   const adapter = adapters.find((a) => a.expandPlaylist && a.matches(url));
   if (!adapter || !adapter.expandPlaylist) {
     throw Object.assign(new Error('Geen adapter met playlist-expand voor deze URL'), { httpStatus: 400 });
+  }
+  const canonicalUrl = canonicalExpandUrl(url);
+  const groupId = options && options.expandGroup ? String(options.expandGroup) : stableExpandGroupId(canonicalUrl);
+  if (!force) {
+    const existingGroup = await repo.getGroupSummary(groupId)
+      || await repo.findGroupSummaryByExpandUrl([canonicalUrl, url].filter(Boolean));
+    if (existingGroup && Number(existingGroup.jobs || 0) > 0) {
+      return {
+        total: Number(existingGroup.total || existingGroup.jobs || 0),
+        queued: 0,
+        duplicates: Number(existingGroup.jobs || 0),
+        skipped: 0,
+        paused: Number(existingGroup.paused || 0),
+        errors: 0,
+        groupId: existingGroup.group_id || groupId,
+        playlistName: existingGroup.name || existingGroup.display_name || canonicalUrl,
+        existing: true,
+        duplicate: true,
+        jobs: [],
+      };
+    }
   }
   const entries = await adapter.expandPlaylist(url);
   if (!entries || entries.length === 0) {
     return { total: 0, queued: 0, duplicates: 0, errors: 0, jobs: [] };
   }
 
-  const groupId = crypto.randomBytes(6).toString('hex');
   let playlistName = url;
   try {
-    const u = new URL(url);
+    const u = new URL(canonicalUrl || url);
     const pathParts = u.pathname.split('/').filter(Boolean);
     if (pathParts[0] && pathParts[0].startsWith('@')) playlistName = pathParts[0];
     else if (pathParts.length >= 2) playlistName = pathParts.slice(0, 2).join('/');
@@ -57,8 +109,9 @@ async function expandAndEnqueue({ repo, queue, adapters, url, priority, options,
 
   // Titels die nooit zullen downloaden — skip ze vóór ze in de queue gaan
   const SKIP_TITLES = /^\[(Deleted video|Private video|Unavailable video)\]$/i;
+  const activeLimit = intEnv('WEBDL_EXPAND_ACTIVE_LIMIT', 300);
 
-  let queued = 0, duplicates = 0, errors = 0, skipped = 0;
+  let queued = 0, duplicates = 0, errors = 0, skipped = 0, paused = 0;
   const jobs = [];
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i];
@@ -74,6 +127,8 @@ async function expandAndEnqueue({ repo, queue, adapters, url, priority, options,
         const existingDownload = await repo.findGalleryDownloadByUrl(entry.url);
         if (existingDownload) { duplicates++; continue; }
       }
+      const originalLane = classifyLane(entry.url, adapter.name);
+      const shouldPause = activeLimit > 0 && queued >= activeLimit;
       const job = await queue.enqueue({
         url: entry.url,
         adapter: adapter.name,
@@ -82,9 +137,11 @@ async function expandAndEnqueue({ repo, queue, adapters, url, priority, options,
           ...options,
           expandGroup: groupId,
           expandName: playlistName,
-          expandUrl: url,
+          expandUrl: canonicalUrl,
+          expandOriginalUrl: url,
           expandIndex: i + 1,
           expandTotal: entries.length,
+          ...(shouldPause ? { pauseLane: originalLane, paused_at: new Date().toISOString(), autoPausedByExpandLimit: true } : {}),
           videoTitle: entry.title || undefined,
           thumbnail: entry.thumbnail || undefined,
           channel: entry.channel || options.channel || undefined,
@@ -93,14 +150,16 @@ async function expandAndEnqueue({ repo, queue, adapters, url, priority, options,
           playlistTitle: entry.playlistTitle || options.playlistTitle || undefined,
         },
         maxAttempts,
+        lane: shouldPause ? 'paused' : originalLane,
       });
       jobs.push({ id: job.id, url: entry.url, title: entry.title, thumbnail: entry.thumbnail || undefined });
-      queued++;
+      if (shouldPause) paused++;
+      else queued++;
     } catch (_e) {
       errors++;
     }
   }
-  return { total: entries.length, queued, duplicates, skipped, errors, groupId, playlistName, jobs };
+  return { total: entries.length, queued, duplicates, skipped, paused, errors, groupId, playlistName, jobs };
 }
 
 function hostnameFromUrl(value) {
