@@ -5,7 +5,7 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-05-08-reddit-three-buttons';
+  const WEBDL_BUILD = 'debug-toolbar-2026-05-08-x-buttons';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
@@ -172,6 +172,47 @@
     const wanted = String(mode || '').trim().toLowerCase();
     if (!wanted) return null;
     return redditTargetOptions(meta).find((opt) => opt.mode === wanted) || null;
+  }
+
+  function xTwitterPartsFromUrl(raw) {
+    try {
+      const u = new URL(String(raw || ''), window.location.href);
+      if (!isTwitterHost(u.hostname)) return { postUrl: '', profileUrl: '', user: '' };
+      const segments = String(u.pathname || '').split('/').filter(Boolean);
+      const first = String(segments[0] || '').replace(/^@/, '');
+      if (first.toLowerCase() === 'i' && String(segments[1] || '').toLowerCase() === 'web' && String(segments[2] || '').toLowerCase() === 'status' && /^\d+$/.test(String(segments[3] || ''))) {
+        return { postUrl: `https://x.com/i/web/status/${segments[3]}`, profileUrl: '', user: '' };
+      }
+      const blocked = new Set(['home', 'explore', 'search', 'hashtag', 'i', 'intent', 'settings', 'notifications', 'messages', 'login', 'signup']);
+      if (!first || blocked.has(first.toLowerCase())) return { postUrl: '', profileUrl: '', user: '' };
+      const isUser = /^[A-Za-z0-9_]{1,15}$/.test(first);
+      const out = { postUrl: '', profileUrl: '', user: isUser ? first : '' };
+      if (isUser) out.profileUrl = `https://x.com/${encodeURIComponent(first)}`;
+      if (isUser && String(segments[1] || '').toLowerCase() === 'status' && /^\d+$/.test(String(segments[2] || ''))) {
+        out.postUrl = `https://x.com/${encodeURIComponent(first)}/status/${segments[2]}`;
+      }
+      return out;
+    } catch (e) {
+      return { postUrl: '', profileUrl: '', user: '' };
+    }
+  }
+
+  function xTwitterTargetOptions(meta) {
+    const parts = xTwitterPartsFromUrl((meta && meta.url) || window.location.href);
+    const opts = [];
+    if (parts.postUrl) {
+      opts.push({ mode: 'post', label: 'deze X-post', url: parts.postUrl });
+    }
+    if (parts.profileUrl) {
+      opts.push({ mode: 'profile', label: `X-profiel @${parts.user}`, url: parts.profileUrl, user: parts.user });
+    }
+    return opts;
+  }
+
+  function xTwitterTargetForMode(meta, mode) {
+    const wanted = String(mode || '').trim().toLowerCase();
+    if (!wanted) return null;
+    return xTwitterTargetOptions(meta).find((opt) => opt.mode === wanted) || null;
   }
 
   function summarizeUrlsByHost(urls) {
@@ -1165,6 +1206,7 @@
       const segments = String(u.pathname || '').split('/').filter(Boolean);
       if (!segments.length) return false;
       const first = String(segments[0] || '').replace(/^@/, '');
+      if (first.toLowerCase() === 'i' && String(segments[1] || '').toLowerCase() === 'web' && String(segments[2] || '').toLowerCase() === 'status' && /^\d+$/.test(String(segments[3] || ''))) return true;
       const blocked = new Set([
         'home', 'explore', 'search', 'hashtag', 'i', 'intent', 'settings',
         'notifications', 'messages', 'login', 'signup', 'tos', 'privacy',
@@ -1260,6 +1302,12 @@
           meta.channel = user;
         }
       }
+    }
+
+    else if (/(?:^|\/\/)(?:www\.|mobile\.)?(?:x\.com|twitter\.com)\//i.test(url)) {
+      meta.platform = 'twitter';
+      const parts = xTwitterPartsFromUrl(url);
+      if (parts.user) meta.channel = `@${parts.user}`;
     }
 
     else if (/reddit\.com|redd\.it/i.test(url)) {
@@ -3416,6 +3464,10 @@
       const redgifsHere = isRedgifsUrl(window.location.href) || collectRedgifsUrls(1).length > 0;
       const redgifsFeedHere = isRedgifsExpandableUrl(window.location.href) || collectRedgifsUrls(1).some((u) => isRedgifsExpandableUrl(u));
       const youtubeHere = m.platform === 'youtube';
+      const xHere = m.platform === 'twitter' && isDownloadableTwitterUrl(m.url);
+      const xTargets = xHere ? xTwitterTargetOptions(m) : [];
+      const xPostHere = xTargets.some((opt) => opt.mode === 'post');
+      const xProfileHere = xTargets.some((opt) => opt.mode === 'profile');
       const redditHere = m.platform === 'reddit' && isRedditBatchSeedUrl(m.url);
       const redditTargets = redditHere ? redditTargetOptions(m) : [];
       const redditPostHere = redditTargets.some((opt) => opt.mode === 'post');
@@ -3428,12 +3480,15 @@
 
       setButtonAvailable(downloadBtn, m.platform !== 'unknown' || batchHere || redgifsHere);
       try { redditBtnContainer.style.display = smartButtons && !redditHere ? 'none' : 'flex'; } catch (e) {}
+      try { xBtnContainer.style.display = smartButtons && !xHere ? 'none' : 'flex'; } catch (e) {}
       setButtonAvailable(batchDownloadBtn, batchHere);
       setButtonAvailable(forceBatchDownloadBtn, batchHere);
       setButtonAvailable(mediaDownloadBtn, visibleMediaHere);
       setButtonAvailable(redditPostBtn, redditPostHere);
       setButtonAvailable(redditUserBtn, redditUserHere);
       setButtonAvailable(redditSubredditBtn, redditSubredditHere);
+      setButtonAvailable(xPostBtn, xPostHere);
+      setButtonAvailable(xProfileBtn, xProfileHere);
       setButtonAvailable(ytShortsBtn, youtubeHere);
       setButtonAvailable(ytVideosBtn, youtubeHere);
       setButtonAvailable(openAllBtn, batchHere);
@@ -3473,6 +3528,10 @@
   const redditBtnContainer = document.createElement('div');
   Object.assign(redditBtnContainer.style, { display: 'flex', gap: '6px', marginBottom: '8px' });
   toolbar.appendChild(redditBtnContainer);
+
+  const xBtnContainer = document.createElement('div');
+  Object.assign(xBtnContainer.style, { display: 'flex', gap: '6px', marginBottom: '8px' });
+  toolbar.appendChild(xBtnContainer);
 
   function makeBtn(text, bg) {
     const btn = document.createElement('button');
@@ -3514,6 +3573,8 @@
   const redditPostBtn = makeCompactBtnIn(redditBtnContainer, 'Post', '#ff4500');
   const redditUserBtn = makeCompactBtnIn(redditBtnContainer, 'Gebruiker', '#d9480f');
   const redditSubredditBtn = makeCompactBtnIn(redditBtnContainer, 'Kanaal', '#c2410c');
+  const xPostBtn = makeCompactBtnIn(xBtnContainer, 'X Post', '#111827');
+  const xProfileBtn = makeCompactBtnIn(xBtnContainer, 'X Profiel', '#0f766e');
   const redgifsClipBtn = makeBtnIn(extraBtnContainer, 'Redgifs clip', '#dc2626');
   const redgifsFeedBtn = makeBtnIn(extraBtnContainer, 'Redgifs feed', '#991b1b');
   const ytShortsBtn = makeBtnIn(extraBtnContainer, 'YT shorts', '#7c3aed');
@@ -3532,6 +3593,8 @@
     redditPostBtn.title = 'Reddit: download alleen deze post via BDFR';
     redditUserBtn.title = 'Reddit: download alles van deze gebruiker via BDFR';
     redditSubredditBtn.title = 'Reddit: download alles van dit kanaal/subreddit via BDFR';
+    xPostBtn.title = 'X/Twitter: download deze post via gallery-dl';
+    xProfileBtn.title = 'X/Twitter: download dit profiel via gallery-dl';
     redgifsClipBtn.title = 'Download deze Redgifs clip of Redgifs links op de pagina';
     redgifsFeedBtn.title = 'Download/expand Redgifs profiel, collectie, niche of zoekpagina';
     ytShortsBtn.title = 'Download YouTube Shorts van dit kanaal';
@@ -4992,6 +5055,59 @@
     }
   }
 
+  async function runXDownloadFromCurrentPage(triggerBtn, targetMode) {
+    if (!(await ensureHubReachable(true))) return;
+
+    const meta = scrapeMetadata();
+    if (meta.platform !== 'twitter' || !isDownloadableTwitterUrl(meta.url)) {
+      showNotification('Gebruik deze knop op een X/Twitter post of profiel', true);
+      return;
+    }
+
+    const target = xTwitterTargetForMode(meta, targetMode);
+    if (!target || !target.url) {
+      showNotification('Geen passende X/Twitter downloaddoel gevonden', true);
+      return;
+    }
+
+    const xMeta = {
+      ...meta,
+      url: target.url,
+      x_target_mode: target.mode,
+      x_target_label: target.label,
+      queued_from: 'firefox-toolbar-x-options',
+    };
+    if (target.user) xMeta.channel = `@${target.user}`;
+
+    const original = triggerBtn ? triggerBtn.textContent : 'X';
+    if (triggerBtn) {
+      triggerBtn.textContent = 'X...';
+      triggerBtn.style.opacity = '0.6';
+    }
+
+    try {
+      addLog(`X ${target.mode}: ${target.url}`);
+      const result = await queueDownloadRequestWithOverride(xMeta, target.url);
+      if (result && result.success) {
+        const id = result.downloadId || result.hubJobId || '';
+        showNotification(`X ${target.label}: ${result.duplicate ? 'bestaat al' : 'gestart'}${id ? ` #${id}` : ''}`);
+        addLog(`X ${target.label} gestart: ${target.url}${id ? ` #${id}` : ''}`);
+      } else {
+        const err = (result && result.error) ? result.error : 'unknown';
+        showNotification(`X fout: ${err}`, true);
+        addLog(`X fout: ${err}`, 'error');
+      }
+    } catch (e) {
+      showNotification(`X fout: ${e.message}`, true);
+      addLog(`X fout: ${e.message}`, 'error');
+    } finally {
+      if (triggerBtn) {
+        triggerBtn.textContent = original;
+        triggerBtn.style.opacity = '1';
+      }
+    }
+  }
+
   function collectYouTubeUrls(mode, maxItems = 600) {
     const out = [];
     const seen = new Set();
@@ -5186,6 +5302,14 @@
 
   redditSubredditBtn.addEventListener('click', async function(e) {
     await runRedditAllBatchFromCurrentPage(redditSubredditBtn, 'subreddit', e);
+  });
+
+  xPostBtn.addEventListener('click', async function() {
+    await runXDownloadFromCurrentPage(xPostBtn, 'post');
+  });
+
+  xProfileBtn.addEventListener('click', async function() {
+    await runXDownloadFromCurrentPage(xProfileBtn, 'profile');
   });
 
   redgifsClipBtn.addEventListener('click', async function() {
