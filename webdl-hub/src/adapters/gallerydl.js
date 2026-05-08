@@ -28,6 +28,15 @@ function matches(url) {
   } catch { return false; }
 }
 
+function isTwitterUrl(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+    return host === 'x.com' || host === 'twitter.com' || host === 'mobile.twitter.com';
+  } catch {
+    return false;
+  }
+}
+
 function plan(url, opts = {}) {
   // -D <cwd> zet álle files direct in onze jobdir (geen sub-mappen per site).
   // -q = quiet, -v geeft één regel per bestand voor progress.
@@ -36,8 +45,18 @@ function plan(url, opts = {}) {
     '-D', opts.cwd,
     '--cookies-from-browser', process.env.WEBDL_GALLERYDL_BROWSER_COOKIES || 'firefox',
     '-o', 'output.progress=true',
-    url,
   ];
+  if (isTwitterUrl(url)) {
+    args.push(
+      '-o', 'conversations=true',
+      '-o', 'replies=true',
+      '-o', 'retweets=true',
+      '-o', 'quoted=true',
+      '-o', 'pinned=true',
+      '-o', 'videos=true',
+    );
+  }
+  args.push(url);
   return { cmd: 'gallery-dl', args, cwd: opts.cwd, env: {} };
 }
 

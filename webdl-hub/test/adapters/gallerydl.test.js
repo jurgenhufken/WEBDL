@@ -29,6 +29,14 @@ test('plan zet -D naar cwd en url als laatste', () => {
   assert.equal(p.args.at(-1), 'https://imgur.com/a/abc');
 });
 
+test('plan gebruikt brede Twitter/X media-opties', () => {
+  const p = a.plan('https://x.com/FeetOmegle43663?t=7k1bLwYzJ5aqMlyuHvk8QQ&s=09', { cwd: '/tmp/j1' });
+  assert.equal(p.args.at(-1), 'https://x.com/FeetOmegle43663?t=7k1bLwYzJ5aqMlyuHvk8QQ&s=09');
+  for (const opt of ['conversations=true', 'replies=true', 'retweets=true', 'quoted=true', 'pinned=true', 'videos=true']) {
+    assert.ok(p.args.includes(opt), `missing ${opt}`);
+  }
+});
+
 test('parseProgress is null (geen globale %)', () => {
   assert.equal(a.parseProgress('./a.jpg'), null);
 });

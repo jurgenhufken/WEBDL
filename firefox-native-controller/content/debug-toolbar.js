@@ -1172,6 +1172,7 @@
       if (!first || blocked.has(first.toLowerCase())) return false;
       if (segments.length === 1) return /^[a-z0-9_]{1,15}$/i.test(first);
       if (String(segments[1] || '').toLowerCase() === 'status' && /^\d+$/.test(String(segments[2] || ''))) return true;
+      if (/^[a-z0-9_]{1,15}$/i.test(first)) return true;
     } catch (e) {}
     return false;
   }

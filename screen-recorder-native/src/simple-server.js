@@ -12529,10 +12529,18 @@ async function startGalleryDlDownload(downloadId, url, platform, channel, title,
     }
 
     const gdlArgs = [url];
-    // For Twitter/X: download entire conversation thread (all replies with media)
-    // Needs Firefox cookies for authenticated timeline access (conversations API)
+    // For Twitter/X: use authenticated gallery-dl and include the common
+    // timeline/thread surfaces instead of only the single visible tweet.
     if (platform === 'twitter') {
-      gdlArgs.unshift('--cookies-from-browser', 'firefox', '-o', 'conversations=true', '-o', 'replies=true');
+      gdlArgs.unshift(
+        '--cookies-from-browser', 'firefox',
+        '-o', 'conversations=true',
+        '-o', 'replies=true',
+        '-o', 'retweets=true',
+        '-o', 'quoted=true',
+        '-o', 'pinned=true',
+        '-o', 'videos=true',
+      );
     }
     const proc = spawnNice(GALLERY_DL, gdlArgs, { cwd: dir });
     activeProcesses.set(downloadId, proc);
