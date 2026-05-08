@@ -126,6 +126,16 @@
     return String((it && (it.source_post_url || it.source_url || it.url)) || '').trim();
   }
 
+  function sourceThreadKey(it) {
+    if (!it) return '';
+    return String(it.source_thread_url || it.source_thread_id || it.source_thread_title || '').trim().toLowerCase();
+  }
+
+  function sourcePostKey(it) {
+    if (!it) return '';
+    return String(it.source_post_num || it.source_post_id || it.source_post_url || it.source_post_title || '').trim().toLowerCase();
+  }
+
   function loadMediaRotation(it) {
     try {
       const value = Number(localStorage.getItem(mediaRotationKey(it)) || 0);
@@ -265,8 +275,8 @@
       const all = vs.channelScope === 'all';
       el.vChannelScope.textContent = all ? '↕ Kanaal: alles' : '↕ Kanaal: query';
       el.vChannelScope.title = all
-        ? 'Omhoog/omlaag zoekt volgend kanaal/model buiten de huidige query'
-        : 'Omhoog/omlaag zoekt volgend kanaal/model binnen de huidige query';
+        ? 'Als een item geen postgegevens heeft, zoekt omhoog/omlaag buiten de huidige query naar volgend kanaal/model'
+        : 'Als een item geen postgegevens heeft, zoekt omhoog/omlaag binnen de huidige query naar volgend kanaal/model';
       el.vChannelScope.classList.toggle('active', all);
     }
   }
@@ -684,6 +694,49 @@
   async function navPrev() {
     return enqueueNavigation(async () => {
       await navTo(vs.idx - 1);
+    });
+  }
+
+  async function navPost(dir) {
+    return enqueueNavigation(async () => {
+      const currentItem = vs.items[vs.idx] || null;
+      const currentThreadKey = sourceThreadKey(currentItem);
+      const currentPostKey = sourcePostKey(currentItem);
+      if (!currentThreadKey || !currentPostKey) {
+        await navChannel(dir);
+        return;
+      }
+
+      async function findLoadedPost(startIdx) {
+        for (let i = startIdx; i >= 0 && i < vs.items.length; i += dir) {
+          const it = vs.items[i];
+          if (sourceThreadKey(it) !== currentThreadKey) continue;
+          const postKey = sourcePostKey(it);
+          if (postKey && postKey !== currentPostKey) return i;
+        }
+        return -1;
+      }
+
+      let nextIdx = await findLoadedPost(vs.idx + dir);
+      if (nextIdx >= 0) {
+        await navTo(nextIdx);
+        return;
+      }
+
+      if (dir > 0) {
+        for (let tries = 0; tries < 10 && !vs.done; tries++) {
+          const beforeLen = vs.items.length;
+          const loaded = await loadMoreViewerItems();
+          if (!loaded && vs.items.length === beforeLen) break;
+          nextIdx = await findLoadedPost(Math.max(beforeLen, vs.idx + 1));
+          if (nextIdx >= 0) {
+            await navTo(nextIdx);
+            return;
+          }
+        }
+      }
+
+      showHudMessage(dir > 0 ? 'Geen volgende post in thread' : 'Geen vorige post in thread');
     });
   }
 
@@ -1544,8 +1597,8 @@
           break;
         case 'ArrowRight': await navNext(); e.preventDefault(); break;
         case 'ArrowLeft':  await navPrev(); e.preventDefault(); break;
-        case 'ArrowUp':    await navChannel(-1); e.preventDefault(); break;
-        case 'ArrowDown':  await navChannel(1);  e.preventDefault(); break;
+        case 'ArrowUp':    await navPost(-1); e.preventDefault(); break;
+        case 'ArrowDown':  await navPost(1);  e.preventDefault(); break;
         case ' ': {
           const v = el.vContent.querySelector('video');
           if (v) { v.paused ? v.play() : v.pause(); e.preventDefault(); }
@@ -1799,8 +1852,8 @@
     el.vClose.addEventListener('click', close);
     el.vPrev.addEventListener('click', (e) => { e.stopPropagation(); navPrev(); });
     el.vNext.addEventListener('click', (e) => { e.stopPropagation(); navNext(); });
-    if (el.vUp) el.vUp.addEventListener('click', (e) => { e.stopPropagation(); navChannel(-1); });
-    if (el.vDown) el.vDown.addEventListener('click', (e) => { e.stopPropagation(); navChannel(1); });
+    if (el.vUp) el.vUp.addEventListener('click', (e) => { e.stopPropagation(); navPost(-1); });
+    if (el.vDown) el.vDown.addEventListener('click', (e) => { e.stopPropagation(); navPost(1); });
     el.vBtnSidebar.addEventListener('click', () => toggleSidebar());
     el.vNowRating.addEventListener('click', (e) => {
       const btn = e.target && e.target.closest ? e.target.closest('.rating-star-btn') : null;
