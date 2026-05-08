@@ -94,6 +94,8 @@
     const raw = String(value || '').trim().toLowerCase().replace(/^www\./, '');
     if (!raw) return '';
     if (raw === 'youtube' || raw === 'youtube.com' || raw === 'youtu.be' || raw.endsWith('.youtube.com')) return 'youtube';
+    if (raw === 'twitter' || raw === 'x.com' || raw === 'twitter.com' || raw.endsWith('.x.com') || raw.endsWith('.twitter.com')) return 'twitter';
+    if (raw === 'reddit' || raw === 'reddit.com' || raw === 'redd.it' || raw.endsWith('.reddit.com')) return 'reddit';
     if (raw === 'redgifs' || raw === 'redgifs.com' || raw === 'gifdeliverynetwork.com' || raw.endsWith('.redgifs.com') || raw.endsWith('.gifdeliverynetwork.com')) return 'redgifs';
     if (raw === 'vipergirls' || raw === 'vipergirls.to' || raw === 'viper.to' || raw.endsWith('.vipergirls.to') || raw.endsWith('.viper.to')) return 'vipergirls';
     if (raw === 'keep2share' || raw === 'keep2share.cc' || raw === 'k2s.cc' || raw === 'k2s.io' || raw.endsWith('.keep2share.cc') || raw.endsWith('.k2s.cc') || raw.endsWith('.k2s.io')) return 'keep2share';
@@ -133,6 +135,8 @@
       const haystack = [
         it.title, it.filename, it.channel, it.platform, it.source_site,
         ...(Array.isArray(it.source_sites) ? it.source_sites : []),
+        ...(Array.isArray(it.content_sites) ? it.content_sites : []),
+        it.source_thread_title, it.source_host,
         it.source_url, it.url,
       ].map(v => String(v || '').toLowerCase()).join(' ');
       if (!haystack.includes(String(f.q).toLowerCase())) return false;
@@ -187,13 +191,15 @@
     const sub = subSource && channel && subSource !== channel
       ? `${subSource} / ${channel}`
       : (subSource || channel);
+    const contentSites = Array.isArray(it.content_sites) ? it.content_sites.filter(Boolean).slice(0, 3) : [];
+    const subParts = [sub, contentSites.length ? `inhoud: ${contentSites.join(', ')}` : ''].filter(Boolean);
     c.innerHTML = `
       <div class="card-thumb">
         ${badge}${mediaMark}
       </div>
       <div class="card-info">
         <div class="card-title">${title}</div>
-        ${sub ? `<div class="card-sub">${escHtml(sub)}</div>` : ''}
+        ${subParts.length ? `<div class="card-sub">${escHtml(subParts.join(' · '))}</div>` : ''}
         ${it.rating != null ? `<div class="card-stars">${starHtml(it.rating)}</div>` : ''}
       </div>`;
     attachThumbRetry(c.querySelector('.card-thumb'), it);
@@ -726,6 +732,7 @@
     state,
     starHtml,
     updateCardRating,
+    shouldShowSourceSite,
     setFilter,
     setViewerActive,
     restoreViewerAnchor,

@@ -96,6 +96,26 @@
     return `webdl:media-rotation:${String((it && it.id) || '')}`;
   }
 
+  function sourceSummaryParts(it) {
+    const platform = String(it && it.platform || '').trim();
+    const sourceSite = String(it && it.source_site || '').trim();
+    const sameSource = window.__wdGallery && typeof window.__wdGallery.shouldShowSourceSite === 'function'
+      ? !window.__wdGallery.shouldShowSourceSite(platform, sourceSite)
+      : sourceSite === platform;
+    const parts = [
+      platform,
+      sourceSite && !sameSource ? `via ${sourceSite}` : '',
+      it && it.channel && it.channel !== 'unknown' ? it.channel : '',
+    ].filter(Boolean);
+    if (it && Array.isArray(it.content_sites) && it.content_sites.length) {
+      parts.push(`inhoud: ${it.content_sites.slice(0, 3).join(', ')}`);
+    }
+    if (it && it.source_thread_title && it.source_thread_title !== it.channel) {
+      parts.push(it.source_thread_title);
+    }
+    return parts;
+  }
+
   function loadMediaRotation(it) {
     try {
       const value = Number(localStorage.getItem(mediaRotationKey(it)) || 0);
@@ -173,7 +193,7 @@
       'vBtnSidebar','vBtnOpen','vBtnFinder','vBtnRotate',
       'vZoomRange','vZoomReset',
       'vVol','vBtnMute','vBtnReloadMedia','vSeek',
-      'vBtnReverse','vSpeedSelect',
+      'vBtnReverse','vSpeedSelect','vSpeedDown','vSpeedUp',
       'vBtnTags','vBtnLog','vClose',
       'vSlideshow2','vRandom2',
       'vStage','vContent','vPrev','vNext','vUp','vDown','vHudLeft','vHudRight',
@@ -538,10 +558,7 @@
 
     // Titel — alleen titel, geen bestandsnaam
     el.vNowTitle.textContent = it.title || '(zonder titel)';
-    el.vNowSub.textContent = [
-      it.platform,
-      (it.channel && it.channel !== 'unknown') ? it.channel : '',
-    ].filter(Boolean).join(' · ');
+    el.vNowSub.textContent = sourceSummaryParts(it).join(' · ');
 
     // Rating, HUD, sidebar active
     updateRatingDisplay(it.rating);
@@ -871,6 +888,15 @@
     updatePlaybackControls(v);
   }
 
+  function seekRelative(seconds) {
+    const v = el.vContent.querySelector('video');
+    if (!v || !Number.isFinite(v.duration)) return;
+    const delta = Number(seconds) || 0;
+    v.currentTime = Math.max(0, Math.min(v.duration, v.currentTime + delta));
+    updatePlaybackControls(v);
+    showHudMessage(`${delta > 0 ? '+' : ''}${delta}s`, 900);
+  }
+
   function toggleVideoPlayback() {
     const v = el.vContent.querySelector('video');
     if (!v) return;
@@ -893,6 +919,7 @@
     // Show progress bar alleen bij video
     if (el.vProgressBar) el.vProgressBar.style.display = it.type === 'video' ? '' : 'none';
     if (el.vBottomControls) el.vBottomControls.classList.toggle('hidden', it.type !== 'video');
+    if (el.vStage) el.vStage.classList.toggle('viewer-stage--video', it.type === 'video');
     if (el.vBtnReloadMedia) el.vBtnReloadMedia.disabled = !it || (it.type !== 'video' && it.type !== 'image');
     updatePlaybackControls(null);
   }
@@ -1803,6 +1830,25 @@
       vs.seekDragging = false;
       seekVideoFromRange(el.vSeek);
     });
+
+    for (const btn of el.vBottomControls.querySelectorAll('[data-seek]')) {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        seekRelative(Number(btn.dataset.seek || 0));
+      });
+    }
+    if (el.vSpeedDown) {
+      el.vSpeedDown.addEventListener('click', (e) => {
+        e.stopPropagation();
+        changeSpeed(-1);
+      });
+    }
+    if (el.vSpeedUp) {
+      el.vSpeedUp.addEventListener('click', (e) => {
+        e.stopPropagation();
+        changeSpeed(1);
+      });
+    }
     el.vSlideshow.addEventListener('click', () => {
       if (vs.slideshow) stopSlideshow(); else startSlideshow();
     });

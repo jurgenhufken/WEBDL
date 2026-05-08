@@ -245,6 +245,8 @@ function normalizeSourceSiteLabel(value) {
   if (!raw) return '';
   if (raw === 'vipergirls.to' || raw === 'viper.to' || raw.endsWith('.vipergirls.to') || raw.endsWith('.viper.to')) return 'vipergirls';
   if (raw === 'youtube.com' || raw === 'youtu.be' || raw.endsWith('.youtube.com')) return 'youtube';
+  if (raw === 'twitter.com' || raw === 'x.com' || raw.endsWith('.twitter.com') || raw.endsWith('.x.com')) return 'twitter';
+  if (raw === 'reddit.com' || raw === 'redd.it' || raw.endsWith('.reddit.com')) return 'reddit';
   if (raw === 'keep2share.cc' || raw === 'k2s.cc' || raw === 'k2s.io' || raw.endsWith('.keep2share.cc') || raw.endsWith('.k2s.cc') || raw.endsWith('.k2s.io')) return 'keep2share';
   return raw;
 }
@@ -269,6 +271,53 @@ function sourceSiteFromMetadata(metadata, sourceUrl) {
   return '';
 }
 
+const CONTENT_SITE_PATTERNS = [
+  { label: 'Omegle', re: /\bomeg(?:le|a|e)\b/i },
+  { label: 'Chatroulette', re: /\bchatroulette\b/i },
+  { label: 'Skype', re: /\bskype\b/i },
+  { label: 'Videochat', re: /\bvideo\s*chat\b|\bvideochat\b/i },
+  { label: 'Webcam', re: /\bweb\s*cam\b|\bwebcam\b/i },
+];
+
+function sourceGraphSummary(parsedMetadata) {
+  const graph = parsedMetadata && parsedMetadata.source_graph && typeof parsedMetadata.source_graph === 'object'
+    ? parsedMetadata.source_graph
+    : null;
+  const nodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
+  const thread = nodes.find((n) => n && n.type === 'thread') || null;
+  const host = nodes.find((n) => n && n.type === 'host') || null;
+  return {
+    source_thread_title: thread && thread.title ? String(thread.title) : '',
+    source_thread_url: thread && thread.url ? String(thread.url) : '',
+    source_host: host && host.platform ? normalizeSourceSiteLabel(host.platform) : '',
+  };
+}
+
+function contentSitesFromRow(row, parsedMetadata) {
+  const graph = parsedMetadata && parsedMetadata.source_graph && typeof parsedMetadata.source_graph === 'object'
+    ? parsedMetadata.source_graph
+    : null;
+  const graphText = graph
+    ? JSON.stringify((Array.isArray(graph.nodes) ? graph.nodes : []).map((n) => ({
+      title: n && n.title,
+      url: n && n.url,
+      platform: n && n.platform,
+    })))
+    : '';
+  const haystack = [
+    row.title,
+    row.filename,
+    row.channel,
+    row.url,
+    row.source_url,
+    row.filepath,
+    graphText,
+  ].map((v) => String(v || '')).join(' ');
+  return CONTENT_SITE_PATTERNS
+    .filter((entry) => entry.re.test(haystack))
+    .map((entry) => entry.label);
+}
+
 function mapItem(row) {
   const ext = fileExt(row.filepath, row.format);
   const isVideo = VIDEO_EXTS.includes(ext);
@@ -280,6 +329,7 @@ function mapItem(row) {
   try { parsedMetadata = row.metadata && typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata; } catch (_) { parsedMetadata = null; }
   const sourceSites = Array.isArray(parsedMetadata?.source_sites) ? parsedMetadata.source_sites.slice() : [];
   if (sourceSite && !sourceSites.some((s) => String(s || '').toLowerCase() === sourceSite.toLowerCase())) sourceSites.unshift(sourceSite);
+  const graphSummary = sourceGraphSummary(parsedMetadata);
   return {
     ...row,
     id: String(row.id),
@@ -291,6 +341,10 @@ function mapItem(row) {
     duration_seconds: durationSeconds,
     source_site: sourceSite || null,
     source_sites: sourceSites,
+    source_thread_title: graphSummary.source_thread_title || null,
+    source_thread_url: graphSummary.source_thread_url || null,
+    source_host: graphSummary.source_host || null,
+    content_sites: contentSitesFromRow(row, parsedMetadata),
   };
 }
 
@@ -953,7 +1007,7 @@ function buildItemFilters({ req, params, fileExpr, extExpr, ratingExpr, includeC
     }
   }
   if (q) {
-    addSearchFilter(where, params, q, ['d.title', 'd.filename', 'd.channel', 'd.platform', fileExpr]);
+    addSearchFilter(where, params, q, ['d.title', 'd.filename', 'd.channel', 'd.platform', 'd.source_url', 'd.url', 'd.metadata', fileExpr]);
   }
   if (Number.isFinite(minRating)) { params.push(minRating); where.push(`${ratingExpr} >= $${params.length}`); }
   if (mediaType === 'video') { where.push(`lower(${extExpr}) IN (${VIDEO_EXTS.map(e=>`'${e}'`).join(',')})`); }
