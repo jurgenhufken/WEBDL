@@ -138,6 +138,7 @@
       channel: filters.channel || '',
       q: filters.q || '',
       sort: filters.sort || 'recent',
+      channel_sort: filters.channel_sort || 'count',
       min_rating: filters.min_rating || '',
       media_type: filters.media_type || '',
       tag_id: el.vTagFilter ? el.vTagFilter.value || '' : '',
@@ -684,6 +685,7 @@
         ? new URLSearchParams()
         : appendContextParams(new URLSearchParams(), { includeChannel: false });
       params.set('sort', viewerFilters().sort || 'recent');
+      params.set('channel_sort', viewerFilters().channel_sort || 'count');
       const data = await api('/api/channels' + (params.toString() ? '?' + params.toString() : ''));
       return (data.channels || []).filter(c => c.channel && c.channel !== 'unknown');
     }
@@ -1853,6 +1855,7 @@
           if (!vs.queryFilters) vs.queryFilters = snapshotGalleryFilters();
           const params = appendContextParams(new URLSearchParams(), { includeChannel: false });
           params.set('sort', viewerFilters().sort || 'recent');
+          params.set('channel_sort', viewerFilters().channel_sort || 'count');
           const data = await api('/api/channels' + (params.toString() ? '?' + params.toString() : ''));
           vs.channels = (data.channels || []).filter(c => c.channel && c.channel !== 'unknown');
           const currentChannel = (vs.items[vs.idx] && vs.items[vs.idx].channel) || viewerFilters().channel || '';

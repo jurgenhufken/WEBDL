@@ -90,6 +90,8 @@ async function readInfoJson(workdir) {
         const data = JSON.parse(raw);
         return {
           channel: data.channel || data.uploader || data.uploader_id || data.playlist_title || '',
+          channelId: data.channel_id || data.uploader_id || '',
+          channelUrl: data.channel_url || data.uploader_url || '',
           title: data.fulltitle || data.title || '',
           sourceUrl: data.webpage_url || data.original_url || data.url || '',
           platform: data.extractor_key ? data.extractor_key.toLowerCase() : '',
@@ -112,6 +114,8 @@ async function readInfoJsonForMedia(mediaPath, fallbackInfo = null) {
       const data = JSON.parse(raw);
       return {
         channel: data.channel || data.uploader || data.uploader_id || data.playlist_title || '',
+        channelId: data.channel_id || data.uploader_id || '',
+        channelUrl: data.channel_url || data.uploader_url || '',
         title: data.fulltitle || data.title || '',
         sourceUrl: data.webpage_url || data.original_url || data.url || '',
         platform: data.extractor_key ? data.extractor_key.toLowerCase() : '',
@@ -364,6 +368,9 @@ async function syncToGallery(job, outputFiles, logger) {
             hub_job_id: job.id,
             adapter: job.adapter,
             source_published_at: fileInfo?.sourcePublishedAt || null,
+            youtube_channel_id: fileInfo?.channelId || job.options?.youtubeChannelId || null,
+            youtube_channel_url: fileInfo?.channelUrl || job.options?.youtubeChannelUrl || null,
+            indexed_channel: channel || null,
             webdl_image_quality: imageQuality.quality,
             webdl_was_thumbnail_url: imageQuality.wasThumbnail === true,
             source_context: pinnedVipergirls ? {

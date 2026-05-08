@@ -10462,7 +10462,6 @@ function looksLikeDirectFileUrl(url) {
     if (host.includes('cdninstagram.com') || host.includes('fbcdn.net')) return true;
 
     const p = (u.pathname || '').toLowerCase();
-    if ((host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) && /^\/attachments\/(?:[^\/]+\.)?\d+\/?$/i.test(p)) return true;
     if ((host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) && /\/data\/attachments\//i.test(p)) return true;
     const m = p.match(/\.([a-z0-9]{1,8})($|\?|#)/i); // Added query/hash support
     if (!m) {
@@ -10509,6 +10508,7 @@ function isKnownHtmlWrapperUrl(url) {
     const u = new URL(String(url || ''));
     const host = String(u.hostname || '').toLowerCase();
     const p = String(u.pathname || '');
+    if ((host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) && /^\/attachments\/(?:[^\/]+\.)?\d+\/?$/i.test(p)) return true;
     if (host === 'upload.footfetishforum.com' && p.startsWith('/image/')) return true;
     if (host.endsWith('pixhost.to') && p.startsWith('/show/')) return true;
     if (host === 'jpg.pet' && /^\/img\//i.test(p)) return true;
@@ -10714,6 +10714,18 @@ function isLikelyThumbnailImageUrl(rawUrl) {
     if (/\.(?:th|thumb|thumbnail|preview|small|md)\.(?:jpe?g|png|gif|webp|bmp|avif|heic|heif)(?:$|[?#])/i.test(input)) return true;
     if (/(?:^|[-_.\/])(?:thumb|thumbnail|preview|small|mini)(?:[-_.\/]|$)/i.test(p)) return true;
     return false;
+  } catch (e) {
+    return false;
+  }
+}
+
+function isFootFetishForumAttachmentCdnImageUrl(rawUrl) {
+  try {
+    const u = new URL(String(rawUrl || ''));
+    const host = String(u.hostname || '').toLowerCase();
+    const p = String(u.pathname || '').toLowerCase();
+    return host === 'flc.nyc3.digitaloceanspaces.com'
+      && /\/data\/attachments\/\d+\/\d+-[^/]+\.(jpe?g|png|webp|gif)(?:$|[?#])/i.test(p);
   } catch (e) {
     return false;
   }
@@ -11284,6 +11296,17 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
           }
           const size = fs.existsSync(filepath) ? fs.statSync(filepath).size : 0;
           const ext = (path.extname(filename).replace('.', '') || '').toLowerCase();
+          const isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'].includes(ext);
+          if (platform === 'footfetishforum' && isImage && isFootFetishForumAttachmentCdnImageUrl(url) && size > 0 && size < 80 * 1024) {
+            try { fs.rmSync(filepath, { force: true }); } catch (e) { }
+            await updateDownloadStatus.run(
+              'error',
+              0,
+              `FootFetishForum attachment geweigerd: bestand is ${size} bytes en lijkt thumbnail/preview, geen fullscale`,
+              downloadId
+            );
+            return;
+          }
           const metaObj = { tool: 'curl', platform, channel, title, url, outputDir: dir };
           metaObj.webdl_image_quality = fullscaleCheck.quality;
           metaObj.webdl_was_thumbnail_url = fullscaleCheck.wasThumbnail === true;
@@ -11295,7 +11318,6 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
             if (originThread && originThread.url) metaObj.source_url = originThread.url;
           }
 
-          const isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'].includes(ext);
           if (isImage) {
             try {
               await updateDownloadThumbnail.run(`/download/${downloadId}/thumb`, downloadId);

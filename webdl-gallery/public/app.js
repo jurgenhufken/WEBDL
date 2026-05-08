@@ -17,7 +17,7 @@
     limit: 100,
     loading: false,
     done: false,
-    filters: { platform: '', channel: '', q: '', sort: 'recent', min_rating: '', media_type: '' },
+    filters: { platform: '', channel: '', q: '', sort: 'recent', min_rating: '', media_type: '', channel_sort: 'count' },
     // Auto-refresh
     autoRefresh: true,
     liveAllMedia: true,
@@ -452,14 +452,19 @@
         resetChannels();
         return;
       }
-      const url = plat
-        ? '/api/channels?platform=' + encodeURIComponent(plat)
-        : '/api/channels';
+      const params = new URLSearchParams();
+      if (plat) params.set('platform', plat);
+      if (state.filters.q) params.set('q', state.filters.q);
+      if (state.filters.media_type) params.set('media_type', state.filters.media_type);
+      if (state.filters.min_rating) params.set('min_rating', state.filters.min_rating);
+      params.set('channel_sort', state.filters.channel_sort || 'count');
+      const url = '/api/channels' + (params.toString() ? '?' + params.toString() : '');
       const channelsResp = await apiFetch(url).then(r => r.json());
       const channels = Array.isArray(channelsResp.channels) ? channelsResp.channels : [];
       const cSel = $('channel');
       const prev = cSel.value;
-      cSel.innerHTML = '<option value="">Alle kanalen</option>';
+      const total = channels.reduce((sum, c) => sum + Number(c.count || 0), 0);
+      cSel.innerHTML = `<option value="">Alle kanalen (${total})</option>`;
       for (const c of channels.slice(0, 300)) {
         if (!c.channel || c.channel === 'unknown') continue;
         const o = document.createElement('option');
@@ -475,7 +480,13 @@
         cSel.value = '';
         state.filters.channel = '';
       }
-      state.channelsLoadedFor = plat || '__all__';
+      state.channelsLoadedFor = [
+        plat || '__all__',
+        state.filters.q || '',
+        state.filters.media_type || '',
+        state.filters.min_rating || '',
+        state.filters.channel_sort || 'count',
+      ].join('|');
     } catch (e) { console.warn('channels load failed', e); }
   }
 
@@ -489,6 +500,7 @@
   function readFiltersFromControls() {
     state.filters.platform   = $('platform').value;
     state.filters.channel    = $('channel').value;
+    state.filters.channel_sort = $('channelSort') ? $('channelSort').value : 'count';
     state.filters.sort       = $('sort').value;
     state.filters.min_rating = $('minRating').value;
     state.filters.media_type = $('mediaType').value;
@@ -524,26 +536,35 @@
   // ─── Event listeners (gallery filters) ───────────────────────────────────
   $('refresh').addEventListener('click', reloadGallery);
 
-  for (const id of ['platform', 'channel', 'sort', 'minRating', 'mediaType']) {
+  for (const id of ['platform', 'channel', 'channelSort', 'sort', 'minRating', 'mediaType']) {
     $(id).addEventListener('change', async () => {
       readFiltersFromControls();
       // Bij platform-wissel: kanalen herladen (filtert op geselecteerd platform)
-      if (id === 'platform') await reloadChannels();
+      if (id === 'platform' || id === 'channelSort' || id === 'minRating' || id === 'mediaType') await reloadChannels();
       reloadGallery();
     });
   }
   $('q').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
       state.filters.q = $('q').value.trim();
+      reloadChannels().catch((err) => console.warn('channels load failed', err));
       reloadGallery();
     }
   });
   $('q').addEventListener('change', () => {
     state.filters.q = $('q').value.trim();
+    reloadChannels().catch((err) => console.warn('channels load failed', err));
     reloadGallery();
   });
   $('channel').addEventListener('focus', () => {
-    if (state.filters.platform && state.channelsLoadedFor !== state.filters.platform) {
+    const key = [
+      state.filters.platform || '__all__',
+      state.filters.q || '',
+      state.filters.media_type || '',
+      state.filters.min_rating || '',
+      state.filters.channel_sort || 'count',
+    ].join('|');
+    if (state.channelsLoadedFor !== key) {
       reloadChannels().catch((e) => console.warn('channels load failed', e));
     }
   });

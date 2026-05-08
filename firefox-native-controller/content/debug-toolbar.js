@@ -2662,6 +2662,20 @@
           return map;
         })();
 
+        const directToFffAttachmentPageSet = (() => {
+          const map = new Map();
+          try {
+            for (const [thumbUrl, directSet] of thumbLinkToDirectSet.entries()) {
+              if (!looksLikeFffAttachmentPage(thumbUrl)) continue;
+              for (const directUrl of directSet) {
+                if (!map.has(directUrl)) map.set(directUrl, new Set());
+                map.get(directUrl).add(thumbUrl);
+              }
+            }
+          } catch (e) {}
+          return map;
+        })();
+
         const underLinkDirectSet = (() => {
           const set = new Set();
           try {
@@ -2732,8 +2746,12 @@
         candidates = candidates.filter((c) => {
           try {
             const kind = String((c && c.kind) ? c.kind : '');
-            if (!/thumb_link/i.test(kind)) return true;
             const url = normalizeUrl((c && c.url) ? c.url : '');
+            if (!/thumb_link/i.test(kind)) {
+              if (/_under_link/i.test(kind) && directToFffAttachmentPageSet.has(url)) return false;
+              return true;
+            }
+            if (looksLikeFffAttachmentPage(url)) return true;
             const mappedSet = thumbLinkToDirectSet.get(url);
             if (mappedSet && mappedSet.size) {
               for (const direct of mappedSet) {
@@ -2760,6 +2778,7 @@
             const isLikelyExternalPage = looksLikeExternalMediaPageUrl(url, candidateText);
             if (looksLikeMediaFileUrl(url)) {
               const isFffDirectAttachment = isFootFetishForumDirectAttachmentMediaUrl(url, window.location.href);
+              if (isFffDirectAttachment && /_under_link/i.test(kind) && directToFffAttachmentPageSet.has(url)) return false;
               if (/_under_link/i.test(kind) && !isFffDirectAttachment) return false;
               if (underLinkDirectSet.has(url) && !isFffDirectAttachment) return false;
               return true;

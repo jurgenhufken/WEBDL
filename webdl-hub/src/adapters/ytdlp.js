@@ -324,7 +324,16 @@ function expandPlaylist(url) {
           const title = obj.title || obj.fulltitle || '';
           const entryUrl = normalizeFlatEntryUrl(obj, url);
           if (entryUrl) {
-            entries.push({ id, title, url: entryUrl, thumbnail: bestThumbnail(obj, entryUrl) });
+            entries.push({
+              id,
+              title,
+              url: entryUrl,
+              thumbnail: bestThumbnail(obj, entryUrl),
+              channel: obj.channel || obj.uploader || obj.uploader_id || obj.playlist_uploader || '',
+              channelId: obj.channel_id || obj.uploader_id || '',
+              channelUrl: obj.channel_url || obj.uploader_url || '',
+              playlistTitle: obj.playlist_title || '',
+            });
           }
         } catch { /* niet-JSON regel, skip */ }
       }
