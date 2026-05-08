@@ -112,8 +112,134 @@ function requestedPriorityFromBody(body) {
   return Number.isFinite(value) ? Math.round(value) : null;
 }
 
+function uniqueUrls(values) {
+  const out = [];
+  const seen = new Set();
+  for (const value of Array.isArray(values) ? values : []) {
+    const url = String(value || '').trim();
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    out.push(url);
+  }
+  return out;
+}
+
+async function mapWithConcurrency(values, limit, fn) {
+  const out = new Array(values.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(values.length || 1, limit || 1)) }, async () => {
+    while (next < values.length) {
+      const index = next++;
+      out[index] = await fn(values[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
 function createJobsRouter({ repo, queue, adapters, detect }) {
   const r = express.Router();
+
+  async function enqueueOneUrl({ url, hint = null, options = {}, maxAttempts = 3, force = false, requestedPriority = null }) {
+    const slave = isSlaveUrl(url);
+    if (slave && !hint) {
+      const slavePriority = requestedPriority ?? defaultJobPriority(url, 'slave-delegate');
+      if (!force) {
+        const existingDownload = await repo.findGalleryDownloadByUrl(url);
+        if (existingDownload) {
+          return {
+            id: existingDownload.id,
+            status: existingDownload.status,
+            platform: existingDownload.platform,
+            title: existingDownload.title || existingDownload.filename || existingDownload.filepath,
+            duplicate: true,
+            delegated: true,
+            slave_platform: slave.platform,
+            simple_server_download_id: existingDownload.id,
+            existing_source: 'gallery',
+          };
+        }
+      }
+      const bookJob = await queue.enqueue({
+        url,
+        adapter: 'slave-delegate',
+        priority: slavePriority,
+        options: {
+          ...options,
+          delegated_to: 'simple-server',
+          slave_platform: slave.platform,
+        },
+        maxAttempts: 1,
+      });
+      const sourceContext = options.webdl_source_contexts?.[url] || options.sourceContext || null;
+      const originalUrl = sourceContext?.url || options.contextUrl || options.pageUrl || '';
+      const originalSite = hostnameFromUrl(originalUrl) || sourceContext?.platform || options.platform || '';
+      const result = await delegateToSlave(repo.pool, {
+        url,
+        platform: slave.platform,
+        metadata: {
+          delegated_from_hub: true,
+          hub_job_id: bookJob.id,
+          source_context: sourceContext,
+          source_site: originalSite || null,
+          original_site: originalSite || null,
+          original_platform: sourceContext?.platform || options.platform || null,
+          original_channel: sourceContext?.channel || options.channel || null,
+          original_title: sourceContext?.title || options.title || null,
+          original_url: originalUrl || null,
+        },
+        priority: slavePriority,
+      });
+      await repo.pool.query(
+        `UPDATE ${repo.schema}.jobs
+            SET status = 'running',
+                started_at = now(),
+                locked_by = 'slave-' || $1::text,
+                locked_at = now(),
+                options = options || jsonb_build_object(
+                  'simple_server_download_id', $1::text,
+                  'was_duplicate', $2::boolean
+                )
+          WHERE id = $3`,
+        [result.downloadId, !!result.duplicate, bookJob.id],
+      );
+      await repo.appendLog(
+        bookJob.id,
+        'info',
+        `↪️  Gedelegeerd naar simple-server (${slave.platform}, download #${result.downloadId}${result.duplicate ? `, dupe van status=${result.existingStatus}` : ''}); wacht op voltooiing...`,
+      );
+      const freshJob = await repo.getJob(bookJob.id);
+      return {
+        ...freshJob,
+        delegated: true,
+        slave_platform: slave.platform,
+        simple_server_download_id: result.downloadId,
+        duplicate: !!result.duplicate,
+      };
+    }
+
+    const adapter = detect(url, adapters, { hint });
+    if (!adapter) {
+      throw Object.assign(new Error('geen passende adapter voor deze URL'), { httpStatus: 400 });
+    }
+    const priority = requestedPriority ?? defaultJobPriority(url, adapter.name);
+    if (!force) {
+      const existing = await repo.findRecentJobByUrl(url);
+      if (existing) return { ...existing, duplicate: true };
+      const existingDownload = await repo.findGalleryDownloadByUrl(url);
+      if (existingDownload) {
+        return {
+          id: existingDownload.id,
+          status: existingDownload.status,
+          platform: existingDownload.platform,
+          title: existingDownload.title || existingDownload.filename || existingDownload.filepath,
+          duplicate: true,
+          existing_source: 'gallery',
+        };
+      }
+    }
+    return queue.enqueue({ url, adapter: adapter.name, priority, options, maxAttempts });
+  }
 
   // ─── Enqueue single URL ─────────────────────────────────────────────────────
   r.post('/', async (req, res, next) => {
@@ -124,90 +250,6 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
       }
       const requestedPriority = requestedPriorityFromBody(req.body);
       const isExpandedRequest = !hint && isMultiItemUrl(url);
-
-      // Master/slave routing: sommige hosts worden door simple-server
-      // afgehandeld. Hub inserteert dan een pending download rij; de
-      // simple-server scheduler picks it up via auto-rehydrate.
-      const slave = isSlaveUrl(url);
-      if (slave && !hint) {
-        const slavePriority = requestedPriority ?? defaultJobPriority(url, 'slave-delegate');
-        if (!force) {
-          const existingDownload = await repo.findGalleryDownloadByUrl(url);
-          if (existingDownload) {
-            return res.status(200).json({
-              id: existingDownload.id,
-              status: existingDownload.status,
-              platform: existingDownload.platform,
-              title: existingDownload.title || existingDownload.filename || existingDownload.filepath,
-              duplicate: true,
-              delegated: true,
-              slave_platform: slave.platform,
-              simple_server_download_id: existingDownload.id,
-              existing_source: 'gallery',
-            });
-          }
-        }
-        // Bookkeeping hub-job eerst aanmaken zodat we z'n ID kunnen meegeven.
-        const bookJob = await queue.enqueue({
-          url,
-          adapter: 'slave-delegate',
-          priority: slavePriority,
-          options: {
-            ...options,
-            delegated_to: 'simple-server',
-            slave_platform: slave.platform,
-          },
-          maxAttempts: 1,
-        });
-        // Delegeer aan simple-server met hub_job_id zodat poller het terug
-        // kan koppelen.
-        const sourceContext = options.webdl_source_contexts?.[url] || options.sourceContext || null;
-        const originalUrl = sourceContext?.url || options.contextUrl || options.pageUrl || '';
-        const originalSite = hostnameFromUrl(originalUrl) || sourceContext?.platform || options.platform || '';
-        const result = await delegateToSlave(repo.pool, {
-          url,
-          platform: slave.platform,
-          metadata: {
-            delegated_from_hub: true,
-            hub_job_id: bookJob.id,
-            source_context: sourceContext,
-            source_site: originalSite || null,
-            original_site: originalSite || null,
-            original_platform: sourceContext?.platform || options.platform || null,
-            original_channel: sourceContext?.channel || options.channel || null,
-            original_title: sourceContext?.title || options.title || null,
-            original_url: originalUrl || null,
-          },
-          priority: slavePriority,
-        });
-        // Markeer hub-job als 'running' en sla simple_server_download_id op.
-        await repo.pool.query(
-          `UPDATE ${repo.schema}.jobs
-              SET status = 'running',
-                  started_at = now(),
-                  locked_by = 'slave-' || $1::text,
-                  locked_at = now(),
-                  options = options || jsonb_build_object(
-                    'simple_server_download_id', $1::text,
-                    'was_duplicate', $2::boolean
-                  )
-            WHERE id = $3`,
-          [result.downloadId, !!result.duplicate, bookJob.id],
-        );
-        await repo.appendLog(
-          bookJob.id,
-          'info',
-          `↪️  Gedelegeerd naar simple-server (${slave.platform}, download #${result.downloadId}${result.duplicate ? `, dupe van status=${result.existingStatus}` : ''}); wacht op voltooiing...`,
-        );
-        const freshJob = await repo.getJob(bookJob.id);
-        return res.status(201).json({
-          ...freshJob,
-          delegated: true,
-          slave_platform: slave.platform,
-          simple_server_download_id: result.downloadId,
-          duplicate: !!result.duplicate,
-        });
-      }
 
       // Auto-expand: als URL een playlist/kanaal/shorts-tab is, expanden
       // we 'm automatisch naar losse jobs ipv één enkele queue-entry.
@@ -224,30 +266,54 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
         }
       }
 
-      const adapter = detect(url, adapters, { hint });
-      if (!adapter) return res.status(400).json({ error: 'geen passende adapter voor deze URL' });
-      const priority = requestedPriority ?? defaultJobPriority(url, adapter.name);
-      if (!force) {
-        const existing = await repo.findRecentJobByUrl(url);
-        if (existing) {
-          return res.status(200).json({ ...existing, duplicate: true });
-        }
-        const existingDownload = await repo.findGalleryDownloadByUrl(url);
-        if (existingDownload) {
-          return res.status(200).json({
-            id: existingDownload.id,
-            status: existingDownload.status,
-            platform: existingDownload.platform,
-            title: existingDownload.title || existingDownload.filename || existingDownload.filepath,
-            duplicate: true,
-            existing_source: 'gallery',
-          });
-        }
-      }
-      const job = await queue.enqueue({
-        url, adapter: adapter.name, priority, options, maxAttempts,
+      const job = await enqueueOneUrl({
+        url, hint, options, maxAttempts, force, requestedPriority,
       });
-      res.status(201).json(job);
+      res.status(job.duplicate ? 200 : 201).json(job);
+    } catch (e) {
+      if (e && e.httpStatus) return res.status(e.httpStatus).json({ error: e.message });
+      next(e);
+    }
+  });
+
+  // ─── Batch enqueue ──────────────────────────────────────────────────────────
+  r.post('/batch', async (req, res, next) => {
+    try {
+      const { adapter: hint, options = {}, metadata = {}, maxAttempts = 3, force = false } = req.body || {};
+      const urls = uniqueUrls(req.body && req.body.urls);
+      if (!urls.length) return res.status(400).json({ error: 'urls ontbreekt' });
+      const requestedPriority = requestedPriorityFromBody(req.body);
+      const batchOptions = {
+        ...(metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {}),
+        ...(options && typeof options === 'object' && !Array.isArray(options) ? options : {}),
+      };
+      const results = await mapWithConcurrency(urls, 8, async (url) => {
+        try {
+          const job = await enqueueOneUrl({
+            url,
+            hint,
+            options: batchOptions,
+            maxAttempts,
+            force,
+            requestedPriority,
+          });
+          return { success: true, url, job, duplicate: !!job.duplicate };
+        } catch (e) {
+          return { success: false, url, error: String(e.message || e) };
+        }
+      });
+      const queued = results.filter((row) => row.success && !row.duplicate).length;
+      const duplicates = results.filter((row) => row.success && row.duplicate).length;
+      const errors = results.filter((row) => !row.success).length;
+      res.status(201).json({
+        success: true,
+        total: urls.length,
+        queued,
+        duplicates,
+        errors,
+        jobs: results.filter((row) => row.success).map((row) => row.job),
+        failed: results.filter((row) => !row.success).slice(0, 50),
+      });
     } catch (e) { next(e); }
   });
 

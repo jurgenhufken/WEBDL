@@ -112,6 +112,48 @@ async function postHubJob(url, metadata = {}) {
   }
 }
 
+async function postHubBatch(urls, metadata = {}, force = false) {
+  const cleanUrls = Array.isArray(urls)
+    ? urls.map((url) => String(url || '').trim()).filter(Boolean)
+    : [];
+  if (!cleanUrls.length) return { success: false, error: 'Geen URLs om naar WebDL-Hub te sturen' };
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), Math.max(HTTP_TIMEOUT_MS, 60000));
+    const response = await fetch(`${HUB_URL}/api/jobs/batch`, {
+      method: 'POST',
+      mode: 'cors',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        urls: cleanUrls,
+        force: force === true,
+        options: {
+          ...(metadata || {}),
+          queued_from: 'firefox-extension',
+        },
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      return { success: false, error: data.error || `Hub batch fout: HTTP ${response.status}` };
+    }
+    return {
+      success: true,
+      total: Number(data.total) || cleanUrls.length,
+      queued: Number(data.queued) || 0,
+      duplicates: Number(data.duplicates) || 0,
+      errors: Number(data.errors) || 0,
+      jobs: Array.isArray(data.jobs) ? data.jobs : [],
+      failed: Array.isArray(data.failed) ? data.failed : [],
+      raw: data,
+    };
+  } catch (e) {
+    return { success: false, error: e && e.message ? e.message : String(e) };
+  }
+}
+
 async function getJson(endpoint) {
   const candidates = getServerCandidates();
   let lastError = null;
@@ -563,13 +605,9 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const payload = (message && message.payload) || {};
     const urls = payload.urls || [];
     const metadata = payload.metadata || {};
-    
-    Promise.all(urls.map(url => postHubJob(url, metadata))).then((results) => {
-      const queued = results.filter(r => r.success && !r.duplicate).reduce((sum, r) => sum + (Number(r.queued) || 1), 0);
-      const duplicates = results.filter(r => r.duplicate).length;
-      const errors = results.filter(r => !r.success).length;
-      sendResponse({ success: true, queued, duplicates, errors });
-    }).catch(e => sendResponse({ success: false, error: e.message }));
+    postHubBatch(urls, metadata, payload.force === true)
+      .then(sendResponse)
+      .catch(e => sendResponse({ success: false, error: e.message }));
     return true;
   }
 

@@ -3986,8 +3986,8 @@
         const result = await queueBatchDownloadRequest(urls, meta);
         if (result && result.success) {
           const stats = summarizeBatchResult(result);
-          showNotification(`AZNudeFeet: ${stats.queued} nieuw, ${stats.duplicates} bestaand (${stats.total} totaal)`);
-          addLog(`AZNudeFeet gestart: nieuw=${stats.queued}, bestaand=${stats.duplicates}, totaal=${stats.total}`);
+          showNotification(`AZNudeFeet: ${formatBatchStats(stats)}`);
+          addLog(`AZNudeFeet gestart: ${formatBatchStats(stats)}`);
         } else {
           showNotification(`AZNudeFeet fout: ${(result && result.error) ? result.error : 'unknown'}`, true);
           addLog(`AZNudeFeet fout: ${(result && result.error) ? result.error : 'unknown'}`, 'error');
@@ -4153,29 +4153,46 @@
 
   function summarizeBatchResult(result) {
     const rows = Array.isArray(result && result.downloads) ? result.downloads : [];
-    if (!rows.length && result && (result.queued != null || result.duplicates != null || result.errors != null)) {
+    if (!rows.length && result && (result.queued != null || result.duplicates != null || result.errors != null || result.total != null)) {
       const queued = Number(result.queued) || 0;
       const duplicates = Number(result.duplicates) || 0;
       const errors = Number(result.errors) || 0;
-      return { total: queued + duplicates + errors, queued, duplicates };
+      const total = Number(result.total) || queued + duplicates + errors;
+      const skipped = Math.max(0, total - queued - duplicates - errors);
+      return { total, queued, duplicates, errors, skipped };
     }
     if (result && result.expanded) {
       return {
         total: Number(result.total) || 0,
         queued: Number(result.queued) || 0,
-        duplicates: Number(result.duplicates) || 0
+        duplicates: Number(result.duplicates) || 0,
+        errors: Number(result.errors) || 0,
+        skipped: Number(result.skipped) || 0
       };
     }
     if (!rows.length && result && Array.isArray(result.jobs)) {
+      const queued = Number(result.queued) || result.jobs.length;
+      const duplicates = Number(result.duplicates) || 0;
+      const errors = Number(result.errors) || 0;
+      const total = Number(result.total) || result.jobs.length;
       return {
-        total: Number(result.total) || result.jobs.length,
-        queued: Number(result.queued) || result.jobs.length,
-        duplicates: Number(result.duplicates) || 0
+        total,
+        queued,
+        duplicates,
+        errors,
+        skipped: Math.max(0, total - queued - duplicates - errors)
       };
     }
     const duplicates = rows.filter((d) => !!(d && d.duplicate)).length;
     const queued = Math.max(0, rows.length - duplicates);
-    return { total: rows.length, queued, duplicates };
+    return { total: rows.length, queued, duplicates, errors: 0, skipped: 0 };
+  }
+
+  function formatBatchStats(stats) {
+    const extra = [];
+    if (stats && Number(stats.errors || 0) > 0) extra.push(`${Number(stats.errors) || 0} fout`);
+    if (stats && Number(stats.skipped || 0) > 0) extra.push(`${Number(stats.skipped) || 0} overgeslagen`);
+    return `${Number(stats && stats.queued) || 0} nieuw, ${Number(stats && stats.duplicates) || 0} bestaand${extra.length ? `, ${extra.join(', ')}` : ''} (${Number(stats && stats.total) || 0} totaal)`;
   }
 
   async function expandRedditBatchUrlsViaApi(seedUrl) {
@@ -4233,8 +4250,8 @@
       const result = await queueBatchDownloadRequest(urls, meta);
       if (result.success) {
         const stats = summarizeBatchResult(result);
-        showNotification(`Reddit all: ${stats.queued} nieuw, ${stats.duplicates} bestaand (${stats.total} totaal)`);
-        addLog(`Reddit all gestart: nieuw=${stats.queued}, bestaand=${stats.duplicates}, totaal=${stats.total}`);
+        showNotification(`Reddit all: ${formatBatchStats(stats)}`);
+        addLog(`Reddit all gestart: ${formatBatchStats(stats)}`);
       } else {
         showNotification(`Reddit all fout: ${result.error}`, true);
         addLog(`Reddit all fout: ${result.error}`, 'error');
@@ -4418,8 +4435,8 @@
       if (result.success) {
         const stats = summarizeBatchResult(result);
         const expandHint = (result.expanding && Number(result.expanding) > 0) ? ` | 🔄 ${result.expanding} pagina's uitbreiden...` : '';
-        showNotification(`Media: ${stats.queued} nieuw, ${stats.duplicates} bestaand (${stats.total} totaal)${expandHint}`);
-        addLog(`Media gestart: nieuw=${stats.queued}, bestaand=${stats.duplicates}, totaal=${stats.total}`);
+        showNotification(`Media: ${formatBatchStats(stats)}${expandHint}`);
+        addLog(`Media gestart: ${formatBatchStats(stats)}`);
       } else {
         showNotification(`Media fout: ${result.error}`, true);
         addLog(`Media fout: ${result.error}`, 'error');
@@ -4626,8 +4643,8 @@
             ? ` | 🔄 ~${estGal} galleries worden op achtergrond gedownload`
             : ` | 🔄 Pagina's worden op achtergrond uitgebreid`
           : '';
-        showNotification(`${modeLabel}: ${stats.queued} nieuw, ${stats.duplicates} bestaand (${stats.total} totaal)${expandHint}`);
-        addLog(`${modeLabel} gestart: nieuw=${stats.queued}, bestaand=${stats.duplicates}, totaal=${stats.total}`);
+        showNotification(`${modeLabel}: ${formatBatchStats(stats)}${expandHint}`);
+        addLog(`${modeLabel} gestart: ${formatBatchStats(stats)}`);
       } else {
         showNotification(`Batch fout: ${result.error}`, true);
         addLog(`Batch fout: ${result.error}`, 'error');
@@ -4787,8 +4804,8 @@
       if (result && result.success) {
         const stats = summarizeBatchResult(result);
         const label = force ? `Force ${isAnyForumPage ? 'forum' : 'thread'}` : (isAnyForumPage ? 'Forum' : 'Thread');
-        showNotification(`${label}: ${stats.queued} nieuw, ${stats.duplicates} bestaand (${stats.total} totaal)`);
-        addLog(`${label} gestart: nieuw=${stats.queued}, bestaand=${stats.duplicates}, totaal=${stats.total}`);
+        showNotification(`${label}: ${formatBatchStats(stats)}`);
+        addLog(`${label} gestart: ${formatBatchStats(stats)}`);
       } else {
         showNotification(`Thread batch fout: ${(result && result.error) ? result.error : 'unknown'}`, true);
         addLog(`Thread batch fout: ${(result && result.error) ? result.error : 'unknown'}`, 'error');
@@ -4885,8 +4902,8 @@
       });
       if (queueResult && queueResult.success) {
         const stats = summarizeBatchResult(queueResult);
-        showNotification(`K2S: ${stats.queued} nieuw, ${stats.duplicates} bestaand (${stats.total} totaal)`);
-        addLog(`K2S gestart: nieuw=${stats.queued}, bestaand=${stats.duplicates}, totaal=${stats.total}`);
+        showNotification(`K2S: ${formatBatchStats(stats)}`);
+        addLog(`K2S gestart: ${formatBatchStats(stats)}`);
       } else {
         showNotification(`K2S fout: ${(queueResult && queueResult.error) ? queueResult.error : 'unknown'}`, true);
         addLog(`K2S fout: ${(queueResult && queueResult.error) ? queueResult.error : 'unknown'}`, 'error');
