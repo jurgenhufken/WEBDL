@@ -3,6 +3,8 @@
 
 const express = require('express');
 const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
 const { isSlaveUrl, delegateToSlave } = require('../queue/slave-router');
 const { classifyLane, defaultJobPriority } = require('../db/repo');
 
@@ -195,6 +197,48 @@ function uniqueUrls(values) {
   return out;
 }
 
+const K2S_AUTH_KEYS = [
+  'WEBDL_KEEP2SHARE_AUTH_TOKEN',
+  'KEEP2SHARE_AUTH_TOKEN',
+  'K2S_AUTH_TOKEN',
+  'WEBDL_KEEP2SHARE_ACCESS_TOKEN',
+  'KEEP2SHARE_ACCESS_TOKEN',
+  'K2S_ACCESS_TOKEN',
+  'WEBDL_KEEP2SHARE_USERNAME',
+  'KEEP2SHARE_USERNAME',
+  'K2S_USERNAME',
+  'WEBDL_KEEP2SHARE_COOKIE',
+  'KEEP2SHARE_COOKIE',
+  'K2S_COOKIE',
+  'WEBDL_KEEP2SHARE_X_BC',
+  'KEEP2SHARE_X_BC',
+  'K2S_X_BC',
+  'WEBDL_KEEP2SHARE_XBC',
+  'KEEP2SHARE_XBC',
+  'K2S_XBC',
+];
+
+function envFileHasAnyKey(filePath, keys) {
+  try {
+    if (!fs.existsSync(filePath)) return false;
+    const wanted = new Set(keys.map((k) => k.toUpperCase()));
+    for (const line of fs.readFileSync(filePath, 'utf8').split(/\r?\n/)) {
+      const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)$/i);
+      if (!m || !wanted.has(String(m[1]).toUpperCase())) continue;
+      const value = String(m[2] || '').trim().replace(/^['"]|['"]$/g, '');
+      if (value) return true;
+    }
+  } catch (_) {}
+  return false;
+}
+
+function hasKeep2ShareApiAuthConfigured() {
+  if (K2S_AUTH_KEYS.some((key) => String(process.env[key] || '').trim())) return true;
+  const root = path.resolve(__dirname, '..', '..', '..');
+  return envFileHasAnyKey(path.join(root, 'screen-recorder-native', '.env'), K2S_AUTH_KEYS)
+    || envFileHasAnyKey(path.join(root, 'webdl-hub', '.env'), K2S_AUTH_KEYS);
+}
+
 async function mapWithConcurrency(values, limit, fn) {
   const out = new Array(values.length);
   let next = 0;
@@ -214,6 +258,12 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
   async function enqueueOneUrl({ url, hint = null, options = {}, maxAttempts = 3, force = false, requestedPriority = null }) {
     const slave = isSlaveUrl(url);
     if (slave && !hint) {
+      if (slave.platform === 'keep2share' && !hasKeep2ShareApiAuthConfigured()) {
+        throw Object.assign(
+          new Error('Keep2Share auth ontbreekt. Zet K2S_COOKIE/K2S_X_BC, K2S_ACCESS_TOKEN/WEBDL_KEEP2SHARE_AUTH_TOKEN of K2S_USERNAME/K2S_PASSWORD in screen-recorder-native/.env of webdl-hub/.env voordat K2S wordt gequeued.'),
+          { httpStatus: 409 },
+        );
+      }
       const slavePriority = requestedPriority ?? defaultJobPriority(url, 'slave-delegate');
       if (!force) {
         const existingDownload = await repo.findGalleryDownloadByUrl(url);

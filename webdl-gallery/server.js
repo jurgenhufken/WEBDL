@@ -1196,33 +1196,7 @@ app.get('/api/platforms', async (_req, res) => {
       WITH media_platforms AS (
         SELECT COALESCE(NULLIF(d.platform, ''), 'unknown') AS platform, COUNT(*)::bigint AS count
           FROM downloads d
-         WHERE d.filepath IS NOT NULL AND d.filepath <> ''
-           AND d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])
-           AND d.filepath !~* '${TEMP_RELPATH_RE}'
-           AND (d.filesize IS NULL OR d.filesize > 0)
-           AND lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})
-           AND (
-             d.platform IN ('sabnzbd', 'keep2share')
-             OR NOT EXISTS (
-               SELECT 1 FROM download_files mf
-                WHERE mf.download_id = d.id
-                  AND mf.relpath !~* '${AUX_RELPATH_RE}'
-                  AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
-             )
-           )
-         GROUP BY COALESCE(NULLIF(d.platform, ''), 'unknown')
-        UNION ALL
-        SELECT COALESCE(NULLIF(d.platform, ''), 'unknown') AS platform, COUNT(*)::bigint AS count
-          FROM download_files df
-          JOIN downloads d ON d.id = df.download_id
-         WHERE d.platform NOT IN ('sabnzbd', 'keep2share')
-           AND df.relpath IS NOT NULL AND df.relpath <> ''
-           AND df.relpath !~* '${AUX_RELPATH_RE}'
-           AND df.relpath !~* '${TEMP_RELPATH_RE}'
-           AND d.filepath !~* '${TEMP_RELPATH_RE}'
-           AND d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])
-           AND (df.filesize IS NULL OR df.filesize > 0)
-           AND lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
+         WHERE d.status = 'completed'
          GROUP BY COALESCE(NULLIF(d.platform, ''), 'unknown')
         UNION ALL
         SELECT COALESCE(NULLIF(s.platform, ''), 'unknown') AS platform, COUNT(*)::bigint AS count

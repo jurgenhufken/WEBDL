@@ -3306,20 +3306,36 @@
   }
 
   const screenshotBtn = makeBtn('📷 Screenshot', '#4CAF50');
-  const downloadBtn = makeBtn('⬇️ Download', '#2196F3');
-  const batchDownloadBtn = makeBtn('⏬ Batch', '#1565C0');
+  const downloadBtn = makeBtn('⬇️ Deze media', '#2196F3');
+  const batchDownloadBtn = makeBtn('⏬ Paginalinks', '#1565C0');
   const dashboardBtn = makeBtn('📊 Dashboard', '#0f3460');
-  const mediaDownloadBtn = makeBtnIn(extraBtnContainer, '🖼 Media', '#6d28d9');
-  const forceBatchDownloadBtn = makeBtnIn(extraBtnContainer, '🔥 Force', '#b91c1c');
-  const threadBatchDownloadBtn = makeBtnIn(extraBtnContainer, '🧵 Hele thread', '#0ea5e9');
+  const mediaDownloadBtn = makeBtnIn(extraBtnContainer, '🖼 Zichtbare media', '#6d28d9');
+  const forceBatchDownloadBtn = makeBtnIn(extraBtnContainer, '🔥 Opnieuw', '#b91c1c');
+  const threadBatchDownloadBtn = makeBtnIn(extraBtnContainer, '🧵 Forum/thread', '#0ea5e9');
   const keep2ShareBatchBtn = null;
-  const vdhHintBtn = makeBtnIn(extraBtnContainer, '🧩 VDH hint', '#2e7d32');
-  const redditAllBtn = makeBtnIn(extraBtnContainer, '🧵 Reddit all', '#ff4500');
-  const redgifsClipBtn = makeBtnIn(extraBtnContainer, 'RG clip', '#dc2626');
-  const redgifsFeedBtn = makeBtnIn(extraBtnContainer, 'RG feed', '#991b1b');
-  const ytShortsBtn = makeBtnIn(extraBtnContainer, '⏬ Shorts', '#7c3aed');
-  const ytVideosBtn = makeBtnIn(extraBtnContainer, '⏬ Videos', '#5b21b6');
-  const openAllBtn = makeBtnIn(extraBtnContainer, 'Open alle', '#03A9F4');
+  const vdhHintBtn = makeBtnIn(extraBtnContainer, '🧩 VDH kanaal', '#2e7d32');
+  const redditAllBtn = makeBtnIn(extraBtnContainer, 'Reddit via BDFR', '#ff4500');
+  const redgifsClipBtn = makeBtnIn(extraBtnContainer, 'Redgifs clip', '#dc2626');
+  const redgifsFeedBtn = makeBtnIn(extraBtnContainer, 'Redgifs profiel', '#991b1b');
+  const ytShortsBtn = makeBtnIn(extraBtnContainer, 'YT shorts', '#7c3aed');
+  const ytVideosBtn = makeBtnIn(extraBtnContainer, 'YT videos', '#5b21b6');
+  const openAllBtn = makeBtnIn(extraBtnContainer, 'Open links', '#03A9F4');
+  try {
+    screenshotBtn.title = 'Maak een screenshot van deze pagina';
+    downloadBtn.title = 'Download de huidige video, foto of geselecteerde media';
+    batchDownloadBtn.title = 'Scan deze pagina en download gevonden links/media';
+    dashboardBtn.title = 'Open WEBDL dashboard';
+    mediaDownloadBtn.title = 'Download direct zichtbare video/foto-bronnen op deze pagina';
+    forceBatchDownloadBtn.title = 'Queue dezelfde gevonden links opnieuw, ook als ze al bestaan';
+    threadBatchDownloadBtn.title = 'Scan de hele forumthread, niet alleen deze pagina';
+    vdhHintBtn.title = 'Geef Video DownloadHelper een kanaal/context hint';
+    redditAllBtn.title = 'Stuur Reddit post/subreddit/user naar BDFR download';
+    redgifsClipBtn.title = 'Download deze Redgifs clip of Redgifs links op de pagina';
+    redgifsFeedBtn.title = 'Download/expand Redgifs profiel, collectie, niche of zoekpagina';
+    ytShortsBtn.title = 'Download YouTube Shorts van dit kanaal';
+    ytVideosBtn.title = 'Download YouTube videos van dit kanaal';
+    openAllBtn.title = 'Open alle gevonden links in tabs';
+  } catch (e) {}
 
   // Tweede rij: REC knoppen
   const recContainer = document.createElement('div');
@@ -3801,7 +3817,12 @@
       hubJobId,
       simpleServerDownloadId,
       expanded: !!raw.expanded,
+      total: Number.isFinite(Number(raw.total)) ? Number(raw.total) : undefined,
       queued: Number.isFinite(Number(raw.queued)) ? Number(raw.queued) : undefined,
+      duplicates: Number.isFinite(Number(raw.duplicates)) ? Number(raw.duplicates) : undefined,
+      errors: Number.isFinite(Number(raw.errors)) ? Number(raw.errors) : undefined,
+      skipped: Number.isFinite(Number(raw.skipped)) ? Number(raw.skipped) : undefined,
+      paused: Number.isFinite(Number(raw.paused)) ? Number(raw.paused) : undefined,
       duplicate: !!raw.duplicate,
       delegated: !!raw.delegated,
       status: raw.status || null,
@@ -4479,7 +4500,7 @@
       const errors = Number(result.errors) || 0;
       const total = Number(result.total) || queued + duplicates + errors;
       const skipped = Math.max(0, total - queued - duplicates - errors);
-      return { total, queued, duplicates, errors, skipped };
+      return { total, queued, duplicates, errors, skipped, paused: Number(result.paused) || 0 };
     }
     if (result && result.expanded) {
       return {
@@ -4487,7 +4508,8 @@
         queued: Number(result.queued) || 0,
         duplicates: Number(result.duplicates) || 0,
         errors: Number(result.errors) || 0,
-        skipped: Number(result.skipped) || 0
+        skipped: Number(result.skipped) || 0,
+        paused: Number(result.paused) || 0
       };
     }
     if (!rows.length && result && Array.isArray(result.jobs)) {
@@ -4500,7 +4522,8 @@
         queued,
         duplicates,
         errors,
-        skipped: Math.max(0, total - queued - duplicates - errors)
+        skipped: Math.max(0, total - queued - duplicates - errors),
+        paused: Number(result.paused) || 0
       };
     }
     const duplicates = rows.filter((d) => !!(d && d.duplicate)).length;
@@ -4512,6 +4535,7 @@
     const extra = [];
     if (stats && Number(stats.errors || 0) > 0) extra.push(`${Number(stats.errors) || 0} fout`);
     if (stats && Number(stats.skipped || 0) > 0) extra.push(`${Number(stats.skipped) || 0} overgeslagen`);
+    if (stats && Number(stats.paused || 0) > 0) extra.push(`${Number(stats.paused) || 0} gepauzeerd`);
     return `${Number(stats && stats.queued) || 0} nieuw, ${Number(stats && stats.duplicates) || 0} bestaand${extra.length ? `, ${extra.join(', ')}` : ''} (${Number(stats && stats.total) || 0} totaal)`;
   }
 
@@ -4601,7 +4625,7 @@
   async function runRedgifsClipDownload(triggerBtn) {
     if (!(await ensureHubReachable(true))) return;
     const meta = scrapeMetadata();
-    const original = triggerBtn ? triggerBtn.textContent : 'RG clip';
+    const original = triggerBtn ? triggerBtn.textContent : 'Redgifs clip';
     if (triggerBtn) {
       triggerBtn.textContent = 'RG...';
       triggerBtn.style.opacity = '0.6';
@@ -4648,9 +4672,9 @@
   async function runRedgifsFeedDownload(triggerBtn, clickEvent) {
     if (!(await ensureHubReachable(true))) return;
     const meta = scrapeMetadata();
-    const original = triggerBtn ? triggerBtn.textContent : 'RG feed';
+    const original = triggerBtn ? triggerBtn.textContent : 'Redgifs profiel';
     if (triggerBtn) {
-      triggerBtn.textContent = 'RG feed...';
+      triggerBtn.textContent = 'Redgifs...';
       triggerBtn.style.opacity = '0.6';
     }
     try {
@@ -4715,7 +4739,7 @@
       return;
     }
 
-    const original = triggerBtn ? triggerBtn.textContent : '🧵 Reddit all';
+    const original = triggerBtn ? triggerBtn.textContent : 'Reddit via BDFR';
     if (triggerBtn) {
       triggerBtn.textContent = '⏳ Reddit...';
       triggerBtn.style.opacity = '0.6';
@@ -4739,15 +4763,19 @@
         return;
       }
 
-      const hint = `\nMode: ${redditIndexInfo && redditIndexInfo.mode ? redditIndexInfo.mode : 'unknown'}, pagina's: ${redditIndexInfo && Number.isFinite(redditIndexInfo.scannedPages) ? redditIndexInfo.scannedPages : 0}, posts gescand: ${redditIndexInfo && Number.isFinite(redditIndexInfo.scannedPosts) ? redditIndexInfo.scannedPosts : 0}`;
-      const ok = window.confirm(`Download all - Reddit: ${urls.length} items?${hint}`);
+      const fallbackTarget = redditIndexInfo && redditIndexInfo.mode === 'fallback_target';
+      const hint = fallbackTarget
+        ? '\nReddit listing is geblokkeerd door 403; WEBDL stuurt deze subreddit/user direct naar BDFR.'
+        : `\nMode: ${redditIndexInfo && redditIndexInfo.mode ? redditIndexInfo.mode : 'unknown'}, pagina's: ${redditIndexInfo && Number.isFinite(redditIndexInfo.scannedPages) ? redditIndexInfo.scannedPages : 0}, posts gescand: ${redditIndexInfo && Number.isFinite(redditIndexInfo.scannedPosts) ? redditIndexInfo.scannedPosts : 0}`;
+      const ok = window.confirm(fallbackTarget ? `Reddit target downloaden via BDFR?${hint}` : `Download all - Reddit: ${urls.length} items?${hint}`);
       if (!ok) return;
 
       const result = await queueBatchDownloadRequest(urls, meta);
       if (result.success) {
         const stats = summarizeBatchResult(result);
-        showNotification(`Reddit all: ${formatBatchStats(stats)}`);
-        addLog(`Reddit all gestart: ${formatBatchStats(stats)}`);
+        const label = fallbackTarget ? 'Reddit BDFR target' : 'Reddit all';
+        showNotification(`${label}: ${formatBatchStats(stats)}`);
+        addLog(`${label} gestart: ${formatBatchStats(stats)}`);
       } else {
         showNotification(`Reddit all fout: ${result.error}`, true);
         addLog(`Reddit all fout: ${result.error}`, 'error');
@@ -5003,8 +5031,11 @@
       return;
     }
 
+    const redditFallbackTarget = redditIndexInfo && meta.platform === 'reddit' && redditIndexInfo.mode === 'fallback_target';
     const redditHint = (redditIndexInfo && meta.platform === 'reddit')
-      ? `\nMode: ${redditIndexInfo.mode}, pagina's: ${redditIndexInfo.scannedPages}, posts gescand: ${redditIndexInfo.scannedPosts}`
+      ? (redditFallbackTarget
+        ? '\nReddit listing is geblokkeerd door 403; WEBDL stuurt deze subreddit/user direct naar BDFR.'
+        : `\nMode: ${redditIndexInfo.mode}, pagina's: ${redditIndexInfo.scannedPages}, posts gescand: ${redditIndexInfo.scannedPosts}`)
       : '';
     let selectedDirectHints = null;
     let previewAccepted = false;
@@ -5074,7 +5105,9 @@
       ? true
       : (confirmLabel
         ? window.confirm(confirmLabel)
-        : confirmBatchStart({ count: urls.length, force, label: 'Batch download', redditHint }));
+        : (redditFallbackTarget
+          ? window.confirm(`Reddit target downloaden via BDFR?${redditHint}`)
+          : confirmBatchStart({ count: urls.length, force, label: 'Batch download', redditHint })));
     if (!ok) return;
 
     // Resolve upload.footfetishforum.com/image/ wrapper URLs in-browser

@@ -82,6 +82,14 @@
     return '';
   }
 
+  function displayTitle(it) {
+    const title = String(it && it.title || '').trim();
+    if (title && title.toLowerCase() !== 'untitled') return title;
+    const filename = String(it && it.filename || '').trim();
+    if (filename) return filename.replace(/\.[a-z0-9]{2,5}$/i, '');
+    return 'Zonder titel';
+  }
+
   function itemMatchesCurrentFilters(it) {
     const f = state.filters || {};
     if (f.platform && String(it.platform || '') !== String(f.platform)) return false;
@@ -139,10 +147,11 @@
     c.className = 'card';
     c.dataset.idx = String(idx);
     c.dataset.id  = String(it.id);
-    const badge = `<span class="card-badge">${it.platform || '?'}</span>`;
+    const badgeTitle = it.source_site ? `${it.platform || '?'} via ${it.source_site}` : (it.platform || '?');
+    const badge = `<span class="card-badge" title="${escHtml(badgeTitle)}">${it.platform || '?'}</span>`;
     const mediaLabel = mediaTypeLabel(it);
     const mediaMark = mediaLabel ? `<span class="card-media-mark">${mediaLabel}</span>` : '';
-    const title = escHtml(it.title || it.filename || '');
+    const title = escHtml(displayTitle(it));
     const sourceSite = String(it.source_site || '').trim();
     const channel = (it.channel && it.channel !== 'unknown') ? String(it.channel) : '';
     const sub = sourceSite && channel && sourceSite !== channel
@@ -163,8 +172,8 @@
       const srcBtn = document.createElement('button');
       srcBtn.type = 'button';
       srcBtn.className = 'src-btn';
-      srcBtn.textContent = 'Source';
-      srcBtn.title = 'Open bron';
+      srcBtn.textContent = 'Bron';
+      srcBtn.title = 'Open bronpagina';
       srcBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         window.open(sourceUrl, '_blank', 'noopener');

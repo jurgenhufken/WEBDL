@@ -79,7 +79,7 @@ async function delegateToSlave(pool, { url, platform, metadata = {}, priority = 
         : null)
     : null;
   const sourceUrl = sourceContext && sourceContext.url ? String(sourceContext.url) : url;
-  const storagePlatform = sourceContext && sourceContext.platform ? String(sourceContext.platform) : platform;
+  const storagePlatform = platform;
   const storageChannel = sourceContext && sourceContext.channel ? String(sourceContext.channel) : 'unknown';
   const storageTitle = sourceContext && sourceContext.title ? String(sourceContext.title) : 'untitled';
   const storedMetadata = {
@@ -89,7 +89,11 @@ async function delegateToSlave(pool, { url, platform, metadata = {}, priority = 
   if (sourceContext && sourceContext.url) {
     storedMetadata.webdl_pin_context = true;
     storedMetadata.origin_thread = sourceContext;
+    storedMetadata.source_context = sourceContext;
+    storedMetadata.source_site = sourceContext.platform || '';
+    storedMetadata.source_sites = Array.from(new Set([sourceContext.platform, ...(Array.isArray(metadata.source_sites) ? metadata.source_sites : [])].filter(Boolean)));
     storedMetadata.webdl_media_url = url;
+    storedMetadata.webdl_detected_platform = platform;
   }
 
   const { rows } = await pool.query(

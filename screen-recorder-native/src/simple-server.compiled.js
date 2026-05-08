@@ -878,6 +878,24 @@ function findFirefoxCookieSqliteFiles() {
   return out;
 }
 
+function findFirefoxProfileDirs() {
+  const roots = [
+    path.join(os.homedir(), 'Library/Application Support/Firefox/Profiles'),
+    path.join(os.homedir(), '.mozilla/firefox')
+  ];
+  const out = [];
+  for (const root of roots) {
+    try {
+      if (!fs.existsSync(root)) continue;
+      for (const entry of fs.readdirSync(root)) {
+        const p = path.join(root, entry);
+        if (fs.existsSync(path.join(p, 'cookies.sqlite')) || fs.existsSync(path.join(p, 'storage'))) out.push(p);
+      }
+    } catch (e) { }
+  }
+  return out;
+}
+
 function sqliteSingleQuote(value) {
   return String(value || '').replace(/'/g, "''");
 }
@@ -935,7 +953,7 @@ async function loadCookiesForDomain(hostname) {
        OR host LIKE '%.${baseLit}'
      )
        AND (expiry IS NULL OR expiry = 0 OR expiry > strftime('%s','now') OR expiry > (strftime('%s','now') * 1000))
-     ORDER BY host DESC, name ASC;
+     ORDER BY host DESC, name ASC, expiry DESC;
   `;
   const cookies = new Map();
   for (const sqlitePath of findFirefoxCookieSqliteFiles()) {
@@ -946,7 +964,7 @@ async function loadCookiesForDomain(hostname) {
         const parts = line.split('\t');
         const name = parts.shift();
         const value = parts.join('\t');
-        if (name) cookies.set(name, value || '');
+        if (name && !cookies.has(name)) cookies.set(name, value || '');
       }
     } catch (e) { }
   }
@@ -976,6 +994,18 @@ function cookieHeaderFromMetadataCookies(raw) {
   return cookies.join('; ');
 }
 
+function cookieValueFromHeader(header, name) {
+  const wanted = String(name || '').trim();
+  if (!wanted) return '';
+  for (const part of String(header || '').split(';')) {
+    const m = part.trim().match(/^([^=]+)=(.*)$/);
+    if (!m || m[1] !== wanted) continue;
+    const value = String(m[2] || '').trim();
+    try { return decodeURIComponent(value); } catch (e) { return value; }
+  }
+  return '';
+}
+
 function keep2ShareCookieFromEnv() {
   return cookieHeaderFromMetadataCookies(
     process.env.WEBDL_KEEP2SHARE_COOKIE ||
@@ -992,6 +1022,27 @@ async function loadKeep2ShareCookieHeader(hostname, metadata) {
   if (envCookies) return envCookies;
   const host = String(hostname || '').toLowerCase();
   return await loadCookiesForDomain(host) || await loadCookiesForDomain('k2s.cc') || await loadCookiesForDomain('keep2share.cc');
+}
+
+function keep2ShareUserAgentFromEnv() {
+  return String(
+    process.env.WEBDL_KEEP2SHARE_USER_AGENT ||
+    process.env.KEEP2SHARE_USER_AGENT ||
+    process.env.K2S_USER_AGENT ||
+    FOOTFETISHFORUM_FIREFOX_UA
+  ).trim();
+}
+
+function keep2ShareXbcFromEnv() {
+  return String(
+    process.env.WEBDL_KEEP2SHARE_X_BC ||
+    process.env.KEEP2SHARE_X_BC ||
+    process.env.K2S_X_BC ||
+    process.env.WEBDL_KEEP2SHARE_XBC ||
+    process.env.KEEP2SHARE_XBC ||
+    process.env.K2S_XBC ||
+    ''
+  ).trim();
 }
 
 function isKeep2ShareUrl(input) {
@@ -1016,6 +1067,17 @@ function keep2ShareFileIdFromUrl(input) {
 }
 
 let keep2ShareAuthTokenCache = { token: '', expiresAt: 0 };
+let keep2ShareWebAccessTokenCache = { token: '', expiresAt: 0, source: '' };
+
+function decodeJwtPayload(token) {
+  try {
+    const parts = String(token || '').split('.');
+    if (parts.length !== 3) return null;
+    return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+  } catch (e) {
+    return null;
+  }
+}
 
 async function postKeep2ShareApi(pathname, body) {
   const res = await fetch(`https://keep2share.cc/api/v2/${pathname}`, {
@@ -1058,26 +1120,351 @@ async function getKeep2ShareAuthToken() {
   throw new Error(`Keep2Share login faalde: ${json.message || json.error || json.status || 'onbekend'}`);
 }
 
-async function resolveKeep2ShareDirectUrl(input) {
+function keep2ShareApiErrorMessage(json, fallback = 'onbekend') {
+  if (!json || typeof json !== 'object') return fallback;
+  if (json.message) return String(json.message);
+  if (json.error) return typeof json.error === 'string' ? json.error : JSON.stringify(json.error);
+  if (json.errors) {
+    try {
+      const firstKey = Object.keys(json.errors)[0];
+      const first = firstKey ? json.errors[firstKey] : json.errors;
+      if (Array.isArray(first) && first[0]) return String(first[0].message || first[0]);
+      if (first) return String(first.message || first);
+    } catch (e) { }
+  }
+  if (json.status) return String(json.status);
+  return fallback;
+}
+
+function snappyUncompress(input) {
+  const src = Buffer.isBuffer(input) ? input : Buffer.from(input || []);
+  let pos = 0;
+  let len = 0;
+  let shift = 0;
+  while (pos < src.length) {
+    const b = src[pos++];
+    len |= (b & 0x7f) << shift;
+    if ((b & 0x80) === 0) break;
+    shift += 7;
+  }
+  if (!Number.isFinite(len) || len < 0 || len > 10 * 1024 * 1024) throw new Error('ongeldige Snappy lengte');
+  const out = Buffer.alloc(len);
+  let op = 0;
+  while (pos < src.length && op < out.length) {
+    const tag = src[pos++];
+    const type = tag & 3;
+    if (type === 0) {
+      let l = tag >>> 2;
+      if (l < 60) {
+        l += 1;
+      } else {
+        const bytes = l - 59;
+        l = 0;
+        for (let i = 0; i < bytes; i++) l |= src[pos++] << (8 * i);
+        l += 1;
+      }
+      src.copy(out, op, pos, pos + l);
+      pos += l;
+      op += l;
+    } else {
+      let l = 0;
+      let offset = 0;
+      if (type === 1) {
+        l = ((tag >>> 2) & 7) + 4;
+        offset = ((tag & 0xe0) << 3) | src[pos++];
+      } else if (type === 2) {
+        l = (tag >>> 2) + 1;
+        offset = src[pos] | (src[pos + 1] << 8);
+        pos += 2;
+      } else {
+        l = (tag >>> 2) + 1;
+        offset = (src[pos] | (src[pos + 1] << 8) | (src[pos + 2] << 16) | (src[pos + 3] << 24)) >>> 0;
+        pos += 4;
+      }
+      if (!offset || offset > op) throw new Error('ongeldige Snappy copy-offset');
+      for (let i = 0; i < l && op < out.length; i++) {
+        out[op] = out[op - offset];
+        op++;
+      }
+    }
+  }
+  return out;
+}
+
+function parseKeep2SharePersistAuth(valueHex, compressionType) {
+  try {
+    if (!valueHex) return null;
+    const raw = Buffer.from(String(valueHex || '').trim(), 'hex');
+    const text = Number(compressionType) === 1 ? snappyUncompress(raw).toString('utf8') : raw.toString('utf8');
+    const state = JSON.parse(text);
+    const token = JSON.parse(state.token || '{}');
+    return token && typeof token === 'object' ? token : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+let keep2ShareFirefoxWebAuthCache = { at: 0, token: '', cookieHeader: '', source: '' };
+async function loadKeep2ShareFirefoxWebAuth(preferredHost = '') {
+  const preferredBase = getRegistrableCookieDomain(preferredHost || 'k2s.cc') || 'k2s.cc';
+  if (keep2ShareFirefoxWebAuthCache.token && keep2ShareFirefoxWebAuthCache.preferredBase === preferredBase && Date.now() - keep2ShareFirefoxWebAuthCache.at < 60000) {
+    return keep2ShareFirefoxWebAuthCache;
+  }
+
+  for (const profileDir of findFirefoxProfileDirs()) {
+    try {
+      const cookieDb = path.join(profileDir, 'cookies.sqlite');
+      if (!fs.existsSync(cookieDb)) continue;
+
+      const authMetas = [];
+      for (const siteDir of ['https+++k2s.cc', 'https+++keep2share.cc']) {
+        const lsDb = path.join(profileDir, 'storage', 'default', siteDir, 'ls', 'data.sqlite');
+        if (!fs.existsSync(lsDb)) continue;
+        try {
+          const text = await runSqliteQuery(lsDb, "SELECT hex(value), compression_type FROM data WHERE key = 'persist:auth' LIMIT 1", 3000);
+          const parts = String(text || '').trim().split('\t');
+          const parsed = parseKeep2SharePersistAuth(parts[0] || '', parts[1] || '0');
+          if (parsed && parsed.jti) authMetas.push(parsed);
+        } catch (e) { }
+      }
+
+      const rowsText = await runSqliteQuery(cookieDb, `
+        SELECT host, name, value, expiry
+          FROM moz_cookies
+         WHERE (host LIKE '%.k2s.cc' OR host LIKE '%.keep2share.cc')
+           AND name IN ('accessToken', 'refreshToken', 'pcId', 'x-ec1jam0tc2vzc2lvbi1pza-id')
+           AND (expiry IS NULL OR expiry = 0 OR expiry > strftime('%s','now') OR expiry > (strftime('%s','now') * 1000))
+         ORDER BY expiry DESC;
+      `, 3000);
+      let rows = String(rowsText || '').split(/\r?\n/).filter(Boolean).map((line) => {
+        const parts = line.split('\t');
+        return {
+          host: parts.shift() || '',
+          name: parts.shift() || '',
+          value: parts.slice(0, -1).join('\t'),
+          expiry: Number(parts[parts.length - 1] || 0),
+        };
+      });
+      if (!rows.length) continue;
+      rows = rows.sort((a, b) => {
+        const aPreferred = String(a.host || '').replace(/^\./, '') === preferredBase ? 1 : 0;
+        const bPreferred = String(b.host || '').replace(/^\./, '') === preferredBase ? 1 : 0;
+        if (aPreferred !== bPreferred) return bPreferred - aPreferred;
+        return Number(b.expiry || 0) - Number(a.expiry || 0);
+      });
+
+      const authJtis = new Set(authMetas.map((m) => String(m.jti || '')).filter(Boolean));
+      const authOwners = new Set(authMetas.map((m) => String(m.ownerId || m.sub || '')).filter(Boolean));
+      let chosen = null;
+      for (const row of rows) {
+        if (row.name !== 'accessToken') continue;
+        const payload = decodeJwtPayload(row.value);
+        if (payload && authJtis.has(String(payload.jti || ''))) { chosen = row; break; }
+      }
+      if (!chosen) {
+        for (const row of rows) {
+          if (row.name !== 'accessToken') continue;
+          const payload = decodeJwtPayload(row.value);
+          if (payload && payload.aud === 'user' && authOwners.has(String(payload.ownerId || payload.sub || ''))) { chosen = row; break; }
+        }
+      }
+      if (!chosen) {
+        chosen = rows.find((row) => {
+          const payload = row.name === 'accessToken' ? decodeJwtPayload(row.value) : null;
+          return payload && payload.aud === 'user';
+        });
+      }
+      if (!chosen) continue;
+
+      const cookiePairs = [];
+      const seen = new Set();
+      for (const row of rows) {
+        if (!row.name || seen.has(row.name)) continue;
+        seen.add(row.name);
+        cookiePairs.push(`${row.name}=${row.value || ''}`);
+      }
+      keep2ShareFirefoxWebAuthCache = {
+        at: Date.now(),
+        token: chosen.value,
+        cookieHeader: cookiePairs.join('; '),
+        source: 'firefox-localstorage',
+        preferredBase,
+      };
+      return keep2ShareFirefoxWebAuthCache;
+    } catch (e) { }
+  }
+
+  keep2ShareFirefoxWebAuthCache = { at: Date.now(), token: '', cookieHeader: '', source: '', preferredBase };
+  return keep2ShareFirefoxWebAuthCache;
+}
+
+async function getKeep2ShareWebAccessToken(cookieHeader = '', preferredHost = '') {
+  const direct = String(
+    process.env.WEBDL_KEEP2SHARE_WEB_ACCESS_TOKEN ||
+    process.env.KEEP2SHARE_WEB_ACCESS_TOKEN ||
+    process.env.K2S_WEB_ACCESS_TOKEN ||
+    ''
+  ).trim();
+  if (direct) return { token: direct, source: 'env' };
+  if (keep2ShareWebAccessTokenCache.token && keep2ShareWebAccessTokenCache.expiresAt > Date.now() + 60000) {
+    return { token: keep2ShareWebAccessTokenCache.token, source: keep2ShareWebAccessTokenCache.source };
+  }
+
+  const firefoxAuth = await loadKeep2ShareFirefoxWebAuth(preferredHost);
+  if (firefoxAuth.token) return { token: firefoxAuth.token, source: firefoxAuth.source, cookieHeader: firefoxAuth.cookieHeader };
+
+  const baseHeaders = {
+    'Accept': 'application/json, text/plain, */*',
+    'Origin': 'https://k2s.cc',
+    'Referer': 'https://k2s.cc/',
+    'User-Agent': keep2ShareUserAgentFromEnv(),
+  };
+  if (cookieHeader) baseHeaders.Cookie = cookieHeader;
+  const xbc = tokenInfo.source === 'firefox-localstorage' ? '' : keep2ShareXbcFromEnv();
+  if (xbc) baseHeaders['X-BC'] = xbc;
+
+  if (cookieHeader) {
+    try {
+      const res = await fetch('https://api.k2s.cc/v1/auth/token', { method: 'GET', headers: baseHeaders });
+      const text = await res.text();
+      let json = null;
+      try { json = JSON.parse(text); } catch (e) { }
+      if (res.ok && json && json.access_token) {
+        keep2ShareWebAccessTokenCache = { token: String(json.access_token), expiresAt: Date.now() + 30 * 60 * 1000, source: 'cookie' };
+        return { token: keep2ShareWebAccessTokenCache.token, source: 'cookie' };
+      }
+    } catch (e) { }
+  }
+
+  try {
+    const res = await fetch('https://api.k2s.cc/v1/auth/token', {
+      method: 'POST',
+      headers: { ...baseHeaders, 'Content-Type': 'text/plain;charset=UTF-8' },
+      body: JSON.stringify({
+        grant_type: 'client_credentials',
+        client_id: 'k2s_web_app',
+        client_secret: 'pjc8pyZv7vhscexepFNzmu4P',
+      }),
+    });
+    const text = await res.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch (e) { }
+    if (res.ok && json && json.access_token) {
+      keep2ShareWebAccessTokenCache = { token: String(json.access_token), expiresAt: Date.now() + 30 * 60 * 1000, source: 'client' };
+      return { token: keep2ShareWebAccessTokenCache.token, source: 'client' };
+    }
+  } catch (e) { }
+
+  return { token: '', source: '' };
+}
+
+async function fetchKeep2ShareWebApiJson(pathname, { filePageUrl = '', cookieHeader = '', metadata = null } = {}) {
+  let cookie = cookieHeader || await loadKeep2ShareCookieHeader('k2s.cc', metadata);
+  const referer = String(filePageUrl || 'https://k2s.cc/').trim();
+  let preferredHost = 'k2s.cc';
+  try { preferredHost = new URL(referer).hostname || preferredHost; } catch (e) { }
+  const tokenInfo = await getKeep2ShareWebAccessToken(cookie, preferredHost);
+  if (!tokenInfo.token) return { json: null, status: 0, error: 'K2S web-access-token kon niet worden opgehaald' };
+  if (tokenInfo.cookieHeader) cookie = tokenInfo.cookieHeader;
+  if (tokenInfo.source === 'firefox-localstorage') cookie = '';
+  const url = new URL(`https://api.k2s.cc/v1/${String(pathname || '').replace(/^\/+/, '')}`);
+  if (referer) url.searchParams.set('referer', referer);
+  const headers = {
+    'Accept': 'application/json, text/plain, */*',
+    'Authorization': `Bearer ${tokenInfo.token}`,
+    'Origin': 'https://k2s.cc',
+    'Referer': referer,
+    'User-Agent': keep2ShareUserAgentFromEnv(),
+  };
+  if (cookie) headers.Cookie = cookie;
+  const xbc = keep2ShareXbcFromEnv();
+  if (xbc) headers['X-BC'] = xbc;
+  const res = await fetch(url.toString(), { method: 'GET', headers });
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch (e) { }
+  return { json, status: res.status, tokenSource: tokenInfo.source, error: json ? '' : `K2S web-API gaf geen JSON terug (${res.status}, auth=${tokenInfo.source || 'geen'})` };
+}
+
+function keep2ShareDownloadUrlFromJson(json) {
+  if (!json || typeof json !== 'object') return '';
+  const candidates = [
+    json.downloadUrl,
+    json.download_url,
+    json.videoStreamUrl,
+    json.video_stream_url,
+    json.url,
+    json.link,
+    json.data && json.data.downloadUrl,
+    json.data && json.data.download_url,
+    json.data && json.data.videoStreamUrl,
+    json.data && json.data.url,
+  ];
+  for (const value of candidates) {
+    const text = String(value || '').trim();
+    if (/^https?:\/\//i.test(text)) return text;
+  }
+  return '';
+}
+
+async function resolveKeep2ShareWebDirectUrl(input, metadata = null) {
+  const fileId = keep2ShareFileIdFromUrl(input);
+  if (!fileId) return { url: '', error: 'Keep2Share file-id ontbreekt in URL' };
+  const cookieHeader = await loadKeep2ShareCookieHeader('k2s.cc', metadata);
+  if (!cookieHeader) return { url: '', error: 'Keep2Share cookie-auth ontbreekt' };
+  const filePageUrl = String(input || '').trim();
+  const result = await fetchKeep2ShareWebApiJson(`files/${encodeURIComponent(fileId)}/download`, { filePageUrl, cookieHeader, metadata });
+  if (result.json) {
+    const downloadUrl = keep2ShareDownloadUrlFromJson(result.json);
+    if (downloadUrl) return { url: downloadUrl, error: '' };
+    const msg = keep2ShareApiErrorMessage(result.json, `HTTP ${result.status}`);
+    const authHint = result.tokenSource === 'client' && /captcha/i.test(msg)
+      ? 'De ingestelde cookie is niet als premiumsessie geaccepteerd; K2S valt terug naar gast/free en vraagt captcha.'
+      : '';
+    return { url: '', error: `Keep2Share web-download faalde: ${msg}${authHint ? ` ${authHint}` : ''}` };
+  }
+  return { url: '', error: result.error || `Keep2Share web-download faalde (HTTP ${result.status})` };
+}
+
+async function resolveKeep2ShareDirectUrl(input, metadata = null) {
   const fileId = keep2ShareFileIdFromUrl(input);
   if (!fileId) return { url: '', error: 'Keep2Share file-id ontbreekt in URL' };
   const authToken = await getKeep2ShareAuthToken();
-  const accessToken = String(
+  let accessTokenSource = 'env';
+  let accessToken = String(
     process.env.WEBDL_KEEP2SHARE_ACCESS_TOKEN ||
     process.env.KEEP2SHARE_ACCESS_TOKEN ||
     process.env.K2S_ACCESS_TOKEN ||
     ''
   ).trim();
   if (!authToken && !accessToken) {
+    try {
+      const host = new URL(String(input || '')).hostname.toLowerCase();
+      const cookieHeader = await loadKeep2ShareCookieHeader(host, null);
+      accessToken = cookieValueFromHeader(cookieHeader, 'accessToken');
+      if (accessToken) accessTokenSource = 'firefox-cookie';
+    } catch (e) { }
+  }
+  if (!authToken && !accessToken) {
+    const webResolved = await resolveKeep2ShareWebDirectUrl(input, metadata);
+    if (webResolved.url) return webResolved;
     return {
       url: '',
-      error: 'Keep2Share premium API-token ontbreekt. Zet WEBDL_KEEP2SHARE_AUTH_TOKEN/K2S_AUTH_TOKEN of WEBDL_KEEP2SHARE_USERNAME/PASSWORD in .env.'
+      error: `${webResolved.error || 'Keep2Share premium auth ontbreekt'}. Zet K2S_COOKIE/K2S_X_BC of WEBDL_KEEP2SHARE_AUTH_TOKEN/K2S_AUTH_TOKEN of WEBDL_KEEP2SHARE_USERNAME/PASSWORD in .env.`
     };
   }
   const body = authToken ? { auth_token: authToken, file_id: fileId } : { access_token: accessToken, file_id: fileId };
   const json = await postKeep2ShareApi('getUrl', body);
   if (json.status === 'success' && json.url) return { url: String(json.url), error: '' };
-  return { url: '', error: `Keep2Share getUrl faalde: ${json.message || json.error || json.status || 'onbekend'}` };
+  const webResolved = await resolveKeep2ShareWebDirectUrl(input, metadata);
+  if (webResolved.url) return webResolved;
+  if (!authToken && accessTokenSource === 'firefox-cookie') {
+    return {
+      url: '',
+      error: `Firefox K2S-login gevonden, maar de K2S API accepteert deze browser-token niet voor getUrl: ${keep2ShareApiErrorMessage(json)}. Web-cookie fallback: ${webResolved.error || 'geen downloadlink'}. Zet K2S_COOKIE/K2S_X_BC of een permanent K2S API-token in .env.`
+    };
+  }
+  return { url: '', error: `Keep2Share getUrl faalde: ${keep2ShareApiErrorMessage(json)}. Web-cookie fallback: ${webResolved.error || 'geen downloadlink'}` };
 }
 
 // Geeft het absolute pad terug van het eerste (alfabetisch) geïndexeerde bestand
@@ -4859,7 +5246,7 @@ function detectLane(platform, url = '') {
   // Only pure image/direct link platforms get the fast lane
   const lightPlatforms = [
     'footfetishforum', 'forum-area', 'imagetwist', 'pixhost', 'postimg', 'bunkr', 'jpg', 'aznudefeet', 'pornpics',
-    'kinky', 'wikifeet', 'wikifeetx', 'elitebabes', 'erome'
+    'kinky', 'wikifeet', 'wikifeetx', 'elitebabes', 'erome', 'keep2share'
   ];
 
   if (lightPlatforms.includes(p)) return 'light';
@@ -9839,6 +10226,9 @@ expressApp.post('/download', async (req, res) => {
   if (pinToOrigin) {
     jobMetadata.webdl_pin_context = true;
     jobMetadata.origin_thread = sourceOrigin && sourceOrigin.url ? sourceOrigin : { url: pageUrl, platform: originPlatform, channel: originChannel, title: originTitle };
+    jobMetadata.source_context = jobMetadata.origin_thread;
+    jobMetadata.source_site = originPlatform;
+    jobMetadata.source_sites = Array.from(new Set([originPlatform, ...(Array.isArray(jobMetadata.source_sites) ? jobMetadata.source_sites : [])].filter(Boolean)));
     jobMetadata.webdl_media_url = effectiveUrl;
     jobMetadata.webdl_detected_platform = detectedPlatform;
   }
@@ -11314,7 +11704,7 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
     if (isKeep2ShareUrl(url)) {
       try {
         const originalK2sUrl = url;
-        const resolved = await resolveKeep2ShareDirectUrl(originalK2sUrl);
+        const resolved = await resolveKeep2ShareDirectUrl(originalK2sUrl, metadata);
         if (!resolved.url) {
           await updateDownloadStatus.run('error', 0, resolved.error || 'Keep2Share premium download-URL kon niet worden opgehaald', downloadId);
           return;
@@ -11425,6 +11815,8 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
       duration: meta.duration,
       thumbnail: meta.thumbnail,
       origin_thread: originThread && originThread.url ? originThread : null,
+      source_context: originThread && originThread.url ? originThread : null,
+      source_site: originThread && originThread.platform ? originThread.platform : null,
       webdl_pin_context: pinContext,
       webdl_media_url: metadata && metadata.webdl_media_url ? metadata.webdl_media_url : url,
       webdl_detected_platform: metadata && metadata.webdl_detected_platform ? metadata.webdl_detected_platform : detectPlatform(url),
@@ -11505,6 +11897,8 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
         if (code === 0 && fs.existsSync(tmpFilepath)) {
           const rawHeaders = fs.existsSync(headerFilepath) ? fs.readFileSync(headerFilepath, 'utf8') : '';
           const filename = resolveDirectDownloadFilename(url, provisionalFilename, rawHeaders);
+          const ext = String(path.extname(filename || '') || '').replace('.', '').toLowerCase();
+          const isImage = isImagePath(filename || '');
           const invalidReason = rejectInvalidDirectDownload(url, tmpFilepath, filename, rawHeaders);
           if (invalidReason) {
             try { fs.rmSync(tmpFilepath, { force: true }); } catch (e) { }
@@ -11528,6 +11922,8 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
           if (pinContext) {
             metaObj.webdl_pin_context = true;
             metaObj.origin_thread = originThread && originThread.url ? originThread : null;
+            metaObj.source_context = originThread && originThread.url ? originThread : null;
+            metaObj.source_site = originThread && originThread.platform ? originThread.platform : null;
             metaObj.webdl_media_url = metadata && metadata.webdl_media_url ? metadata.webdl_media_url : url;
             metaObj.webdl_detected_platform = metadata && metadata.webdl_detected_platform ? metadata.webdl_detected_platform : detectPlatform(url);
             if (originThread && originThread.url) metaObj.source_url = originThread.url;
