@@ -481,6 +481,7 @@
     try {
       const params = new URLSearchParams();
       params.set('limit',  String(state.limit));
+      params.set('thumb_ready', '1');
       if (state.filters.sort === 'recent' && state.nextCursor) {
         params.set('cursor_ts', state.nextCursor.sort_ts);
         params.set('cursor_order', state.nextCursor.source_order);
@@ -705,6 +706,7 @@
         limit: String(Math.min(state.limit, 50)),
         offset: '0',
         sort: 'recent',
+        thumb_ready: '1',
       });
       if (!state.liveAllMedia) {
         for (const [k, v] of Object.entries(state.filters)) {

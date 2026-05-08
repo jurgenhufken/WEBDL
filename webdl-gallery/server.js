@@ -96,6 +96,11 @@ const VIDEO_EXTS = ['mp4','webm','mkv','mov','m4v','avi','wmv','flv','ts','m2ts'
 const IMAGE_EXTS = ['jpg','jpeg','png','gif','webp','avif','bmp'];
 const MEDIA_EXTS = [...VIDEO_EXTS, ...IMAGE_EXTS];
 const BROWSER_NATIVE_VIDEO_EXTS = new Set(['.mp4', '.webm', '.ogv']);
+const THUMB_WIDTH = Math.max(160, Number(process.env.WEBDL_GALLERY_THUMB_WIDTH || 480));
+const THUMB_HEIGHT = Math.max(90, Number(process.env.WEBDL_GALLERY_THUMB_HEIGHT || 270));
+const THUMB_CONCURRENCY = Math.max(1, Number(process.env.WEBDL_GALLERY_THUMB_CONCURRENCY || 4));
+const THUMB_WARM_INTERVAL_MS = Math.max(500, Number(process.env.WEBDL_GALLERY_THUMB_WARM_INTERVAL_MS || 1500));
+const THUMB_WARM_BATCH = Math.max(1, Number(process.env.WEBDL_GALLERY_THUMB_WARM_BATCH || 80));
 const AUX_RELPATH_RE = String.raw`((^|[\\/])\d{1,3}[-_. ]?thumbnail\.(jpe?g|png|webp|gif|bmp|avif)$|(^|[-_. ])thumbnail\.(jpe?g|png|webp|gif|bmp|avif)$|_thumb(_v[0-9]+)?\.(jpe?g|png|webp)$|_preview\.(jpe?g|png|webp|gif|bmp|avif)$|_logo\.(jpe?g|png|webp)$|\.(json|part|tmp|ytdl)$)`;
 const TEMP_RELPATH_RE = String.raw`(^|[\\/])(_UNPACK_|_FAILED_|_ADMIN_|__ADMIN__|incomplete)([^\\/]*)([\\/]|$)`;
 const MEDIA_EXT_SQL = MEDIA_EXTS.map(e => `'${e}'`).join(',');
@@ -113,6 +118,29 @@ let keep2shareSyncRunning = false;
 const thumbInflight = new Map();
 const activeThumbPaths = new Map();
 const videoStreamProbeCache = new Map();
+let activeThumbJobs = 0;
+const thumbQueue = [];
+
+function runLimitedThumbJob(fn) {
+  return new Promise((resolve, reject) => {
+    thumbQueue.push({ fn, resolve, reject });
+    drainThumbQueue();
+  });
+}
+
+function drainThumbQueue() {
+  while (activeThumbJobs < THUMB_CONCURRENCY && thumbQueue.length) {
+    const job = thumbQueue.shift();
+    activeThumbJobs += 1;
+    Promise.resolve()
+      .then(job.fn)
+      .then(job.resolve, job.reject)
+      .finally(() => {
+        activeThumbJobs -= 1;
+        drainThumbQueue();
+      });
+  }
+}
 
 function collectPartFiles(root, limit = 40) {
   return new Promise((resolve) => {
@@ -591,6 +619,44 @@ function thumbPathForMedia(filePath) {
   return path.join(dir, `${base}_thumb_v3.jpg`);
 }
 
+async function generateImageThumb(filePath) {
+  if (!isImageFile(filePath)) return null;
+  const outPath = thumbPathForMedia(filePath);
+  if (fs.existsSync(outPath)) {
+    try {
+      if (fs.statSync(outPath).size > 1000) return outPath;
+    } catch (_) {}
+  }
+  if (thumbInflight.has(filePath)) return thumbInflight.get(filePath);
+  const job = runLimitedThumbJob(async () => {
+    const ok = await new Promise((resolve) => {
+      const args = [
+        '-y',
+        '-hide_banner',
+        '-loglevel', 'error',
+        '-i', filePath,
+        '-frames:v', '1',
+        '-an',
+        '-vf', `scale=${THUMB_WIDTH}:${THUMB_HEIGHT}:force_original_aspect_ratio=decrease,pad=${THUMB_WIDTH}:${THUMB_HEIGHT}:(ow-iw)/2:(oh-ih)/2:black,setsar=1`,
+        '-q:v', '4',
+        outPath,
+      ];
+      const proc = spawn(FFMPEG_BIN, args, { stdio: ['ignore', 'ignore', 'ignore'] });
+      proc.on('close', () => {
+        try {
+          if (fs.existsSync(outPath) && fs.statSync(outPath).size > 1000) return resolve(true);
+          fs.rmSync(outPath, { force: true });
+        } catch (_) {}
+        resolve(false);
+      });
+      proc.on('error', () => resolve(false));
+    });
+    return ok ? outPath : null;
+  }).finally(() => thumbInflight.delete(filePath));
+  thumbInflight.set(filePath, job);
+  return job;
+}
+
 async function generateVideoThumb(filePath) {
   if (!isVideoFile(filePath)) return null;
   const outPath = thumbPathForMedia(filePath);
@@ -600,7 +666,7 @@ async function generateVideoThumb(filePath) {
     } catch (_) {}
   }
   if (thumbInflight.has(filePath)) return thumbInflight.get(filePath);
-  const job = (async () => {
+  const job = runLimitedThumbJob(async () => {
     for (const seek of ['10', '2', '0.5', '0']) {
       const ok = await new Promise((resolve) => {
         const args = [
@@ -611,7 +677,7 @@ async function generateVideoThumb(filePath) {
           '-i', filePath,
           '-frames:v', '1',
           '-an',
-          '-vf', 'scale=480:270:force_original_aspect_ratio=decrease,pad=480:270:(ow-iw)/2:(oh-ih)/2:black,setsar=1',
+          '-vf', `scale=${THUMB_WIDTH}:${THUMB_HEIGHT}:force_original_aspect_ratio=decrease,pad=${THUMB_WIDTH}:${THUMB_HEIGHT}:(ow-iw)/2:(oh-ih)/2:black,setsar=1`,
           '-q:v', '3',
           outPath,
         ];
@@ -628,7 +694,7 @@ async function generateVideoThumb(filePath) {
       if (ok) return outPath;
     }
     return null;
-  })().finally(() => thumbInflight.delete(filePath));
+  }).finally(() => thumbInflight.delete(filePath));
   thumbInflight.set(filePath, job);
   return job;
 }
@@ -785,6 +851,104 @@ function markThumbReady(idRaw) {
     pool.query('UPDATE download_files SET is_thumb_ready = true WHERE id = $1', [Number(id.slice(5))]).catch(() => {});
   } else if (id.startsWith('s-')) {
     pool.query('UPDATE screenshots SET is_thumb_ready = true WHERE id = $1', [Number(id.slice(2))]).catch(() => {});
+  }
+}
+
+function resolveStoredMediaPath(filePath) {
+  const value = String(filePath || '');
+  if (!value) return '';
+  if (path.isAbsolute(value)) return value;
+  const resolved = resolveRelativeMediaPath(value);
+  if (fs.existsSync(resolved)) return resolved;
+  const userPathMatch = value.match(/(?:^|\/)(Users\/.+)$/);
+  if (userPathMatch) {
+    const absoluteUserPath = path.join('/', userPathMatch[1]);
+    if (fs.existsSync(absoluteUserPath)) return absoluteUserPath;
+  }
+  return resolved;
+}
+
+async function warmThumbForItem(item) {
+  const id = String(item.id || '');
+  const fp = resolveStoredMediaPath(item.filepath);
+  if (!id || !fp || !fs.existsSync(fp)) return false;
+  const existing = thumbPathForMedia(fp);
+  try {
+    if (fs.existsSync(existing) && fs.statSync(existing).size > 1000) {
+      markThumbReady(id);
+      return true;
+    }
+  } catch (_) {}
+  const generated = isVideoFile(fp)
+    ? await generateVideoThumb(fp)
+    : isImageFile(fp)
+      ? await generateImageThumb(fp)
+      : null;
+  if (generated && fs.existsSync(generated)) {
+    markThumbReady(id);
+    return true;
+  }
+  return false;
+}
+
+let thumbWarmRunning = false;
+async function warmThumbBacklog(reason = 'timer') {
+  if (thumbWarmRunning) return;
+  thumbWarmRunning = true;
+  let warmed = 0;
+  try {
+    const { rows } = await pool.query(`
+      SELECT id, filepath
+        FROM (
+          SELECT d.id::text AS id,
+                 d.filepath,
+                 COALESCE(d.finished_at, d.updated_at, d.created_at) AS sort_ts,
+                 d.id::bigint AS source_order
+            FROM downloads d
+           WHERE COALESCE(d.is_thumb_ready, false) = false
+             AND d.filepath IS NOT NULL
+             AND d.filepath <> ''
+             AND d.status <> ALL($1::text[])
+             AND d.filepath !~* $2
+             AND lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})
+          UNION ALL
+          SELECT 'file-' || df.id::text AS id,
+                 df.relpath AS filepath,
+                 COALESCE(to_timestamp(NULLIF(df.mtime_ms,0) / 1000.0)::timestamp, df.updated_at, d.finished_at, d.updated_at, d.created_at) AS sort_ts,
+                 (1000000000000 + df.id)::bigint AS source_order
+            FROM download_files df
+            JOIN downloads d ON d.id = df.download_id
+           WHERE COALESCE(df.is_thumb_ready, d.is_thumb_ready, false) = false
+             AND df.relpath IS NOT NULL
+             AND df.relpath <> ''
+             AND df.relpath !~* $3
+             AND df.relpath !~* $2
+             AND d.filepath !~* $2
+             AND d.status <> ALL($1::text[])
+             AND lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
+          UNION ALL
+          SELECT 's-' || s.id::text AS id,
+                 s.filepath,
+                 COALESCE(s.created_at, s.updated_at) AS sort_ts,
+                 (2000000000000 + s.id)::bigint AS source_order
+            FROM screenshots s
+           WHERE COALESCE(s.is_thumb_ready, false) = false
+             AND s.filepath IS NOT NULL
+             AND s.filepath <> ''
+             AND s.filepath !~* $2
+        ) pending
+       ORDER BY sort_ts DESC NULLS LAST, source_order DESC
+       LIMIT $4`,
+      [HIDDEN_GALLERY_STATUSES, TEMP_RELPATH_RE, AUX_RELPATH_RE, THUMB_WARM_BATCH],
+    );
+    await Promise.all(rows.map(async (row) => {
+      if (await warmThumbForItem(row)) warmed += 1;
+    }));
+    if (warmed) console.log(`[thumb-warm] ${warmed} thumb(s) klaar (${reason})`);
+  } catch (e) {
+    console.warn('[thumb-warm] failed:', e.message);
+  } finally {
+    thumbWarmRunning = false;
   }
 }
 
@@ -1094,6 +1258,10 @@ function buildItemFilters({ req, params, fileExpr, extExpr, ratingExpr, includeC
   return where;
 }
 
+function wantsThumbReadyOnly(req) {
+  return /^(1|true|yes|on)$/i.test(String(req.query.thumb_ready || req.query.thumbs_ready || ''));
+}
+
 function buildScreenshotFilters({ req, params, includeChannel = true }) {
   const platform = req.query.platform ? String(req.query.platform) : null;
   const channel = req.query.channel ? String(req.query.channel) : null;
@@ -1241,6 +1409,7 @@ app.get('/api/items', async (req, res) => {
     const platformFilter = req.query.platform ? String(req.query.platform).toLowerCase() : '';
     const directOnlyPlatform = platformFilter === 'sabnzbd' || platformFilter === 'keep2share';
     const hasSearchQuery = Boolean(req.query.q && String(req.query.q).trim());
+    const thumbReadyOnly = wantsThumbReadyOnly(req);
     // Elke bron moet ruimer dan offset+limit leveren: infinite scroll mag niet
     // vroeg stoppen, en oude importmappen kunnen dubbele records bevatten die
     // later in deze query worden weggefilterd.
@@ -1272,6 +1441,7 @@ app.get('/api/items', async (req, res) => {
     directWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
     directWhere.push(`(d.filesize IS NULL OR d.filesize > 0)`);
     directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
+    if (thumbReadyOnly) directWhere.push(`COALESCE(d.is_thumb_ready, false) = true`);
     if (useCursor) {
       addRecentCursor(directWhere, 'COALESCE(d.finished_at, d.updated_at, d.created_at)', 'd.id::bigint');
     }
@@ -1288,6 +1458,7 @@ app.get('/api/items', async (req, res) => {
       fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
       fileWhere.push(`(df.filesize IS NULL OR df.filesize > 0)`);
       fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
+      if (thumbReadyOnly) fileWhere.push(`COALESCE(df.is_thumb_ready, d.is_thumb_ready, false) = true`);
     }
     if (useCursor && !directOnlyPlatform) {
       addRecentCursor(
@@ -1298,6 +1469,7 @@ app.get('/api/items', async (req, res) => {
     }
     const screenshotWhere = directOnlyPlatform ? ['false'] : buildScreenshotFilters({ req, params });
     screenshotWhere.push(`(s.filesize IS NULL OR s.filesize > 0)`);
+    if (thumbReadyOnly) screenshotWhere.push(`COALESCE(s.is_thumb_ready, false) = true`);
     if (useCursor) {
       addRecentCursor(screenshotWhere, 'COALESCE(s.created_at, s.updated_at)', '(2000000000000 + s.id)::bigint');
     }
@@ -1651,13 +1823,30 @@ app.get('/thumb/:id', async (req, res) => {
       path.join(dir, `${base}_thumb_v3.jpg`),
       path.join(dir, `${base}_thumb.jpg`),
       path.join(dir, `${base}.webp`),
-      ...(isVideo ? [] : [fp]), // fallback naar origineel alleen voor images
     ];
     for (const c of candidates) {
       if (fs.existsSync(c)) {
         res.setHeader('Cache-Control', 'public, max-age=86400');
         return res.sendFile(c);
       }
+    }
+    if (!isVideo && isImageFile(fp)) {
+      let canGenerate = false;
+      try {
+        canGenerate = fs.existsSync(fp) && fs.statSync(fp).size > 0;
+      } catch (_) {}
+      if (canGenerate) {
+        const generated = await generateImageThumb(fp);
+        if (generated && fs.existsSync(generated)) {
+          markThumbReady(req.params.id);
+          res.setHeader('Cache-Control', 'public, max-age=86400');
+          return res.sendFile(generated);
+        }
+      }
+      // Fallback naar origineel houdt nieuwe items zichtbaar, maar alleen als
+      // thumbnail-generatie niet kan slagen.
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+      return res.sendFile(fp);
     }
     if (isVideo) {
       let canGenerate = false;
@@ -1814,9 +2003,13 @@ ensureSchema()
 	      console.log(`webdl-gallery listening on http://localhost:${PORT}`);
 	      ensureSearchIndexes().catch((e) => console.warn('[search-indexes] failed:', e.message));
 	      syncKeep2ShareFiles('startup').catch((e) => console.warn('[keep2share-sync] failed:', e.message));
+	      warmThumbBacklog('startup').catch((e) => console.warn('[thumb-warm] failed:', e.message));
       setInterval(() => {
         syncKeep2ShareFiles('timer').catch((e) => console.warn('[keep2share-sync] failed:', e.message));
       }, KEEP2SHARE_SYNC_MS).unref();
+      setInterval(() => {
+        warmThumbBacklog('timer').catch((e) => console.warn('[thumb-warm] failed:', e.message));
+      }, THUMB_WARM_INTERVAL_MS).unref();
     });
     global.__webdlGalleryServer = server;
   })
