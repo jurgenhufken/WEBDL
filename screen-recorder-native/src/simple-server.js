@@ -10507,11 +10507,76 @@ function upgradeKnownLowQualityMediaUrl(rawUrl) {
         u.pathname = p.replace(/\/thumbs\//i, '/images/');
         out = u.toString();
       }
+      if ((host === 'vipr.im' || host.endsWith('.vipr.im')) && /^\/th\//i.test(p)) {
+        const m = String(u.pathname || '').match(/^\/th\/([^/]+)\/([^/?#]+\.jpe?g)$/i);
+        if (m && m[1] && m[2]) {
+          u.pathname = `/i/${m[1]}/${m[2]}/30.jpg`;
+          out = u.toString();
+        }
+      }
     } catch (e) { }
     return out;
   } catch (e) {
     return String(rawUrl || '').trim();
   }
+}
+
+function isLikelyThumbnailImageUrl(rawUrl) {
+  try {
+    const input = String(rawUrl || '').trim();
+    if (!input || !isImageUrlLike(input)) return false;
+    const u = new URL(input);
+    const host = String(u.hostname || '').toLowerCase();
+    const p = String(u.pathname || '').toLowerCase();
+    if (/^(?:thumbs?|thumbnails?)\d*\./i.test(host)) return true;
+    if ((host === 'vipr.im' || host.endsWith('.vipr.im')) && /^\/th\//i.test(p)) return true;
+    if ((host === 'pixhost.to' || host.endsWith('.pixhost.to')) && /\/thumbs\//i.test(p)) return true;
+    if (/\/(?:thumb|thumbs|thumbnail|thumbnails|preview|previews|small|mini|square)\//i.test(p)) return true;
+    if (/\.(?:th|thumb|thumbnail|preview|small|md)\.(?:jpe?g|png|gif|webp|bmp|avif|heic|heif)(?:$|[?#])/i.test(input)) return true;
+    if (/(?:^|[-_.\/])(?:thumb|thumbnail|preview|small|mini)(?:[-_.\/]|$)/i.test(p)) return true;
+    return false;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function ensureFullscaleImageDownloadUrl(rawUrl, metadata = {}, referer = '') {
+  const input = String(rawUrl || '').trim();
+  if (!input || !isImageUrlLike(input)) {
+    return { url: input, quality: 'not_image', wasThumbnail: false, rejected: false };
+  }
+
+  const directHint = upgradeKnownLowQualityMediaUrl(String(
+    metadata && typeof metadata === 'object' && metadata.webdl_direct_hint ? metadata.webdl_direct_hint : ''
+  ).trim());
+  if (directHint && looksLikeDirectFileUrl(directHint) && !isLikelyThumbnailImageUrl(directHint)) {
+    return { url: directHint, quality: 'fullscale_hint', wasThumbnail: isLikelyThumbnailImageUrl(input), rejected: false };
+  }
+
+  let upgraded = upgradeKnownLowQualityMediaUrl(input);
+  if (upgraded && upgraded !== input) {
+    if (isKnownHtmlWrapperUrl(upgraded)) {
+      const resolved = await resolveHtmlWrapperToDirectMediaUrl(upgraded, 15000, referer);
+      if (resolved && looksLikeDirectFileUrl(resolved) && !isLikelyThumbnailImageUrl(resolved)) {
+        return { url: upgradeKnownLowQualityMediaUrl(resolved), quality: 'fullscale_resolved', wasThumbnail: true, rejected: false };
+      }
+    }
+    if (looksLikeDirectFileUrl(upgraded) && !isLikelyThumbnailImageUrl(upgraded)) {
+      return { url: upgraded, quality: 'fullscale_upgraded', wasThumbnail: true, rejected: false };
+    }
+  }
+
+  if (isLikelyThumbnailImageUrl(input)) {
+    return {
+      url: input,
+      quality: 'thumbnail_rejected',
+      wasThumbnail: true,
+      rejected: true,
+      reason: 'Thumbnail-achtige image URL kon niet naar fullscale worden opgewaardeerd'
+    };
+  }
+
+  return { url: upgraded || input, quality: 'direct_image', wasThumbnail: false, rejected: false };
 }
 
 function scoreDirectMediaCandidate(url, baseUrl = '') {
@@ -10850,11 +10915,19 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
       return;
     }
 
-    // Probeer lage resolutie links van footfetishforum te upgraden
-    const upgradedInitialUrl = upgradeKnownLowQualityMediaUrl(url);
-    if (upgradedInitialUrl && upgradedInitialUrl !== url) {
-      try { await updateDownloadUrl.run(upgradedInitialUrl, downloadId); } catch (e) { }
-      url = upgradedInitialUrl;
+    const initialReferer = String(
+      metadata && typeof metadata === 'object' && metadata.origin_thread && metadata.origin_thread.url ? metadata.origin_thread.url :
+        metadata && typeof metadata === 'object' && metadata.url && metadata.url !== url ? metadata.url :
+          ''
+    ).trim();
+    const fullscaleCheck = await ensureFullscaleImageDownloadUrl(url, metadata, initialReferer);
+    if (fullscaleCheck.rejected) {
+      await updateDownloadStatus.run('error', 0, fullscaleCheck.reason || 'Image URL lijkt een thumbnail en is niet fullscale bevestigd', downloadId);
+      return;
+    }
+    if (fullscaleCheck.url && fullscaleCheck.url !== url) {
+      try { await updateDownloadUrl.run(fullscaleCheck.url, downloadId); } catch (e) { }
+      url = fullscaleCheck.url;
     }
 
     // Skip site infrastructure files (favicons, apple-touch-icons, etc.)
@@ -10937,6 +11010,8 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
       webdl_pin_context: pinContext,
       webdl_media_url: metadata && metadata.webdl_media_url ? metadata.webdl_media_url : url,
       webdl_detected_platform: metadata && metadata.webdl_detected_platform ? metadata.webdl_detected_platform : detectPlatform(url),
+      webdl_image_quality: fullscaleCheck.quality,
+      webdl_was_thumbnail_url: fullscaleCheck.wasThumbnail === true,
       downloadedAt: new Date().toISOString()
     }, null, 2));
 
@@ -11024,6 +11099,8 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
           const size = fs.existsSync(filepath) ? fs.statSync(filepath).size : 0;
           const ext = (path.extname(filename).replace('.', '') || '').toLowerCase();
           const metaObj = { tool: 'curl', platform, channel, title, url, outputDir: dir };
+          metaObj.webdl_image_quality = fullscaleCheck.quality;
+          metaObj.webdl_was_thumbnail_url = fullscaleCheck.wasThumbnail === true;
           if (pinContext) {
             metaObj.webdl_pin_context = true;
             metaObj.origin_thread = originThread && originThread.url ? originThread : null;

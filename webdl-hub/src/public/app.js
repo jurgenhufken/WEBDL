@@ -21,6 +21,7 @@ const state = {
   collapsedGroups: new Set(),
   jobStats: { queued: 0, running: 0, paused: 0, done: 0, failed: 0, cancelled: 0, total: 0 },
   jobGroups: [],
+  queueDiagnostics: null,
   sabnzbd: null,
   // Live progress data van WebSocket (speed/eta)
   liveProgress: new Map(),
@@ -213,6 +214,7 @@ function renderOverview() {
   setText('ovQueued', s.queued || 0);
   setText('ovPaused', s.paused || 0);
   setText('ovFailed', s.failed || 0);
+  renderQueueDiagnosis();
   renderSabnzbdStatus();
 
   const target = $('overviewGroups');
@@ -250,6 +252,95 @@ function renderOverview() {
     empty.textContent = 'Geen actieve of wachtende groepen';
     target.appendChild(empty);
   }
+}
+
+function shortTitle(row) {
+  return firstReadable(row.video_title, row.group_name, row.name) || row.url || `Job #${row.id}`;
+}
+
+function renderQueueDiagnosis() {
+  const target = $('queueDiagnosis');
+  if (!target) return;
+  const d = state.queueDiagnostics;
+  if (!d) {
+    target.innerHTML = '';
+    return;
+  }
+
+  const pausedGroups = (d.pausedGroups || []).slice(0, 5);
+  const running = (d.running || []).slice(0, 4);
+  const failures = (d.recentFailures || []).slice(0, 4);
+  const pausedLanes = (d.pausedLanes || [])
+    .map((lane) => `${lane.count} ${lane.resume_lane}`)
+    .join(' · ');
+
+  const rows = [];
+  if (running.length) {
+    rows.push(...running.map((job) => `
+      <button type="button" class="diagnosis-row diagnosis-job" data-job-id="${esc(job.id)}">
+        <span>${esc(shortTitle(job))}</span>
+        <strong>${Math.round(Number(job.progress_pct || 0))}%</strong>
+      </button>
+    `));
+  } else if (pausedGroups.length) {
+    rows.push(...pausedGroups.map((group) => `
+      <button type="button" class="diagnosis-row diagnosis-group" data-group-id="${esc(group.group_id)}">
+        <span>${esc(group.name || 'Losse downloads')}</span>
+        <strong>${esc(group.paused)} pauze</strong>
+      </button>
+    `));
+  } else if (failures.length) {
+    rows.push(...failures.map((job) => `
+      <button type="button" class="diagnosis-row diagnosis-job" data-job-id="${esc(job.id)}">
+        <span>${esc(shortTitle(job))}</span>
+        <strong>fout</strong>
+      </button>
+    `));
+  }
+
+  target.className = `queue-diagnosis ${esc(d.state || 'idle')}`;
+  target.innerHTML = `
+    <div class="diagnosis-main">
+      <div>
+        <div class="diagnosis-label">Hubstatus</div>
+        <h3>${esc(d.reason || 'Status onbekend')}</h3>
+        <p>${esc(d.action || '')}</p>
+        ${pausedLanes ? `<p class="diagnosis-muted">Gepauzeerde lanes: ${esc(pausedLanes)}</p>` : ''}
+      </div>
+      <div class="diagnosis-actions">
+        ${(d.stats && Number(d.stats.paused || 0) > 0) ? '<button id="diagResumeAll" type="button" class="btn-download">▶ Hervat alles</button>' : ''}
+        ${(d.stats && Number(d.stats.failed || 0) > 0) ? '<button id="diagRetryFailed" type="button" class="btn-expand">↻ Retry failed</button>' : ''}
+      </div>
+    </div>
+    ${rows.length ? `<div class="diagnosis-list">${rows.join('')}</div>` : ''}
+  `;
+
+  const resumeAll = $('diagResumeAll');
+  if (resumeAll) {
+    resumeAll.addEventListener('click', async () => {
+      try {
+        const result = await api('POST', '/api/jobs/bulk', { action: 'resume-paused' });
+        setMsg(`Hervat: ${result.affected} jobs bijgewerkt`, false, true);
+        await refreshCurrentSource();
+      } catch (e) { setMsg(e.message, true); }
+    });
+  }
+  const retryFailed = $('diagRetryFailed');
+  if (retryFailed) {
+    retryFailed.addEventListener('click', async () => {
+      try {
+        const result = await api('POST', '/api/jobs/bulk', { action: 'retry-failed' });
+        setMsg(`Retry failed: ${result.affected} jobs bijgewerkt`, false, true);
+        await refreshCurrentSource();
+      } catch (e) { setMsg(e.message, true); }
+    });
+  }
+  target.querySelectorAll('.diagnosis-job').forEach((btn) => {
+    btn.addEventListener('click', () => selectJob(btn.dataset.jobId));
+  });
+  target.querySelectorAll('.diagnosis-group').forEach((btn) => {
+    btn.addEventListener('click', () => selectGroup(btn.dataset.groupId).catch((e) => setMsg(e.message, true)));
+  });
 }
 
 function renderSabnzbdStatus() {
@@ -1035,9 +1126,10 @@ async function loadJobs() {
 
 async function loadJobStats() {
   try {
-    const { stats, groups } = await api('GET', '/api/jobs/meta/stats');
+    const { stats, groups, diagnostics } = await api('GET', '/api/jobs/meta/stats');
     state.jobStats = stats || state.jobStats;
     state.jobGroups = groups || [];
+    state.queueDiagnostics = diagnostics || null;
     updateStats();
     if (state.source === 'hub') renderList();
     if (state.source === 'hub' && state.selectedGroupId) renderGroupDetail();

@@ -34,6 +34,7 @@
     // Tags
     availableTags: [],
     currentItemTags: [],
+    lastTagOpenAt: 0,
 
     // Video
     vol: 0.8,
@@ -183,9 +184,7 @@
       el[id] = $(id);
       if (!el[id]) console.warn(`viewer: element #${id} niet gevonden`);
     }
-    if (el.vBtnTags) {
-      el.vBtnTags.onclick = (e) => { e.stopPropagation(); openTagDialog(); };
-    }
+    window.__wdOpenTags = openTagsFromEvent;
     bindControls();
     bindKeyboard();
     bindMouse();
@@ -277,7 +276,7 @@
     vs.open = false;
     stopSlideshow();
     cleanupMedia();
-    closeTagDialog();
+    closeTagDialog({ force: true });
     if (vs.logOpen) toggleLog();
 
     el.viewer.classList.add('hidden');
@@ -896,7 +895,6 @@
     el.vHudLeft.classList.remove('hud-hidden');
     el.vHudRight.classList.remove('hud-hidden');
     el.vStage.classList.remove('hud-hidden');
-    // Topbar mee tonen
     const topbar = document.querySelector('.viewer-topbar');
     if (topbar) {
       topbar.style.opacity = '';
@@ -910,11 +908,10 @@
     el.vHudLeft.classList.add('hud-hidden');
     el.vHudRight.classList.add('hud-hidden');
     el.vStage.classList.add('hud-hidden');
-    // Topbar mee verbergen
     const topbar = document.querySelector('.viewer-topbar');
     if (topbar) {
-      topbar.style.opacity = '0';
-      topbar.style.pointerEvents = 'none';
+      topbar.style.opacity = '';
+      topbar.style.pointerEvents = '';
     }
   }
 
@@ -1063,15 +1060,35 @@
 
   async function openTagDialog() {
     const it = vs.items[vs.idx];
-    if (!it) return;
+    el.vTagDialog.classList.remove('hidden');
+    if (el.vTagSearch) el.vTagSearch.value = '';
+    if (el.vTagCurrent) el.vTagCurrent.textContent = 'Tags laden...';
+    if (el.vTagQuick) el.vTagQuick.textContent = '';
+    if (el.vTagList) el.vTagList.textContent = '';
+    if (!it) {
+      if (el.vTagCurrent) el.vTagCurrent.textContent = 'Geen item geselecteerd';
+      return;
+    }
     await loadTags();
     await loadItemTags(it.rating_id || it.id);
-    if (el.vTagSearch) el.vTagSearch.value = '';
     renderTagDialog();
-    el.vTagDialog.classList.remove('hidden');
   }
 
-  function closeTagDialog() {
+  function openTagsFromEvent(e) {
+    if (e) {
+      try { e.preventDefault(); } catch (_) {}
+      try { e.stopPropagation(); } catch (_) {}
+      try { e.stopImmediatePropagation(); } catch (_) {}
+    }
+    const now = Date.now();
+    if (now - vs.lastTagOpenAt < 250) return false;
+    vs.lastTagOpenAt = now;
+    openTagDialog().catch((err) => log('Tags openen mislukt: ' + err.message));
+    return false;
+  }
+
+  function closeTagDialog(opts = {}) {
+    if (!opts.force && Date.now() - vs.lastTagOpenAt < 2000) return;
     if (el.vTagDialog) el.vTagDialog.classList.add('hidden');
   }
 
@@ -1396,7 +1413,7 @@
 
       switch (e.key) {
         case 'Escape':
-          if (!el.vTagDialog.classList.contains('hidden')) closeTagDialog();
+          if (!el.vTagDialog.classList.contains('hidden')) closeTagDialog({ force: true });
           else if (vs.logOpen) toggleLog();
           else close();
           e.preventDefault();
@@ -1648,10 +1665,11 @@
 
     // Tag dialog: klik buiten → sluit
     document.addEventListener('click', (e) => {
+      const clickedTagsButton = el.vBtnTags && (e.target === el.vBtnTags || el.vBtnTags.contains(e.target));
+      if (clickedTagsButton || Date.now() - vs.lastTagOpenAt < 2000) return;
       if (
         !el.vTagDialog.classList.contains('hidden') &&
-        !el.vTagDialog.contains(e.target) &&
-        e.target !== el.vBtnTags
+        !el.vTagDialog.contains(e.target)
       ) {
         closeTagDialog();
       }
@@ -1860,8 +1878,18 @@
     });
 
     // Tags dialog
-    el.vBtnTags.addEventListener('click', (e) => { e.stopPropagation(); openTagDialog(); });
-    el.vBtnCloseTagDialog.addEventListener('click', closeTagDialog);
+    ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach((eventName) => {
+      el.vBtnTags.addEventListener(eventName, openTagsFromEvent);
+      document.addEventListener(eventName, (e) => {
+        if (e.target && e.target.closest && e.target.closest('#vBtnTags')) {
+          openTagsFromEvent(e);
+        }
+      }, true);
+    });
+    el.vBtnCloseTagDialog.addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeTagDialog({ force: true });
+    });
     el.vTagDialog.addEventListener('click', (e) => {
       if (e.target === el.vTagDialog) closeTagDialog();
     });
@@ -1910,13 +1938,7 @@
     vs.lastRotateAt = now;
     rotateCurrentMedia();
   };
-  window.__wdOpenTags = (e) => {
-    if (e) {
-      e.preventDefault();
-      e.stopPropagation();
-    }
-    openTagDialog();
-  };
+  window.__wdOpenTags = openTagsFromEvent;
   window.__viewer = { init, open, close };
 
   // Auto-init zodra DOM klaar is (app.js laadt viewer.js na zichzelf)

@@ -279,12 +279,13 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
 
   r.get('/meta/stats', async (_req, res, next) => {
     try {
-      const [stats, lanes, groups] = await Promise.all([
+      const [stats, lanes, groups, diagnostics] = await Promise.all([
         repo.getJobStats(),
         repo.getLaneStats(),
         repo.listGroups({ limit: 80 }),
+        repo.getQueueDiagnostics(),
       ]);
-      res.json({ stats, lanes, groups });
+      res.json({ stats, lanes, groups, diagnostics });
     } catch (e) { next(e); }
   });
 

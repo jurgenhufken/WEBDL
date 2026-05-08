@@ -402,6 +402,41 @@ ol.logs .lvl.error { color: var(--err); }
   text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;
 }
 .overview-card strong { color: var(--fg); font-size: 24px; line-height: 1; }
+.queue-diagnosis {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 8px; padding: 12px; margin-bottom: 18px;
+}
+.queue-diagnosis.paused { border-color: rgba(240,179,50,0.55); }
+.queue-diagnosis.running { border-color: rgba(106,169,255,0.55); }
+.queue-diagnosis.blocked { border-color: rgba(240,99,106,0.55); }
+.diagnosis-main {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 16px;
+}
+.diagnosis-label {
+  font-size: 10px; color: var(--fg-dim); text-transform: uppercase;
+  letter-spacing: 0.5px; margin-bottom: 4px;
+}
+.queue-diagnosis h3 { font-size: 15px; color: var(--fg); margin-bottom: 4px; }
+.queue-diagnosis p { font-size: 12px; color: var(--fg-dim); }
+.diagnosis-muted { margin-top: 4px; }
+.diagnosis-actions {
+  display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end;
+  flex-shrink: 0;
+}
+.diagnosis-list {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px; margin-top: 10px;
+}
+.diagnosis-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; text-align: left; background: var(--panel-2);
+  border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px;
+}
+.diagnosis-row span {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.diagnosis-row strong { color: var(--fg); font-size: 12px; flex-shrink: 0; }
 .overview-sab {
   background: var(--panel); border: 1px solid var(--border);
   border-radius: 8px; padding: 12px; margin-bottom: 18px;

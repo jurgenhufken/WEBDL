@@ -232,6 +232,97 @@ function createRepo({ databaseUrl = config.databaseUrl, schema = config.dbSchema
     return rows;
   }
 
+  async function getQueueDiagnostics() {
+    const [stats, runnable, pausedLanes, pausedGroups, running, recentFailures] = await Promise.all([
+      getJobStats(),
+      query(
+        `SELECT lane, COUNT(*)::int AS count, MIN(created_at) AS oldest_created
+           FROM ${T.jobs}
+          WHERE status = 'queued' AND lane <> 'paused'
+          GROUP BY lane
+          ORDER BY count DESC, lane`,
+      ),
+      query(
+        `SELECT COALESCE(NULLIF(options->>'pauseLane', ''), 'onbekend') AS resume_lane,
+                COUNT(*)::int AS count,
+                MIN(options->>'paused_at') AS oldest_paused_at
+           FROM ${T.jobs}
+          WHERE status = 'queued' AND lane = 'paused'
+          GROUP BY COALESCE(NULLIF(options->>'pauseLane', ''), 'onbekend')
+          ORDER BY count DESC, resume_lane`,
+      ),
+      query(
+        `SELECT COALESCE(NULLIF(options->>'expandGroup', ''), 'standalone') AS group_id,
+                COALESCE(
+                  NULLIF(MIN(options->>'expandName'), ''),
+                  NULLIF(MIN(options->>'playlistTitle'), ''),
+                  'Losse downloads'
+                ) AS name,
+                COUNT(*)::int AS paused,
+                MIN(NULLIF(options->>'expandIndex', '')::int) AS next_index,
+                MAX(NULLIF(options->>'expandTotal', '')::int) AS total,
+                MIN(options->>'paused_at') AS oldest_paused_at,
+                COALESCE(NULLIF(MIN(options->>'pauseLane'), ''), 'onbekend') AS resume_lane
+           FROM ${T.jobs}
+          WHERE status = 'queued' AND lane = 'paused'
+          GROUP BY COALESCE(NULLIF(options->>'expandGroup', ''), 'standalone')
+          ORDER BY paused DESC, oldest_paused_at NULLS LAST
+          LIMIT 10`,
+      ),
+      query(
+        `SELECT id, url, adapter, lane, progress_pct, locked_by, locked_at, started_at,
+                options->>'expandName' AS group_name,
+                options->>'videoTitle' AS video_title
+           FROM ${T.jobs}
+          WHERE status = 'running'
+          ORDER BY started_at NULLS LAST, id
+          LIMIT 10`,
+      ),
+      query(
+        `SELECT id, url, adapter, lane, error, finished_at,
+                options->>'expandName' AS group_name,
+                options->>'videoTitle' AS video_title
+           FROM ${T.jobs}
+          WHERE status = 'failed'
+          ORDER BY finished_at DESC NULLS LAST, id DESC
+          LIMIT 8`,
+      ),
+    ]);
+
+    let state = 'idle';
+    let reason = 'Geen actieve of wachtende hub-jobs.';
+    let action = 'Plak een URL of hervat gepauzeerde jobs.';
+    if (Number(stats.running || 0) > 0) {
+      state = 'running';
+      reason = `${stats.running} hub-job(s) actief.`;
+      action = 'Open de actieve job voor voortgang, snelheid en logs.';
+    } else if (Number(stats.queued || 0) > 0) {
+      state = 'waiting';
+      reason = `${stats.queued} hub-job(s) wachten op een worker of throttle.`;
+      action = 'Laat de hub draaien; als dit lang blijft staan, check de recente fouten en worker-logs.';
+    } else if (Number(stats.paused || 0) > 0) {
+      state = 'paused';
+      reason = `Alle resterende hub-jobs staan gepauzeerd (${stats.paused}).`;
+      action = 'Gebruik Hervat alles of hervat een specifieke groep.';
+    } else if (Number(stats.failed || 0) > 0) {
+      state = 'blocked';
+      reason = `Er zijn geen wachtende jobs meer; ${stats.failed} job(s) zijn mislukt.`;
+      action = 'Gebruik Retry failed of open een fout voor details.';
+    }
+
+    return {
+      state,
+      reason,
+      action,
+      stats,
+      runnable: runnable.rows,
+      pausedLanes: pausedLanes.rows,
+      pausedGroups: pausedGroups.rows,
+      running: running.rows,
+      recentFailures: recentFailures.rows,
+    };
+  }
+
   async function listGroups({ limit = 100 } = {}) {
     const { rows } = await query(
       `WITH download_rows AS MATERIALIZED (
@@ -513,7 +604,7 @@ function createRepo({ databaseUrl = config.databaseUrl, schema = config.dbSchema
 
   return {
     pool, schema, close, ping,
-    createJob, getJob, findRecentJobByUrl, findGalleryDownloadByUrl, listJobs, getJobStats, getLaneStats, listGroups, listJobsByGroup,
+    createJob, getJob, findRecentJobByUrl, findGalleryDownloadByUrl, listJobs, getJobStats, getLaneStats, getQueueDiagnostics, listGroups, listJobsByGroup,
     claimNextJob, completeJob, failJob, cancelJob, updateProgress, heartbeatJob,
     pauseJob, resumeJob, setJobPriority, reclaimStaleRunning,
     addFile, listFiles, appendLog, listLogs,

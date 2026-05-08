@@ -131,7 +131,7 @@
           <button id="vBtnOpen" class="vtop-btn" title="Bron-URL openen in browser">🔗 Bron</button>
           <button id="vBtnFinder" class="vtop-btn" title="Bestand tonen in Finder">📁 Finder</button>
           <button id="vBtnRotate" class="vtop-btn" title="Media 90° draaien" onmousedown="window.__wdRotateMedia && window.__wdRotateMedia(event)" onclick="window.__wdRotateMedia && window.__wdRotateMedia(event)">↻ +90°</button>
-          <button id="vBtnTags" class="vtop-btn" title="Tags beheren" onmousedown="window.__wdOpenTags && window.__wdOpenTags(event)" onclick="window.__wdOpenTags && window.__wdOpenTags(event)">🏷 Tags</button>
+          <button id="vBtnTags" class="vtop-btn" title="Tags beheren" onmousedown="return window.__wdOpenTags && window.__wdOpenTags(event)" onclick="return window.__wdOpenTags && window.__wdOpenTags(event)">🏷 Tags</button>
           <button id="vBtnLog" class="vtop-btn" title="Activiteitenlog tonen (L)">📋 Log</button>
           <button id="vBtnTheme" class="vtop-btn" title="Thema wisselen">💎</button>
           <input id="vZoomRange" class="vzoom-hidden" type="range" min="100" max="600" step="10" value="100" aria-hidden="true" tabindex="-1">
@@ -215,7 +215,7 @@
   </div><!-- /viewer -->
 
   <script src="/app.js?v=20260502-54"></script>
-  <script src="/viewer.js?v=20260502-54"></script>
+  <script src="/viewer.js?v=20260508-14"></script>
   <script>
   // ─── Thema switcher ─────────────────────────────────────────────────────
   (function() {

@@ -164,6 +164,34 @@ function idFromMediaUrl(rawUrl) {
   return '';
 }
 
+function isImageUrlLike(input) {
+  try {
+    const u = new URL(String(input || ''));
+    return IMAGE_EXTS.has(path.extname(String(u.pathname || '')).toLowerCase());
+  } catch {
+    return IMAGE_EXTS.has(path.extname(String(input || '').split(/[?#]/)[0]).toLowerCase());
+  }
+}
+
+function isLikelyThumbnailImageUrl(rawUrl) {
+  try {
+    const input = String(rawUrl || '').trim();
+    if (!input || !isImageUrlLike(input)) return false;
+    const u = new URL(input);
+    const host = String(u.hostname || '').toLowerCase();
+    const p = String(u.pathname || '').toLowerCase();
+    if (/^(?:thumbs?|thumbnails?)\d*\./i.test(host)) return true;
+    if ((host === 'vipr.im' || host.endsWith('.vipr.im')) && /^\/th\//i.test(p)) return true;
+    if ((host === 'pixhost.to' || host.endsWith('.pixhost.to')) && /\/thumbs\//i.test(p)) return true;
+    if (/\/(?:thumb|thumbs|thumbnail|thumbnails|preview|previews|small|mini|square)\//i.test(p)) return true;
+    if (/\.(?:th|thumb|thumbnail|preview|small|md)\.(?:jpe?g|png|gif|webp|bmp|avif)(?:$|[?#])/i.test(input)) return true;
+    if (/(?:^|[-_.\/])(?:thumb|thumbnail|preview|small|mini)(?:[-_.\/]|$)/i.test(p)) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 function isPinnedVipergirlsJob(job) {
   return String(job?.options?.platform || '').toLowerCase() === 'vipergirls'
     || /vipergirls\.to/i.test(String(job?.options?.contextUrl || job?.options?.url || ''));
@@ -263,6 +291,16 @@ async function syncToGallery(job, outputFiles, logger) {
       const pinnedVipergirls = isPinnedVipergirlsJob(job);
       const pinnedTarget = pinnedVipergirls ? pinnedVipergirlsTarget(job) : null;
       const rawSourceUrl = fileInfo?.sourceUrl || job.url;
+      const imageQuality = isImage && isImageUrlLike(rawSourceUrl)
+        ? (isLikelyThumbnailImageUrl(rawSourceUrl)
+          ? { quality: 'thumbnail_rejected', wasThumbnail: true, rejected: true }
+          : { quality: 'direct_image', wasThumbnail: false, rejected: false })
+        : { quality: isImage ? 'unknown_source' : 'not_image', wasThumbnail: false, rejected: false };
+      if (imageQuality.rejected) {
+        await repo.appendLog(job.id, 'warn', `thumbnail overgeslagen, geen fullscale bron bevestigd: ${rawSourceUrl}`);
+        logger.warn('gallery.sync.thumbnail_skipped', { job: job.id, sourceUrl: rawSourceUrl, file: path.basename(f.path) });
+        continue;
+      }
       const finalPath = renameOutputForPinnedSource(f.path, job, rawSourceUrl, ext);
       if (finalPath !== f.path) {
         try {
@@ -326,6 +364,8 @@ async function syncToGallery(job, outputFiles, logger) {
             hub_job_id: job.id,
             adapter: job.adapter,
             source_published_at: fileInfo?.sourcePublishedAt || null,
+            webdl_image_quality: imageQuality.quality,
+            webdl_was_thumbnail_url: imageQuality.wasThumbnail === true,
             source_context: pinnedVipergirls ? {
               platform: pinnedTarget.sourcePlatform,
               channel: pinnedTarget.sourceChannel,
