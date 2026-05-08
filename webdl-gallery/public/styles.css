@@ -369,7 +369,12 @@ input[type="range"]:disabled { opacity: 0.35; cursor: default; }
   background: var(--bg-elevated); backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--accent);
   box-shadow: 0 2px 20px rgba(0,0,0,0.4), 0 1px 0 var(--accent-neon), 0 4px 12px var(--card-glow);
-  min-height: 44px; transition: opacity .5s ease;
+  min-height: 44px; transition: opacity .25s ease, transform .25s ease;
+}
+.viewer.viewer--hud-hidden .viewer-topbar {
+  opacity: 0;
+  transform: translateY(-100%);
+  pointer-events: none;
 }
 .vtop-left { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
 .vtop-info { min-width: 0; flex: 1; }

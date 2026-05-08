@@ -5,11 +5,23 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-05-08-fff-thread-full';
+  const WEBDL_BUILD = 'debug-toolbar-2026-05-08-thread-unlimited-origin';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
   const REQUEST_TIMEOUT_MS = 15000;
+  const WEBDL_UNLIMITED = Number.POSITIVE_INFINITY;
+
+  function parseScanLimit(value, fallback = WEBDL_UNLIMITED) {
+    const raw = String(value == null ? '' : value).trim().toLowerCase();
+    if (!raw || raw === '0' || raw === 'all' || raw === 'alles' || raw === 'unlimited' || raw === 'onbeperkt') return fallback;
+    const n = parseInt(raw, 10);
+    return Number.isFinite(n) && n > 0 ? n : fallback;
+  }
+
+  function formatScanLimit(value) {
+    return Number.isFinite(Number(value)) ? String(Number(value)) : 'alles';
+  }
 
   function summarizeUrlsByHost(urls) {
     const counts = new Map();
@@ -718,10 +730,10 @@
 
   async function fetchFootFetishForumForumCandidates(startUrl, options = {}) {
     const opt = options && typeof options === 'object' ? options : {};
-    const maxForumPages = Math.max(1, Math.min(100, parseInt(opt.maxForumPages || '5', 10) || 5));
-    const maxThreadPages = Math.max(1, Math.min(250, parseInt(opt.maxThreadPages || opt.maxPages || '30', 10) || 30));
-    const maxThreads = Math.max(1, Math.min(1000, parseInt(opt.maxThreads || '100', 10) || 100));
-    const maxItems = Math.max(1, Math.min(12000, parseInt(opt.maxItems || '8000', 10) || 8000));
+    const maxForumPages = parseScanLimit(opt.maxForumPages);
+    const maxThreadPages = parseScanLimit(opt.maxThreadPages || opt.maxPages);
+    const maxThreads = parseScanLimit(opt.maxThreads);
+    const maxItems = parseScanLimit(opt.maxItems);
     const delayMs = Math.max(0, Math.min(3000, parseInt(opt.delayMs || '250', 10) || 250));
     const timeoutMs = Math.max(3000, Math.min(60000, parseInt(opt.timeoutMs || '20000', 10) || 20000));
 
@@ -798,8 +810,8 @@
 
   async function fetchFootFetishForumThreadCandidates(startUrl, options = {}) {
     const opt = options && typeof options === 'object' ? options : {};
-    const maxPages = Math.max(1, Math.min(250, parseInt(opt.maxPages || '60', 10) || 60));
-    const maxItems = Math.max(1, Math.min(8000, parseInt(opt.maxItems || '5000', 10) || 5000));
+    const maxPages = parseScanLimit(opt.maxPages);
+    const maxItems = parseScanLimit(opt.maxItems);
     const delayMs = Math.max(0, Math.min(3000, parseInt(opt.delayMs || '250', 10) || 250));
     const timeoutMs = Math.max(3000, Math.min(60000, parseInt(opt.timeoutMs || '20000', 10) || 20000));
 
@@ -1703,8 +1715,8 @@
 
   async function fetchVipergirlsKeep2ShareThreadCandidates(startUrl, options = {}) {
     const opt = options && typeof options === 'object' ? options : {};
-    const maxPages = Math.max(1, Math.min(250, parseInt(opt.maxPages || '250', 10) || 250));
-    const maxItems = Math.max(1, Math.min(8000, parseInt(opt.maxItems || '5000', 10) || 5000));
+    const maxPages = parseScanLimit(opt.maxPages);
+    const maxItems = parseScanLimit(opt.maxItems);
     const delayMs = Math.max(0, Math.min(3000, parseInt(opt.delayMs || '250', 10) || 250));
     const timeoutMs = Math.max(3000, Math.min(60000, parseInt(opt.timeoutMs || '20000', 10) || 20000));
     const seen = new Set();
@@ -1753,8 +1765,8 @@
 
   async function fetchVipergirlsMixedThreadCandidates(startUrl, options = {}) {
     const opt = options && typeof options === 'object' ? options : {};
-    const maxPages = Math.max(1, Math.min(250, parseInt(opt.maxPages || '250', 10) || 250));
-    const maxItems = Math.max(1, Math.min(8000, parseInt(opt.maxItems || '5000', 10) || 5000));
+    const maxPages = parseScanLimit(opt.maxPages);
+    const maxItems = parseScanLimit(opt.maxItems);
     const delayMs = Math.max(0, Math.min(3000, parseInt(opt.delayMs || '250', 10) || 250));
     const timeoutMs = Math.max(3000, Math.min(60000, parseInt(opt.timeoutMs || '20000', 10) || 20000));
     const out = [];
@@ -1838,8 +1850,8 @@
 
   async function fetchVipergirlsForumCandidates(startUrl, options = {}) {
     const opt = options && typeof options === 'object' ? options : {};
-    const maxForumPages = Math.max(1, Math.min(100, parseInt(opt.maxForumPages || '10', 10) || 10));
-    const maxThreads = Math.max(1, Math.min(1000, parseInt(opt.maxThreads || opt.maxItems || '200', 10) || 200));
+    const maxForumPages = parseScanLimit(opt.maxForumPages);
+    const maxThreads = parseScanLimit(opt.maxThreads || opt.maxItems);
     const delayMs = Math.max(0, Math.min(3000, parseInt(opt.delayMs || '250', 10) || 250));
     const timeoutMs = Math.max(3000, Math.min(60000, parseInt(opt.timeoutMs || '20000', 10) || 20000));
 
@@ -4712,51 +4724,39 @@
         triggerBtn.style.opacity = '0.6';
       }
 
-      let maxPages = 60;
-      let maxItems = 5000;
-      let maxForumPages = 5;
-      try {
-        maxPages = parseInt(localStorage.getItem(isAnyForumPage ? 'WEBDL_FFF_FORUM_MAX_THREAD_PAGES' : 'WEBDL_FFF_THREAD_MAX_PAGES') || (isAnyForumPage ? '30' : '60'), 10) || (isAnyForumPage ? 30 : 60);
-      } catch (e) {}
-      try {
-        maxForumPages = parseInt(localStorage.getItem(isVipergirlsForum ? 'WEBDL_VIPERGIRLS_FORUM_MAX_PAGES' : 'WEBDL_FFF_FORUM_MAX_PAGES') || (isVipergirlsForum ? '10' : '5'), 10) || (isVipergirlsForum ? 10 : 5);
-      } catch (e) {}
-      try {
-        maxItems = parseInt(localStorage.getItem('WEBDL_FFF_THREAD_MAX_ITEMS') || '5000', 10) || 5000;
-      } catch (e) {}
+      let maxPages = WEBDL_UNLIMITED;
+      let maxItems = WEBDL_UNLIMITED;
+      let maxForumPages = WEBDL_UNLIMITED;
 
       const wantsSettings = !!(clickEvent && (clickEvent.metaKey || clickEvent.ctrlKey));
       if (wantsSettings) {
         if (isAnyForumPage) {
           try {
-            const fIn = window.prompt('Forum: max forum-pagina\'s scannen? (1-100)', String(maxForumPages));
+            const fIn = window.prompt('Forum: max forum-pagina\'s scannen? Leeg/0 = alles', '');
             if (fIn === null) return;
-            const n = parseInt(String(fIn || '').trim(), 10);
-            if (Number.isFinite(n) && n > 0) maxForumPages = n;
+            maxForumPages = parseScanLimit(fIn);
           } catch (e) {}
         }
         try {
-          const pIn = window.prompt(isAnyForumPage ? 'Forum: max pagina\'s per thread scannen? (1-250)' : 'Hele thread: max pagina\'s scannen? (1-250)', String(maxPages));
+          const pIn = window.prompt(isAnyForumPage ? 'Forum: max pagina\'s per thread scannen? Leeg/0 = alles' : 'Hele thread: max pagina\'s scannen? Leeg/0 = alles', '');
           if (pIn === null) return;
-          const n = parseInt(String(pIn || '').trim(), 10);
-          if (Number.isFinite(n) && n > 0) maxPages = n;
+          maxPages = parseScanLimit(pIn);
         } catch (e) {}
         try {
-          const iIn = window.prompt(isVipergirlsForum ? 'Vipergirls forum: max threads verzamelen? (1-1000)' : 'Hele thread: max items (URLs) verzamelen? (1-8000)', String(maxItems));
+          const iIn = window.prompt(isVipergirlsForum ? 'Vipergirls forum: max threads verzamelen? Leeg/0 = alles' : 'Hele thread: max items (URLs) verzamelen? Leeg/0 = alles', '');
           if (iIn === null) return;
-          const n = parseInt(String(iIn || '').trim(), 10);
-          if (Number.isFinite(n) && n > 0) maxItems = n;
+          maxItems = parseScanLimit(iIn);
         } catch (e) {}
       }
 
-      try { if (isForumPage) localStorage.setItem('WEBDL_FFF_FORUM_MAX_PAGES', String(maxForumPages)); } catch (e) {}
-      try { if (isVipergirlsForum) localStorage.setItem('WEBDL_VIPERGIRLS_FORUM_MAX_PAGES', String(maxForumPages)); } catch (e) {}
-      try { localStorage.setItem(isAnyForumPage ? 'WEBDL_FFF_FORUM_MAX_THREAD_PAGES' : 'WEBDL_FFF_THREAD_MAX_PAGES', String(maxPages)); } catch (e) {}
-      try { localStorage.setItem('WEBDL_FFF_THREAD_MAX_ITEMS', String(maxItems)); } catch (e) {}
+      try { if (wantsSettings && isForumPage) localStorage.setItem('WEBDL_FFF_FORUM_MAX_PAGES', Number.isFinite(maxForumPages) ? String(maxForumPages) : ''); } catch (e) {}
+      try { if (wantsSettings && isVipergirlsForum) localStorage.setItem('WEBDL_VIPERGIRLS_FORUM_MAX_PAGES', Number.isFinite(maxForumPages) ? String(maxForumPages) : ''); } catch (e) {}
+      try { if (wantsSettings) localStorage.setItem(isAnyForumPage ? 'WEBDL_FFF_FORUM_MAX_THREAD_PAGES' : 'WEBDL_FFF_THREAD_MAX_PAGES', Number.isFinite(maxPages) ? String(maxPages) : ''); } catch (e) {}
+      try { if (wantsSettings) localStorage.setItem('WEBDL_FFF_THREAD_MAX_ITEMS', Number.isFinite(maxItems) ? String(maxItems) : ''); } catch (e) {}
 
       try {
-        const hint = wantsSettings ? '' : ' (Cmd/Ctrl-klik om limieten te wijzigen)';
-        showNotification(`${isAnyForumPage ? `Forum scannen: max ${maxForumPages} forum-pagina's, ` : 'Thread scannen: '}max ${maxPages} pagina's/thread, max ${maxItems} items${hint}`, false);
+        const hint = wantsSettings ? '' : ' (Cmd/Ctrl-klik voor optionele limiet)';
+        showNotification(`${isAnyForumPage ? `Forum scannen: ${formatScanLimit(maxForumPages)} forum-pagina's, ` : 'Thread scannen: '} ${formatScanLimit(maxPages)} pagina's/thread, ${formatScanLimit(maxItems)} items${hint}`, false);
       } catch (e) {}
 
       const startUrl = String(window.location.href || '').replace(/#.*$/, '');
@@ -4863,28 +4863,24 @@
         triggerBtn.style.opacity = '0.6';
       }
 
-      let maxPages = 250;
-      let maxItems = 5000;
-      try { maxPages = parseInt(localStorage.getItem('WEBDL_VIPERGIRLS_K2S_MAX_PAGES') || '250', 10) || 250; } catch (e) {}
-      try { maxItems = parseInt(localStorage.getItem('WEBDL_VIPERGIRLS_K2S_MAX_ITEMS') || '5000', 10) || 5000; } catch (e) {}
+      let maxPages = WEBDL_UNLIMITED;
+      let maxItems = WEBDL_UNLIMITED;
 
       if (wantsSettings) {
         try {
-          const pIn = window.prompt('K2S hele thread: max pagina\'s scannen? (1-250)', String(maxPages));
+          const pIn = window.prompt('K2S hele thread: max pagina\'s scannen? Leeg/0 = alles', '');
           if (pIn === null) return;
-          const n = parseInt(String(pIn || '').trim(), 10);
-          if (Number.isFinite(n) && n > 0) maxPages = n;
+          maxPages = parseScanLimit(pIn);
         } catch (e) {}
         try {
-          const iIn = window.prompt('K2S: max links verzamelen? (1-8000)', String(maxItems));
+          const iIn = window.prompt('K2S: max links verzamelen? Leeg/0 = alles', '');
           if (iIn === null) return;
-          const n = parseInt(String(iIn || '').trim(), 10);
-          if (Number.isFinite(n) && n > 0) maxItems = n;
+          maxItems = parseScanLimit(iIn);
         } catch (e) {}
       }
 
-      try { localStorage.setItem('WEBDL_VIPERGIRLS_K2S_MAX_PAGES', String(maxPages)); } catch (e) {}
-      try { localStorage.setItem('WEBDL_VIPERGIRLS_K2S_MAX_ITEMS', String(maxItems)); } catch (e) {}
+      try { if (wantsSettings) localStorage.setItem('WEBDL_VIPERGIRLS_K2S_MAX_PAGES', Number.isFinite(maxPages) ? String(maxPages) : ''); } catch (e) {}
+      try { if (wantsSettings) localStorage.setItem('WEBDL_VIPERGIRLS_K2S_MAX_ITEMS', Number.isFinite(maxItems) ? String(maxItems) : ''); } catch (e) {}
 
       const result = wholeThread
         ? await fetchVipergirlsKeep2ShareThreadCandidates(window.location.href, { maxPages, maxItems })

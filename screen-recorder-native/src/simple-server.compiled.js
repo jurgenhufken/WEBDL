@@ -976,6 +976,110 @@ function cookieHeaderFromMetadataCookies(raw) {
   return cookies.join('; ');
 }
 
+function keep2ShareCookieFromEnv() {
+  return cookieHeaderFromMetadataCookies(
+    process.env.WEBDL_KEEP2SHARE_COOKIE ||
+    process.env.KEEP2SHARE_COOKIE ||
+    process.env.K2S_COOKIE ||
+    ''
+  );
+}
+
+async function loadKeep2ShareCookieHeader(hostname, metadata) {
+  const metadataCookies = metadata && typeof metadata === 'object' ? cookieHeaderFromMetadataCookies(metadata.cookies) : '';
+  if (metadataCookies) return metadataCookies;
+  const envCookies = keep2ShareCookieFromEnv();
+  if (envCookies) return envCookies;
+  const host = String(hostname || '').toLowerCase();
+  return await loadCookiesForDomain(host) || await loadCookiesForDomain('k2s.cc') || await loadCookiesForDomain('keep2share.cc');
+}
+
+function isKeep2ShareUrl(input) {
+  try {
+    const u = new URL(String(input || ''));
+    const host = String(u.hostname || '').toLowerCase().replace(/^www\./, '');
+    return host === 'k2s.cc' || host === 'k2s.io' || host === 'keep2share.cc' ||
+      host.endsWith('.k2s.cc') || host.endsWith('.k2s.io') || host.endsWith('.keep2share.cc');
+  } catch (e) {
+    return false;
+  }
+}
+
+function keep2ShareFileIdFromUrl(input) {
+  try {
+    const u = new URL(String(input || ''));
+    const m = String(u.pathname || '').match(/^\/file\/([^\/?#]+)/i);
+    return m && m[1] ? decodeURIComponent(m[1]).trim() : '';
+  } catch (e) {
+    return '';
+  }
+}
+
+let keep2ShareAuthTokenCache = { token: '', expiresAt: 0 };
+
+async function postKeep2ShareApi(pathname, body) {
+  const res = await fetch(`https://keep2share.cc/api/v2/${pathname}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+    },
+    body: JSON.stringify(body || {})
+  });
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch (e) { }
+  if (!json || typeof json !== 'object') {
+    throw new Error(`Keep2Share API gaf geen JSON terug (${res.status})`);
+  }
+  return json;
+}
+
+async function getKeep2ShareAuthToken() {
+  const direct = String(
+    process.env.WEBDL_KEEP2SHARE_AUTH_TOKEN ||
+    process.env.KEEP2SHARE_AUTH_TOKEN ||
+    process.env.K2S_AUTH_TOKEN ||
+    ''
+  ).trim();
+  if (direct) return direct;
+  if (keep2ShareAuthTokenCache.token && keep2ShareAuthTokenCache.expiresAt > Date.now() + 60000) return keep2ShareAuthTokenCache.token;
+
+  const username = String(process.env.WEBDL_KEEP2SHARE_USERNAME || process.env.KEEP2SHARE_USERNAME || process.env.K2S_USERNAME || '').trim();
+  const password = String(process.env.WEBDL_KEEP2SHARE_PASSWORD || process.env.KEEP2SHARE_PASSWORD || process.env.K2S_PASSWORD || '').trim();
+  if (!username || !password) return '';
+
+  const json = await postKeep2ShareApi('login', { username, password });
+  if (json.status === 'success' && json.auth_token) {
+    keep2ShareAuthTokenCache = { token: String(json.auth_token), expiresAt: Date.now() + 6 * 3600 * 1000 };
+    return keep2ShareAuthTokenCache.token;
+  }
+  throw new Error(`Keep2Share login faalde: ${json.message || json.error || json.status || 'onbekend'}`);
+}
+
+async function resolveKeep2ShareDirectUrl(input) {
+  const fileId = keep2ShareFileIdFromUrl(input);
+  if (!fileId) return { url: '', error: 'Keep2Share file-id ontbreekt in URL' };
+  const authToken = await getKeep2ShareAuthToken();
+  const accessToken = String(
+    process.env.WEBDL_KEEP2SHARE_ACCESS_TOKEN ||
+    process.env.KEEP2SHARE_ACCESS_TOKEN ||
+    process.env.K2S_ACCESS_TOKEN ||
+    ''
+  ).trim();
+  if (!authToken && !accessToken) {
+    return {
+      url: '',
+      error: 'Keep2Share premium API-token ontbreekt. Zet WEBDL_KEEP2SHARE_AUTH_TOKEN/K2S_AUTH_TOKEN of WEBDL_KEEP2SHARE_USERNAME/PASSWORD in .env.'
+    };
+  }
+  const body = authToken ? { auth_token: authToken, file_id: fileId } : { access_token: accessToken, file_id: fileId };
+  const json = await postKeep2ShareApi('getUrl', body);
+  if (json.status === 'success' && json.url) return { url: String(json.url), error: '' };
+  return { url: '', error: `Keep2Share getUrl faalde: ${json.message || json.error || json.status || 'onbekend'}` };
+}
+
 // Geeft het absolute pad terug van het eerste (alfabetisch) geïndexeerde bestand
 // voor een specifieke download. Nodig voor platforms waar meerdere downloads
 // dezelfde filepath (gedeelde channel-dir) delen, bv. gallery-dl/pornpics:
@@ -5030,6 +5134,34 @@ function shouldAutoRehydrate() {
   return needHeavy || needLight || needBatch;
 }
 
+function queueContextFromDownloadRow(row, parsedMeta) {
+  const url = String(row && row.url || '').trim();
+  const storedPlatform = row && row.platform && String(row.platform).trim() ? String(row.platform).trim() : '';
+  const storedChannel = row && row.channel && String(row.channel).trim() ? String(row.channel).trim() : '';
+  const storedTitle = row && row.title && String(row.title).trim() ? String(row.title).trim() : '';
+  const sourceUrl = row && row.source_url && String(row.source_url).trim() ? String(row.source_url).trim() : '';
+  const rawMeta = parsedMeta && typeof parsedMeta === 'object' && !Array.isArray(parsedMeta) ? parsedMeta : null;
+  const origin = normalizeOriginThreadContext(
+    pickSourceContextForUrl(rawMeta, url),
+    storedPlatform,
+    sourceUrl || url,
+    storedChannel,
+    storedTitle
+  );
+  const pinOrigin = !!(origin && origin.url && origin.url !== url && (rawMeta && rawMeta.webdl_pin_context === true || rawMeta && rawMeta.origin_thread || rawMeta && rawMeta.source_context));
+  const platform = pinOrigin ? origin.platform : normalizePlatform(storedPlatform, url);
+  const channel = pinOrigin ? origin.channel : storedChannel && storedChannel !== 'unknown' ? storedChannel : deriveChannelFromUrl(platform, url) || 'unknown';
+  const title = pinOrigin ? origin.title : storedTitle && storedTitle !== 'untitled' ? storedTitle : deriveTitleFromUrl(url);
+  const metadata = rawMeta ? { ...rawMeta } : parsedMeta;
+  if (pinOrigin && metadata && typeof metadata === 'object') {
+    metadata.webdl_pin_context = true;
+    metadata.origin_thread = origin;
+    if (!metadata.webdl_media_url) metadata.webdl_media_url = url;
+    if (!metadata.webdl_detected_platform) metadata.webdl_detected_platform = detectPlatform(url);
+  }
+  return { platform, channel, title, metadata };
+}
+
 function scheduleAutoRehydrate() {
   if (autoRehydrateTimer) return;
   autoRehydrateTimer = setTimeout(async () => {
@@ -5044,9 +5176,12 @@ function scheduleAutoRehydrate() {
       if (!needHeavy && !needLight && !needBatch) return;
 
       const rows = await db.prepare(
-        `SELECT id, url, platform, channel, title, metadata, status
+        `SELECT id, url, source_url, platform, channel, title, metadata, status
          FROM downloads
          WHERE status = 'pending'
+           AND url NOT LIKE 'recording:%'
+           AND COALESCE(CAST(metadata AS TEXT), '') NOT LIKE '%"webdl_kind":"recording"%'
+           AND COALESCE(CAST(metadata AS TEXT), '') NOT LIKE '%"webdl_kind": "recording"%'
          ORDER BY COALESCE(priority, 0) DESC, id ASC
          LIMIT 250`
       ).all();
@@ -5062,15 +5197,16 @@ function scheduleAutoRehydrate() {
         let parsedMeta = null;
         try { if (row.metadata) parsedMeta = JSON.parse(row.metadata); } catch (e) {}
         if (parsedMeta && parsedMeta.webdl_kind === 'recording') continue;
-        const storedPlatform = String(row.platform || '').trim().toLowerCase();
-        const platform = normalizePlatform(storedPlatform, url);
-        const channel = (row.channel && row.channel !== 'unknown') ? row.channel : deriveChannelFromUrl(platform, url) || 'unknown';
-        const title = (row.title && row.title !== 'untitled') ? row.title : deriveTitleFromUrl(url);
+        const ctx = queueContextFromDownloadRow(row, parsedMeta);
+        const platform = ctx.platform;
+        const channel = ctx.channel;
+        const title = ctx.title;
+        const metadata = ctx.metadata;
         const lane = detectLane(platform, url);
         if (lane === 'heavy' && !needHeavy) continue;
         if (lane === 'light' && !needLight) continue;
         if (lane === 'batch' && !needBatch) continue;
-        queuedJobs.set(id, { downloadId: id, url, platform, channel, title, metadata: parsedMeta, progress: 0 });
+        queuedJobs.set(id, { downloadId: id, url, platform, channel, title, metadata, progress: 0 });
         jobLane.set(id, lane);
         jobPlatform.set(id, platform);
         if (lane === 'light') queuedLight.push(id); else queuedHeavy.push(id);
@@ -5260,7 +5396,7 @@ async function rehydrateDownloadQueueWithMode(modeRaw, maxRowsRaw) {
           "('postprocessing')" :
           "('downloading', 'postprocessing')";
     const rows = await db.prepare(
-      `SELECT id, url, platform, channel, title, metadata, status
+      `SELECT id, url, source_url, platform, channel, title, metadata, status
        FROM downloads
        WHERE status IN ${statusList}
        ORDER BY
@@ -5291,20 +5427,18 @@ async function rehydrateDownloadQueueWithMode(modeRaw, maxRowsRaw) {
       }
       if (url.startsWith('recording:') || parsedMeta && parsedMeta.webdl_kind === 'recording') continue;
 
+      const ctx = queueContextFromDownloadRow(row, parsedMeta);
+      const platform = ctx.platform;
+      const channel = ctx.channel;
+      const title = ctx.title;
+      const metadata = ctx.metadata;
       const storedPlatform = row.platform && String(row.platform).trim() ? String(row.platform).trim() : '';
-      const platform = normalizePlatform(storedPlatform, url);
-
       const storedChannel = row.channel && String(row.channel).trim() ? String(row.channel).trim() : '';
-      const channel = storedChannel && storedChannel !== 'unknown' ? storedChannel : deriveChannelFromUrl(platform, url) || 'unknown';
-
       const storedTitle = row.title && String(row.title).trim() ? String(row.title).trim() : '';
-      const title = storedTitle && storedTitle !== 'untitled' ? storedTitle : deriveTitleFromUrl(url);
 
       if (platform !== storedPlatform || channel !== storedChannel || title !== storedTitle) {
         await updateDownloadBasics.run(platform, channel, title, id);
       }
-
-      const metadata = parsedMeta;
 
       let initialProgress = 0;
       if (row.status === 'downloading' || row.status === 'postprocessing') {
@@ -5342,7 +5476,7 @@ async function rehydrateDownloadQueue() {
           "('postprocessing')" :
           "('downloading', 'postprocessing')";
     const rows = await db.prepare(
-      `SELECT id, url, platform, channel, title, metadata, status
+      `SELECT id, url, source_url, platform, channel, title, metadata, status
        FROM downloads
        WHERE status IN ${statusList}
        ORDER BY
@@ -5381,20 +5515,18 @@ async function rehydrateDownloadQueue() {
         continue;
       }
 
+      const ctx = queueContextFromDownloadRow(row, parsedMeta);
+      const platform = ctx.platform;
+      const channel = ctx.channel;
+      const title = ctx.title;
+      const metadata = ctx.metadata;
       const storedPlatform = row.platform && String(row.platform).trim() ? String(row.platform).trim() : '';
-      const platform = normalizePlatform(storedPlatform, url);
-
       const storedChannel = row.channel && String(row.channel).trim() ? String(row.channel).trim() : '';
-      const channel = storedChannel && storedChannel !== 'unknown' ? storedChannel : deriveChannelFromUrl(platform, url) || 'unknown';
-
       const storedTitle = row.title && String(row.title).trim() ? String(row.title).trim() : '';
-      const title = storedTitle && storedTitle !== 'untitled' ? storedTitle : deriveTitleFromUrl(url);
 
       if (platform !== storedPlatform || channel !== storedChannel || title !== storedTitle) {
         await updateDownloadBasics.run(platform, channel, title, id);
       }
-
-      const metadata = parsedMeta;
 
       let initialProgress = 0;
       if (row.status === 'downloading' || row.status === 'postprocessing') {
@@ -7838,6 +7970,51 @@ function isFootfetishforumForumUrl(input) {
   }
 }
 
+function pickSourceContextForUrl(metadata, url) {
+  try {
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null;
+    const map = metadata.webdl_source_contexts && typeof metadata.webdl_source_contexts === 'object'
+      ? metadata.webdl_source_contexts
+      : null;
+    const key = String(url || '').trim();
+    if (map && key && map[key] && typeof map[key] === 'object') return map[key];
+    if (metadata.source_context && typeof metadata.source_context === 'object') return metadata.source_context;
+    if (metadata.origin_thread && typeof metadata.origin_thread === 'object') return metadata.origin_thread;
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function normalizeOriginThreadContext(ctx, fallbackPlatform, fallbackUrl, fallbackChannel, fallbackTitle) {
+  try {
+    const raw = ctx && typeof ctx === 'object' && !Array.isArray(ctx) ? ctx : {};
+    const url = String(raw.url || fallbackUrl || '').trim();
+    if (!url) return null;
+    const platform = normalizePlatform(raw.platform || fallbackPlatform || '', url);
+    const fffInfo = platform === 'footfetishforum' ? parseFootFetishForumThreadInfo(url) : null;
+    const channel = String(
+      fffInfo && fffInfo.name ||
+      raw.channel ||
+      fallbackChannel ||
+      deriveChannelFromUrl(platform, url) ||
+      'unknown'
+    ).trim();
+    const title = String(
+      fffInfo && fffInfo.name ||
+      raw.title ||
+      fallbackTitle ||
+      deriveTitleFromUrl(url)
+    ).trim();
+    const out = { url, platform, channel: channel || 'unknown', title: title || 'untitled' };
+    if (raw.thread_id) out.thread_id = String(raw.thread_id);
+    if (fffInfo && fffInfo.id) out.thread_id = fffInfo.id;
+    return out;
+  } catch (e) {
+    return null;
+  }
+}
+
 function isAznudefeetViewUrl(input) {
   try {
     const u = new URL(String(input || ''));
@@ -9538,18 +9715,22 @@ expressApp.post('/download', async (req, res) => {
   }
 
 
-  const pageUrl = metadata && typeof metadata.url === 'string' ? metadata.url.trim() : '';
-  const originPlatform = normalizePlatform(metaPlatform, pageUrl || effectiveUrl);
+  const sourceContext = pickSourceContextForUrl(metadata, effectiveUrl);
+  const rawPageUrl = metadata && typeof metadata.url === 'string' ? metadata.url.trim() : '';
+  const pageUrl = sourceContext && sourceContext.url ? String(sourceContext.url).trim() : rawPageUrl;
+  const sourceOrigin = normalizeOriginThreadContext(sourceContext, metaPlatform, pageUrl || effectiveUrl, metadata && metadata.channel, metadata && metadata.title);
+  const originPlatform = sourceOrigin && sourceOrigin.platform ? sourceOrigin.platform : normalizePlatform(metaPlatform, pageUrl || effectiveUrl);
+  const pinSourceOrigin = !!(sourceOrigin && sourceOrigin.url && sourceOrigin.url !== effectiveUrl);
   const pinFffOrigin = !!(
     (originPlatform === 'footfetishforum' && pageUrl && pageUrl !== effectiveUrl && (isFootfetishforumThreadUrl(pageUrl) || isFootfetishforumForumUrl(pageUrl))) ||
     (detectPlatform(effectiveUrl) === 'footfetishforum' && /\/attachments\//i.test(effectiveUrl) && pageUrl && (isFootfetishforumThreadUrl(pageUrl) || isFootfetishforumForumUrl(pageUrl)))
   );
   const pinAznOrigin = !!(originPlatform === 'aznudefeet' && pageUrl && pageUrl !== effectiveUrl && isAznudefeetViewUrl(pageUrl));
-  const pinToOrigin = !!(pinFffOrigin || pinAznOrigin);
+  const pinToOrigin = !!(pinSourceOrigin || pinFffOrigin || pinAznOrigin);
   const fffThreadInfo = pinFffOrigin ? parseFootFetishForumThreadInfo(pageUrl || effectiveUrl) : null;
   const detectedPlatform = detectPlatform(effectiveUrl);
-  const originChannel = pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : metadata && metadata.channel && metadata.channel !== 'unknown' ? metadata.channel : deriveChannelFromUrl(originPlatform, pageUrl || effectiveUrl) || 'unknown';
-  const originTitle = pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : metadata && metadata.title ? metadata.title : deriveTitleFromUrl(pageUrl || effectiveUrl);
+  const originChannel = sourceOrigin && sourceOrigin.channel ? sourceOrigin.channel : pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : metadata && metadata.channel && metadata.channel !== 'unknown' ? metadata.channel : deriveChannelFromUrl(originPlatform, pageUrl || effectiveUrl) || 'unknown';
+  const originTitle = sourceOrigin && sourceOrigin.title ? sourceOrigin.title : pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : metadata && metadata.title ? metadata.title : deriveTitleFromUrl(pageUrl || effectiveUrl);
 
   const preferDetectedPlatform = !!(pinFffOrigin && detectedPlatform && detectedPlatform !== 'other' && detectedPlatform !== originPlatform);
   const platform = pinToOrigin ? originPlatform : (preferDetectedPlatform ? detectedPlatform : normalizePlatform(metaPlatform, effectiveUrl));
@@ -9657,7 +9838,7 @@ expressApp.post('/download', async (req, res) => {
   }
   if (pinToOrigin) {
     jobMetadata.webdl_pin_context = true;
-    jobMetadata.origin_thread = { url: pageUrl, platform: originPlatform, channel: originChannel, title: originTitle };
+    jobMetadata.origin_thread = sourceOrigin && sourceOrigin.url ? sourceOrigin : { url: pageUrl, platform: originPlatform, channel: originChannel, title: originTitle };
     jobMetadata.webdl_media_url = effectiveUrl;
     jobMetadata.webdl_detected_platform = detectedPlatform;
   }
@@ -9879,9 +10060,14 @@ async function _expandAndQueueBackground(deferredUrls, { originPlatform, originC
         }
       }
 
-      // Queue each discovered CDN URL
-      const channel = originChannel !== 'unknown' ? originChannel : deriveChannelFromUrl(sitePlatform, u) || 'unknown';
-      const title = originTitle || metadata && metadata.title || deriveTitleFromUrl(u);
+      // Queue each discovered CDN URL. If the gallery/model link came from a
+      // thread batch, keep the original thread as the storage context.
+      const sourceContext = pickSourceContextForUrl(metadata, u);
+      const sourceOrigin = normalizeOriginThreadContext(sourceContext, originPlatform, pageUrl || u, originChannel, originTitle);
+      const pinToSourceOrigin = !!(sourceOrigin && sourceOrigin.url && sourceOrigin.url !== u);
+      const queuedPlatform = pinToSourceOrigin ? sourceOrigin.platform : sitePlatform;
+      const channel = pinToSourceOrigin ? sourceOrigin.channel : originChannel !== 'unknown' ? originChannel : deriveChannelFromUrl(sitePlatform, u) || 'unknown';
+      const title = pinToSourceOrigin ? sourceOrigin.title : originTitle || metadata && metadata.title || deriveTitleFromUrl(u);
       let queuedCount = 0;
       let skippedCount = 0;
       for (const cdnUrl of cdnUrls) {
@@ -9896,13 +10082,20 @@ async function _expandAndQueueBackground(deferredUrls, { originPlatform, originC
             const iter = _expandQueuedUrls.values();
             for (let i = 0; i < 50000; i++) { const v = iter.next(); if (v.done) break; _expandQueuedUrls.delete(v.value); }
           }
-          const result = await insertDownload.run(cdnUrl, sitePlatform, channel, title);
+          const result = await insertDownload.run(cdnUrl, queuedPlatform, channel, title);
           const downloadId = result.lastInsertRowid;
           try {
-            if (pageUrl && pageUrl !== cdnUrl) await updateDownloadSourceUrl.run(pageUrl, downloadId);
+            const sourceUrl = pinToSourceOrigin && sourceOrigin.url ? sourceOrigin.url : pageUrl;
+            if (sourceUrl && sourceUrl !== cdnUrl) await updateDownloadSourceUrl.run(sourceUrl, downloadId);
           } catch (e) {}
-          const jobMeta = { ...(metadata || {}), tool: 'curl', platform: sitePlatform, channel, title };
-          enqueueDownloadJob(downloadId, cdnUrl, sitePlatform, channel, title, jobMeta);
+          const jobMeta = { ...(metadata || {}), tool: 'curl', platform: queuedPlatform, channel, title };
+          if (pinToSourceOrigin) {
+            jobMeta.webdl_pin_context = true;
+            jobMeta.origin_thread = sourceOrigin;
+            jobMeta.webdl_media_url = cdnUrl;
+            jobMeta.webdl_detected_platform = detectPlatform(cdnUrl);
+          }
+          enqueueDownloadJob(downloadId, cdnUrl, queuedPlatform, channel, title, jobMeta);
           queuedCount++;
         } catch (e) {
           console.log(`[BG-EXPAND] Queue error for ${cdnUrl.slice(-40)}: ${e.message}`);
@@ -9990,14 +10183,27 @@ expressApp.post('/download/batch', async (req, res) => {
   // Process immediate URLs synchronously (fast)
   const created = [];
   for (const u of immediate) {
-    const pinToOrigin = !!((pinFffOrigin || pinAznOrigin) && pageUrl && pageUrl !== u);
+    const itemSourceContext = pickSourceContextForUrl(metadata, u);
+    const itemPageUrl = itemSourceContext && itemSourceContext.url ? String(itemSourceContext.url).trim() : pageUrl;
+    const itemOrigin = normalizeOriginThreadContext(itemSourceContext, metaPlatform, itemPageUrl || pageUrl, metadata && metadata.channel, metadata && metadata.title);
+    const itemOriginPlatform = itemOrigin && itemOrigin.platform ? itemOrigin.platform : originPlatform;
+    const itemFffThreadInfo = itemOriginPlatform === 'footfetishforum' && itemPageUrl ? parseFootFetishForumThreadInfo(itemPageUrl) : fffThreadInfo;
+    const itemOriginChannel = itemOrigin && itemOrigin.channel ? itemOrigin.channel : itemOriginPlatform === 'footfetishforum' && itemFffThreadInfo && itemFffThreadInfo.name ? itemFffThreadInfo.name : originChannel;
+    const itemOriginTitle = itemOrigin && itemOrigin.title ? itemOrigin.title : itemOriginPlatform === 'footfetishforum' && itemFffThreadInfo && itemFffThreadInfo.name ? itemFffThreadInfo.name : originTitle;
+    const itemPinSourceOrigin = !!(itemOrigin && itemOrigin.url && itemOrigin.url !== u);
+    const itemPinFffOrigin = !!(
+      (itemOriginPlatform === 'footfetishforum' && itemPageUrl && itemPageUrl !== u && (isFootfetishforumThreadUrl(itemPageUrl) || isFootfetishforumForumUrl(itemPageUrl))) ||
+      (detectPlatform(u) === 'footfetishforum' && /\/attachments\//i.test(u) && itemPageUrl && (isFootfetishforumThreadUrl(itemPageUrl) || isFootfetishforumForumUrl(itemPageUrl)))
+    );
+    const itemPinAznOrigin = !!(itemOriginPlatform === 'aznudefeet' && itemPageUrl && itemPageUrl !== u && isAznudefeetViewUrl(itemPageUrl));
+    const pinToOrigin = !!(itemPinSourceOrigin || itemPinFffOrigin || itemPinAznOrigin);
     const detectedPlatform = detectPlatform(u);
-    const preferDetectedPlatform = !!(pinFffOrigin && pinToOrigin && detectedPlatform && detectedPlatform !== 'other' && detectedPlatform !== originPlatform);
-    const platform = pinToOrigin ? originPlatform : (preferDetectedPlatform ? detectedPlatform : normalizePlatform(metaPlatform, u));
-    const isElitebabesCdn = originPlatform === 'elitebabes' && /cdn\.elitebabes\.com/i.test(u);
-    const isPornpicsCdn = originPlatform === 'pornpics' && /cdni\.pornpics\.com/i.test(u);
-    const channel = pinToOrigin ? originChannel : (isElitebabesCdn || isPornpicsCdn) ? (originChannel !== 'unknown' ? originChannel : metadata && metadata.channel || 'unknown') : preferDetectedPlatform ? deriveChannelFromUrl(platform, u) || originChannel : metadata && metadata.channel && metadata.channel !== 'unknown' ? metadata.channel : deriveChannelFromUrl(platform, u) || 'unknown';
-    const title = pinToOrigin ? originTitle : (isElitebabesCdn || isPornpicsCdn) ? (originTitle || metadata && metadata.title || deriveTitleFromUrl(u)) : preferDetectedPlatform ? deriveTitleFromUrl(u) : metadata && metadata.title ? metadata.title : deriveTitleFromUrl(u);
+    const preferDetectedPlatform = !!(itemPinFffOrigin && pinToOrigin && detectedPlatform && detectedPlatform !== 'other' && detectedPlatform !== itemOriginPlatform);
+    const platform = pinToOrigin ? itemOriginPlatform : (preferDetectedPlatform ? detectedPlatform : normalizePlatform(metaPlatform, u));
+    const isElitebabesCdn = itemOriginPlatform === 'elitebabes' && /cdn\.elitebabes\.com/i.test(u);
+    const isPornpicsCdn = itemOriginPlatform === 'pornpics' && /cdni\.pornpics\.com/i.test(u);
+    const channel = pinToOrigin ? itemOriginChannel : (isElitebabesCdn || isPornpicsCdn) ? (itemOriginChannel !== 'unknown' ? itemOriginChannel : metadata && metadata.channel || 'unknown') : preferDetectedPlatform ? deriveChannelFromUrl(platform, u) || itemOriginChannel : metadata && metadata.channel && metadata.channel !== 'unknown' ? metadata.channel : deriveChannelFromUrl(platform, u) || 'unknown';
+    const title = pinToOrigin ? itemOriginTitle : (isElitebabesCdn || isPornpicsCdn) ? (itemOriginTitle || metadata && metadata.title || deriveTitleFromUrl(u)) : preferDetectedPlatform ? deriveTitleFromUrl(u) : metadata && metadata.title ? metadata.title : deriveTitleFromUrl(u);
     const allowRedditRerun = platform === 'reddit' && isRedditRollingTargetUrl(u);
     const allowPatreonRerun = platform === 'patreon' && (u.includes('/posts') || u.includes('patreon.com/c/'));
     const allowRerun = allowRedditRerun || allowPatreonRerun;
@@ -10029,9 +10235,8 @@ expressApp.post('/download/batch', async (req, res) => {
     }
 
     try {
-      const pageUrl = metadata && typeof metadata.url === 'string' ? metadata.url.trim() : '';
-      if (pageUrl && pageUrl !== u) {
-        await updateDownloadSourceUrl.run(pageUrl, downloadId);
+      if (itemPageUrl && itemPageUrl !== u) {
+        await updateDownloadSourceUrl.run(itemPageUrl, downloadId);
       }
     } catch (e) { }
 
@@ -10044,7 +10249,7 @@ expressApp.post('/download/batch', async (req, res) => {
     }
     if (pinToOrigin) {
       jobMetadata.webdl_pin_context = true;
-      jobMetadata.origin_thread = { url: pageUrl, platform: originPlatform, channel: originChannel, title: originTitle };
+      jobMetadata.origin_thread = itemOrigin && itemOrigin.url ? itemOrigin : { url: itemPageUrl, platform: itemOriginPlatform, channel: itemOriginChannel, title: itemOriginTitle };
       jobMetadata.webdl_media_url = u;
       jobMetadata.webdl_detected_platform = detectedPlatform;
     }
@@ -11091,7 +11296,7 @@ function rejectInvalidDirectDownload(url, filepath, filename, rawHeaders) {
   const isKeep2Share = /(?:keep2share\.cc|k2s\.cc)/i.test(String(url || ''));
   if ((isExpectedMedia || isKeep2Share) && directDownloadLooksLikeHtml(filepath, rawHeaders)) {
     return isKeep2Share
-      ? 'Keep2Share gaf een HTML/login-pagina terug in plaats van het videobestand'
+      ? 'Keep2Share gaf een HTML/login-pagina terug in plaats van het videobestand; premium-cookie ontbreekt of is niet geldig'
       : 'Directe download gaf HTML terug in plaats van media';
   }
   return '';
@@ -11104,6 +11309,28 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
       jobLane.delete(downloadId);
       await updateDownloadStatus.run('cancelled', 0, null, downloadId);
       return;
+    }
+
+    if (isKeep2ShareUrl(url)) {
+      try {
+        const originalK2sUrl = url;
+        const resolved = await resolveKeep2ShareDirectUrl(originalK2sUrl);
+        if (!resolved.url) {
+          await updateDownloadStatus.run('error', 0, resolved.error || 'Keep2Share premium download-URL kon niet worden opgehaald', downloadId);
+          return;
+        }
+        if (resolved.url !== url) {
+          const nextMeta = metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? { ...metadata } : {};
+          nextMeta.webdl_input_url = nextMeta.webdl_input_url || originalK2sUrl;
+          nextMeta.webdl_resolved_url = resolved.url;
+          try { await updateDownloadUrl.run(resolved.url, downloadId); } catch (e) { }
+          url = resolved.url;
+          metadata = nextMeta;
+        }
+      } catch (e) {
+        await updateDownloadStatus.run('error', 0, `Keep2Share premium-resolve faalde: ${e && e.message ? e.message : String(e)}`, downloadId);
+        return;
+      }
     }
 
     const initialReferer = String(
@@ -11250,7 +11477,7 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
     }
     if (curlHost === 'k2s.cc' || curlHost.endsWith('.k2s.cc') || curlHost === 'keep2share.cc' || curlHost.endsWith('.keep2share.cc')) {
       try {
-        const cookieStr = await loadCookiesForDomain(curlHost) || await loadCookiesForDomain('k2s.cc') || await loadCookiesForDomain('keep2share.cc');
+        const cookieStr = await loadKeep2ShareCookieHeader(curlHost, metadata);
         if (cookieStr) curlArgs.push('-b', cookieStr);
       } catch (e) { }
     }
@@ -11295,18 +11522,6 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
             return;
           }
           const size = fs.existsSync(filepath) ? fs.statSync(filepath).size : 0;
-          const ext = (path.extname(filename).replace('.', '') || '').toLowerCase();
-          const isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'].includes(ext);
-          if (platform === 'footfetishforum' && isImage && isFootFetishForumAttachmentCdnImageUrl(url) && size > 0 && size < 80 * 1024) {
-            try { fs.rmSync(filepath, { force: true }); } catch (e) { }
-            await updateDownloadStatus.run(
-              'error',
-              0,
-              `FootFetishForum attachment geweigerd: bestand is ${size} bytes en lijkt thumbnail/preview, geen fullscale`,
-              downloadId
-            );
-            return;
-          }
           const metaObj = { tool: 'curl', platform, channel, title, url, outputDir: dir };
           metaObj.webdl_image_quality = fullscaleCheck.quality;
           metaObj.webdl_was_thumbnail_url = fullscaleCheck.wasThumbnail === true;
@@ -16247,16 +16462,8 @@ async function startServer() {
 
   server.on('error', (err) => {
     if (err.code === 'EADDRINUSE') {
-      console.log(`⚠️  Poort ${PORT} is bezet, probeer oude server te stoppen...`);
-      try {
-        const { execSync } = require('child_process');
-        execSync(`lsof -ti :${PORT} | xargs kill -9 2>/dev/null || true`, { timeout: 5000 });
-      } catch (e) { }
-      setTimeout(() => {
-        server.listen(PORT, () => {
-          console.log(`\n🟢 WEBDL Server draait op http://localhost:${PORT} (na herstart)`);
-        });
-      }, 1500);
+      console.error(`⚠️  Poort ${PORT} is al bezet. Stop eerst de bestaande WEBDL-server gericht; automatische kill is uitgeschakeld zodat Firefox en andere processen niet geraakt worden.`);
+      setTimeout(() => process.exit(1), 50);
     } else {
       console.error('Server error:', err);
     }

@@ -71,11 +71,32 @@ async function delegateToSlave(pool, { url, platform, metadata = {}, priority = 
     return { downloadId: dup.rows[0].id, duplicate: true, existingStatus: dup.rows[0].status };
   }
 
+  const sourceContext = metadata && typeof metadata === 'object'
+    ? (metadata.origin_thread && typeof metadata.origin_thread === 'object'
+      ? metadata.origin_thread
+      : metadata.source_context && typeof metadata.source_context === 'object'
+        ? metadata.source_context
+        : null)
+    : null;
+  const sourceUrl = sourceContext && sourceContext.url ? String(sourceContext.url) : url;
+  const storagePlatform = sourceContext && sourceContext.platform ? String(sourceContext.platform) : platform;
+  const storageChannel = sourceContext && sourceContext.channel ? String(sourceContext.channel) : 'unknown';
+  const storageTitle = sourceContext && sourceContext.title ? String(sourceContext.title) : 'untitled';
+  const storedMetadata = {
+    ...metadata,
+    origin: 'webdl-hub',
+  };
+  if (sourceContext && sourceContext.url) {
+    storedMetadata.webdl_pin_context = true;
+    storedMetadata.origin_thread = sourceContext;
+    storedMetadata.webdl_media_url = url;
+  }
+
   const { rows } = await pool.query(
-    `INSERT INTO downloads (url, platform, status, metadata, source_url, priority, created_at, updated_at)
-     VALUES ($1, $2, 'pending', $3, $1, $4, now(), now())
+    `INSERT INTO downloads (url, platform, channel, title, status, metadata, source_url, priority, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, now(), now())
      RETURNING id`,
-    [url, platform, JSON.stringify({ ...metadata, origin: 'webdl-hub' }), Math.max(Number(priority) || 0, 10)],
+    [url, storagePlatform, storageChannel, storageTitle, JSON.stringify(storedMetadata), sourceUrl, Math.max(Number(priority) || 0, 10)],
   );
   return { downloadId: rows[0].id, duplicate: false };
 }

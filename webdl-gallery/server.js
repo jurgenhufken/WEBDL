@@ -1153,7 +1153,8 @@ app.get('/api/items', async (req, res) => {
     const pageRows = dedupeGalleryRows(rows.filter(hasNonEmptyMedia));
     const items = (useCursor ? pageRows.slice(0, limit) : pageRows.slice(offset, offset + limit)).map(mapItem);
     const last = items[items.length - 1] || null;
-    const nextCursor = last && sort === 'recent' && items.length === limit
+    const moreRecentRowsLikely = sort === 'recent' && (items.length === limit || rows.length >= sourceLimit);
+    const nextCursor = last && moreRecentRowsLikely
       ? { sort_ts: last.sort_ts, source_order: last.source_order }
       : null;
     if (DEBUG_GALLERY_QUERY) {

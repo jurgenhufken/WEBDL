@@ -78,6 +78,7 @@
 
   // Gecachede DOM refs
   const el = {};
+  let navChain = Promise.resolve();
 
   // Uniek per tabblad — voorkomt dat de browser requests van verschillende tabs samenvoegt
   const VIEWER_TAB_ID = Math.random().toString(36).slice(2, 8);
@@ -632,21 +633,30 @@
     showCurrent();
   }
 
+  function enqueueNavigation(action) {
+    navChain = navChain.catch(() => {}).then(action);
+    return navChain;
+  }
+
   async function navNext() {
-    let next;
-    if (vs.random) {
-      if (!vs.done && vs.items.length < 300) {
-        await loadMoreViewerItems();
+    return enqueueNavigation(async () => {
+      let next;
+      if (vs.random) {
+        if (!vs.done && vs.items.length < 300) {
+          await loadMoreViewerItems();
+        }
+        next = Math.floor(Math.random() * vs.items.length);
+      } else {
+        next = vs.idx + 1;
       }
-      next = Math.floor(Math.random() * vs.items.length);
-    } else {
-      next = vs.idx + 1;
-    }
-    await navTo(next);
+      await navTo(next);
+    });
   }
 
   async function navPrev() {
-    await navTo(vs.idx - 1);
+    return enqueueNavigation(async () => {
+      await navTo(vs.idx - 1);
+    });
   }
 
   async function navChannel(dir) {
@@ -757,6 +767,7 @@
     const currentId = preserveSelection && vs.items[vs.idx] ? String(vs.items[vs.idx].id) : '';
     vs.items = [];
     vs.offset = 0;
+    vs.nextCursor = null;
     vs.done = false;
     vs.idx = 0;
     await loadMoreViewerItems();
@@ -897,24 +908,23 @@
     el.vHudLeft.classList.remove('hud-hidden');
     el.vHudRight.classList.remove('hud-hidden');
     el.vStage.classList.remove('hud-hidden');
-    const topbar = document.querySelector('.viewer-topbar');
-    if (topbar) {
-      topbar.style.opacity = '';
-      topbar.style.pointerEvents = '';
-    }
+    if (el.viewer) el.viewer.classList.remove('viewer--hud-hidden');
     clearTimeout(vs.hudTimer);
     vs.hudTimer = setTimeout(hideHUD, 3000);
   }
 
   function hideHUD() {
+    if (el.vTagDialog && !el.vTagDialog.classList.contains('hidden')) return;
+    const topbar = document.querySelector('.viewer-topbar');
+    if (topbar && (topbar.matches(':hover') || topbar.contains(document.activeElement))) {
+      clearTimeout(vs.hudTimer);
+      vs.hudTimer = setTimeout(hideHUD, 1200);
+      return;
+    }
     el.vHudLeft.classList.add('hud-hidden');
     el.vHudRight.classList.add('hud-hidden');
     el.vStage.classList.add('hud-hidden');
-    const topbar = document.querySelector('.viewer-topbar');
-    if (topbar) {
-      topbar.style.opacity = '';
-      topbar.style.pointerEvents = '';
-    }
+    if (el.viewer) el.viewer.classList.add('viewer--hud-hidden');
   }
 
   // ─── Slideshow ────────────────────────────────────────────────────────────
