@@ -5,7 +5,7 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-05-08-thread-unlimited-origin-hub-intake';
+  const WEBDL_BUILD = 'debug-toolbar-2026-05-08-thread-k2s-buttons';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
@@ -23,6 +23,19 @@
 
   function formatScanLimit(value) {
     return Number.isFinite(Number(value)) ? String(Number(value)) : 'alles';
+  }
+
+  function promptRedditBdfrLimit(defaultLimit = 100) {
+    try {
+      const input = window.prompt('Reddit BDFR: max posts downloaden? Leeg = 100, 0 = onbeperkt', String(defaultLimit));
+      if (input === null) return null;
+      const raw = String(input || '').trim().toLowerCase();
+      if (!raw) return defaultLimit;
+      if (raw === '0' || raw === 'all' || raw === 'alles' || raw === 'unlimited' || raw === 'onbeperkt') return 0;
+      const n = parseInt(raw, 10);
+      if (Number.isFinite(n) && n > 0) return Math.min(5000, n);
+    } catch (e) {}
+    return defaultLimit;
   }
 
   function summarizeUrlsByHost(urls) {
@@ -1013,6 +1026,14 @@
     return false;
   }
 
+  function isVipergirlsHost(hostname) {
+    const host = String(hostname || '').toLowerCase();
+    return host === 'vipergirls.to' || host.endsWith('.vipergirls.to') || host === 'viper.to' || host.endsWith('.viper.to');
+  }
+
+  const VIPERGIRLS_URL_RE = /(?:vipergirls\.to|viper\.to)/i;
+  const VIPERGIRLS_THREAD_RE = /(?:vipergirls\.to|viper\.to)\/threads\/(\d+)-([^\/\?#]+)/i;
+
   // ========================
   // METADATA SCRAPING
   // ========================
@@ -1158,15 +1179,15 @@
       if (fm && fm[1]) meta.channel = `forum_${fm[1]}`;
     }
 
-    else if (/vipergirls\.to/i.test(url)) {
+    else if (VIPERGIRLS_URL_RE.test(url)) {
       meta.platform = 'vipergirls';
-      const tm = url.match(/vipergirls\.to\/threads\/(\d+)-([^\/\?#]+)/i);
+      const tm = url.match(VIPERGIRLS_THREAD_RE);
       if (tm && tm[1]) meta.channel = `thread_${tm[1]}`;
       if (tm && tm[2]) {
         const name = tm[2].replace(/[-_]+/g, ' ').trim();
         if (name) meta.title = name;
       }
-      const fm = url.match(/vipergirls\.to\/forumdisplay\.php\?[^#]*\bf=(\d+)/i) || url.match(/vipergirls\.to\/forums\/(\d+)-/i);
+      const fm = url.match(/(?:vipergirls\.to|viper\.to)\/forumdisplay\.php\?[^#]*\bf=(\d+)/i) || url.match(/(?:vipergirls\.to|viper\.to)\/forums\/(\d+)-/i);
       if (fm && fm[1]) meta.channel = `forum_${fm[1]}`;
       else if (/vipergirls\.to\/forum\.php(?:[?#]|$)/i.test(url)) meta.channel = 'forum_index';
       const heading = pickFirstMatchingText('h1, .threadtitle, .title, .page-title');
@@ -1294,8 +1315,7 @@
   function isVipergirlsThreadPage() {
     try {
       const u = new URL(window.location.href);
-      const host = String(u.hostname || '').toLowerCase();
-      if (!(host === 'vipergirls.to' || host.endsWith('.vipergirls.to'))) return false;
+      if (!isVipergirlsHost(u.hostname)) return false;
       return /\/threads\/\d+-/i.test(String(u.pathname || ''));
     } catch (e) {
       return false;
@@ -1305,8 +1325,7 @@
   function isVipergirlsForumPage() {
     try {
       const u = new URL(window.location.href);
-      const host = String(u.hostname || '').toLowerCase();
-      if (!(host === 'vipergirls.to' || host.endsWith('.vipergirls.to'))) return false;
+      if (!isVipergirlsHost(u.hostname)) return false;
       const path = String(u.pathname || '');
       const full = path + String(u.search || '') + String(u.hash || '');
       return /\/forum\.php(?:[?#]|$)/i.test(full) || /\/forumdisplay\.php\?[^#]*\bf=\d+/i.test(full) || /\/forums\/\d+-/i.test(path);
@@ -1319,8 +1338,7 @@
     try {
       const u = new URL(String(rawUrl || ''), baseHref || window.location.href);
       u.hash = '';
-      const host = String(u.hostname || '').toLowerCase();
-      if (!(host === 'vipergirls.to' || host.endsWith('.vipergirls.to'))) return '';
+      if (!isVipergirlsHost(u.hostname)) return '';
       const path = String(u.pathname || '');
       const modern = path.match(/\/threads\/(\d+)-([^\/\?#]+)/i);
       if (modern && modern[1]) {
@@ -1336,11 +1354,10 @@
   function parseVipergirlsThreadContext(rawUrl, fallbackTitle) {
     try {
       const u = new URL(String(rawUrl || ''), window.location.href);
-      const host = String(u.hostname || '').toLowerCase();
-      if (!(host === 'vipergirls.to' || host.endsWith('.vipergirls.to'))) return null;
+      if (!isVipergirlsHost(u.hostname)) return null;
       let id = '';
       let name = String(fallbackTitle || '').trim();
-      const modern = u.toString().match(/vipergirls\.to\/threads\/(\d+)-([^\/\?#]+)/i);
+      const modern = u.toString().match(VIPERGIRLS_THREAD_RE);
       if (modern) {
         id = String(modern[1] || '');
         if (!name) name = String(modern[2] || '').replace(/[-_]+/g, ' ').trim();
@@ -1411,8 +1428,7 @@
         if (out.length >= maxForums) return;
         const u = new URL(String(raw || ''), baseHref);
         u.hash = '';
-        const host = String(u.hostname || '').toLowerCase();
-        if (!(host === 'vipergirls.to' || host.endsWith('.vipergirls.to'))) return;
+        if (!isVipergirlsHost(u.hostname)) return;
         const path = String(u.pathname || '');
         const full = path + String(u.search || '');
         if (!(/\/forumdisplay\.php\?[^#]*\bf=\d+/i.test(full) || /\/forums\/\d+-/i.test(path) || /\/forum\.php(?:[?#]|$)/i.test(full))) return;
@@ -1441,7 +1457,7 @@
       if (/^thumbs?\d*\./i.test(host)) return true;
       if (/\/(?:thumb|thumbs|thumbnail|thumbnails)\//i.test(p)) return true;
       if (/\/th\//i.test(p) && !isVipr) return true;
-      if ((host === 'vipergirls.to' || host.endsWith('.vipergirls.to')) && /\/images\/viper-red\/misc\/progress\.gif$/i.test(p)) return true;
+      if (isVipergirlsHost(host) && /\/images\/viper-red\/misc\/progress\.gif$/i.test(p)) return true;
     } catch (e) {}
     return false;
   }
@@ -1459,7 +1475,7 @@
       if (/\b(avatar|emoji|emote|smilie|smiley|reaction|logo|icon|banner|sprite|button)\b/i.test(p + ' ' + text)) return false;
       if (/\/(?:images|clientscript|css|js)\/(?:smilies|misc|buttons|icons)\//i.test(p)) return false;
 
-      const isViperHost = host === 'vipergirls.to' || host.endsWith('.vipergirls.to');
+      const isViperHost = isVipergirlsHost(host);
       const isDirectMediaFile = /\.(jpe?g|png|gif|webp|bmp|avif|heic|heif|mp4|mov|m4v|webm|mkv|zip|rar|7z)(?:$|[?#])/i.test(p);
       if (isKeep2ShareFilehostUrl(u.toString(), baseHref)) return true;
       if (isDirectMediaFile) return true;
@@ -1854,7 +1870,7 @@
         const u = new URL(href, baseHref);
         u.hash = '';
         const host = String(u.hostname || '').toLowerCase();
-        if (host === 'vipergirls.to' || host.endsWith('.vipergirls.to')) return u.toString();
+        if (isVipergirlsHost(host)) return u.toString();
       }
       for (const a of Array.from(doc.querySelectorAll('a[href]'))) {
         const text = String(a.textContent || '').trim().toLowerCase();
@@ -1864,7 +1880,7 @@
         const u = new URL(a.getAttribute('href'), baseHref);
         u.hash = '';
         const host = String(u.hostname || '').toLowerCase();
-        if (host === 'vipergirls.to' || host.endsWith('.vipergirls.to')) return u.toString();
+        if (isVipergirlsHost(host)) return u.toString();
       }
     } catch (e) {}
     return '';
@@ -1888,8 +1904,7 @@
       try {
         const u = new URL(String(raw || ''), window.location.href);
         u.hash = '';
-        const host = String(u.hostname || '').toLowerCase();
-        if (!(host === 'vipergirls.to' || host.endsWith('.vipergirls.to'))) return;
+        if (!isVipergirlsHost(u.hostname)) return;
         const s = u.toString();
         if (seenForums.has(s)) return;
         seenForums.add(s);
@@ -3306,28 +3321,29 @@
   }
 
   const screenshotBtn = makeBtn('📷 Screenshot', '#4CAF50');
-  const downloadBtn = makeBtn('⬇️ Deze media', '#2196F3');
-  const batchDownloadBtn = makeBtn('⏬ Paginalinks', '#1565C0');
+  const downloadBtn = makeBtn('⬇️ Huidige media', '#2196F3');
+  const batchDownloadBtn = makeBtn('⏬ Pagina scannen', '#1565C0');
   const dashboardBtn = makeBtn('📊 Dashboard', '#0f3460');
-  const mediaDownloadBtn = makeBtnIn(extraBtnContainer, '🖼 Zichtbare media', '#6d28d9');
-  const forceBatchDownloadBtn = makeBtnIn(extraBtnContainer, '🔥 Opnieuw', '#b91c1c');
-  const threadBatchDownloadBtn = makeBtnIn(extraBtnContainer, '🧵 Forum/thread', '#0ea5e9');
-  const keep2ShareBatchBtn = null;
+  const mediaDownloadBtn = makeBtnIn(extraBtnContainer, '🖼 Media zichtbaar', '#6d28d9');
+  const forceBatchDownloadBtn = makeBtnIn(extraBtnContainer, '🔥 Forceer opnieuw', '#b91c1c');
+  const threadBatchDownloadBtn = makeBtnIn(extraBtnContainer, '🧵 Hele thread', '#0ea5e9');
+  const keep2ShareBatchBtn = makeBtnIn(extraBtnContainer, '🔐 K2S links', '#0891b2');
   const vdhHintBtn = makeBtnIn(extraBtnContainer, '🧩 VDH kanaal', '#2e7d32');
   const redditAllBtn = makeBtnIn(extraBtnContainer, 'Reddit via BDFR', '#ff4500');
   const redgifsClipBtn = makeBtnIn(extraBtnContainer, 'Redgifs clip', '#dc2626');
-  const redgifsFeedBtn = makeBtnIn(extraBtnContainer, 'Redgifs profiel', '#991b1b');
+  const redgifsFeedBtn = makeBtnIn(extraBtnContainer, 'Redgifs feed', '#991b1b');
   const ytShortsBtn = makeBtnIn(extraBtnContainer, 'YT shorts', '#7c3aed');
   const ytVideosBtn = makeBtnIn(extraBtnContainer, 'YT videos', '#5b21b6');
   const openAllBtn = makeBtnIn(extraBtnContainer, 'Open links', '#03A9F4');
   try {
     screenshotBtn.title = 'Maak een screenshot van deze pagina';
     downloadBtn.title = 'Download de huidige video, foto of geselecteerde media';
-    batchDownloadBtn.title = 'Scan deze pagina en download gevonden links/media';
+    batchDownloadBtn.title = 'Scan alleen deze pagina en download gevonden links/media';
     dashboardBtn.title = 'Open WEBDL dashboard';
     mediaDownloadBtn.title = 'Download direct zichtbare video/foto-bronnen op deze pagina';
     forceBatchDownloadBtn.title = 'Queue dezelfde gevonden links opnieuw, ook als ze al bestaan';
-    threadBatchDownloadBtn.title = 'Scan de hele forumthread, niet alleen deze pagina';
+    threadBatchDownloadBtn.title = 'Scan de hele forumthread over alle pagina\'s';
+    keep2ShareBatchBtn.title = 'ViperGirls: download Keep2Share-links. Klik = huidige pagina, Shift/Alt = hele thread, Cmd/Ctrl = limieten.';
     vdhHintBtn.title = 'Geef Video DownloadHelper een kanaal/context hint';
     redditAllBtn.title = 'Stuur Reddit post/subreddit/user naar BDFR download';
     redgifsClipBtn.title = 'Download deze Redgifs clip of Redgifs links op de pagina';
@@ -4764,13 +4780,23 @@
       }
 
       const fallbackTarget = redditIndexInfo && redditIndexInfo.mode === 'fallback_target';
+      const redditMeta = { ...meta };
+      let redditLimit = null;
+      if (fallbackTarget) {
+        redditLimit = promptRedditBdfrLimit(100);
+        if (redditLimit === null) return;
+        if (Number.isFinite(Number(redditLimit)) && Number(redditLimit) > 0) {
+          redditMeta.limit = Number(redditLimit);
+          redditMeta.bdfr_limit = Number(redditLimit);
+        }
+      }
       const hint = fallbackTarget
-        ? '\nReddit listing is geblokkeerd door 403; WEBDL stuurt deze subreddit/user direct naar BDFR.'
+        ? `\nReddit listing is geblokkeerd door 403; WEBDL stuurt deze subreddit/user direct naar BDFR.${redditLimit ? `\nLimiet: ${redditLimit} posts.` : '\nLimiet: onbeperkt.'}`
         : `\nMode: ${redditIndexInfo && redditIndexInfo.mode ? redditIndexInfo.mode : 'unknown'}, pagina's: ${redditIndexInfo && Number.isFinite(redditIndexInfo.scannedPages) ? redditIndexInfo.scannedPages : 0}, posts gescand: ${redditIndexInfo && Number.isFinite(redditIndexInfo.scannedPosts) ? redditIndexInfo.scannedPosts : 0}`;
       const ok = window.confirm(fallbackTarget ? `Reddit target downloaden via BDFR?${hint}` : `Download all - Reddit: ${urls.length} items?${hint}`);
       if (!ok) return;
 
-      const result = await queueBatchDownloadRequest(urls, meta);
+      const result = await queueBatchDownloadRequest(urls, redditMeta);
       if (result.success) {
         const stats = summarizeBatchResult(result);
         const label = fallbackTarget ? 'Reddit BDFR target' : 'Reddit all';
@@ -5032,9 +5058,18 @@
     }
 
     const redditFallbackTarget = redditIndexInfo && meta.platform === 'reddit' && redditIndexInfo.mode === 'fallback_target';
+    let redditLimit = null;
+    if (redditFallbackTarget) {
+      redditLimit = promptRedditBdfrLimit(100);
+      if (redditLimit === null) return;
+      if (Number.isFinite(Number(redditLimit)) && Number(redditLimit) > 0) {
+        meta.limit = Number(redditLimit);
+        meta.bdfr_limit = Number(redditLimit);
+      }
+    }
     const redditHint = (redditIndexInfo && meta.platform === 'reddit')
       ? (redditFallbackTarget
-        ? '\nReddit listing is geblokkeerd door 403; WEBDL stuurt deze subreddit/user direct naar BDFR.'
+        ? `\nReddit listing is geblokkeerd door 403; WEBDL stuurt deze subreddit/user direct naar BDFR.${redditLimit ? `\nLimiet: ${redditLimit} posts.` : '\nLimiet: onbeperkt.'}`
         : `\nMode: ${redditIndexInfo.mode}, pagina's: ${redditIndexInfo.scannedPages}, posts gescand: ${redditIndexInfo.scannedPosts}`)
       : '';
     let selectedDirectHints = null;
@@ -5435,7 +5470,7 @@
       addLog(`K2S fout: ${e && e.message ? e.message : String(e)}`, 'error');
     } finally {
       if (triggerBtn) {
-        triggerBtn.textContent = oldLabel || '🔐 K2S pagina';
+        triggerBtn.textContent = oldLabel || '🔐 K2S links';
         triggerBtn.style.opacity = '1';
       }
     }

@@ -10861,6 +10861,12 @@ async function startRedditBdfrDownload(downloadId, url, platform, channel, title
       '--max-wait-time', '120'
     ];
     if (configFile.path) args.push('--config', configFile.path);
+    try {
+      const limit = metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+        ? Number(metadata.limit || metadata.bdfr_limit || metadata.reddit_limit || 0)
+        : 0;
+      if (Number.isFinite(limit) && limit > 0) args.push('-L', String(Math.floor(limit)));
+    } catch (e) {}
     args.push(...sourceArgs);
 
     const result = await new Promise((resolve) => {
