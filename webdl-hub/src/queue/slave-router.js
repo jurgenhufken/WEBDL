@@ -17,6 +17,15 @@ const SLAVE_PLATFORMS = [
   { match: /pornpics\.com/i,              platform: 'pornpics' },
   { match: /forum-area\.com/i,            platform: 'forum-area' },
   { match: /imagetwist\.com/i,            platform: 'imagetwist' },
+  { match: /imagebam\.com/i,              platform: 'imagebam' },
+  { match: /imgbox\.com/i,                platform: 'imgbox' },
+  { match: /imagevenue\.com/i,            platform: 'imagevenue' },
+  { match: /imgchest\.com/i,              platform: 'imgchest' },
+  { match: /imgvb\.com/i,                 platform: 'imgvb' },
+  { match: /imx\.to/i,                    platform: 'imx' },
+  { match: /vipr\.im/i,                   platform: 'vipr' },
+  { match: /turboimagehost\.com/i,        platform: 'turboimagehost' },
+  { match: /img\.kiwi/i,                  platform: 'imgkiwi' },
   { match: /pixhost\.to/i,                platform: 'pixhost' },
   { match: /postimg\.cc/i,                platform: 'postimg' },
   { match: /bunkr\./i,                    platform: 'bunkr' },
@@ -43,6 +52,76 @@ function keep2ShareFileId(url) {
   } catch (_) {
     return '';
   }
+}
+
+function hostnameFromUrl(raw) {
+  try {
+    return new URL(String(raw || '')).hostname.replace(/^www\./i, '').toLowerCase();
+  } catch (_) {
+    return '';
+  }
+}
+
+function normalizeSourceSite(sourceContext) {
+  if (!sourceContext || typeof sourceContext !== 'object') return '';
+  const platform = String(sourceContext.platform || '').trim().toLowerCase();
+  if (platform) return platform;
+  return hostnameFromUrl(sourceContext.url);
+}
+
+function buildSourceGraph({ mediaUrl, storagePlatform, sourceContext }) {
+  const sourceSite = normalizeSourceSite(sourceContext);
+  const nodes = [];
+  const edges = [];
+  const addNode = (node) => {
+    if (!node || !node.id || nodes.some((n) => n.id === node.id)) return;
+    nodes.push(node);
+  };
+  const addEdge = (from, to, type) => {
+    if (!from || !to || !type) return;
+    if (edges.some((e) => e.from === from && e.to === to && e.type === type)) return;
+    edges.push({ from, to, type });
+  };
+
+  let mediaNode = '';
+  const fileId = keep2ShareFileId(mediaUrl);
+  if (fileId) {
+    mediaNode = `file:keep2share:${fileId}`;
+    addNode({ id: mediaNode, type: 'file', platform: 'keep2share', file_id: fileId, url: mediaUrl });
+  } else if (mediaUrl) {
+    mediaNode = `url:${mediaUrl}`;
+    addNode({ id: mediaNode, type: 'url', platform: storagePlatform || '', url: mediaUrl });
+  }
+
+  const hostNode = storagePlatform ? `host:${storagePlatform}` : '';
+  if (hostNode) {
+    addNode({ id: hostNode, type: 'host', platform: storagePlatform });
+    if (mediaNode) addEdge(mediaNode, hostNode, 'hosted_on');
+  }
+
+  const siteNode = sourceSite ? `site:${sourceSite}` : '';
+  if (siteNode) addNode({ id: siteNode, type: 'site', platform: sourceSite, url: sourceContext && sourceContext.url || null });
+
+  const threadMatch = String(sourceContext && sourceContext.channel || '').match(/^thread_(\d+)/i);
+  const threadId = sourceContext && (sourceContext.thread_id || (threadMatch && threadMatch[1]));
+  const threadNode = sourceSite && threadId ? `thread:${sourceSite}:${threadId}` : '';
+  if (threadNode) {
+    addNode({
+      id: threadNode,
+      type: 'thread',
+      platform: sourceSite,
+      thread_id: String(threadId),
+      channel: sourceContext.channel || `thread_${threadId}`,
+      title: sourceContext.title || null,
+      url: sourceContext.url || null,
+    });
+    if (siteNode) addEdge(threadNode, siteNode, 'belongs_to');
+    if (mediaNode) addEdge(mediaNode, threadNode, 'found_on');
+  } else if (siteNode && mediaNode) {
+    addEdge(mediaNode, siteNode, 'found_on');
+  }
+
+  return { version: 1, nodes, edges };
 }
 
 /**
@@ -87,11 +166,13 @@ async function delegateToSlave(pool, { url, platform, metadata = {}, priority = 
     origin: 'webdl-hub',
   };
   if (sourceContext && sourceContext.url) {
+    const sourceSite = normalizeSourceSite(sourceContext);
     storedMetadata.webdl_pin_context = true;
     storedMetadata.origin_thread = sourceContext;
     storedMetadata.source_context = sourceContext;
-    storedMetadata.source_site = sourceContext.platform || '';
-    storedMetadata.source_sites = Array.from(new Set([sourceContext.platform, ...(Array.isArray(metadata.source_sites) ? metadata.source_sites : [])].filter(Boolean)));
+    storedMetadata.source_site = sourceSite || '';
+    storedMetadata.source_sites = Array.from(new Set([sourceSite, ...(Array.isArray(metadata.source_sites) ? metadata.source_sites : [])].filter(Boolean)));
+    storedMetadata.source_graph = buildSourceGraph({ mediaUrl: url, storagePlatform, sourceContext });
     storedMetadata.webdl_media_url = url;
     storedMetadata.webdl_detected_platform = platform;
   }

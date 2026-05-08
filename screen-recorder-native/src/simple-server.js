@@ -11753,7 +11753,13 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
     }
 
     const pinContext = !!(metadata && typeof metadata === 'object' && !Array.isArray(metadata) && metadata.webdl_pin_context === true);
-    const originThread = metadata && typeof metadata === 'object' && metadata.origin_thread && typeof metadata.origin_thread === 'object' ? metadata.origin_thread : null;
+    const originThread = metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+      ? (metadata.origin_thread && typeof metadata.origin_thread === 'object'
+        ? metadata.origin_thread
+        : metadata.source_context && typeof metadata.source_context === 'object'
+          ? metadata.source_context
+          : null)
+      : null;
     const pinnedPlatform = String(originThread && originThread.platform ? originThread.platform : platform || '').toLowerCase();
     if (isKnownHtmlWrapperUrl(url)) {
       const directHint = upgradeKnownLowQualityMediaUrl(String(metadata && typeof metadata === 'object' && metadata.webdl_direct_hint ? metadata.webdl_direct_hint : '').trim());
@@ -11823,6 +11829,8 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
       origin_thread: originThread && originThread.url ? originThread : null,
       source_context: originThread && originThread.url ? originThread : null,
       source_site: originThread && originThread.platform ? originThread.platform : null,
+      source_sites: Array.isArray(metadata && metadata.source_sites) ? metadata.source_sites : (originThread && originThread.platform ? [originThread.platform] : []),
+      source_graph: metadata && metadata.source_graph ? metadata.source_graph : null,
       webdl_pin_context: pinContext,
       webdl_media_url: metadata && metadata.webdl_media_url ? metadata.webdl_media_url : url,
       webdl_detected_platform: metadata && metadata.webdl_detected_platform ? metadata.webdl_detected_platform : detectPlatform(url),
@@ -11930,6 +11938,8 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
             metaObj.origin_thread = originThread && originThread.url ? originThread : null;
             metaObj.source_context = originThread && originThread.url ? originThread : null;
             metaObj.source_site = originThread && originThread.platform ? originThread.platform : null;
+            metaObj.source_sites = Array.isArray(metadata && metadata.source_sites) ? metadata.source_sites : (originThread && originThread.platform ? [originThread.platform] : []);
+            if (metadata && metadata.source_graph) metaObj.source_graph = metadata.source_graph;
             metaObj.webdl_media_url = metadata && metadata.webdl_media_url ? metadata.webdl_media_url : url;
             metaObj.webdl_detected_platform = metadata && metadata.webdl_detected_platform ? metadata.webdl_detected_platform : detectPlatform(url);
             if (originThread && originThread.url) metaObj.source_url = originThread.url;

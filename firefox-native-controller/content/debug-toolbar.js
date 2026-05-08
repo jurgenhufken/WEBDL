@@ -5,7 +5,7 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-05-08-thread-k2s-buttons';
+  const WEBDL_BUILD = 'debug-toolbar-2026-05-08-reddit-three-buttons';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
@@ -36,6 +36,142 @@
       if (Number.isFinite(n) && n > 0) return Math.min(5000, n);
     } catch (e) {}
     return defaultLimit;
+  }
+
+  function redditBdfrLimitForClick(clickEvent, defaultLimit = 0) {
+    const wantsPrompt = !!(clickEvent && (clickEvent.metaKey || clickEvent.ctrlKey || clickEvent.altKey || clickEvent.shiftKey));
+    if (!wantsPrompt) return defaultLimit;
+    return promptRedditBdfrLimit(defaultLimit);
+  }
+
+  function redditCanonicalUrl(raw) {
+    try {
+      const u = new URL(String(raw || ''), window.location.href);
+      const host = String(u.hostname || '').toLowerCase().replace(/^www\./, '');
+      const p = String(u.pathname || '');
+      if (host === 'redd.it' || host.endsWith('.redd.it')) {
+        const id = p.replace(/^\/+/, '').split('/')[0];
+        return id ? `https://redd.it/${encodeURIComponent(id)}` : u.toString();
+      }
+      if (host === 'reddit.com' || host.endsWith('.reddit.com')) {
+        const post = p.match(/^\/r\/([^\/?#]+)\/comments\/([a-z0-9]+)/i);
+        if (post && post[1] && post[2]) return `https://www.reddit.com/r/${encodeURIComponent(decodeURIComponent(post[1]))}/comments/${post[2]}/`;
+        const userPost = p.match(/^\/(?:user|u)\/([^\/?#]+)\/comments\/([a-z0-9]+)/i);
+        if (userPost && userPost[1] && userPost[2]) return `https://www.reddit.com/user/${encodeURIComponent(decodeURIComponent(userPost[1]))}/comments/${userPost[2]}/`;
+        const sub = p.match(/^\/r\/([^\/?#]+)/i);
+        if (sub && sub[1]) return `https://www.reddit.com/r/${encodeURIComponent(decodeURIComponent(sub[1]))}/`;
+        const user = p.match(/^\/(?:user|u)\/([^\/?#]+)/i);
+        if (user && user[1]) return `https://www.reddit.com/user/${encodeURIComponent(decodeURIComponent(user[1]))}/`;
+      }
+      u.hash = '';
+      return u.toString();
+    } catch (e) {
+      return String(raw || '').trim();
+    }
+  }
+
+  function redditPartsFromUrl(raw) {
+    try {
+      const u = new URL(String(raw || ''), window.location.href);
+      const host = String(u.hostname || '').toLowerCase().replace(/^www\./, '');
+      const p = String(u.pathname || '');
+      const out = { postUrl: '', subreddit: '', user: '' };
+      if (host === 'redd.it' || host.endsWith('.redd.it')) {
+        const id = p.replace(/^\/+/, '').split('/')[0];
+        if (id) out.postUrl = `https://redd.it/${encodeURIComponent(id)}`;
+        return out;
+      }
+      if (!(host === 'reddit.com' || host.endsWith('.reddit.com'))) return out;
+      const post = p.match(/^\/r\/([^\/?#]+)\/comments\/([a-z0-9]+)/i);
+      if (post && post[1] && post[2]) {
+        out.subreddit = decodeURIComponent(post[1]);
+        out.postUrl = `https://www.reddit.com/r/${encodeURIComponent(out.subreddit)}/comments/${post[2]}/`;
+      }
+      const userPost = p.match(/^\/(?:user|u)\/([^\/?#]+)\/comments\/([a-z0-9]+)/i);
+      if (userPost && userPost[1] && userPost[2]) {
+        out.user = decodeURIComponent(userPost[1]);
+        out.postUrl = `https://www.reddit.com/user/${encodeURIComponent(out.user)}/comments/${userPost[2]}/`;
+      }
+      const sub = p.match(/^\/r\/([^\/?#]+)/i);
+      if (sub && sub[1]) out.subreddit = decodeURIComponent(sub[1]);
+      const user = p.match(/^\/(?:user|u)\/([^\/?#]+)/i);
+      if (user && user[1]) out.user = decodeURIComponent(user[1]);
+      return out;
+    } catch (e) {
+      return { postUrl: '', subreddit: '', user: '' };
+    }
+  }
+
+  function redditAuthorFromPage() {
+    const selectors = [
+      'shreddit-post[author]',
+      '[data-testid="post_author_link"]',
+      'a[data-click-id="user"]',
+      'a[href^="/user/"]',
+      'a[href^="/u/"]',
+      'a[href*="reddit.com/user/"]',
+      'a[href*="reddit.com/u/"]'
+    ];
+    for (const selector of selectors) {
+      try {
+        const el = document.querySelector(selector);
+        if (!el) continue;
+        const attr = (el.getAttribute && (el.getAttribute('author') || el.getAttribute('data-author'))) || '';
+        const href = (el.getAttribute && el.getAttribute('href')) || '';
+        const text = String(attr || el.textContent || '').trim().replace(/^u\//i, '').replace(/^\/?user\//i, '').replace(/^@/, '');
+        const fromHref = String(href || '').match(/\/(?:user|u)\/([^\/?#]+)/i);
+        const value = fromHref && fromHref[1] ? decodeURIComponent(fromHref[1]) : text;
+        if (value && /^[A-Za-z0-9_-]{2,32}$/.test(value) && !/^(deleted|automoderator)$/i.test(value)) return value;
+      } catch (e) {}
+    }
+    return '';
+  }
+
+  function redditTargetOptions(meta) {
+    const parts = redditPartsFromUrl((meta && meta.url) || window.location.href);
+    const channel = String(meta && meta.channel || '');
+    if (!parts.subreddit && /^r_/i.test(channel)) parts.subreddit = channel.replace(/^r_/i, '');
+    if (!parts.user && /^u_/i.test(channel)) parts.user = channel.replace(/^u_/i, '');
+    if (!parts.user) parts.user = redditAuthorFromPage();
+
+    const opts = [];
+    if (parts.postUrl) {
+      opts.push({ key: '1', mode: 'post', label: 'alleen deze post', url: redditCanonicalUrl(parts.postUrl), limitable: false });
+    }
+    if (parts.user) {
+      opts.push({ key: '2', mode: 'user', label: `alles van gebruiker u/${parts.user}`, url: `https://www.reddit.com/user/${encodeURIComponent(parts.user)}/`, limitable: true });
+    }
+    if (parts.subreddit) {
+      opts.push({ key: '3', mode: 'subreddit', label: `alles van kanaal r/${parts.subreddit}`, url: `https://www.reddit.com/r/${encodeURIComponent(parts.subreddit)}/`, limitable: true });
+    }
+    return opts;
+  }
+
+  function chooseRedditTarget(meta) {
+    const options = redditTargetOptions(meta);
+    if (!options.length) return null;
+    const lines = options.map((opt, idx) => `${idx + 1}. ${opt.label}`);
+    const input = window.prompt(`Reddit downloaden via BDFR:\n${lines.join('\n')}\n\nKies nummer:`, '1');
+    if (input === null) return null;
+    const raw = String(input || '').trim().toLowerCase();
+    const picked = options.find((opt, idx) => raw === opt.key || raw === String(idx + 1) || raw === opt.mode);
+    if (!picked) {
+      showNotification('Reddit keuze geannuleerd: onbekende optie', true);
+      return null;
+    }
+    const out = { ...picked };
+    if (picked.limitable) {
+      const limit = promptRedditBdfrLimit(0);
+      if (limit === null) return null;
+      out.limit = limit;
+    }
+    return out;
+  }
+
+  function redditTargetForMode(meta, mode) {
+    const wanted = String(mode || '').trim().toLowerCase();
+    if (!wanted) return null;
+    return redditTargetOptions(meta).find((opt) => opt.mode === wanted) || null;
   }
 
   function summarizeUrlsByHost(urls) {
@@ -1020,8 +1156,8 @@
     const s = String(input || '');
     if (!s) return false;
     if (/reddit\.com\/(?:r\/[^\/\?#]+\/)?comments\/[a-z0-9]+(?:\/[^\/\?#]+)?/i.test(s)) return true;
-    if (/reddit\.com\/(?:user|u)\/[^\/\?#]+(?:\/)?$/i.test(s)) return true;
-    if (/reddit\.com\/r\/[^\/\?#]+(?:\/)?$/i.test(s)) return true;
+    if (/reddit\.com\/(?:user|u)\/[^\/\?#]+(?:\/[^?#]*)?/i.test(s)) return true;
+    if (/reddit\.com\/r\/[^\/\?#]+(?:\/[^?#]*)?/i.test(s)) return true;
     if (/redd\.it\/[a-z0-9]+/i.test(s)) return true;
     return false;
   }
@@ -3258,16 +3394,23 @@
       const redgifsFeedHere = isRedgifsExpandableUrl(window.location.href) || collectRedgifsUrls(1).some((u) => isRedgifsExpandableUrl(u));
       const youtubeHere = m.platform === 'youtube';
       const redditHere = m.platform === 'reddit' && isRedditBatchSeedUrl(m.url);
+      const redditTargets = redditHere ? redditTargetOptions(m) : [];
+      const redditPostHere = redditTargets.some((opt) => opt.mode === 'post');
+      const redditUserHere = redditTargets.some((opt) => opt.mode === 'user');
+      const redditSubredditHere = redditTargets.some((opt) => opt.mode === 'subreddit');
       const threadHere = isFootFetishForumThreadPage() || isFootFetishForumForumPage() || isVipergirlsThreadPage() || isVipergirlsForumPage();
       const k2sHere = isVipergirlsThreadPage();
       const visibleMediaHere = collectVisibleMediaUrls(1).length > 0;
       const batchHere = hasUsableLinksOnPage(m);
 
       setButtonAvailable(downloadBtn, m.platform !== 'unknown' || batchHere || redgifsHere);
+      try { redditBtnContainer.style.display = smartButtons && !redditHere ? 'none' : 'flex'; } catch (e) {}
       setButtonAvailable(batchDownloadBtn, batchHere);
       setButtonAvailable(forceBatchDownloadBtn, batchHere);
       setButtonAvailable(mediaDownloadBtn, visibleMediaHere);
-      setButtonAvailable(redditAllBtn, redditHere);
+      setButtonAvailable(redditPostBtn, redditPostHere);
+      setButtonAvailable(redditUserBtn, redditUserHere);
+      setButtonAvailable(redditSubredditBtn, redditSubredditHere);
       setButtonAvailable(ytShortsBtn, youtubeHere);
       setButtonAvailable(ytVideosBtn, youtubeHere);
       setButtonAvailable(openAllBtn, batchHere);
@@ -3304,6 +3447,10 @@
   Object.assign(extraBtnContainer.style, { display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: '8px' });
   toolbar.appendChild(extraBtnContainer);
 
+  const redditBtnContainer = document.createElement('div');
+  Object.assign(redditBtnContainer.style, { display: 'flex', gap: '6px', marginBottom: '8px' });
+  toolbar.appendChild(redditBtnContainer);
+
   function makeBtn(text, bg) {
     const btn = document.createElement('button');
     btn.textContent = text;
@@ -3320,6 +3467,18 @@
     return btn;
   }
 
+  function makeCompactBtnIn(container, text, bg) {
+    const btn = makeBtnIn(container, text, bg);
+    Object.assign(btn.style, {
+      minWidth: '0',
+      padding: '7px 8px',
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+    });
+    return btn;
+  }
+
   const screenshotBtn = makeBtn('📷 Screenshot', '#4CAF50');
   const downloadBtn = makeBtn('⬇️ Huidige media', '#2196F3');
   const batchDownloadBtn = makeBtn('⏬ Pagina scannen', '#1565C0');
@@ -3329,7 +3488,9 @@
   const threadBatchDownloadBtn = makeBtnIn(extraBtnContainer, '🧵 Hele thread', '#0ea5e9');
   const keep2ShareBatchBtn = makeBtnIn(extraBtnContainer, '🔐 K2S links', '#0891b2');
   const vdhHintBtn = makeBtnIn(extraBtnContainer, '🧩 VDH kanaal', '#2e7d32');
-  const redditAllBtn = makeBtnIn(extraBtnContainer, 'Reddit via BDFR', '#ff4500');
+  const redditPostBtn = makeCompactBtnIn(redditBtnContainer, 'Post', '#ff4500');
+  const redditUserBtn = makeCompactBtnIn(redditBtnContainer, 'Gebruiker', '#d9480f');
+  const redditSubredditBtn = makeCompactBtnIn(redditBtnContainer, 'Kanaal', '#c2410c');
   const redgifsClipBtn = makeBtnIn(extraBtnContainer, 'Redgifs clip', '#dc2626');
   const redgifsFeedBtn = makeBtnIn(extraBtnContainer, 'Redgifs feed', '#991b1b');
   const ytShortsBtn = makeBtnIn(extraBtnContainer, 'YT shorts', '#7c3aed');
@@ -3345,7 +3506,9 @@
     threadBatchDownloadBtn.title = 'Scan de hele forumthread over alle pagina\'s';
     keep2ShareBatchBtn.title = 'ViperGirls: download Keep2Share-links. Klik = huidige pagina, Shift/Alt = hele thread, Cmd/Ctrl = limieten.';
     vdhHintBtn.title = 'Geef Video DownloadHelper een kanaal/context hint';
-    redditAllBtn.title = 'Stuur Reddit post/subreddit/user naar BDFR download';
+    redditPostBtn.title = 'Reddit: download alleen deze post via BDFR';
+    redditUserBtn.title = 'Reddit: download alles van deze gebruiker via BDFR';
+    redditSubredditBtn.title = 'Reddit: download alles van dit kanaal/subreddit via BDFR';
     redgifsClipBtn.title = 'Download deze Redgifs clip of Redgifs links op de pagina';
     redgifsFeedBtn.title = 'Download/expand Redgifs profiel, collectie, niche of zoekpagina';
     ytShortsBtn.title = 'Download YouTube Shorts van dit kanaal';
@@ -4746,7 +4909,7 @@
     }
   }
 
-  async function runRedditAllBatchFromCurrentPage(triggerBtn) {
+  async function runRedditAllBatchFromCurrentPage(triggerBtn, targetMode, clickEvent) {
     if (!(await ensureHubReachable(true))) return;
 
     const meta = scrapeMetadata();
@@ -4755,60 +4918,49 @@
       return;
     }
 
-    const original = triggerBtn ? triggerBtn.textContent : 'Reddit via BDFR';
+    const target = targetMode ? redditTargetForMode(meta, targetMode) : chooseRedditTarget(meta);
+    if (!target || !target.url) return;
+    const wantsLimitPrompt = !!(clickEvent && (clickEvent.metaKey || clickEvent.ctrlKey || clickEvent.altKey || clickEvent.shiftKey));
+    if (target.limitable && typeof target.limit === 'undefined' && wantsLimitPrompt) {
+      const limit = promptRedditBdfrLimit(0);
+      if (limit === null) return;
+      target.limit = limit;
+    }
+
+    const redditMeta = {
+      ...meta,
+      url: target.url,
+      reddit_target_mode: target.mode,
+      reddit_target_label: target.label,
+      queued_from: 'firefox-toolbar-reddit-options',
+    };
+    if (target.limitable && Number.isFinite(Number(target.limit)) && Number(target.limit) > 0) {
+      redditMeta.limit = Number(target.limit);
+      redditMeta.bdfr_limit = Number(target.limit);
+      redditMeta.reddit_limit = Number(target.limit);
+    }
+
+    const original = triggerBtn ? triggerBtn.textContent : 'Reddit';
     if (triggerBtn) {
       triggerBtn.textContent = '⏳ Reddit...';
       triggerBtn.style.opacity = '0.6';
     }
 
-    let urls = [];
-    let redditIndexInfo = null;
     try {
-      try {
-        redditIndexInfo = await expandRedditBatchUrlsViaApi(meta.url);
-        urls = redditIndexInfo.urls;
-      } catch (e) {
-        addLog(`Reddit index fout: ${e.message} — fallback naar server reddit-dl target`, 'error');
-        urls = [meta.url];
-        redditIndexInfo = { mode: 'fallback_target', scannedPages: 0, scannedPosts: 0, reachedEnd: false };
-        showNotification('Reddit index geblokkeerd; fallback naar server reddit-dl target', true);
-      }
-
-      if (!urls.length) {
-        showNotification('Geen Reddit media-posts gevonden via API index', true);
-        return;
-      }
-
-      const fallbackTarget = redditIndexInfo && redditIndexInfo.mode === 'fallback_target';
-      const redditMeta = { ...meta };
-      let redditLimit = null;
-      if (fallbackTarget) {
-        redditLimit = promptRedditBdfrLimit(100);
-        if (redditLimit === null) return;
-        if (Number.isFinite(Number(redditLimit)) && Number(redditLimit) > 0) {
-          redditMeta.limit = Number(redditLimit);
-          redditMeta.bdfr_limit = Number(redditLimit);
-        }
-      }
-      const hint = fallbackTarget
-        ? `\nReddit listing is geblokkeerd door 403; WEBDL stuurt deze subreddit/user direct naar BDFR.${redditLimit ? `\nLimiet: ${redditLimit} posts.` : '\nLimiet: onbeperkt.'}`
-        : `\nMode: ${redditIndexInfo && redditIndexInfo.mode ? redditIndexInfo.mode : 'unknown'}, pagina's: ${redditIndexInfo && Number.isFinite(redditIndexInfo.scannedPages) ? redditIndexInfo.scannedPages : 0}, posts gescand: ${redditIndexInfo && Number.isFinite(redditIndexInfo.scannedPosts) ? redditIndexInfo.scannedPosts : 0}`;
-      const ok = window.confirm(fallbackTarget ? `Reddit target downloaden via BDFR?${hint}` : `Download all - Reddit: ${urls.length} items?${hint}`);
-      if (!ok) return;
-
-      const result = await queueBatchDownloadRequest(urls, redditMeta);
-      if (result.success) {
-        const stats = summarizeBatchResult(result);
-        const label = fallbackTarget ? 'Reddit BDFR target' : 'Reddit all';
-        showNotification(`${label}: ${formatBatchStats(stats)}`);
-        addLog(`${label} gestart: ${formatBatchStats(stats)}`);
+      addLog(`Reddit ${target.mode}: ${target.url}${target.limitable ? ` limiet=${target.limit || 'alles'}` : ''}`);
+      const result = await queueDownloadRequestWithOverride(redditMeta, target.url);
+      if (result && result.success) {
+        const id = result.downloadId || result.hubJobId || '';
+        showNotification(`Reddit ${target.label}: ${result.duplicate ? 'bestaat al' : 'gestart'}${id ? ` #${id}` : ''}`);
+        addLog(`Reddit ${target.label} gestart: ${target.url}${id ? ` #${id}` : ''}`);
       } else {
-        showNotification(`Reddit all fout: ${result.error}`, true);
-        addLog(`Reddit all fout: ${result.error}`, 'error');
+        const err = (result && result.error) ? result.error : 'unknown';
+        showNotification(`Reddit fout: ${err}`, true);
+        addLog(`Reddit fout: ${err}`, 'error');
       }
     } catch (e) {
-      showNotification(`Reddit all fout: ${e.message}`, true);
-      addLog(`Reddit all fout: ${e.message}`, 'error');
+      showNotification(`Reddit fout: ${e.message}`, true);
+      addLog(`Reddit fout: ${e.message}`, 'error');
     } finally {
       if (triggerBtn) {
         triggerBtn.textContent = original;
@@ -5001,8 +5153,16 @@
     }
   });
 
-  redditAllBtn.addEventListener('click', async function() {
-    await runRedditAllBatchFromCurrentPage(redditAllBtn);
+  redditPostBtn.addEventListener('click', async function(e) {
+    await runRedditAllBatchFromCurrentPage(redditPostBtn, 'post', e);
+  });
+
+  redditUserBtn.addEventListener('click', async function(e) {
+    await runRedditAllBatchFromCurrentPage(redditUserBtn, 'user', e);
+  });
+
+  redditSubredditBtn.addEventListener('click', async function(e) {
+    await runRedditAllBatchFromCurrentPage(redditSubredditBtn, 'subreddit', e);
   });
 
   redgifsClipBtn.addEventListener('click', async function() {

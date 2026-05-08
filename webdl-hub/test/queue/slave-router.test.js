@@ -9,3 +9,9 @@ test('slave-router delegeert Keep2Share/K2S naar simple-server', () => {
   assert.equal(isSlaveUrl('https://k2s.cc/file/12c6d4edd861e/video.mp4').platform, 'keep2share');
   assert.equal(isSlaveUrl('https://keep2share.cc/file/12c6d4edd861e/video.mp4').platform, 'keep2share');
 });
+
+test("slave-router delegeert imagehost-pagina's naar simple-server", () => {
+  assert.equal(isSlaveUrl('https://vipr.im/abc123').platform, 'vipr');
+  assert.equal(isSlaveUrl('https://imx.to/i/abc123').platform, 'imx');
+  assert.equal(isSlaveUrl('https://imgbox.com/abc123').platform, 'imgbox');
+});

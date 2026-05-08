@@ -90,6 +90,29 @@
     return 'Zonder titel';
   }
 
+  function canonicalSiteLabel(value) {
+    const raw = String(value || '').trim().toLowerCase().replace(/^www\./, '');
+    if (!raw) return '';
+    if (raw === 'youtube' || raw === 'youtube.com' || raw === 'youtu.be' || raw.endsWith('.youtube.com')) return 'youtube';
+    if (raw === 'redgifs' || raw === 'redgifs.com' || raw === 'gifdeliverynetwork.com' || raw.endsWith('.redgifs.com') || raw.endsWith('.gifdeliverynetwork.com')) return 'redgifs';
+    if (raw === 'vipergirls' || raw === 'vipergirls.to' || raw === 'viper.to' || raw.endsWith('.vipergirls.to') || raw.endsWith('.viper.to')) return 'vipergirls';
+    if (raw === 'keep2share' || raw === 'keep2share.cc' || raw === 'k2s.cc' || raw === 'k2s.io' || raw.endsWith('.keep2share.cc') || raw.endsWith('.k2s.cc') || raw.endsWith('.k2s.io')) return 'keep2share';
+    return raw;
+  }
+
+  function shouldShowSourceSite(platform, sourceSite) {
+    const platformKey = canonicalSiteLabel(platform);
+    const sourceKey = canonicalSiteLabel(sourceSite);
+    return !!sourceKey && sourceKey !== platformKey;
+  }
+
+  function displayPlatformBadge(it) {
+    const platform = String(it && it.platform || '?').trim();
+    const sourceSite = String(it && it.source_site || '').trim();
+    if (!shouldShowSourceSite(platform, sourceSite)) return platform || '?';
+    return `${platform} via ${sourceSite}`;
+  }
+
   function itemMatchesCurrentFilters(it) {
     const f = state.filters || {};
     if (f.platform && String(it.platform || '') !== String(f.platform)) return false;
@@ -147,16 +170,23 @@
     c.className = 'card';
     c.dataset.idx = String(idx);
     c.dataset.id  = String(it.id);
-    const badgeTitle = it.source_site ? `${it.platform || '?'} via ${it.source_site}` : (it.platform || '?');
-    const badge = `<span class="card-badge" title="${escHtml(badgeTitle)}">${it.platform || '?'}</span>`;
+    const platformText = String(it.platform || '?').trim() || '?';
+    const sourceText = String(it.source_site || '').trim();
+    const showSource = shouldShowSourceSite(platformText, sourceText);
+    const badgeTitle = displayPlatformBadge(it);
+    const badge = `<div class="card-badge-stack" title="${escHtml(badgeTitle)}">
+        <span class="card-badge">${escHtml(platformText)}</span>
+        ${showSource ? `<span class="card-badge card-badge-source">via ${escHtml(sourceText)}</span>` : ''}
+      </div>`;
     const mediaLabel = mediaTypeLabel(it);
     const mediaMark = mediaLabel ? `<span class="card-media-mark">${mediaLabel}</span>` : '';
     const title = escHtml(displayTitle(it));
     const sourceSite = String(it.source_site || '').trim();
     const channel = (it.channel && it.channel !== 'unknown') ? String(it.channel) : '';
-    const sub = sourceSite && channel && sourceSite !== channel
-      ? `${sourceSite} / ${channel}`
-      : (sourceSite || channel);
+    const subSource = shouldShowSourceSite(platformText, sourceSite) ? sourceSite : '';
+    const sub = subSource && channel && subSource !== channel
+      ? `${subSource} / ${channel}`
+      : (subSource || channel);
     c.innerHTML = `
       <div class="card-thumb">
         ${badge}${mediaMark}

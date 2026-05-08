@@ -856,8 +856,11 @@
     if (el.vBtnReverse) el.vBtnReverse.classList.toggle('active', vs.playbackRate < 0);
     if (el.vTimeLabel) {
       el.vTimeLabel.textContent = v
+        ? `${formatTime(v.currentTime)} / ${formatTime(v.duration)}`
+        : '0:00 / 0:00';
+      el.vTimeLabel.title = v
         ? `${formatTime(v.currentTime)} (${formatSeconds(v.currentTime)}) / ${formatTime(v.duration)} (${formatSeconds(v.duration)})`
-        : '0:00 (0s) / 0:00 (--s)';
+        : '';
     }
   }
 

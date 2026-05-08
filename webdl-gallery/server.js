@@ -97,7 +97,7 @@ const MEDIA_EXTS = [...VIDEO_EXTS, ...IMAGE_EXTS];
 const AUX_RELPATH_RE = String.raw`((^|[\\/])\d{1,3}[-_. ]?thumbnail\.(jpe?g|png|webp|gif|bmp|avif)$|(^|[-_. ])thumbnail\.(jpe?g|png|webp|gif|bmp|avif)$|_thumb(_v[0-9]+)?\.(jpe?g|png|webp)$|_preview\.(jpe?g|png|webp|gif|bmp|avif)$|_logo\.(jpe?g|png|webp)$|\.(json|part|tmp|ytdl)$)`;
 const TEMP_RELPATH_RE = String.raw`(^|[\\/])(_UNPACK_|_FAILED_|_ADMIN_|__ADMIN__|incomplete)([^\\/]*)([\\/]|$)`;
 const MEDIA_EXT_SQL = MEDIA_EXTS.map(e => `'${e}'`).join(',');
-const ACTIVE_STATUSES = ['pending', 'queued', 'downloading', 'postprocessing'];
+const ACTIVE_DB_STATUSES = ['downloading', 'postprocessing'];
 const HIDDEN_GALLERY_STATUSES = ['pending', 'queued', 'downloading', 'postprocessing', 'superseded'];
 const KEEP2SHARE_DIR = path.join(BASE_DIR, '_Keep2Share');
 const JDOWNLOADER_CFG_DIR = process.env.JDOWNLOADER_CFG_DIR || path.join(process.env.HOME || '/Users/jurgen', 'Library/Application Support/JDownloader 2/cfg');
@@ -238,7 +238,16 @@ function thumbnailFromHubJob(row) {
   return '';
 }
 
-function sourceSiteFromMetadata(metadata) {
+function normalizeSourceSiteLabel(value) {
+  const raw = String(value || '').trim().toLowerCase().replace(/^www\./, '');
+  if (!raw) return '';
+  if (raw === 'vipergirls.to' || raw === 'viper.to' || raw.endsWith('.vipergirls.to') || raw.endsWith('.viper.to')) return 'vipergirls';
+  if (raw === 'youtube.com' || raw === 'youtu.be' || raw.endsWith('.youtube.com')) return 'youtube';
+  if (raw === 'keep2share.cc' || raw === 'k2s.cc' || raw === 'k2s.io' || raw.endsWith('.keep2share.cc') || raw.endsWith('.k2s.cc') || raw.endsWith('.k2s.io')) return 'keep2share';
+  return raw;
+}
+
+function sourceSiteFromMetadata(metadata, sourceUrl) {
   try {
     const parsed = metadata && typeof metadata === 'string' ? JSON.parse(metadata) : metadata;
     if (parsed && typeof parsed === 'object') {
@@ -248,8 +257,12 @@ function sourceSiteFromMetadata(metadata) {
           ? new URL(String(parsed.source_context.url)).hostname.replace(/^www\./i, '').toLowerCase()
           : '';
       } catch (_) {}
-      return parsed.source_site || parsed.original_site || contextHost || parsed.source_context?.platform || '';
+      const fromMetadata = normalizeSourceSiteLabel(parsed.source_site || parsed.original_site || contextHost || parsed.source_context?.platform || '');
+      if (fromMetadata) return fromMetadata;
     }
+  } catch (_) {}
+  try {
+    if (sourceUrl) return normalizeSourceSiteLabel(new URL(String(sourceUrl)).hostname);
   } catch (_) {}
   return '';
 }
@@ -260,9 +273,11 @@ function mapItem(row) {
   const filename = row.filename || path.basename(row.filepath || '');
   const durationText = row.duration == null ? null : String(row.duration);
   const durationSeconds = parseDurationSeconds(durationText);
-  const sourceSite = sourceSiteFromMetadata(row.metadata);
+  const sourceSite = sourceSiteFromMetadata(row.metadata, row.source_url);
   let parsedMetadata = null;
   try { parsedMetadata = row.metadata && typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata; } catch (_) { parsedMetadata = null; }
+  const sourceSites = Array.isArray(parsedMetadata?.source_sites) ? parsedMetadata.source_sites.slice() : [];
+  if (sourceSite && !sourceSites.some((s) => String(s || '').toLowerCase() === sourceSite.toLowerCase())) sourceSites.unshift(sourceSite);
   return {
     ...row,
     id: String(row.id),
@@ -273,7 +288,7 @@ function mapItem(row) {
     duration: durationText,
     duration_seconds: durationSeconds,
     source_site: sourceSite || null,
-    source_sites: Array.isArray(parsedMetadata?.source_sites) ? parsedMetadata.source_sites : [],
+    source_sites: sourceSites,
   };
 }
 
@@ -924,12 +939,13 @@ app.get('/api/active-items', async (_req, res) => {
          END,
          COALESCE(updated_at, created_at) DESC,
          id DESC
-       LIMIT 80`, [ACTIVE_STATUSES]),
+       LIMIT 80`, [ACTIVE_DB_STATUSES]),
       pool.query(`
         SELECT id::text, status, adapter, url, progress_pct AS progress,
                options, locked_at AS updated_at, created_at
           FROM webdl.jobs
          WHERE status IN ('queued', 'running')
+           AND COALESCE(lane, '') <> 'paused'
          ORDER BY
            CASE status
              WHEN 'running' THEN 0
@@ -955,6 +971,7 @@ app.get('/api/active-items', async (_req, res) => {
                    END AS platform_guess
               FROM webdl.jobs
              WHERE status IN ('queued', 'running')
+               AND COALESCE(lane, '') <> 'paused'
           ) q
          GROUP BY status, COALESCE(options->>'platform', platform_guess, adapter, 'hub')
          ORDER BY status, count DESC`),
@@ -964,7 +981,7 @@ app.get('/api/active-items', async (_req, res) => {
       ...r,
       source: 'db',
       title: r.title || r.filename || r.filepath || `download ${r.id}`,
-      thumb_url: `/thumb/${encodeURIComponent(String(r.id))}?v=${r.is_thumb_ready ? '1' : '0'}`,
+      thumb_url: r.is_thumb_ready ? `/thumb/${encodeURIComponent(String(r.id))}?v=1` : '',
     }));
     const hubItems = hub.rows.map((r) => ({
       id: `hub-${r.id}`,
