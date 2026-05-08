@@ -450,9 +450,19 @@
   }
 
   // ─── Filters ──────────────────────────────────────────────────────────────
+  function platformCountParams() {
+    const params = new URLSearchParams();
+    if (state.filters.q) params.set('q', state.filters.q);
+    if (state.filters.media_type) params.set('media_type', state.filters.media_type);
+    if (state.filters.min_rating) params.set('min_rating', state.filters.min_rating);
+    return params;
+  }
+
   async function loadFilterDropdowns() {
     try {
-      const platformsResp = await apiFetch('/api/platforms').then(r => r.json());
+      const params = platformCountParams();
+      const platformsUrl = '/api/platforms' + (params.toString() ? '?' + params.toString() : '');
+      const platformsResp = await apiFetch(platformsUrl).then(r => r.json());
       const platforms = Array.isArray(platformsResp.platforms) ? platformsResp.platforms : [];
       const pSel = $('platform');
       const prev = pSel.value;
@@ -578,6 +588,7 @@
   for (const id of ['platform', 'channel', 'channelSort', 'sort', 'minRating', 'mediaType']) {
     $(id).addEventListener('change', async () => {
       readFiltersFromControls();
+      if (id === 'minRating' || id === 'mediaType') await loadFilterDropdowns();
       // Bij platform-wissel: kanalen herladen (filtert op geselecteerd platform)
       if (id === 'platform' || id === 'channelSort' || id === 'minRating' || id === 'mediaType') await reloadChannels();
       reloadGallery();
@@ -586,12 +597,14 @@
   $('q').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
       state.filters.q = $('q').value.trim();
+      loadFilterDropdowns().catch((err) => console.warn('platforms load failed', err));
       reloadChannels().catch((err) => console.warn('channels load failed', err));
       reloadGallery();
     }
   });
   $('q').addEventListener('change', () => {
     state.filters.q = $('q').value.trim();
+    loadFilterDropdowns().catch((err) => console.warn('platforms load failed', err));
     reloadChannels().catch((err) => console.warn('channels load failed', err));
     reloadGallery();
   });

@@ -953,7 +953,7 @@ function buildItemFilters({ req, params, fileExpr, extExpr, ratingExpr, includeC
     }
   }
   if (q) {
-    addSearchFilter(where, params, q, ['d.title', 'd.filename', fileExpr]);
+    addSearchFilter(where, params, q, ['d.title', 'd.filename', 'd.channel', 'd.platform', fileExpr]);
   }
   if (Number.isFinite(minRating)) { params.push(minRating); where.push(`${ratingExpr} >= $${params.length}`); }
   if (mediaType === 'video') { where.push(`lower(${extExpr}) IN (${VIDEO_EXTS.map(e=>`'${e}'`).join(',')})`); }
@@ -981,7 +981,7 @@ function buildScreenshotFilters({ req, params, includeChannel = true }) {
   if (platform) { params.push(platform); where.push(`s.platform = $${params.length}`); }
   if (includeChannel && channel) { params.push(channel); where.push(`s.channel = $${params.length}`); }
   if (q) {
-    addSearchFilter(where, params, q, ['s.title', 's.filename', 's.filepath']);
+    addSearchFilter(where, params, q, ['s.title', 's.filename', 's.channel', 's.platform', 's.filepath']);
   }
   if (Number.isFinite(minRating)) { params.push(minRating); where.push(`s.rating >= $${params.length}`); }
   if (mediaType === 'video') where.push('false');
@@ -1293,25 +1293,67 @@ app.get('/api/items-since', async (req, res) => {
 });
 
 // ─── Platforms lijst ───────────────────────────────────────────────────────
-app.get('/api/platforms', async (_req, res) => {
+app.get('/api/platforms', async (req, res) => {
   try {
+    const params = [];
+    const directWhere = buildItemFilters({
+      req, params,
+      fileExpr: 'd.filepath',
+      extExpr: "COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))",
+      ratingExpr: 'd.rating',
+      includeChannel: false,
+    });
+    directWhere.push(`(
+      d.platform IN ('sabnzbd', 'keep2share')
+      OR NOT EXISTS (
+        SELECT 1 FROM download_files mf
+         WHERE mf.download_id = d.id
+           AND mf.relpath !~* '${AUX_RELPATH_RE}'
+           AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
+      )
+    )`);
+    directWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
+    directWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
+    directWhere.push(`(d.filesize IS NULL OR d.filesize > 0)`);
+    directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
+
+    const fileWhere = buildItemFilters({
+      req, params,
+      fileExpr: 'df.relpath',
+      extExpr: "regexp_replace(df.relpath, '^.*\\.', '')",
+      ratingExpr: 'df.rating',
+      includeChannel: false,
+    });
+    fileWhere.push(`d.platform NOT IN ('sabnzbd', 'keep2share')`);
+    fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
+    fileWhere.push(`df.relpath !~* '${TEMP_RELPATH_RE}'`);
+    fileWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
+    fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
+    fileWhere.push(`(df.filesize IS NULL OR df.filesize > 0)`);
+    fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
+
+    const screenshotWhere = buildScreenshotFilters({ req, params, includeChannel: false });
+    screenshotWhere.push(`(s.filesize IS NULL OR s.filesize > 0)`);
+
     const { rows } = await pool.query(`
       WITH media_platforms AS (
-        SELECT COALESCE(NULLIF(d.platform, ''), 'unknown') AS platform, COUNT(*)::bigint AS count
+        SELECT COALESCE(NULLIF(d.platform, ''), 'unknown') AS platform
           FROM downloads d
-         WHERE d.status = 'completed'
-         GROUP BY COALESCE(NULLIF(d.platform, ''), 'unknown')
+         WHERE ${directWhere.join(' AND ')}
         UNION ALL
-        SELECT COALESCE(NULLIF(s.platform, ''), 'unknown') AS platform, COUNT(*)::bigint AS count
+        SELECT COALESCE(NULLIF(d.platform, ''), 'unknown') AS platform
+          FROM download_files df
+          JOIN downloads d ON d.id = df.download_id
+         WHERE ${fileWhere.join(' AND ')}
+        UNION ALL
+        SELECT COALESCE(NULLIF(s.platform, ''), 'unknown') AS platform
           FROM screenshots s
-         WHERE s.filepath IS NOT NULL AND s.filepath <> ''
-           AND (s.filesize IS NULL OR s.filesize > 0)
-         GROUP BY COALESCE(NULLIF(s.platform, ''), 'unknown')
+         WHERE ${screenshotWhere.join(' AND ')}
       )
-      SELECT platform, SUM(count)::bigint AS count
+      SELECT platform, COUNT(*)::bigint AS count
         FROM media_platforms
        GROUP BY platform
-       ORDER BY SUM(count) DESC`);
+       ORDER BY COUNT(*) DESC`, params);
     res.json({ platforms: rows });
   } catch (e) {
     res.status(500).json({ error: e.message });
