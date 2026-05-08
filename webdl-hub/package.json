@@ -14,6 +14,7 @@
     "migrate": "node src/db/migrate.js",
     "storage:audit": "node scripts/storage-audit.js",
     "images:audit": "node scripts/audit-fullscale-images.js",
+    "images:repair": "node scripts/repair-fullscale-images.js",
     "test": "node --test --test-reporter=spec 'test/**/*.test.js'",
     "test:online": "TEST_ONLINE=1 node --test --test-reporter=spec 'test/**/*.test.js'",
     "lint": "eslint src test",
