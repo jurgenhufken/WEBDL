@@ -12,7 +12,7 @@ const VALID_SCHEMA = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 //  - 'video':         directe video download zonder merge
 //  - 'image':         images/attachments (netwerk-bound)
 const IMAGE_URL_RE = /\.(jpe?g|png|webp|gif|avif|bmp|tiff?)(\?|$)/i;
-const DIRECT_VIDEO_RE = /\.(mp4|webm|mkv|mov|m4v|avi|flv|ts)(\?|$)/i;
+const DIRECT_VIDEO_RE = /\.(mp4|webm|mkv|mov|m4v|avi|wmv|flv|ts|m2ts|mpg|mpeg|ogv|3gp|3g2)(\?|$)/i;
 const MERGE_VIDEO_HOSTS = [
   'youtube.com', 'youtu.be', 'vimeo.com', 'twitch.tv',
   'reddit.com', 'redd.it', 'v.redd.it',
@@ -81,6 +81,20 @@ function normalizeJobOptionsForUrl(url, options = {}) {
   return normalized;
 }
 
+function keep2ShareFileId(url) {
+  try {
+    const u = new URL(String(url || ''));
+    const host = String(u.hostname || '').toLowerCase().replace(/^www\./, '');
+    if (!(host === 'keep2share.cc' || host === 'k2s.cc' || host === 'k2s.io' || host.endsWith('.keep2share.cc') || host.endsWith('.k2s.cc') || host.endsWith('.k2s.io'))) {
+      return '';
+    }
+    const m = String(u.pathname || '').match(/^\/file\/([^\/?#]+)/i);
+    return m && m[1] ? decodeURIComponent(m[1]).trim().toLowerCase() : '';
+  } catch (_) {
+    return '';
+  }
+}
+
 function createRepo({ databaseUrl = config.databaseUrl, schema = config.dbSchema } = {}) {
   if (!VALID_SCHEMA.test(schema)) {
     throw new Error(`Ongeldige schema-naam: "${schema}"`);
@@ -118,12 +132,43 @@ function createRepo({ databaseUrl = config.databaseUrl, schema = config.dbSchema
   }
 
   async function findRecentJobByUrl(url, { statuses = ['queued', 'running', 'done'] } = {}) {
+    const k2sId = keep2ShareFileId(url);
+    const params = [url, statuses];
+    let extraWhere = '';
+    if (k2sId) {
+      params.push(k2sId);
+      extraWhere = `OR substring(lower(url) from '(?:keep2share\\.cc|k2s\\.cc|k2s\\.io)/file/([^/?#]+)') = $3`;
+    }
     const { rows } = await query(
       `SELECT * FROM ${T.jobs}
-        WHERE url = $1 AND status = ANY($2::text[])
+        WHERE (url = $1 ${extraWhere})
+          AND status = ANY($2::text[])
         ORDER BY id DESC
         LIMIT 1`,
-      [url, statuses],
+      params,
+    );
+    return rows[0] || null;
+  }
+
+  async function findGalleryDownloadByUrl(url, { statuses = ['pending', 'queued', 'downloading', 'postprocessing', 'completed'] } = {}) {
+    const k2sId = keep2ShareFileId(url);
+    const params = [url, statuses];
+    let extraWhere = '';
+    if (k2sId) {
+      params.push(k2sId);
+      extraWhere = `OR substring(lower(source_url) from '(?:keep2share\\.cc|k2s\\.cc|k2s\\.io)/file/([^/?#]+)') = $3
+                    OR substring(lower(url) from '(?:keep2share\\.cc|k2s\\.cc|k2s\\.io)/file/([^/?#]+)') = $3`;
+    }
+    const { rows } = await query(
+      `SELECT id, url, source_url, platform, status, title, filename, filepath
+         FROM public.downloads
+        WHERE (source_url = $1 OR url = $1 ${extraWhere})
+          AND status = ANY($2::text[])
+        ORDER BY
+          CASE status WHEN 'completed' THEN 0 ELSE 1 END,
+          id DESC
+        LIMIT 1`,
+      params,
     );
     return rows[0] || null;
   }
@@ -189,35 +234,84 @@ function createRepo({ databaseUrl = config.databaseUrl, schema = config.dbSchema
 
   async function listGroups({ limit = 100 } = {}) {
     const { rows } = await query(
-      `SELECT
-         options->>'expandGroup' AS group_id,
-         MIN(options->>'expandName') AS name,
-         MIN(options->>'expandUrl') AS url,
-         MAX(NULLIF(options->>'expandTotal','')::int) AS total,
+      `WITH download_rows AS MATERIALIZED (
+         SELECT DISTINCT ON (hub_job_id)
+                hub_job_id, channel, platform, title, finished_at
+           FROM (
+             SELECT NULLIF(substring(metadata from '"hub_job_id"\\s*:\\s*"?([0-9]+)"?'), '')::bigint AS hub_job_id,
+                    channel, platform, title, finished_at
+               FROM public.downloads
+              WHERE metadata LIKE '%hub_job_id%'
+           ) d
+          WHERE hub_job_id IS NOT NULL
+          ORDER BY hub_job_id, finished_at DESC NULLS LAST
+       )
+       SELECT
+         j.options->>'expandGroup' AS group_id,
+         MIN(j.options->>'expandName') AS name,
+         MIN(j.options->>'expandUrl') AS url,
+         COALESCE(
+           (array_agg(NULLIF(d.channel, '') ORDER BY d.finished_at DESC NULLS LAST)
+             FILTER (WHERE NULLIF(d.channel, '') IS NOT NULL))[1],
+           (array_agg(NULLIF(d.platform, '') ORDER BY d.finished_at DESC NULLS LAST)
+             FILTER (WHERE NULLIF(d.platform, '') IS NOT NULL))[1],
+           MIN(j.options->>'expandName')
+         ) AS display_name,
+         (array_agg(NULLIF(d.title, '') ORDER BY d.finished_at DESC NULLS LAST)
+           FILTER (WHERE NULLIF(d.title, '') IS NOT NULL))[1] AS latest_title,
+         MAX(NULLIF(j.options->>'expandTotal','')::int) AS total,
          COUNT(*)::int AS jobs,
-         COUNT(*) FILTER (WHERE status = 'queued' AND lane <> 'paused')::int AS queued,
-         COUNT(*) FILTER (WHERE status = 'queued' AND lane = 'paused')::int AS paused,
-         COUNT(*) FILTER (WHERE status = 'running')::int AS running,
-         COUNT(*) FILTER (WHERE status = 'done')::int AS done,
-         COUNT(*) FILTER (WHERE status = 'failed')::int AS failed,
-         MIN(NULLIF(options->>'expandIndex','')::int) FILTER (WHERE status <> 'done') AS next_index,
-         MAX(NULLIF(options->>'expandIndex','')::int) FILTER (WHERE status = 'done') AS max_done_index,
-         MIN(created_at) AS first_created,
-         MAX(finished_at) AS last_finished
-       FROM ${T.jobs}
-       WHERE options ? 'expandGroup'
-       GROUP BY options->>'expandGroup'
+         COUNT(*) FILTER (WHERE j.status = 'queued' AND j.lane <> 'paused')::int AS queued,
+         COUNT(*) FILTER (WHERE j.status = 'queued' AND j.lane = 'paused')::int AS paused,
+         COUNT(*) FILTER (WHERE j.status = 'running')::int AS running,
+         COUNT(*) FILTER (WHERE j.status = 'done')::int AS done,
+         COUNT(*) FILTER (WHERE j.status = 'failed')::int AS failed,
+         MIN(NULLIF(j.options->>'expandIndex','')::int) FILTER (WHERE j.status <> 'done') AS next_index,
+         MAX(NULLIF(j.options->>'expandIndex','')::int) FILTER (WHERE j.status = 'done') AS max_done_index,
+         MIN(j.created_at) AS first_created,
+         MAX(j.finished_at) AS last_finished
+       FROM ${T.jobs} j
+       LEFT JOIN download_rows d ON d.hub_job_id = j.id
+       WHERE j.options ? 'expandGroup'
+       GROUP BY j.options->>'expandGroup'
        ORDER BY
          CASE
-           WHEN COUNT(*) FILTER (WHERE status = 'running') > 0 THEN 0
-           WHEN COUNT(*) FILTER (WHERE status = 'queued' AND lane <> 'paused') > 0 THEN 1
-           WHEN COUNT(*) FILTER (WHERE status = 'queued' AND lane = 'paused') > 0 THEN 2
-           WHEN COUNT(*) FILTER (WHERE status = 'failed') > 0 THEN 3
+           WHEN COUNT(*) FILTER (WHERE j.status = 'running') > 0 THEN 0
+           WHEN COUNT(*) FILTER (WHERE j.status = 'queued' AND j.lane <> 'paused') > 0 THEN 1
+           WHEN COUNT(*) FILTER (WHERE j.status = 'queued' AND j.lane = 'paused') > 0 THEN 2
+           WHEN COUNT(*) FILTER (WHERE j.status = 'failed') > 0 THEN 3
            ELSE 4
          END,
-         MIN(created_at) ASC
+         MIN(j.created_at) ASC
        LIMIT $1`,
       [limit],
+    );
+    return rows;
+  }
+
+  async function listJobsByGroup(groupId, { limit = 1500 } = {}) {
+    const { rows } = await query(
+      `WITH download_rows AS MATERIALIZED (
+         SELECT DISTINCT ON (hub_job_id)
+                hub_job_id, channel, platform, title, finished_at
+           FROM (
+             SELECT NULLIF(substring(metadata from '"hub_job_id"\\s*:\\s*"?([0-9]+)"?'), '')::bigint AS hub_job_id,
+                    channel, platform, title, finished_at
+               FROM public.downloads
+              WHERE metadata LIKE '%hub_job_id%'
+           ) d
+          WHERE hub_job_id IS NOT NULL
+          ORDER BY hub_job_id, finished_at DESC NULLS LAST
+       )
+       SELECT j.*, d.title AS downloaded_title, d.channel AS downloaded_channel, d.platform AS downloaded_platform
+         FROM ${T.jobs} j
+         LEFT JOIN download_rows d ON d.hub_job_id = j.id
+        WHERE j.options->>'expandGroup' = $1
+        ORDER BY
+          NULLIF(j.options->>'expandIndex','')::int NULLS LAST,
+          j.id
+        LIMIT $2`,
+      [String(groupId || ''), Math.max(1, Math.min(3000, Number(limit) || 1500))],
     );
     return rows;
   }
@@ -419,7 +513,7 @@ function createRepo({ databaseUrl = config.databaseUrl, schema = config.dbSchema
 
   return {
     pool, schema, close, ping,
-    createJob, getJob, findRecentJobByUrl, listJobs, getJobStats, getLaneStats, listGroups,
+    createJob, getJob, findRecentJobByUrl, findGalleryDownloadByUrl, listJobs, getJobStats, getLaneStats, listGroups, listJobsByGroup,
     claimNextJob, completeJob, failJob, cancelJob, updateProgress, heartbeatJob,
     pauseJob, resumeJob, setJobPriority, reclaimStaleRunning,
     addFile, listFiles, appendLog, listLogs,

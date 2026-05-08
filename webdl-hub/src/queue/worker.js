@@ -12,9 +12,10 @@ const FFMPEG = process.env.WEBDL_FFMPEG || '/opt/homebrew/bin/ffmpeg';
 const DATABASE_URL = process.env.DATABASE_URL || 'postgres://jurgen@localhost:5432/webdl';
 
 // Video extensions die een thumbnail mogen krijgen
-const VIDEO_EXTS = new Set(['.mp4', '.mkv', '.webm', '.mov', '.m4v', '.avi', '.flv', '.ts']);
+const VIDEO_EXTS = new Set(['.mp4', '.mkv', '.webm', '.mov', '.m4v', '.avi', '.wmv', '.flv', '.ts', '.m2ts', '.mpg', '.mpeg', '.ogv', '.3gp', '.3g2']);
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.avif']);
 const SKIP_EXTS = new Set(['.part', '.ytdl', '.tmp']);
+const AUX_IMAGE_BASENAME_RE = /(^\d{1,3}[-_. ]?thumbnail|(?:^|[-_. ])thumbnail|_thumb(_v\d+)?|_preview|_logo)\.(jpe?g|png|webp|gif|bmp|avif)$/i;
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
@@ -140,6 +141,79 @@ function getYtdlpSourceTimestamp(info) {
   return null;
 }
 
+function sanitizeFilePart(value, fallback = 'download') {
+  const cleaned = String(value || '')
+    .replace(/^Thread:\s*/i, '')
+    .normalize('NFKD')
+    .replace(/[^\w .()[\]-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120);
+  return cleaned || fallback;
+}
+
+function idFromMediaUrl(rawUrl) {
+  try {
+    const u = new URL(String(rawUrl || ''));
+    const parts = String(u.pathname || '').split('/').filter(Boolean);
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const part = parts[i].replace(/\.(jpe?g|png|gif|webp|mp4|webm|m4v|mov)$/i, '');
+      if (/^[a-z0-9]{8,}$/i.test(part)) return part;
+    }
+  } catch {}
+  return '';
+}
+
+function isPinnedVipergirlsJob(job) {
+  return String(job?.options?.platform || '').toLowerCase() === 'vipergirls'
+    || /vipergirls\.to/i.test(String(job?.options?.contextUrl || job?.options?.url || ''));
+}
+
+function pinnedVipergirlsTarget(job) {
+  const options = job?.options || {};
+  const haystack = [
+    job?.url,
+    options.url,
+    options.contextUrl,
+    options.pageUrl,
+    options.title,
+    options.channel,
+    options.expandGroup,
+  ].map((v) => String(v || '')).join(' ');
+
+  if (/thread_?6777850|threads\/6777850|czechcasting/i.test(haystack)) {
+    return {
+      platform: 'czechcasting',
+      channel: 'MyFav Czechcasting Model Collection Sets',
+      sourcePlatform: 'vipergirls',
+      sourceChannel: options.channel || 'thread_6777850',
+    };
+  }
+
+  return {
+    platform: 'vipergirls',
+    channel: options.channel || 'vipergirls',
+    sourcePlatform: 'vipergirls',
+    sourceChannel: options.channel || 'vipergirls',
+  };
+}
+
+function renameOutputForPinnedSource(filePath, job, sourceUrl, ext) {
+  if (!isPinnedVipergirlsJob(job)) return filePath;
+  const dir = path.dirname(filePath);
+  const sourceId = idFromMediaUrl(sourceUrl || job.url) || String(job.id || 'item');
+  const baseTitle = sanitizeFilePart(job?.options?.title || job?.options?.channel || 'vipergirls', 'vipergirls');
+  const target = path.join(dir, `${baseTitle}_${sourceId}${ext}`);
+  if (target === filePath) return filePath;
+  try {
+    if (fsSync.existsSync(target)) return target;
+    fsSync.renameSync(filePath, target);
+    return target;
+  } catch {
+    return filePath;
+  }
+}
+
 // ─── Pre-download dedup: check of URL al in simple-server gallery staat ─────
 async function checkGalleryDuplicate(url) {
   if (!url) return null;
@@ -182,15 +256,32 @@ async function syncToGallery(job, outputFiles, logger) {
       const isImage = IMAGE_EXTS.has(ext);
       if (!isVideo && !isImage) continue;
       // Skip thumbnails en temp files
-      if (/_thumb(_v\d+)?\.(jpe?g|png|webp)$/i.test(path.basename(f.path))) continue;
+      if (AUX_IMAGE_BASENAME_RE.test(path.basename(f.path))) continue;
       if (SKIP_EXTS.has(ext)) continue;
 
       const fileInfo = await readInfoJsonForMedia(f.path, info);
-      const channel = fileInfo?.channel || job.options?.channel || job.options?.playlistTitle || '';
+      const pinnedVipergirls = isPinnedVipergirlsJob(job);
+      const pinnedTarget = pinnedVipergirls ? pinnedVipergirlsTarget(job) : null;
+      const rawSourceUrl = fileInfo?.sourceUrl || job.url;
+      const finalPath = renameOutputForPinnedSource(f.path, job, rawSourceUrl, ext);
+      if (finalPath !== f.path) {
+        try {
+          await galleryPool.query(`UPDATE webdl.files SET path = $1 WHERE job_id = $2 AND path = $3`, [finalPath, job.id, f.path]);
+        } catch (_) {}
+        f.path = finalPath;
+      }
+      const channel = pinnedVipergirls
+        ? pinnedTarget.channel
+        : (fileInfo?.channel || job.options?.channel || job.options?.playlistTitle || '');
       const infoPlatform = String(fileInfo?.platform || '').toLowerCase();
-      const realPlatform = infoPlatform && infoPlatform !== 'generic' ? infoPlatform : platform;
-      const title = fileInfo?.title || path.basename(f.path, ext).replace(/_/g, ' ').trim();
-      const sourceUrl = fileInfo?.sourceUrl || job.url;
+      const realPlatform = pinnedVipergirls
+        ? pinnedTarget.platform
+        : (infoPlatform && infoPlatform !== 'generic' ? infoPlatform : platform);
+      const sourceId = idFromMediaUrl(rawSourceUrl || job.url);
+      const title = pinnedVipergirls
+        ? `${sanitizeFilePart(job.options?.title || 'Vipergirls', 'Vipergirls')}${sourceId ? ` ${sourceId}` : ''}`
+        : (fileInfo?.title || path.basename(f.path, ext).replace(/_/g, ' ').trim());
+      const sourceUrl = rawSourceUrl;
       const sourceUrlIsJobUrl = sourceUrl && String(sourceUrl) === String(job.url || '');
       const shouldDedupeBySourceUrl = Boolean(sourceUrl) && !(sourceUrlIsJobUrl && outputFiles.length > 1);
 
@@ -231,7 +322,19 @@ async function syncToGallery(job, outputFiles, logger) {
           f.path,
           stat.size,
           ext.replace('.', ''),
-          JSON.stringify({ hub_job_id: job.id, adapter: job.adapter, source_published_at: fileInfo?.sourcePublishedAt || null }),
+          JSON.stringify({
+            hub_job_id: job.id,
+            adapter: job.adapter,
+            source_published_at: fileInfo?.sourcePublishedAt || null,
+            source_context: pinnedVipergirls ? {
+              platform: pinnedTarget.sourcePlatform,
+              channel: pinnedTarget.sourceChannel,
+              target_platform: pinnedTarget.platform,
+              target_channel: pinnedTarget.channel,
+              title: job.options?.title || null,
+              url: job.options?.contextUrl || null,
+            } : null,
+          }),
           sourceUrl,
           fileInfo?.duration || null,
           importedAt,
@@ -250,7 +353,7 @@ async function syncToGallery(job, outputFiles, logger) {
 function isImportableMedia(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   if (!VIDEO_EXTS.has(ext) && !IMAGE_EXTS.has(ext)) return false;
-  if (/_thumb(_v\d+)?\.(jpe?g|png|webp)$/i.test(path.basename(filePath))) return false;
+  if (AUX_IMAGE_BASENAME_RE.test(path.basename(filePath))) return false;
   if (SKIP_EXTS.has(ext)) return false;
   return true;
 }
@@ -308,7 +411,8 @@ function startWorkerPool({
       /\/@[^/]+\/?(shorts|videos|streams)?\/?$/.test(urlLower) ||
       /\/channel\//.test(urlLower) ||
       /\/c\//.test(urlLower);
-    if (!isExpandable) {
+    const skipPreDownloadDedup = String(job?.options?.source_quality || '') === 'vipr_full_image';
+    if (!isExpandable && !skipPreDownloadDedup) {
       try {
         const dupe = await checkGalleryDuplicate(job.url);
         if (dupe) {

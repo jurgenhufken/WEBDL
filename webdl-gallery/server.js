@@ -19,7 +19,7 @@ const pool = new Pool({
   max: 20,                        // meer ruimte voor meerdere tabs
   idleTimeoutMillis: 30000,       // idle verbindingen na 30s sluiten
   connectionTimeoutMillis: 5000,  // max 5s wachten op verbinding uit pool
-  statement_timeout: 10000,       // queries langer dan 10s afbreken
+  statement_timeout: 30000,       // zware zoekqueries mogen onder load iets langer lopen
 });
 
 const app = express();
@@ -91,10 +91,10 @@ function relativeToMediaRoot(filePath) {
 }
 
 const RG_BIN = process.env.RG_BIN || (fs.existsSync('/Applications/Codex.app/Contents/Resources/rg') ? '/Applications/Codex.app/Contents/Resources/rg' : 'rg');
-const VIDEO_EXTS = ['mp4','webm','mkv','mov','m4v','avi','flv','ts'];
+const VIDEO_EXTS = ['mp4','webm','mkv','mov','m4v','avi','wmv','flv','ts','m2ts','mpg','mpeg','ogv','3gp','3g2'];
 const IMAGE_EXTS = ['jpg','jpeg','png','gif','webp','avif','bmp'];
 const MEDIA_EXTS = [...VIDEO_EXTS, ...IMAGE_EXTS];
-const AUX_RELPATH_RE = String.raw`(_thumb(_v[0-9]+)?\.(jpe?g|png|webp)$|_logo\.(jpe?g|png|webp)$|\.(json|part|tmp|ytdl)$)`;
+const AUX_RELPATH_RE = String.raw`((^|[\\/])\d{1,3}[-_. ]?thumbnail\.(jpe?g|png|webp|gif|bmp|avif)$|(^|[-_. ])thumbnail\.(jpe?g|png|webp|gif|bmp|avif)$|_thumb(_v[0-9]+)?\.(jpe?g|png|webp)$|_preview\.(jpe?g|png|webp|gif|bmp|avif)$|_logo\.(jpe?g|png|webp)$|\.(json|part|tmp|ytdl)$)`;
 const TEMP_RELPATH_RE = String.raw`(^|[\\/])(_UNPACK_|_FAILED_|_ADMIN_|__ADMIN__|incomplete)([^\\/]*)([\\/]|$)`;
 const MEDIA_EXT_SQL = MEDIA_EXTS.map(e => `'${e}'`).join(',');
 const ACTIVE_STATUSES = ['pending', 'queued', 'downloading', 'postprocessing'];
@@ -164,6 +164,48 @@ async function ensureSchema() {
     )`);
 }
 
+async function ensureSearchIndexes() {
+  const statements = [
+    'CREATE EXTENSION IF NOT EXISTS pg_trgm',
+    'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_downloads_filename_trgm ON downloads USING gin (filename gin_trgm_ops)',
+    'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_downloads_filepath_trgm ON downloads USING gin (filepath gin_trgm_ops)',
+    'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_downloads_metadata_trgm ON downloads USING gin (metadata gin_trgm_ops)',
+    'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_download_files_relpath_trgm ON download_files USING gin (relpath gin_trgm_ops)',
+    'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_screenshots_title_trgm ON screenshots USING gin (title gin_trgm_ops)',
+    'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_screenshots_filename_trgm ON screenshots USING gin (filename gin_trgm_ops)',
+    'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_screenshots_filepath_trgm ON screenshots USING gin (filepath gin_trgm_ops)',
+  ];
+  const client = await pool.connect();
+  try {
+    await client.query('SET statement_timeout = 0');
+    for (const sql of statements) {
+      await client.query(sql);
+    }
+  } finally {
+    client.release();
+  }
+}
+
+function addSearchFilter(where, params, q, columns) {
+  params.push('%' + q + '%');
+  const param = `$${params.length}`;
+  where.push(`(${columns.map((col) => `${col} ILIKE ${param}`).join(' OR ')})`);
+}
+
+function sourceSiteSql(alias = 'd') {
+  const metadata = `${alias}.metadata`;
+  return `NULLIF(substring(COALESCE(${metadata}, '') from '"source_site"\\s*:\\s*"([^"]+)"'), '')`;
+}
+
+function channelGroupSql(alias = 'd') {
+  const sourceSite = sourceSiteSql(alias);
+  return `CASE
+    WHEN ${alias}.platform IN ('sabnzbd', 'keep2share') AND ${sourceSite} IS NOT NULL
+      THEN 'site:' || ${sourceSite}
+    ELSE ${alias}.channel
+  END`;
+}
+
 function fileExt(filePath, format) {
   return format ? String(format).toLowerCase() : path.extname(filePath || '').replace('.', '').toLowerCase();
 }
@@ -196,12 +238,31 @@ function thumbnailFromHubJob(row) {
   return '';
 }
 
+function sourceSiteFromMetadata(metadata) {
+  try {
+    const parsed = metadata && typeof metadata === 'string' ? JSON.parse(metadata) : metadata;
+    if (parsed && typeof parsed === 'object') {
+      let contextHost = '';
+      try {
+        contextHost = parsed.source_context?.url
+          ? new URL(String(parsed.source_context.url)).hostname.replace(/^www\./i, '').toLowerCase()
+          : '';
+      } catch (_) {}
+      return parsed.source_site || parsed.original_site || contextHost || parsed.source_context?.platform || '';
+    }
+  } catch (_) {}
+  return '';
+}
+
 function mapItem(row) {
   const ext = fileExt(row.filepath, row.format);
   const isVideo = VIDEO_EXTS.includes(ext);
   const filename = row.filename || path.basename(row.filepath || '');
   const durationText = row.duration == null ? null : String(row.duration);
   const durationSeconds = parseDurationSeconds(durationText);
+  const sourceSite = sourceSiteFromMetadata(row.metadata);
+  let parsedMetadata = null;
+  try { parsedMetadata = row.metadata && typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata; } catch (_) { parsedMetadata = null; }
   return {
     ...row,
     id: String(row.id),
@@ -211,6 +272,8 @@ function mapItem(row) {
     type: isVideo ? 'video' : 'image',
     duration: durationText,
     duration_seconds: durationSeconds,
+    source_site: sourceSite || null,
+    source_sites: Array.isArray(parsedMetadata?.source_sites) ? parsedMetadata.source_sites : [],
   };
 }
 
@@ -242,6 +305,37 @@ function isJunkTagName(value) {
 function hasNonEmptyMedia(row) {
   const size = row.filesize == null ? null : Number(row.filesize);
   return !Number.isFinite(size) || size > 0;
+}
+
+function galleryDedupeKey(row) {
+  if (String(row.platform || '').toLowerCase() !== 'keep2share') {
+    return `${row.item_kind}:${row.id}`;
+  }
+  return [
+    String(row.platform || '').toLowerCase(),
+    String(row.source_url || row.url || row.filepath || row.id).trim().toLowerCase(),
+    String(row.title || row.filename || '').trim().toLowerCase(),
+    row.filesize == null ? '' : String(row.filesize),
+  ].join('|');
+}
+
+function dedupeGalleryRows(rows) {
+  const out = [];
+  const indexByKey = new Map();
+  for (const row of rows) {
+    const key = galleryDedupeKey(row);
+    const existingIdx = indexByKey.get(key);
+    if (existingIdx == null) {
+      indexByKey.set(key, out.length);
+      out.push(row);
+      continue;
+    }
+    const existing = out[existingIdx];
+    const rowHasRating = row.rating != null;
+    const existingHasRating = existing && existing.rating != null;
+    if (rowHasRating && !existingHasRating) out[existingIdx] = row;
+  }
+  return out;
 }
 
 function parseDurationSeconds(value) {
@@ -442,9 +536,20 @@ async function listRecentRawRecordings(limit = 20) {
   files.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
   const recent = files.slice(0, limit);
   if (!recent.length) return [];
-  const { rows } = await pool.query('SELECT filepath FROM downloads WHERE filepath = ANY($1::text[])', [recent.map((f) => f.file)]);
+  const lookupPaths = [];
+  for (const f of recent) {
+    lookupPaths.push(f.file);
+    lookupPaths.push(f.file.replace(/_raw\.mp4$/i, '.mp4'));
+  }
+  const { rows } = await pool.query('SELECT filepath FROM downloads WHERE filepath = ANY($1::text[])', [lookupPaths]);
   const known = new Set(rows.map((r) => r.filepath));
-  return recent.filter((f) => !known.has(f.file)).map((f) => parseRecordingFile(f.file, f.stat));
+  return recent.filter((f) => {
+    if (known.has(f.file)) return false;
+    const finalFile = f.file.replace(/_raw\.mp4$/i, '.mp4');
+    if (finalFile !== f.file && known.has(finalFile)) return false;
+    if (finalFile !== f.file && fs.existsSync(finalFile)) return false;
+    return true;
+  }).map((f) => parseRecordingFile(f.file, f.stat));
 }
 
 function markThumbReady(idRaw) {
@@ -738,10 +843,17 @@ function buildItemFilters({ req, params, fileExpr, extExpr, ratingExpr, includeC
 
   const where = [`${fileExpr} IS NOT NULL`, `${fileExpr} <> ''`];
   if (platform) { params.push(platform); where.push(`d.platform = $${params.length}`); }
-  if (includeChannel && channel) { params.push(channel); where.push(`d.channel = $${params.length}`); }
+  if (includeChannel && channel) {
+    if (String(channel).startsWith('site:')) {
+      params.push('%' + String(channel).slice(5).toLowerCase() + '%');
+      where.push(`LOWER(COALESCE(d.metadata, '')) LIKE $${params.length}`);
+    } else {
+      params.push(channel);
+      where.push(`d.channel = $${params.length}`);
+    }
+  }
   if (q) {
-    params.push('%' + q.toLowerCase() + '%');
-    where.push(`(LOWER(COALESCE(d.title, d.filename, '')) LIKE $${params.length} OR LOWER(${fileExpr}) LIKE $${params.length})`);
+    addSearchFilter(where, params, q, ['d.title', 'd.filename', fileExpr]);
   }
   if (Number.isFinite(minRating)) { params.push(minRating); where.push(`${ratingExpr} >= $${params.length}`); }
   if (mediaType === 'video') { where.push(`lower(${extExpr}) IN (${VIDEO_EXTS.map(e=>`'${e}'`).join(',')})`); }
@@ -769,8 +881,7 @@ function buildScreenshotFilters({ req, params, includeChannel = true }) {
   if (platform) { params.push(platform); where.push(`s.platform = $${params.length}`); }
   if (includeChannel && channel) { params.push(channel); where.push(`s.channel = $${params.length}`); }
   if (q) {
-    params.push('%' + q.toLowerCase() + '%');
-    where.push(`(LOWER(COALESCE(s.title, s.filename, '')) LIKE $${params.length} OR LOWER(s.filepath) LIKE $${params.length})`);
+    addSearchFilter(where, params, q, ['s.title', 's.filename', 's.filepath']);
   }
   if (Number.isFinite(minRating)) { params.push(minRating); where.push(`s.rating >= $${params.length}`); }
   if (mediaType === 'video') where.push('false');
@@ -895,9 +1006,14 @@ app.get('/api/items', async (req, res) => {
     const cursorTs = req.query.cursor_ts ? String(req.query.cursor_ts) : '';
     const cursorOrder = req.query.cursor_order != null ? Number(req.query.cursor_order) : NaN;
     const useCursor = sort === 'recent' && cursorTs && Number.isFinite(cursorOrder);
-    // Elke bron moet minstens offset+limit kunnen leveren, anders stopt
-    // infinite scroll rond 5000 items terwijl de database veel meer media heeft.
-    const sourceLimit = useCursor ? limit : limit + offset;
+    const platformFilter = req.query.platform ? String(req.query.platform).toLowerCase() : '';
+    const directOnlyPlatform = platformFilter === 'sabnzbd' || platformFilter === 'keep2share';
+    const hasSearchQuery = Boolean(req.query.q && String(req.query.q).trim());
+    // Elke bron moet ruimer dan offset+limit leveren: infinite scroll mag niet
+    // vroeg stoppen, en oude importmappen kunnen dubbele records bevatten die
+    // later in deze query worden weggefilterd.
+    const overfetch = hasSearchQuery ? 2 : 3;
+    const sourceLimit = useCursor ? limit * overfetch : offset + (limit * overfetch);
     const params = [];
     function addRecentCursor(where, sortExpr, orderExpr) {
       params.push(cursorTs);
@@ -912,12 +1028,14 @@ app.get('/api/items', async (req, res) => {
       extExpr: "COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))",
       ratingExpr: 'd.rating',
     });
-    directWhere.push(`NOT EXISTS (
-      SELECT 1 FROM download_files mf
-       WHERE mf.download_id = d.id
-         AND mf.relpath !~* '${AUX_RELPATH_RE}'
-         AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
-    )`);
+    if (!directOnlyPlatform) {
+      directWhere.push(`NOT EXISTS (
+        SELECT 1 FROM download_files mf
+         WHERE mf.download_id = d.id
+           AND mf.relpath !~* '${AUX_RELPATH_RE}'
+           AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
+      )`);
+    }
     directWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
     directWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
     directWhere.push(`(d.filesize IS NULL OR d.filesize > 0)`);
@@ -925,26 +1043,28 @@ app.get('/api/items', async (req, res) => {
     if (useCursor) {
       addRecentCursor(directWhere, 'COALESCE(d.finished_at, d.updated_at, d.created_at)', 'd.id::bigint');
     }
-    const fileWhere = buildItemFilters({
+    const fileWhere = directOnlyPlatform ? ['false'] : buildItemFilters({
       req, params,
       fileExpr: 'df.relpath',
       extExpr: "regexp_replace(df.relpath, '^.*\\.', '')",
       ratingExpr: 'df.rating',
     });
-    fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
-    fileWhere.push(`df.relpath !~* '${TEMP_RELPATH_RE}'`);
-    fileWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
-    fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
-    fileWhere.push(`(df.filesize IS NULL OR df.filesize > 0)`);
-    fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
-    if (useCursor) {
+    if (!directOnlyPlatform) {
+      fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
+      fileWhere.push(`df.relpath !~* '${TEMP_RELPATH_RE}'`);
+      fileWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
+      fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
+      fileWhere.push(`(df.filesize IS NULL OR df.filesize > 0)`);
+      fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
+    }
+    if (useCursor && !directOnlyPlatform) {
       addRecentCursor(
         fileWhere,
         'COALESCE(to_timestamp(NULLIF(df.mtime_ms,0) / 1000.0)::timestamp, df.updated_at, d.finished_at, d.updated_at, d.created_at)',
         '(1000000000000 + df.id)::bigint',
       );
     }
-    const screenshotWhere = buildScreenshotFilters({ req, params });
+    const screenshotWhere = directOnlyPlatform ? ['false'] : buildScreenshotFilters({ req, params });
     screenshotWhere.push(`(s.filesize IS NULL OR s.filesize > 0)`);
     if (useCursor) {
       addRecentCursor(screenshotWhere, 'COALESCE(s.created_at, s.updated_at)', '(2000000000000 + s.id)::bigint');
@@ -978,7 +1098,7 @@ app.get('/api/items', async (req, res) => {
           SELECT 'download' AS item_kind,
                  d.id::text AS id, d.id AS rating_id,
                  d.url, d.source_url, d.platform, d.channel, d.title, d.filename,
-                 d.filepath, d.filesize, d.format, d.duration, d.rating, d.is_thumb_ready,
+                 d.filepath, d.filesize, d.format, d.duration, d.rating, d.is_thumb_ready, d.metadata,
                  d.finished_at, d.created_at,
                  COALESCE(d.finished_at, d.updated_at, d.created_at) AS sort_ts,
                  d.id::bigint AS source_order
@@ -994,7 +1114,7 @@ app.get('/api/items', async (req, res) => {
                  regexp_replace(df.relpath, '^.*/', '') AS filename,
                  df.relpath AS filepath, df.filesize,
                  regexp_replace(df.relpath, '^.*\\.', '') AS format,
-                 d.duration, df.rating, COALESCE(df.is_thumb_ready, d.is_thumb_ready) AS is_thumb_ready,
+                 d.duration, df.rating, COALESCE(df.is_thumb_ready, d.is_thumb_ready) AS is_thumb_ready, d.metadata,
                  d.finished_at, d.created_at,
                  COALESCE(to_timestamp(NULLIF(df.mtime_ms,0) / 1000.0)::timestamp, df.updated_at, d.finished_at, d.updated_at, d.created_at) AS sort_ts,
                  (1000000000000 + df.id)::bigint AS source_order
@@ -1009,7 +1129,7 @@ app.get('/api/items', async (req, res) => {
                  's-' || s.id::text AS id, NULL::bigint AS rating_id,
                  s.url, s.url AS source_url, s.platform, s.channel, s.title, s.filename,
                  s.filepath, s.filesize, 'jpg' AS format, NULL::text AS duration,
-                 s.rating, s.is_thumb_ready,
+                 s.rating, s.is_thumb_ready, NULL::text AS metadata,
                  s.created_at AS finished_at, s.created_at,
                  COALESCE(s.created_at, s.updated_at) AS sort_ts,
                  (2000000000000 + s.id)::bigint AS source_order
@@ -1030,10 +1150,10 @@ app.get('/api/items', async (req, res) => {
       LIMIT $${sourceLimitParam}`;
     const { rows } = await pool.query(sql, params);
 
-    const pageRows = rows.filter(hasNonEmptyMedia);
+    const pageRows = dedupeGalleryRows(rows.filter(hasNonEmptyMedia));
     const items = (useCursor ? pageRows.slice(0, limit) : pageRows.slice(offset, offset + limit)).map(mapItem);
     const last = items[items.length - 1] || null;
-    const nextCursor = last && sort === 'recent'
+    const nextCursor = last && sort === 'recent' && items.length === limit
       ? { sort_ts: last.sort_ts, source_order: last.source_order }
       : null;
     if (DEBUG_GALLERY_QUERY) {
@@ -1072,39 +1192,26 @@ app.get('/api/items-since', async (req, res) => {
 app.get('/api/platforms', async (_req, res) => {
   try {
     const { rows } = await pool.query(`
-      SELECT platform, COUNT(*) AS count
-      FROM (
-        SELECT d.platform
+      WITH media_platforms AS (
+        SELECT COALESCE(NULLIF(d.platform, ''), 'unknown') AS platform, COUNT(*)::bigint AS count
           FROM downloads d
          WHERE d.filepath IS NOT NULL AND d.filepath <> ''
            AND d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])
            AND d.filepath !~* '${TEMP_RELPATH_RE}'
            AND (d.filesize IS NULL OR d.filesize > 0)
            AND lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})
-           AND NOT EXISTS (
-             SELECT 1 FROM download_files mf
-              WHERE mf.download_id = d.id
-                AND mf.relpath !~* '${AUX_RELPATH_RE}'
-                AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})
-           )
+         GROUP BY COALESCE(NULLIF(d.platform, ''), 'unknown')
         UNION ALL
-        SELECT d.platform
-          FROM download_files df
-          JOIN downloads d ON d.id = df.download_id
-         WHERE df.relpath !~* '${AUX_RELPATH_RE}'
-           AND df.relpath !~* '${TEMP_RELPATH_RE}'
-           AND d.filepath !~* '${TEMP_RELPATH_RE}'
-           AND d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])
-           AND (df.filesize IS NULL OR df.filesize > 0)
-           AND lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXTS.map(e=>`'${e}'`).join(',')})
-        UNION ALL
-        SELECT s.platform
+        SELECT COALESCE(NULLIF(s.platform, ''), 'unknown') AS platform, COUNT(*)::bigint AS count
           FROM screenshots s
          WHERE s.filepath IS NOT NULL AND s.filepath <> ''
            AND (s.filesize IS NULL OR s.filesize > 0)
-      ) media_items
-      GROUP BY platform
-      ORDER BY count DESC`);
+         GROUP BY COALESCE(NULLIF(s.platform, ''), 'unknown')
+      )
+      SELECT platform, SUM(count)::bigint AS count
+        FROM media_platforms
+       GROUP BY platform
+       ORDER BY SUM(count) DESC`);
     res.json({ platforms: rows });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1114,6 +1221,12 @@ app.get('/api/platforms', async (_req, res) => {
 // ─── Channels lijst (per platform) ─────────────────────────────────────────
 app.get('/api/channels', async (req, res) => {
   try {
+    const sort = String(req.query.sort || 'recent');
+    const orderBy = sort === 'random'
+      ? 'RANDOM()'
+      : sort === 'rating'
+        ? 'max_rating DESC NULLS LAST, latest_ts DESC NULLS LAST, count DESC'
+        : 'latest_ts DESC NULLS LAST, count DESC';
     const params = [];
     const directWhere = buildItemFilters({
       req, params,
@@ -1122,16 +1235,12 @@ app.get('/api/channels', async (req, res) => {
       ratingExpr: 'd.rating',
       includeChannel: false,
     });
-    directWhere.push(`NOT EXISTS (
-      SELECT 1 FROM download_files mf
-       WHERE mf.download_id = d.id
-         AND mf.relpath !~* '${AUX_RELPATH_RE}'
-         AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
-    )`);
     directWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
     directWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
     directWhere.push(`(d.filesize IS NULL OR d.filesize > 0)`);
     directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
+    const fileWhere = ['false'];
+    /*
     const fileWhere = buildItemFilters({
       req, params,
       fileExpr: 'df.relpath',
@@ -1145,27 +1254,38 @@ app.get('/api/channels', async (req, res) => {
     fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
     fileWhere.push(`(df.filesize IS NULL OR df.filesize > 0)`);
     fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
+    */
     const screenshotWhere = buildScreenshotFilters({ req, params, includeChannel: false });
     screenshotWhere.push(`(s.filesize IS NULL OR s.filesize > 0)`);
+    const directChannelExpr = channelGroupSql('d');
+    const fileChannelExpr = channelGroupSql('d');
 
     const { rows } = await pool.query(`
-      SELECT channel, platform, COUNT(*) AS count
+      SELECT channel, platform, COUNT(*) AS count,
+             MAX(sort_ts) AS latest_ts,
+             MAX(rating) AS max_rating
       FROM (
-        SELECT d.channel, d.platform
+        SELECT ${directChannelExpr} AS channel, d.platform,
+               COALESCE(d.finished_at, d.updated_at, d.created_at) AS sort_ts,
+               d.rating
           FROM downloads d
          WHERE ${directWhere.join(' AND ')}
         UNION ALL
-        SELECT d.channel, d.platform
+        SELECT ${fileChannelExpr} AS channel, d.platform,
+               COALESCE(to_timestamp(NULLIF(df.mtime_ms,0) / 1000.0)::timestamp, df.updated_at, d.finished_at, d.updated_at, d.created_at) AS sort_ts,
+               df.rating
           FROM download_files df
           JOIN downloads d ON d.id = df.download_id
          WHERE ${fileWhere.join(' AND ')}
         UNION ALL
-        SELECT s.channel, s.platform
+        SELECT s.channel, s.platform,
+               COALESCE(s.created_at, s.updated_at) AS sort_ts,
+               s.rating
           FROM screenshots s
          WHERE ${screenshotWhere.join(' AND ')}
       ) media_items
       GROUP BY channel, platform
-      ORDER BY count DESC
+      ORDER BY ${orderBy}
       LIMIT 500`, params);
     res.json({ channels: rows });
   } catch (e) {
@@ -1395,13 +1515,15 @@ app.post('/api/finder', async (req, res) => {
 
 ensureSchema()
   .then(() => {
-    app.listen(PORT, () => {
-      console.log(`webdl-gallery listening on http://localhost:${PORT}`);
-      syncKeep2ShareFiles('startup').catch((e) => console.warn('[keep2share-sync] failed:', e.message));
+	    const server = app.listen(PORT, () => {
+	      console.log(`webdl-gallery listening on http://localhost:${PORT}`);
+	      ensureSearchIndexes().catch((e) => console.warn('[search-indexes] failed:', e.message));
+	      syncKeep2ShareFiles('startup').catch((e) => console.warn('[keep2share-sync] failed:', e.message));
       setInterval(() => {
         syncKeep2ShareFiles('timer').catch((e) => console.warn('[keep2share-sync] failed:', e.message));
       }, KEEP2SHARE_SYNC_MS).unref();
     });
+    global.__webdlGalleryServer = server;
   })
   .catch((e) => {
     console.error('webdl-gallery schema init failed:', e);

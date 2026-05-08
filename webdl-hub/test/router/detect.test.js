@@ -21,6 +21,8 @@ const cases = [
   ['https://telegram.me/x/1',                  'tdl'],
   ['https://imgur.com/gallery/xyz',            'gallerydl'],
   ['https://x.com/user/status/1',              'gallerydl'],
+  ['https://vipergirls.to/threads/6777850-MyFav-Czechcasting-Model-Collection-Sets', 'gallerydl'],
+  ['https://vipergirls.to/forum.php',          'gallerydl'],
   ['https://onlyfans.com/johndoe',             'ofscraper'],
   ['https://example.com/video.mp4',            'ytdlp'],
   ['ftp://example.com/foo',                    null],

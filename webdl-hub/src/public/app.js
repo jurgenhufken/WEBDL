@@ -13,6 +13,8 @@ const state = {
   serverDownloads: new Map(),
   serverPlatforms: [],
   selectedId: null,
+  selectedGroupId: null,
+  selectedGroupJobs: [],
   filter: '',
   platformFilter: '',
   adapters: [],
@@ -115,16 +117,59 @@ function effectiveStatus(job) {
 }
 
 function videoTitle(job) {
+  if (job.downloaded_title) return job.downloaded_title;
   // Probeer video-titel uit options
   const opts = job.options || {};
   if (opts.videoTitle) return opts.videoTitle;
   // Fallback: haal iets leesbars uit de URL
   try {
     const u = new URL(job.url);
-    if (u.searchParams.get('v')) return u.searchParams.get('v');
+    if (u.searchParams.get('v')) return `Video van ${u.hostname.replace(/^www\./, '')}`;
     const parts = u.pathname.split('/').filter(Boolean);
-    return parts[parts.length - 1] || u.hostname;
+    const last = parts[parts.length - 1] || '';
+    if (last && !isTechnicalText(last)) return last.replace(/[-_]+/g, ' ');
+    return `Video van ${u.hostname.replace(/^www\./, '')}`;
   } catch { return job.url; }
+}
+
+function groupMeta(groupId) {
+  return (state.jobGroups || []).find((g) => String(g.group_id) === String(groupId)) || null;
+}
+
+function isTechnicalText(value) {
+  const text = String(value || '').trim();
+  if (!text) return true;
+  if (/^https?:\/\//i.test(text)) return true;
+  if (/^[a-f0-9]{10,}$/i.test(text)) return true;
+  if (/^playlist\s+(PL|UU|UC|OLAK5uy|RD)[A-Za-z0-9_-]+$/i.test(text)) return true;
+  if (/^(PL|UU|UC|OLAK5uy|RD)[A-Za-z0-9_-]{8,}$/i.test(text)) return true;
+  if (/^[A-Za-z0-9_-]{18,}$/.test(text) && !/\s/.test(text)) return true;
+  return false;
+}
+
+function firstReadable(...values) {
+  return values.map((v) => String(v || '').trim()).find((v) => v && !isTechnicalText(v)) || '';
+}
+
+function groupDisplayName(group) {
+  const total = Number(group.total || group.jobs || 0);
+  return firstReadable(group.displayName, group.display_name, group.name, group.latestTitle, group.latest_title) ||
+    (total ? `Playlist met ${total} video's` : 'Playlist');
+}
+
+function groupContext(group) {
+  const parts = [];
+  const technicalName = group.technicalName || group.technical_name || group.name;
+  if (technicalName && !isTechnicalText(technicalName) && technicalName !== groupDisplayName(group)) parts.push(technicalName);
+  const latestTitle = firstReadable(group.latestTitle, group.latest_title);
+  if (latestTitle && latestTitle !== groupDisplayName(group)) parts.push(latestTitle);
+  return parts.join(' · ');
+}
+
+function jobGroupDisplay(job) {
+  const opts = job?.options || {};
+  const meta = opts.expandGroup ? groupMeta(opts.expandGroup) : null;
+  return firstReadable(meta?.display_name, opts.playlistTitle, opts.expandName, job?.downloaded_channel, job?.downloaded_platform);
 }
 
 function downloadTitle(download) {
@@ -180,10 +225,13 @@ function renderOverview() {
     const total = Number(g.total || g.jobs || 0);
     const done = Number(g.done || 0);
     const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+    const name = groupDisplayName(g);
+    const context = groupContext(g);
     const div = document.createElement('div');
     div.className = 'overview-group';
     div.innerHTML = `
-      <div class="overview-group-title" title="${esc(g.name || g.group_id)}">${esc(g.name || 'Playlist')}</div>
+      <div class="overview-group-title" title="${esc([name, context].filter(Boolean).join(' · '))}">${esc(name)}</div>
+      ${context ? `<div class="overview-group-sub">${esc(context)}</div>` : ''}
       <div class="overview-group-stats">
         ${g.running ? `<span>⬇ ${g.running} actief</span>` : ''}
         ${g.queued ? `<span>⏳ ${g.queued} wacht</span>` : ''}
@@ -193,6 +241,7 @@ function renderOverview() {
       </div>
       <div class="overview-group-progress"><div class="bar"><div class="bar-fill ${pct === 100 ? 'done' : ''}" style="width:${pct}%"></div></div></div>
     `;
+    div.addEventListener('click', () => selectGroup(g.group_id));
     target.appendChild(div);
   }
   if (groups.length === 0) {
@@ -295,11 +344,15 @@ function buildGroups() {
     const gid = j.options?.expandGroup;
     if (gid) {
       if (!groups.has(gid)) {
+        const meta = groupMeta(gid);
         groups.set(gid, {
           id: gid,
-          name: j.options.expandName || 'Playlist',
-          url: j.options.expandUrl || '',
-          total: j.options.expandTotal || 0,
+          name: meta?.display_name || j.options.expandName || 'Playlist',
+          displayName: meta?.display_name || j.options.expandName || 'Playlist',
+          technicalName: j.options.expandName || meta?.name || '',
+          latestTitle: meta?.latest_title || '',
+          url: meta?.url || j.options.expandUrl || '',
+          total: meta?.total || j.options.expandTotal || 0,
           jobs: [],
         });
       }
@@ -341,20 +394,25 @@ function renderList() {
     container.appendChild(renderJobItem(j, true));
   }
 
-  // Gegroepeerde playlists
+  // Gegroepeerde playlists. Links staat alleen de map/groep; de losse video's
+  // verschijnen rechts wanneer je een groep selecteert.
   for (const g of groups) {
     const s = groupStats(g);
-    const collapsed = state.collapsedGroups.has(g.id);
     const donePct = g.jobs.length > 0 ? Math.round((s.done / g.jobs.length) * 100) : 0;
 
     // Groepskop
     const header = document.createElement('div');
-    header.className = 'group-header' + (collapsed ? ' collapsed' : '');
+    header.className = 'group-header' + (String(state.selectedGroupId) === String(g.id) ? ' selected' : '');
+    const groupName = groupDisplayName(g);
+    const groupSub = groupContext(g);
     header.innerHTML = `
       <div class="group-top-row">
         <div class="group-name">
-          <span class="chevron">▼</span>
-          📋 ${esc(g.name)}
+          <span class="chevron">›</span>
+          <span class="group-label">
+            <span class="group-main">📋 ${esc(groupName)}</span>
+            ${groupSub ? `<span class="group-sub">${esc(groupSub)}</span>` : ''}
+          </span>
         </div>
         <div class="group-actions">
           ${s.queued ? `<button class="btn-sm btn-grp" data-action="pause-queued" data-gid="${esc(g.id)}" title="Pauzeer wachtende">⏸ ${s.queued}</button>` : ''}
@@ -375,12 +433,9 @@ function renderList() {
         <div class="bar"><div class="bar-fill ${donePct === 100 ? 'done' : ''}" style="width:${donePct}%"></div></div>
       </div>
     `;
-    // Collapse toggle (op header, niet op knoppen)
     header.addEventListener('click', (e) => {
-      if (e.target.closest('.btn-grp')) return; // niet collapen als knop geklikt
-      if (state.collapsedGroups.has(g.id)) state.collapsedGroups.delete(g.id);
-      else state.collapsedGroups.add(g.id);
-      renderList();
+      if (e.target.closest('.btn-grp')) return;
+      selectGroup(g.id).catch((err) => setMsg(err.message, true));
     });
     // Groep-actie knoppen
     header.querySelectorAll('.btn-grp').forEach(btn => {
@@ -396,13 +451,6 @@ function renderList() {
       });
     });
     container.appendChild(header);
-
-    // Individuele video-items (verborgen als collapsed)
-    if (!collapsed) {
-      for (const j of g.jobs) {
-        container.appendChild(renderJobItem(j, false));
-      }
-    }
   }
 
   updateStats();
@@ -438,21 +486,22 @@ function renderJobItem(job, isStandalone) {
   const title = isStandalone ? videoTitle(job) : (job.options?.videoTitle || videoTitle(job));
   const live = state.liveProgress.get(String(job.id));
   const gallerySynced = job.options?.gallery_synced;
+  const groupName = jobGroupDisplay(job);
 
   // Regel 2: meta-info afhankelijk van status
   let metaHtml = '';
   if (status === 'running') {
     const speed = live?.speed || '';
     const eta = live?.eta || '';
-    metaHtml = `<div class="job-meta">${job.adapter || ''} · ${job.lane || ''} · ${pct}%${speed ? ' · ' + speed : ''}${eta && eta !== 'Unknown' ? ' · ETA ' + eta : ''}</div>`;
+    metaHtml = `<div class="job-meta">${esc([groupName, job.adapter, job.lane, pct + '%'].filter(Boolean).join(' · '))}${speed ? ' · ' + esc(speed) : ''}${eta && eta !== 'Unknown' ? ' · ETA ' + esc(eta) : ''}</div>`;
   } else if (status === 'failed' && job.error) {
     metaHtml = `<div class="job-meta job-error">${esc(job.error).slice(0, 80)}</div>`;
   } else if (status === 'done') {
-    metaHtml = `<div class="job-meta">${gallerySynced ? '🖼️ in gallery' : job.adapter || ''}</div>`;
+    metaHtml = `<div class="job-meta">${esc([groupName, gallerySynced ? 'in gallery' : job.adapter].filter(Boolean).join(' · '))}</div>`;
   } else if (status === 'paused') {
-    metaHtml = `<div class="job-meta">${job.options?.pauseLane || job.lane || ''} · gepauzeerd</div>`;
+    metaHtml = `<div class="job-meta">${esc([groupName, job.options?.pauseLane || job.lane, 'gepauzeerd'].filter(Boolean).join(' · '))}</div>`;
   } else if (status === 'queued') {
-    metaHtml = `<div class="job-meta">${job.lane || ''} · wachtrij</div>`;
+    metaHtml = `<div class="job-meta">${esc([groupName, job.lane, 'wachtrij'].filter(Boolean).join(' · '))}</div>`;
   }
 
   // Progress bar bij running
@@ -508,11 +557,101 @@ function renderServerItem(download) {
 }
 
 // ─── Detail ───────────────────────────────────────────────────────────────────
+function showOverview() {
+  state.selectedId = null;
+  state.selectedGroupId = null;
+  state.selectedGroupJobs = [];
+  $('detail').hidden = true;
+  const groupDetail = $('groupDetail');
+  if (groupDetail) groupDetail.hidden = true;
+  $('detailEmpty').hidden = false;
+  closeInlineViewer();
+  renderList();
+}
+
+async function selectGroup(groupId) {
+  state.source = 'hub';
+  state.selectedId = null;
+  state.selectedGroupId = groupId;
+  $('detailEmpty').hidden = true;
+  $('detail').hidden = true;
+  const groupDetail = $('groupDetail');
+  if (groupDetail) groupDetail.hidden = false;
+  closeInlineViewer();
+  renderList();
+  state.selectedGroupJobs = [...state.jobs.values()]
+    .filter((job) => String(job.options?.expandGroup) === String(groupId))
+    .sort((a, b) => Number(a.options?.expandIndex || a.id) - Number(b.options?.expandIndex || b.id));
+  renderGroupDetail();
+  try {
+    const { jobs } = await api('GET', `/api/jobs/group/${encodeURIComponent(groupId)}?limit=1500`);
+    state.selectedGroupJobs = jobs || state.selectedGroupJobs;
+    renderGroupDetail();
+  } catch (_) {
+    // De bestaande hub-process serveert de nieuwe frontend direct vanaf disk.
+    // Na de eerstvolgende hub-herstart levert de nieuwe endpoint de volledige lijst.
+  }
+}
+
+function renderGroupDetail() {
+  const groupId = state.selectedGroupId;
+  if (!groupId) return;
+  const jobs = state.selectedGroupJobs || [];
+  const meta = groupMeta(groupId) || jobs.reduce((found, job) => {
+    if (found) return found;
+    if (job.options?.expandGroup === groupId) {
+      return {
+        group_id: groupId,
+        display_name: jobGroupDisplay(job),
+        name: job.options?.expandName,
+        latest_title: job.options?.videoTitle || job.downloaded_title,
+        total: job.options?.expandTotal || jobs.length,
+      };
+    }
+    return null;
+  }, null) || { group_id: groupId, total: jobs.length };
+
+  const title = groupDisplayName(meta);
+  const context = groupContext(meta);
+  const stats = groupStats({ jobs });
+  setText('gTitle', title);
+  setText('gSub', context || `${jobs.length} video's`);
+
+  const gStats = $('gStats');
+  if (gStats) {
+    gStats.innerHTML = `
+      <span>${stats.total} video's</span>
+      <span class="ok">${stats.done} klaar</span>
+      ${stats.running ? `<span class="running">${stats.running} actief</span>` : ''}
+      ${stats.queued ? `<span>${stats.queued} wachtend</span>` : ''}
+      ${stats.paused ? `<span class="warn">${stats.paused} pauze</span>` : ''}
+      ${stats.failed ? `<span class="err">${stats.failed} fout</span>` : ''}
+    `;
+  }
+
+  const target = $('gVideos');
+  if (!target) return;
+  target.innerHTML = '';
+  if (jobs.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-inline';
+    empty.textContent = 'Geen losse video\'s gevonden voor deze groep';
+    target.appendChild(empty);
+    return;
+  }
+  for (const job of jobs) {
+    target.appendChild(renderJobItem(job, true));
+  }
+}
+
 async function selectJob(id) {
   state.source = 'hub';
   state.selectedId = id;
+  state.selectedGroupId = null;
   renderList();
   $('detailEmpty').hidden = true;
+  const groupDetail = $('groupDetail');
+  if (groupDetail) groupDetail.hidden = true;
   $('detail').hidden = false;
   try {
     const { job, files, logs } = await api('GET', '/api/jobs/' + id);
@@ -523,8 +662,11 @@ async function selectJob(id) {
 async function selectServerDownload(id) {
   state.source = 'server';
   state.selectedId = id;
+  state.selectedGroupId = null;
   renderList();
   $('detailEmpty').hidden = true;
+  const groupDetail = $('groupDetail');
+  if (groupDetail) groupDetail.hidden = true;
   $('detail').hidden = false;
   try {
     const { download } = await api('GET', '/api/downloads/' + id);
@@ -541,8 +683,9 @@ function renderDetail(job, files, logs) {
   $('dUrl').href = job.url || '#';
   setText('dAdapter', job.adapter);
   setText('dPlatformBadge', job.adapter || '');
-  setText('dChannelBadge', job.options?.expandName || '');
-  setText('dChannel', job.options?.expandName || job.options?.playlistTitle || '—');
+  const groupName = jobGroupDisplay(job);
+  setText('dChannelBadge', groupName || '');
+  setText('dChannel', groupName || job.options?.expandName || '—');
   const totalSize = sumSizes(files);
   setText('dFilesize', totalSize ? humanSize(totalSize) : '—');
   $('dStatus').innerHTML = `<span class="badge ${status}">${displayStatus(status)}</span>`;
@@ -847,6 +990,8 @@ function handleEvent(type, payload) {
   if (type === 'job:progress') {
     const j = state.jobs.get(payload.id);
     if (j) { j.progress_pct = payload.pct; }
+    const groupJob = state.selectedGroupJobs.find((item) => String(item.id) === String(payload.id));
+    if (groupJob) groupJob.progress_pct = payload.pct;
     // Bewaar speed/eta voor weergave
     state.liveProgress.set(String(payload.id), {
       pct: payload.pct,
@@ -854,16 +999,20 @@ function handleEvent(type, payload) {
       eta: payload.eta || null,
     });
     if (state.source === 'hub') renderList();
+    if (state.source === 'hub' && state.selectedGroupId) renderGroupDetail();
     if (state.source === 'hub' && String(state.selectedId) === String(payload.id)) selectJob(payload.id);
     return;
   }
   if (typeof payload === 'object' && payload.id) {
     state.jobs.set(payload.id, { ...(state.jobs.get(payload.id) || {}), ...payload });
+    const groupIndex = state.selectedGroupJobs.findIndex((item) => String(item.id) === String(payload.id));
+    if (groupIndex !== -1) state.selectedGroupJobs[groupIndex] = { ...state.selectedGroupJobs[groupIndex], ...payload };
     // Wis live progress als job niet meer running is
     if (payload.status && payload.status !== 'running') {
       state.liveProgress.delete(String(payload.id));
     }
     if (state.source === 'hub') renderList();
+    if (state.source === 'hub' && state.selectedGroupId) renderGroupDetail();
     if (state.source === 'hub' && String(state.selectedId) === String(payload.id)) selectJob(payload.id);
   }
 }
@@ -890,6 +1039,8 @@ async function loadJobStats() {
     state.jobStats = stats || state.jobStats;
     state.jobGroups = groups || [];
     updateStats();
+    if (state.source === 'hub') renderList();
+    if (state.source === 'hub' && state.selectedGroupId) renderGroupDetail();
   } catch {}
 }
 
@@ -951,7 +1102,11 @@ async function refreshCurrentSource() {
 async function switchSource(source) {
   state.source = source;
   state.selectedId = null;
+  state.selectedGroupId = null;
+  state.selectedGroupJobs = [];
   $('detail').hidden = true;
+  const groupDetail = $('groupDetail');
+  if (groupDetail) groupDetail.hidden = true;
   $('detailEmpty').hidden = false;
   closeInlineViewer();
   updateSourceControls();
@@ -1078,6 +1233,8 @@ function bind() {
     const path = state.source === 'server' ? `/api/downloads/${state.selectedId}/cancel` : `/api/jobs/${state.selectedId}/cancel`;
     api('POST', path).then(() => refreshCurrentSource()).catch((e) => setMsg(e.message, true));
   });
+  const groupClose = $('gClose');
+  if (groupClose) groupClose.addEventListener('click', showOverview);
   $('btnCloseViewer').addEventListener('click', closeInlineViewer);
 
   // Tab switching

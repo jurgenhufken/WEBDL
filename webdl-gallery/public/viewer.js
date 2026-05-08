@@ -11,6 +11,7 @@
     // Eigen items + paginering (onafhankelijk van gallery grid)
     items: [],
     offset: 0,
+    nextCursor: null,
     done: false,
     loading: false,
     typeFilter: 'all',    // 'all' | 'video' | 'image'
@@ -20,9 +21,10 @@
     slideshow: false,
     slideshowTimer: null,
     slideshowSec: 4,
-    wrap: true,
+    wrap: false,
     random: false,
     videoWait: true,
+    channelScope: 'query', // 'query' | 'all'
 
     // UI
     sidebarOpen: false,
@@ -46,6 +48,10 @@
     // Loop sectie
     loopStart: null,       // in seconden
     loopEnd: null,
+    mediaReloadNonce: 0,
+    mediaResetSeq: 0,
+    mediaSeq: 0,
+    hudMessageTimer: null,
 
     // Zoom (exact als oude viewer)
     zoomed: false,
@@ -74,6 +80,8 @@
 
   // Uniek per tabblad — voorkomt dat de browser requests van verschillende tabs samenvoegt
   const VIEWER_TAB_ID = Math.random().toString(36).slice(2, 8);
+  const VIEWER_POS_KEY = 'webdl:viewer:last-position';
+  const VIEWER_SPEED_KEY = 'webdl:viewer:playback-rate';
 
   async function api(url, opts) {
     const sep = url.includes('?') ? '&' : '?';
@@ -156,15 +164,16 @@
     const ids = [
       'viewer','vSidebar','vSidebarBackdrop','vList',
       'vMode','vFilter','vTagFilter','vReload',
-      'vSlideshow','vSlideshowSec','vWrap','vRandom','vVideoWait',
+      'vSlideshow','vSlideshowSec','vWrap','vRandom','vVideoWait','vChannelScope',
       'vNowTitle','vNowSub','vNowRating',
       'vRatingSelect',
       'vBtnSidebar','vBtnOpen','vBtnFinder','vBtnRotate',
       'vZoomRange','vZoomReset',
-      'vVol','vBtnMute','vSeek',
+      'vVol','vBtnMute','vBtnReloadMedia','vSeek',
+      'vBtnReverse','vSpeedSelect',
       'vBtnTags','vBtnLog','vClose',
       'vSlideshow2','vRandom2',
-      'vStage','vContent','vPrev','vNext','vHudLeft','vHudRight',
+      'vStage','vContent','vPrev','vNext','vUp','vDown','vHudLeft','vHudRight',
       'vProgressBar','vProgressFill','vProgressHandle',
       'vBottomControls','vBtnPlayPause','vTimeLabel','vBtnRotateBottom','vBtnRotateStage',
       'vTagDialog','vTagCurrent','vTagQuick','vTagSearch','vTagList','vNewTagInput','vBtnAddTag','vBtnCloseTagDialog',
@@ -180,7 +189,55 @@
     bindControls();
     bindKeyboard();
     bindMouse();
+    restorePlaybackRate();
+    syncViewerModeControls();
     loadTags();
+  }
+
+  function restorePlaybackRate() {
+    try {
+      const stored = Number(localStorage.getItem(VIEWER_SPEED_KEY) || '1');
+      if (SPEED_STEPS.includes(stored)) vs.playbackRate = stored;
+    } catch (_) {}
+  }
+
+  function rememberCurrentPosition() {
+    const it = vs.items[vs.idx];
+    if (!it) return;
+    try {
+      localStorage.setItem(VIEWER_POS_KEY, JSON.stringify({
+        id: String(it.id),
+        idx: vs.idx,
+        filters: viewerFilters(),
+        at: Date.now(),
+      }));
+    } catch (_) {}
+  }
+
+  function syncViewerModeControls() {
+    if (el.vWrap) {
+      el.vWrap.textContent = vs.wrap ? '🔁 Query loop' : '∞ Oneindig';
+      el.vWrap.title = vs.wrap
+        ? 'Aan het einde terug naar het begin van de huidige query'
+        : 'Aan het einde verder laden uit de database';
+      el.vWrap.classList.toggle('active', vs.wrap);
+    }
+    if (el.vRandom) {
+      el.vRandom.textContent = `🔀 Rand: ${vs.random ? 'aan' : 'uit'}`;
+      el.vRandom.classList.toggle('active', vs.random);
+    }
+    if (el.vVideoWait) {
+      el.vVideoWait.textContent = `⏳ Wacht: ${vs.videoWait ? 'aan' : 'uit'}`;
+      el.vVideoWait.classList.toggle('active', vs.videoWait);
+    }
+    if (el.vChannelScope) {
+      const all = vs.channelScope === 'all';
+      el.vChannelScope.textContent = all ? '↕ Kanaal: alles' : '↕ Kanaal: query';
+      el.vChannelScope.title = all
+        ? 'Omhoog/omlaag zoekt volgend kanaal/model buiten de huidige query'
+        : 'Omhoog/omlaag zoekt volgend kanaal/model binnen de huidige query';
+      el.vChannelScope.classList.toggle('active', all);
+    }
   }
 
   // ─── Open / sluit ─────────────────────────────────────────────────────────
@@ -194,7 +251,8 @@
     vs.chIdx = 0;
     vs.items  = [...gState.items];
     vs.offset = gState.offset;
-    vs.done   = gState.done;
+    vs.nextCursor = gState.nextCursor || null;
+    vs.done   = Boolean(gState.done && !vs.nextCursor);
     vs.idx    = Math.max(0, Math.min(idx, vs.items.length - 1));
     vs.open   = true;
 
@@ -202,6 +260,7 @@
     el.viewer.classList.toggle('viewer--sidebar-open', vs.sidebarOpen);
     el.viewer.setAttribute('aria-hidden', 'false');
     document.body.style.overflow = 'hidden';
+    if (gal().setViewerActive) gal().setViewerActive(true);
 
     // Push history state zodat browser-back (en muis-back-knop) de viewer sluit
     history.pushState({ page: 'viewer' }, '', location.href);
@@ -213,6 +272,8 @@
 
   function close(skipHistory) {
     if (!vs.open) return;
+    const anchorId = vs.items[vs.idx] ? String(vs.items[vs.idx].id) : '';
+    rememberCurrentPosition();
     vs.open = false;
     stopSlideshow();
     cleanupMedia();
@@ -223,6 +284,10 @@
     el.viewer.setAttribute('aria-hidden', 'true');
     document.body.style.overflow = '';
     vs.idx = -1;
+    if (gal().setViewerActive) gal().setViewerActive(false);
+    if (anchorId && gal().restoreViewerAnchor) {
+      gal().restoreViewerAnchor(anchorId).catch(() => {});
+    }
 
     // Pop de viewer history entry (tenzij we al via popstate kwamen)
     if (!skipHistory) {
@@ -231,6 +296,54 @@
   }
 
   // ─── Huidige item tonen ────────────────────────────────────────────────────
+  function mediaUrl(it) {
+    const params = new URLSearchParams();
+    if (vs.mediaReloadNonce) params.set('reload', String(vs.mediaReloadNonce));
+    return `/media/${encodeURIComponent(String(it.id))}${params.toString() ? '?' + params.toString() : ''}`;
+  }
+
+  function wait(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async function reloadCurrentMedia() {
+    if (!vs.open || !vs.items[vs.idx]) return;
+    const seq = ++vs.mediaResetSeq;
+    const activeIdx = vs.idx;
+    vs.mediaReloadNonce = Date.now();
+    cleanupMedia();
+    if (el.vProgressBar) el.vProgressBar.style.display = 'none';
+    if (el.vBottomControls) el.vBottomControls.classList.add('hidden');
+    if (el.vContent) {
+      el.vContent.innerHTML = '<div class="media-reset-note">Speler wordt opnieuw opgebouwd...</div>';
+    }
+    await wait(350);
+    if (!vs.open || seq !== vs.mediaResetSeq || activeIdx !== vs.idx) return;
+    showCurrent();
+    showHUD();
+    log('Speler opnieuw opgebouwd');
+  }
+
+  async function rebuildCurrentMedia({ reason = '', quiet = false } = {}) {
+    if (!vs.open || !vs.items[vs.idx]) return;
+    const seq = ++vs.mediaResetSeq;
+    const activeIdx = vs.idx;
+    vs.mediaReloadNonce = Date.now();
+    cleanupMedia();
+    if (!quiet) {
+      if (el.vProgressBar) el.vProgressBar.style.display = 'none';
+      if (el.vBottomControls) el.vBottomControls.classList.add('hidden');
+      if (el.vContent) {
+        el.vContent.innerHTML = '<div class="media-reset-note">Speler wordt opnieuw opgebouwd...</div>';
+      }
+    }
+    await wait(quiet ? 180 : 350);
+    if (!vs.open || seq !== vs.mediaResetSeq || activeIdx !== vs.idx) return;
+    showCurrent({ autoRecovered: true });
+    showHUD();
+    if (reason) log(reason);
+  }
+
   function showVideoFallback(videoEl, it) {
     if (!videoEl || videoEl.dataset.fallbackShown === '1') return;
     videoEl.dataset.fallbackShown = '1';
@@ -257,15 +370,23 @@
 
     const note = document.createElement('div');
     note.className = 'media-error-note';
-    note.textContent = 'Video niet afspeelbaar · preview getoond';
+    note.innerHTML = `
+      <span>Video niet afspeelbaar · preview getoond</span>
+      <button type="button" class="media-error-action">Opnieuw laden</button>
+    `;
+    note.querySelector('.media-error-action').addEventListener('click', (e) => {
+      e.stopPropagation();
+      reloadCurrentMedia().catch((err) => log('Reload fout: ' + err.message));
+    });
     el.vContent.appendChild(note);
   }
 
-  function showCurrent() {
+  function showCurrent(opts = {}) {
     const it = vs.items[vs.idx];
     if (!it) { close(); return; }
 
     cleanupMedia();
+    const mediaSeq = ++vs.mediaSeq;
     resetZoom(); // Reset zoom bij elk nieuw item (exact als oude viewer)
     vs.rotation = loadMediaRotation(it);
     syncRotationUi();
@@ -273,22 +394,23 @@
     let mediaEl;
     if (it.type === 'video') {
       mediaEl = document.createElement('video');
-      mediaEl.src = `/media/${it.id}`;
-      mediaEl.poster = thumbUrl(it);        // thumbnail terwijl video laadt
-      mediaEl.autoplay = true;
+      mediaEl.preload = 'auto';
       mediaEl.playsinline = true;
       mediaEl.muted = true;                  // altijd muted starten (browser autoplay policy)
       mediaEl.volume = vs.vol;
+      mediaEl.poster = thumbUrl(it);        // thumbnail terwijl video laadt
+      mediaEl.dataset.autoRecoveries = opts.autoRecovered ? '1' : '0';
       try { mediaEl.setAttribute('controlsList', 'noremoteplayback nodownload'); } catch (_) {}
       try { mediaEl.disablePictureInPicture = true; } catch (_) {}
 
-      // Zodra metadata geladen is: unmute als gebruiker dat wil
+      // Start altijd muted; zet de gewenste mute-status pas terug nadat play() gelukt is.
       mediaEl.addEventListener('loadedmetadata', () => {
-        mediaEl.muted = vs.muted;
+        if (mediaSeq !== vs.mediaSeq || mediaEl !== vs.currentMediaEl) return;
         el.vBtnMute.textContent = vs.muted ? '🔇' : '🔊';
       });
 
       mediaEl.addEventListener('timeupdate', () => {
+        if (mediaSeq !== vs.mediaSeq || mediaEl !== vs.currentMediaEl) return;
         if (!vs.seekDragging && mediaEl.duration) {
           const pct = (mediaEl.currentTime / mediaEl.duration) * 100;
           el.vSeek.value = String(Math.round(pct * 10));
@@ -306,6 +428,7 @@
       mediaEl.addEventListener('play', () => updatePlaybackControls(mediaEl));
       mediaEl.addEventListener('pause', () => updatePlaybackControls(mediaEl));
       mediaEl.addEventListener('ended', () => {
+        if (mediaSeq !== vs.mediaSeq || mediaEl !== vs.currentMediaEl) return;
         stopReverse();
         updatePlaybackControls(mediaEl);
         if (vs.slideshow && vs.videoWait) slideshowTick();
@@ -313,16 +436,38 @@
 
       // Pas opgeslagen snelheid toe
       mediaEl.addEventListener('loadedmetadata', () => {
+        if (mediaSeq !== vs.mediaSeq || mediaEl !== vs.currentMediaEl) return;
         if (vs.playbackRate > 0) mediaEl.playbackRate = vs.playbackRate;
       });
-      mediaEl.addEventListener('error', () => showVideoFallback(mediaEl, it));
+      mediaEl.addEventListener('loadeddata', () => {
+        if (mediaSeq !== vs.mediaSeq || mediaEl !== vs.currentMediaEl) return;
+        const p = mediaEl.play();
+        if (p && typeof p.catch === 'function') {
+          p.then(() => {
+            if (mediaSeq !== vs.mediaSeq || mediaEl !== vs.currentMediaEl) return;
+            mediaEl.muted = vs.muted;
+            el.vBtnMute.textContent = vs.muted ? '🔇' : '🔊';
+          }).catch(() => updatePlaybackControls(mediaEl));
+        }
+      }, { once: true });
+      mediaEl.addEventListener('error', () => {
+        if (mediaSeq !== vs.mediaSeq || mediaEl !== vs.currentMediaEl) return;
+        const recoveries = Number(mediaEl.dataset.autoRecoveries || 0);
+        if (recoveries < 1) {
+          mediaEl.dataset.autoRecoveries = String(recoveries + 1);
+          rebuildCurrentMedia({ reason: 'Video-load automatisch hersteld', quiet: true })
+            .catch((err) => log('Auto-herstel fout: ' + err.message));
+          return;
+        }
+        showVideoFallback(mediaEl, it);
+      });
 
       el.vVol.disabled  = false;
       el.vSeek.disabled = false;
       if (el.vBottomControls) el.vBottomControls.classList.remove('hidden');
     } else {
       mediaEl = document.createElement('img');
-      mediaEl.src = `/media/${it.id}`;
+      mediaEl.src = mediaUrl(it);
       mediaEl.alt = it.title || '';
       mediaEl.onerror = () => { mediaEl.src = thumbUrl(it, Date.now()); };
 
@@ -337,6 +482,10 @@
     mediaEl.style.transition = 'transform 120ms ease-out';
     vs.currentMediaEl = mediaEl;
     el.vContent.appendChild(mediaEl);
+    if (it.type === 'video') {
+      mediaEl.src = mediaUrl(it);
+      mediaEl.load();
+    }
     applyTransform();
     attachZoomHandlers(mediaEl);
 
@@ -398,6 +547,7 @@
     updateHUD(it);
     updateSidebarActive();
     scrollListToActive();
+    rememberCurrentPosition();
 
     // Tags prefetch
     loadItemTags(it.rating_id || it.id).catch(() => {});
@@ -405,6 +555,7 @@
 
   function cleanupMedia() {
     stopReverse();
+    vs.mediaSeq += 1;
     vs.loopStart = null;
     vs.loopEnd = null;
     const v = el.vContent.querySelector('video');
@@ -417,22 +568,37 @@
 
   // ─── Navigatie ────────────────────────────────────────────────────────────
   async function loadMoreViewerItems() {
-    if (vs.loading || vs.done) return;
+    if (vs.loading || vs.done) return false;
     vs.loading = true;
     try {
+      const sort = viewerFilters().sort || 'recent';
       const params = new URLSearchParams({
         limit: '100',
-        offset: String(vs.offset),
-        sort: viewerFilters().sort || 'recent',
+        sort,
       });
+      if (sort === 'recent' && vs.nextCursor) {
+        params.set('cursor_ts', vs.nextCursor.sort_ts);
+        params.set('cursor_order', vs.nextCursor.source_order);
+      } else {
+        params.set('offset', String(vs.offset));
+      }
       appendContextParams(params);
 
       const data = await api('/api/items?' + params.toString());
       if (data.items && data.items.length > 0) {
-        vs.items.push(...data.items);
+        const seen = new Set(vs.items.map((it) => String(it.id)));
+        const fresh = data.items.filter((it) => !seen.has(String(it.id)));
+        vs.items.push(...fresh);
         vs.offset += data.items.length;
-        if (data.items.length < 100) vs.done = true;
+        vs.nextCursor = data.next_cursor || null;
+        if (sort === 'recent') {
+          vs.done = !vs.nextCursor;
+        } else if (data.items.length < 100) {
+          vs.done = true;
+        }
         renderSidebarList();
+        vs.loading = false;
+        return fresh.length > 0 || (!vs.done && Boolean(vs.nextCursor));
       } else {
         vs.done = true;
       }
@@ -440,17 +606,25 @@
       log('Laden mislukt: ' + e.message);
     }
     vs.loading = false;
+    return false;
   }
 
   async function navTo(idx) {
     if (idx < 0) {
-      if (vs.wrap) idx = vs.items.length - 1;
+      if (vs.wrap && vs.done) idx = vs.items.length - 1;
       else return;
     }
     if (idx >= vs.items.length) {
-      await loadMoreViewerItems();
+      let loaded = false;
+      for (let i = 0; idx >= vs.items.length && !vs.done && i < 10; i++) {
+        // Cursor-pagina's kunnen door live prepend/dedup een lege verse set
+        // opleveren. Blijf dan doorvragen totdat de gevraagde index bestaat.
+        loaded = await loadMoreViewerItems() || loaded;
+      }
       if (idx >= vs.items.length) {
-        if (vs.wrap) idx = 0;
+        if (loaded && idx < vs.items.length) {
+          // Nieuwe items zijn beschikbaar; ga door naar de gevraagde index.
+        } else if (vs.wrap && vs.done) idx = 0;
         else { stopSlideshow(); return; }
       }
     }
@@ -461,6 +635,9 @@
   async function navNext() {
     let next;
     if (vs.random) {
+      if (!vs.done && vs.items.length < 300) {
+        await loadMoreViewerItems();
+      }
       next = Math.floor(Math.random() * vs.items.length);
     } else {
       next = vs.idx + 1;
@@ -473,23 +650,104 @@
   }
 
   async function navChannel(dir) {
-    if (!vs.channels.length) {
-      // Laad kanalen als nog niet aanwezig
-      try {
-        const params = appendContextParams(new URLSearchParams(), { includeChannel: false });
-        const data = await api('/api/channels' + (params.toString() ? '?' + params.toString() : ''));
-        vs.channels = (data.channels || []).filter(c => c.channel && c.channel !== 'unknown');
-        const currentChannel = viewerFilters().channel || (vs.items[vs.idx] && vs.items[vs.idx].channel) || '';
-        const currentIdx = vs.channels.findIndex(c => c.channel === currentChannel);
-        vs.chIdx = currentIdx >= 0 ? currentIdx : 0;
-      } catch (e) { return; }
+    const currentItem = vs.items[vs.idx] || null;
+    const channelKey = (it) => [
+      String((it && it.platform) || ''),
+      String((it && it.channel) || ''),
+    ].join('\u0001');
+    const currentItemKey = channelKey(currentItem);
+    if (currentItem && currentItemKey !== '\u0001') {
+      for (let i = vs.idx + dir; i >= 0 && i < vs.items.length; i += dir) {
+        if (channelKey(vs.items[i]) !== currentItemKey) {
+          await navTo(i);
+          return;
+        }
+      }
+      if (dir > 0) {
+        for (let tries = 0; tries < 5 && !vs.done; tries++) {
+          const beforeLen = vs.items.length;
+          const loaded = await loadMoreViewerItems();
+          if (!loaded && vs.items.length === beforeLen) break;
+          for (let i = Math.max(vs.idx + 1, beforeLen); i < vs.items.length; i++) {
+            if (channelKey(vs.items[i]) !== currentItemKey) {
+              await navTo(i);
+              return;
+            }
+          }
+        }
+      }
     }
-    if (!vs.channels.length) return;
-    vs.chIdx = ((vs.chIdx + dir) + vs.channels.length) % vs.channels.length;
-    const ch = vs.channels[vs.chIdx];
-    if (!vs.queryFilters) vs.queryFilters = snapshotGalleryFilters();
-    vs.queryFilters.channel = ch.channel;
-    gal().setFilter('channel', ch.channel);
+    const sameChannel = (c, channel, platform) =>
+      c && c.channel === channel && (!platform || !c.platform || c.platform === platform);
+
+    async function loadChannelList(scope) {
+      const params = scope === 'all'
+        ? new URLSearchParams()
+        : appendContextParams(new URLSearchParams(), { includeChannel: false });
+      params.set('sort', viewerFilters().sort || 'recent');
+      const data = await api('/api/channels' + (params.toString() ? '?' + params.toString() : ''));
+      return (data.channels || []).filter(c => c.channel && c.channel !== 'unknown');
+    }
+
+    function pickNextChannel(channels) {
+      if (!channels.length) return null;
+      const currentChannel = (currentItem && currentItem.channel) || viewerFilters().channel || '';
+      const currentPlatform = (currentItem && currentItem.platform) || viewerFilters().platform || '';
+      const currentIdx = channels.findIndex(c => sameChannel(c, currentChannel, currentPlatform));
+      const baseIdx = currentIdx >= 0 ? currentIdx : 0;
+      for (let step = 1; step <= channels.length; step++) {
+        const idx = ((baseIdx + (dir * step)) + channels.length) % channels.length;
+        const ch = channels[idx];
+        if (ch && !sameChannel(ch, currentChannel, currentPlatform)) {
+          vs.chIdx = idx;
+          return ch;
+        }
+      }
+      return null;
+    }
+
+    try {
+      if (!vs.channels.length) vs.channels = await loadChannelList(vs.channelScope);
+    } catch (e) {
+      showHudMessage('Kanalen laden mislukt');
+      log('Kanalen laden mislukt: ' + e.message);
+      return;
+    }
+
+    let ch = pickNextChannel(vs.channels);
+    if (!ch && vs.channelScope === 'query') {
+      try {
+        vs.channelScope = 'all';
+        vs.channels = await loadChannelList('all');
+        syncViewerModeControls();
+        showHudMessage('Geen volgende in query, nu alles');
+        ch = pickNextChannel(vs.channels);
+      } catch (e) {
+        showHudMessage('Kanalen laden mislukt');
+        log('Kanalen laden mislukt: ' + e.message);
+        return;
+      }
+    }
+    if (!ch) {
+      showHudMessage(dir > 0 ? 'Geen volgend kanaal/model' : 'Geen vorig kanaal/model');
+      return;
+    }
+
+    if (vs.channelScope === 'all') {
+      vs.queryFilters = {
+        platform: ch.platform || '',
+        channel: ch.channel,
+        q: '',
+        sort: viewerFilters().sort || 'recent',
+        min_rating: '',
+        media_type: vs.typeFilter && vs.typeFilter !== 'all' ? vs.typeFilter : '',
+        tag_id: '',
+      };
+    } else {
+      if (!vs.queryFilters) vs.queryFilters = snapshotGalleryFilters();
+      vs.queryFilters.channel = ch.channel;
+      if (ch.platform) vs.queryFilters.platform = ch.platform;
+    }
     await reloadViewerItems();
   }
 
@@ -582,6 +840,8 @@
   function updatePlaybackControls(video) {
     const v = video || el.vContent.querySelector('video');
     if (el.vBtnPlayPause) el.vBtnPlayPause.textContent = v && !v.paused && !v.ended ? '⏸' : '▶';
+    if (el.vSpeedSelect) el.vSpeedSelect.value = String(vs.playbackRate);
+    if (el.vBtnReverse) el.vBtnReverse.classList.toggle('active', vs.playbackRate < 0);
     if (el.vTimeLabel) {
       el.vTimeLabel.textContent = v
         ? `${formatTime(v.currentTime)} (${formatSeconds(v.currentTime)}) / ${formatTime(v.duration)} (${formatSeconds(v.duration)})`
@@ -618,7 +878,18 @@
     // Show progress bar alleen bij video
     if (el.vProgressBar) el.vProgressBar.style.display = it.type === 'video' ? '' : 'none';
     if (el.vBottomControls) el.vBottomControls.classList.toggle('hidden', it.type !== 'video');
+    if (el.vBtnReloadMedia) el.vBtnReloadMedia.disabled = !it || (it.type !== 'video' && it.type !== 'image');
     updatePlaybackControls(null);
+  }
+
+  function showHudMessage(message, timeout = 1800) {
+    if (!message || !el.vHudRight) return;
+    el.vHudRight.textContent = message;
+    showHUD();
+    clearTimeout(vs.hudMessageTimer);
+    vs.hudMessageTimer = setTimeout(() => {
+      if (vs.items[vs.idx]) updateHUD(vs.items[vs.idx]);
+    }, timeout);
   }
 
   function showHUD() {
@@ -991,6 +1262,7 @@
 
   function setSpeed(rate) {
     vs.playbackRate = rate;
+    try { localStorage.setItem(VIEWER_SPEED_KEY, String(rate)); } catch (_) {}
     const v = el.vContent.querySelector('video');
 
     if (rate <= 0) {
@@ -1003,6 +1275,7 @@
       if (v) { v.playbackRate = rate; if (v.paused) v.play(); }
     }
     updateSpeedIndicator();
+    updatePlaybackControls(v);
     log(`Snelheid: ${rate > 0 ? rate + '×' : rate + '× (achteruit)'}`);
   }
 
@@ -1047,6 +1320,8 @@
       ind.style.background = r < 0 ? 'rgba(255,80,80,.25)' : 'rgba(80,200,255,.2)';
       ind.style.color = r < 0 ? '#ff8080' : '#80d0ff';
     }
+    if (el.vSpeedSelect) el.vSpeedSelect.value = String(r);
+    if (el.vBtnReverse) el.vBtnReverse.classList.toggle('active', r < 0);
   }
 
   // ─── Loop sectie ─────────────────────────────────────────────────────────
@@ -1115,6 +1390,7 @@
   function bindKeyboard() {
     window.addEventListener('keydown', async (e) => {
       if (!vs.open) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
       const tag = (e.target.tagName || '').toUpperCase();
       if (['INPUT', 'SELECT', 'TEXTAREA'].includes(tag)) return;
 
@@ -1148,10 +1424,6 @@
           break;
         case 'l': case 'L':
           toggleLog();
-          e.preventDefault();
-          break;
-        case 'r': case 'R':
-          rotateCurrentMedia();
           e.preventDefault();
           break;
         case '[': changeSpeed(-1); e.preventDefault(); break;
@@ -1391,6 +1663,8 @@
     el.vClose.addEventListener('click', close);
     el.vPrev.addEventListener('click', (e) => { e.stopPropagation(); navPrev(); });
     el.vNext.addEventListener('click', (e) => { e.stopPropagation(); navNext(); });
+    if (el.vUp) el.vUp.addEventListener('click', (e) => { e.stopPropagation(); navChannel(-1); });
+    if (el.vDown) el.vDown.addEventListener('click', (e) => { e.stopPropagation(); navChannel(1); });
     el.vBtnSidebar.addEventListener('click', () => toggleSidebar());
     el.vNowRating.addEventListener('click', (e) => {
       const btn = e.target && e.target.closest ? e.target.closest('.rating-star-btn') : null;
@@ -1453,10 +1727,31 @@
       el.vBtnMute.textContent = vs.muted ? '🔇' : '🔊';
     });
 
+    if (el.vBtnReloadMedia) {
+      el.vBtnReloadMedia.addEventListener('click', (e) => {
+        e.stopPropagation();
+        reloadCurrentMedia().catch((err) => log('Reload fout: ' + err.message));
+      });
+    }
+
     if (el.vBtnPlayPause) {
       el.vBtnPlayPause.addEventListener('click', (e) => {
         e.stopPropagation();
         toggleVideoPlayback();
+      });
+    }
+
+    if (el.vBtnReverse) {
+      el.vBtnReverse.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setSpeed(vs.playbackRate < 0 ? 1 : -1);
+      });
+    }
+
+    if (el.vSpeedSelect) {
+      el.vSpeedSelect.addEventListener('change', (e) => {
+        const rate = Number(e.target.value);
+        if (Number.isFinite(rate)) setSpeed(rate);
       });
     }
 
@@ -1485,21 +1780,26 @@
 
     el.vWrap.addEventListener('click', () => {
       vs.wrap = !vs.wrap;
-      el.vWrap.textContent = `🔁 Wrap: ${vs.wrap ? 'aan' : 'uit'}`;
-      el.vWrap.classList.toggle('active', vs.wrap);
+      syncViewerModeControls();
     });
 
     el.vRandom.addEventListener('click', () => {
       vs.random = !vs.random;
-      el.vRandom.textContent = `🔀 Rand: ${vs.random ? 'aan' : 'uit'}`;
-      el.vRandom.classList.toggle('active', vs.random);
+      syncViewerModeControls();
     });
 
     el.vVideoWait.addEventListener('click', () => {
       vs.videoWait = !vs.videoWait;
-      el.vVideoWait.textContent = `⏳ Wacht: ${vs.videoWait ? 'aan' : 'uit'}`;
-      el.vVideoWait.classList.toggle('active', vs.videoWait);
+      syncViewerModeControls();
     });
+
+    if (el.vChannelScope) {
+      el.vChannelScope.addEventListener('click', () => {
+        vs.channelScope = vs.channelScope === 'query' ? 'all' : 'query';
+        vs.channels = [];
+        syncViewerModeControls();
+      });
+    }
 
     if (el.vZoomRange) {
       el.vZoomRange.addEventListener('input', () => {
@@ -1534,9 +1834,10 @@
         try {
           if (!vs.queryFilters) vs.queryFilters = snapshotGalleryFilters();
           const params = appendContextParams(new URLSearchParams(), { includeChannel: false });
+          params.set('sort', viewerFilters().sort || 'recent');
           const data = await api('/api/channels' + (params.toString() ? '?' + params.toString() : ''));
           vs.channels = (data.channels || []).filter(c => c.channel && c.channel !== 'unknown');
-          const currentChannel = viewerFilters().channel || (vs.items[vs.idx] && vs.items[vs.idx].channel) || '';
+          const currentChannel = (vs.items[vs.idx] && vs.items[vs.idx].channel) || viewerFilters().channel || '';
           const currentIdx = vs.channels.findIndex(c => c.channel === currentChannel);
           vs.chIdx = currentIdx >= 0 ? currentIdx : 0;
         } catch (e) { log('Kanalen laden mislukt: ' + e.message); }

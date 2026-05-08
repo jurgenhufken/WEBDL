@@ -16111,7 +16111,7 @@ async function startServer() {
       path.join(BASE_DIR, 'Videodownloadhelper'),
       '/Volumes/HDD - One Touch/WEBDL/_4KDownloader',
     ];
-    const _4K_VIDEO_EXTS = new Set(['.mp4', '.mkv', '.webm', '.mov', '.m4v']);
+    const _4K_VIDEO_EXTS = new Set(['.mp4', '.mkv', '.webm', '.mov', '.m4v', '.avi', '.wmv', '.flv', '.ts', '.m2ts', '.mpg', '.mpeg', '.ogv', '.3gp', '.3g2']);
     const _4K_IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.avif']);
     // Combineer beide: watcher indexeert voortaan ook plaatjes uit hub-downloads.
     const _4K_MEDIA_EXTS = new Set([..._4K_VIDEO_EXTS, ..._4K_IMAGE_EXTS]);

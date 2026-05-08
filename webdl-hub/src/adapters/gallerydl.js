@@ -12,7 +12,7 @@ const HOSTS = [
   'danbooru.donmai.us', 'gelbooru.com', 'rule34.xxx', 'e621.net',
   '4chan.org', 'kemono.su', 'coomer.su', 'tumblr.com',
   'pinterest.com', 'bsky.app', 'twitter.com', 'x.com', 'mastodon.social',
-  'instagram.com',
+  'instagram.com', 'vipergirls.to',
 ];
 
 function hostMatches(hostname) {

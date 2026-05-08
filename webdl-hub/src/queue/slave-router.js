@@ -31,19 +31,41 @@ function isSlaveUrl(url) {
   return null;
 }
 
+function keep2ShareFileId(url) {
+  try {
+    const u = new URL(String(url || ''));
+    const host = String(u.hostname || '').toLowerCase().replace(/^www\./, '');
+    if (!(host === 'keep2share.cc' || host === 'k2s.cc' || host === 'k2s.io' || host.endsWith('.keep2share.cc') || host.endsWith('.k2s.cc') || host.endsWith('.k2s.io'))) {
+      return '';
+    }
+    const m = String(u.pathname || '').match(/^\/file\/([^\/?#]+)/i);
+    return m && m[1] ? decodeURIComponent(m[1]).trim().toLowerCase() : '';
+  } catch (_) {
+    return '';
+  }
+}
+
 /**
  * Delegeer naar simple-server door een rij in public.downloads aan te maken.
  * Returns { downloadId } on success.
  */
 async function delegateToSlave(pool, { url, platform, metadata = {}, priority = 0 }) {
   // Dedup: als URL al in downloads staat, geen nieuwe rij maken.
+  const k2sId = keep2ShareFileId(url);
+  const params = [url];
+  let extraWhere = '';
+  if (k2sId) {
+    params.push(k2sId);
+    extraWhere = `OR substring(lower(source_url) from '(?:keep2share\\.cc|k2s\\.cc|k2s\\.io)/file/([^/?#]+)') = $2
+                  OR substring(lower(url) from '(?:keep2share\\.cc|k2s\\.cc|k2s\\.io)/file/([^/?#]+)') = $2`;
+  }
   const dup = await pool.query(
     `SELECT id, status FROM downloads
-       WHERE (source_url = $1 OR url = $1)
+       WHERE (source_url = $1 OR url = $1 ${extraWhere})
          AND status IN ('pending','queued','downloading','postprocessing','completed')
        ORDER BY CASE status WHEN 'completed' THEN 0 ELSE 1 END, id DESC
        LIMIT 1`,
-    [url],
+    params,
   );
   if (dup.rows.length > 0) {
     return { downloadId: dup.rows[0].id, duplicate: true, existingStatus: dup.rows[0].status };

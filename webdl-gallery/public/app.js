@@ -19,9 +19,13 @@
     done: false,
     filters: { platform: '', channel: '', q: '', sort: 'recent', min_rating: '', media_type: '' },
     // Auto-refresh
-    autoRefresh: false,
-    autoRefreshMs: 10000,
+    autoRefresh: true,
+    liveAllMedia: true,
+    autoRefreshMs: 8000,
+    autoInjectMax: 30,
+    autoInjectPumpMs: 700,
     autoRefreshTimer: null,
+    autoInjectTimer: null,
     activeRefreshMs: 30000,
     activeRefreshTimer: null,
     newestFinishedAt: null,
@@ -78,6 +82,33 @@
     return '';
   }
 
+  function itemMatchesCurrentFilters(it) {
+    const f = state.filters || {};
+    if (f.platform && String(it.platform || '') !== String(f.platform)) return false;
+    if (f.channel) {
+      if (String(f.channel).startsWith('site:')) {
+        const siteNeedle = String(f.channel).slice(5).toLowerCase();
+        const sites = [it.source_site, ...(Array.isArray(it.source_sites) ? it.source_sites : [])]
+          .map(v => String(v || '').toLowerCase())
+          .filter(Boolean);
+        if (!sites.some(site => site === siteNeedle || site.includes(siteNeedle))) return false;
+      } else if (String(it.channel || '') !== String(f.channel)) {
+        return false;
+      }
+    }
+    if (f.media_type && mediaTypeOf(it) !== String(f.media_type)) return false;
+    if (f.min_rating && Number(it.rating || 0) < Number(f.min_rating)) return false;
+    if (f.q) {
+      const haystack = [
+        it.title, it.filename, it.channel, it.platform, it.source_site,
+        ...(Array.isArray(it.source_sites) ? it.source_sites : []),
+        it.source_url, it.url,
+      ].map(v => String(v || '').toLowerCase()).join(' ');
+      if (!haystack.includes(String(f.q).toLowerCase())) return false;
+    }
+    return true;
+  }
+
   function attachThumbRetry(el, it) {
     if (!el || !it || !it.id) return;
     let tries = 0;
@@ -112,7 +143,11 @@
     const mediaLabel = mediaTypeLabel(it);
     const mediaMark = mediaLabel ? `<span class="card-media-mark">${mediaLabel}</span>` : '';
     const title = escHtml(it.title || it.filename || '');
-    const sub   = (it.channel && it.channel !== 'unknown') ? it.channel : '';
+    const sourceSite = String(it.source_site || '').trim();
+    const channel = (it.channel && it.channel !== 'unknown') ? String(it.channel) : '';
+    const sub = sourceSite && channel && sourceSite !== channel
+      ? `${sourceSite} / ${channel}`
+      : (sourceSite || channel);
     c.innerHTML = `
       <div class="card-thumb">
         ${badge}${mediaMark}
@@ -140,6 +175,21 @@
       if (window.__viewer) window.__viewer.open(idx);
     });
     return c;
+  }
+
+  async function restoreViewerAnchor(itemId) {
+    const id = String(itemId || '');
+    if (!id) return false;
+    let card = grid.querySelector(`.card[data-id="${CSS.escape(id)}"]`);
+    for (let i = 0; !card && !state.done && i < 12; i++) {
+      await loadMore();
+      card = grid.querySelector(`.card[data-id="${CSS.escape(id)}"]`);
+    }
+    if (!card) return false;
+    card.scrollIntoView({ block: 'center', behavior: 'auto' });
+    card.classList.add('card-return-anchor');
+    setTimeout(() => card.classList.remove('card-return-anchor'), 1800);
+    return true;
   }
 
   function renderAppend(newItems) {
@@ -188,6 +238,24 @@
     s.textContent = `+${count} nieuw · ${state.items.length} items`;
     s.style.color = '#4ade80';
     setTimeout(() => { s.style.color = ''; updateStats(); }, 3000);
+  }
+
+  function pumpPendingNewItems() {
+    if (state.viewerActive) return;
+    if (!state.pendingNewItems || state.pendingNewItems.size === 0) return;
+    if (window.scrollY >= 320) { updateStats(); return; }
+    const inject = Array.from(state.pendingNewItems.values()).slice(0, state.autoInjectMax);
+    for (const it of inject) state.pendingNewItems.delete(String(it.id));
+    if (inject.length) renderPrepend(inject);
+    if (state.pendingNewItems.size > 0) scheduleInjectPump();
+  }
+
+  function scheduleInjectPump() {
+    if (state.autoInjectTimer) return;
+    state.autoInjectTimer = setTimeout(() => {
+      state.autoInjectTimer = null;
+      pumpPendingNewItems();
+    }, state.autoInjectPumpMs);
   }
 
   function clearGrid() {
@@ -297,6 +365,7 @@
     if (state.loading || state.done) return;
     const queryVersion = state.queryVersion;
     state.loading = true;
+    sentinel.hidden = false;
     sentinel.textContent = 'Laden…';
     try {
       const params = new URLSearchParams();
@@ -316,7 +385,11 @@
       state.items.push(...data.items);
       state.offset += data.items.length;
       state.nextCursor = data.next_cursor || null;
-      if (data.items.length < state.limit) state.done = true;
+      if (state.filters.sort === 'recent') {
+        state.done = !state.nextCursor;
+      } else if (data.items.length < state.limit) {
+        state.done = true;
+      }
       renderAppend(data.items);
       updateStats();
     } catch (e) {
@@ -326,7 +399,8 @@
       return;
     }
     if (queryVersion !== state.queryVersion) return;
-    sentinel.textContent = state.done ? `Einde — ${state.items.length} items` : 'Scroll voor meer…';
+    sentinel.textContent = state.done ? '' : 'Scroll voor meer…';
+    sentinel.hidden = state.done;
     state.loading = false;
   }
 
@@ -390,7 +464,8 @@
         if (!c.channel || c.channel === 'unknown') continue;
         const o = document.createElement('option');
         o.value = c.channel;
-        o.textContent = `${c.channel} (${c.count})`;
+        const label = String(c.channel || '').startsWith('site:') ? String(c.channel).slice(5) : c.channel;
+        o.textContent = `${label} (${c.count})`;
         cSel.appendChild(o);
       }
       // Herstel vorige selectie als die nog bestaat
@@ -481,17 +556,24 @@
   // ─── Auto-refresh: poll voor nieuwe items ─────────────────────────────────
   async function pollNewItems() {
     if (!state.autoRefresh) return;
-    if (state.filters.sort !== 'recent') return;
+    if (!state.liveAllMedia && state.filters.sort !== 'recent') return;
     try {
-      const params = new URLSearchParams({ limit: String(state.limit), offset: '0' });
-      for (const [k, v] of Object.entries(state.filters)) {
-        if (v) params.set(k, v);
+      const params = new URLSearchParams({
+        limit: String(Math.min(state.limit, 50)),
+        offset: '0',
+        sort: 'recent',
+      });
+      if (!state.liveAllMedia) {
+        for (const [k, v] of Object.entries(state.filters)) {
+          if (v) params.set(k, v);
+        }
       }
       const data = await apiFetch('/api/items?' + params.toString()).then(r => r.json());
       if (!data.items || data.items.length === 0) return;
-      const fresh = data.items.filter(it => !state.knownIds.has(String(it.id)));
+      const fresh = data.items.filter(it => !state.knownIds.has(String(it.id)) && itemMatchesCurrentFilters(it));
       if (fresh.length > 0) {
         for (const it of fresh) state.pendingNewItems.set(String(it.id), it);
+        pumpPendingNewItems();
         updateStats();
       }
     } catch (e) { console.warn('auto-refresh failed', e); }
@@ -499,11 +581,14 @@
 
   function startAutoRefresh() {
     stopAutoRefresh();
+    pollNewItems();
     state.autoRefreshTimer = setInterval(pollNewItems, state.autoRefreshMs);
   }
   function stopAutoRefresh() {
     if (state.autoRefreshTimer) clearInterval(state.autoRefreshTimer);
+    if (state.autoInjectTimer) clearTimeout(state.autoInjectTimer);
     state.autoRefreshTimer = null;
+    state.autoInjectTimer = null;
   }
   function startActiveRefresh() {
     stopActiveRefresh();
@@ -515,34 +600,49 @@
     state.activeRefreshTimer = null;
   }
 
+  function setViewerActive(active) {
+    state.viewerActive = Boolean(active);
+    if (state.viewerActive) {
+      stopAutoRefresh();
+      stopActiveRefresh();
+    } else if (!document.hidden) {
+      startActiveRefresh();
+      if (state.autoRefresh) startAutoRefresh();
+    }
+  }
+
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
       stopAutoRefresh();
       stopActiveRefresh();
     } else {
-      startActiveRefresh();
-      if (state.autoRefresh) startAutoRefresh();
+      if (!state.viewerActive) {
+        startActiveRefresh();
+        if (state.autoRefresh) startAutoRefresh();
+      }
     }
   });
 
   // Live-toggle knop
   const autoBtn = document.createElement('button');
-  autoBtn.textContent = state.autoRefresh ? '🔴 Live' : '⚪ Live';
-  autoBtn.title = state.autoRefresh ? 'Auto-refresh aan (klik om uit te zetten)' : 'Auto-refresh uit (klik om aan te zetten)';
+  function syncAutoButton() {
+    autoBtn.textContent = state.autoRefresh ? (state.liveAllMedia ? '🔴 Live alles' : '🔴 Live') : '⚪ Live';
+    autoBtn.title = state.autoRefresh
+      ? (state.liveAllMedia ? 'Auto-refresh aan voor alle media (klik om uit te zetten)' : 'Auto-refresh aan voor huidige filter (klik om uit te zetten)')
+      : 'Auto-refresh uit (klik om aan te zetten)';
+    autoBtn.style.cssText = state.autoRefresh ? 'background:#1f6feb;border-color:#1f6feb;color:#fff' : '';
+  }
   autoBtn.className = 'auto-toggle';
-  autoBtn.style.cssText = state.autoRefresh ? 'background:#1f6feb;border-color:#1f6feb;color:#fff' : '';
+  syncAutoButton();
   autoBtn.addEventListener('click', () => {
     state.autoRefresh = !state.autoRefresh;
     if (state.autoRefresh) {
-      autoBtn.textContent = '🔴 Live';
-      autoBtn.title = 'Auto-refresh aan (klik om uit te zetten)';
-      autoBtn.style.cssText = 'background:#1f6feb;border-color:#1f6feb;color:#fff';
+      state.liveAllMedia = true;
+      syncAutoButton();
       startAutoRefresh();
       pollNewItems();
     } else {
-      autoBtn.textContent = '⚪ Live';
-      autoBtn.title = 'Auto-refresh uit (klik om aan te zetten)';
-      autoBtn.style.cssText = '';
+      syncAutoButton();
       stopAutoRefresh();
     }
   });
@@ -554,16 +654,24 @@
     starHtml,
     updateCardRating,
     setFilter,
+    setViewerActive,
+    restoreViewerAnchor,
     loadMore,
     reload: reloadGallery,
   };
 
   // ─── Init ─────────────────────────────────────────────────────────────────
-  readFiltersFromControls();
-  loadMore().then(() => {
+  async function init() {
+    readFiltersFromControls();
+    await loadFilterDropdowns();
+    readFiltersFromControls();
+    await loadMore();
     io.observe(sentinel);
     startActiveRefresh();
     if (state.autoRefresh) startAutoRefresh();
+  }
+
+  init().catch((e) => {
+    sentinel.textContent = 'Fout: ' + (e && e.message ? e.message : String(e));
   });
-  loadFilterDropdowns();
 })();

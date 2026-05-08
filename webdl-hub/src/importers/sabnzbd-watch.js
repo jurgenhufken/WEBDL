@@ -5,9 +5,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 
-const VIDEO_EXTS = new Set(['.mp4', '.mkv', '.webm', '.mov', '.m4v', '.avi', '.flv', '.ts', '.wmv']);
+const VIDEO_EXTS = new Set(['.mp4', '.mkv', '.webm', '.mov', '.m4v', '.avi', '.wmv', '.flv', '.ts', '.m2ts', '.mpg', '.mpeg', '.ogv', '.3gp', '.3g2']);
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.avif']);
-const SKIP_BASENAME_RE = /(_thumb(_v\d+)?|_preview|_logo)\.(jpe?g|png|webp|gif|bmp|avif)$/i;
+const SKIP_BASENAME_RE = /(^\d{1,3}[-_. ]?thumbnail|(?:^|[-_. ])thumbnail|_thumb(_v\d+)?|_preview|_logo)\.(jpe?g|png|webp|gif|bmp|avif)$/i;
 const SKIP_PATH_SEGMENT_RE = /^(?:_UNPACK_|_FAILED_|_ADMIN_|__ADMIN__|incomplete)/i;
 const DEFAULT_CONFIG_PATH = path.join(os.homedir(), 'Library', 'Application Support', 'SABnzbd', 'sabnzbd.ini');
 
@@ -123,6 +123,52 @@ function normalizeRootDirs({ rootDir = '', rootDirs = [] } = {}) {
     out.push(resolved);
   }
   return out;
+}
+
+function normalizeSearchToken(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function extractSourceSites(...values) {
+  const haystack = values.map((v) => String(v || '')).filter(Boolean).join(' ');
+  const sites = new Map();
+  const add = (site) => {
+    const cleaned = String(site || '')
+      .replace(/^www\./i, '')
+      .replace(/[._-]+com$/i, '.com')
+      .replace(/[._-]+net$/i, '.net')
+      .replace(/[._-]+org$/i, '.org')
+      .replace(/^[^a-z0-9]+|[^a-z0-9.]+$/gi, '')
+      .trim();
+    if (!cleaned || cleaned.length < 4) return;
+    const key = cleaned.toLowerCase();
+    if (!/\.[a-z]{2,}$/i.test(cleaned)) return;
+    sites.set(key, cleaned);
+  };
+
+  const dotted = haystack.match(/\b(?:[a-z0-9][a-z0-9-]*[._-])+(?:com|net|org|tv|cz|cc|to|me|io|xxx|online)\b/gi) || [];
+  for (const raw of dotted) add(raw.replace(/_/g, '.').replace(/-/g, '.'));
+
+  const compactKnown = [
+    ['clubseventeen', 'clubseventeen.com'],
+    ['seventeenvideo', 'seventeenvideo.com'],
+    ['cityfeet', 'cityfeet.com'],
+    ['brattyfootgirls', 'brattyfootgirls.com'],
+    ['feetextreme', 'feetextreme.com'],
+    ['under girls feet', 'undergirlsfeet.com'],
+    ['undergirlsfeet', 'undergirlsfeet.com'],
+    ['licking girls feet', 'lickinggirlsfeet.com'],
+    ['lickinggirlsfeet', 'lickinggirlsfeet.com'],
+    ['ab by winters', 'abbywinters.com'],
+    ['abby winters', 'abbywinters.com'],
+    ['abbywinters', 'abbywinters.com'],
+  ];
+  const normalized = normalizeSearchToken(haystack);
+  for (const [needle, site] of compactKnown) {
+    if (normalized.includes(normalizeSearchToken(needle))) add(site);
+  }
+
+  return Array.from(sites.values());
 }
 
 async function fetchSabnzbdStatus({ configPath = '', url = '', apiKey = '', completedDir = '', completedDirs = [], downloadRoot = '', logger = null } = {}) {
@@ -243,14 +289,45 @@ function walkMediaFiles(rootDir, { maxDepth = 8, sinceMtimeMs = 0, maxFiles = Nu
   return out;
 }
 
+function walkSabnzbdHistoryFiles(rootDir, history = [], { maxDepth = 8, maxFiles = Number.POSITIVE_INFINITY } = {}) {
+  const root = path.resolve(rootDir);
+  const out = [];
+  const seenDirs = new Set();
+  const completed = (Array.isArray(history) ? history : [])
+    .filter((slot) => String(slot?.status || '').toLowerCase() === 'completed')
+    .sort((a, b) => Number(b?.completed || 0) - Number(a?.completed || 0));
+  for (const slot of completed) {
+    if (out.length >= maxFiles) break;
+    const storage = String(slot?.storage || '').trim();
+    if (!storage) continue;
+    const resolved = path.resolve(storage);
+    if (seenDirs.has(resolved)) continue;
+    seenDirs.add(resolved);
+    if (resolved !== root && !resolved.startsWith(root + path.sep)) continue;
+    const files = walkMediaFiles(resolved, {
+      maxDepth,
+      sinceMtimeMs: 0,
+      maxFiles: Math.max(0, maxFiles - out.length),
+    });
+    out.push(...files);
+  }
+  return out;
+}
+
 function deriveMetadata(filePath, rootDir, historyItem = null) {
   const ext = path.extname(filePath).toLowerCase();
   const folder = path.basename(path.dirname(filePath));
   const name = historyItem?.name || historyItem?.nzb_name || folder;
   const category = String(historyItem?.category || '').trim();
+  const channel = category && category !== '*' ? category : (name || folder || 'SABNZBD');
   const title = path.basename(filePath, ext).replace(/[._-]+/g, ' ').trim() || name || 'sabnzbd import';
-  const channel = category || folder || 'SABNZBD';
+  const sourceSites = extractSourceSites(name, folder, filePath, title);
+  const sourceSite = sourceSites[0] || null;
   const type = IMAGE_EXTS.has(ext) ? 'image' : 'video';
+  const completedSeconds = Number(historyItem?.completed || 0);
+  const completedAt = Number.isFinite(completedSeconds) && completedSeconds > 0
+    ? new Date(completedSeconds * 1000).toISOString()
+    : null;
   return {
     url: `file://${filePath}`,
     platform: 'sabnzbd',
@@ -260,12 +337,16 @@ function deriveMetadata(filePath, rootDir, historyItem = null) {
     format: ext.replace('.', ''),
     type,
     lane: type === 'image' ? 'image' : 'video',
+    completedAt,
     metadata: {
       webdl_kind: type === 'image' ? 'imported_image' : 'imported_video',
       imported: true,
       importer: 'sabnzbd-watch',
       root_dir: rootDir,
       source_filepath: filePath,
+      source_site: sourceSite,
+      source_sites: sourceSites,
+      source_sites_search: sourceSites.map(normalizeSearchToken).filter(Boolean),
       sabnzbd: historyItem ? {
         name: historyItem.name || null,
         nzb_name: historyItem.nzb_name || null,
@@ -304,6 +385,7 @@ async function importSabnzbdFile({ repo, filePath, rootDir, history = [], minFil
   const historyItem = findHistoryForFile(absPath, history);
   const meta = deriveMetadata(absPath, rootDir, historyItem);
   const now = new Date().toISOString();
+  const eventTime = meta.completedAt || new Date(Number(stat.mtimeMs || Date.now())).toISOString();
 
   const client = await repo.pool.connect();
   try {
@@ -327,7 +409,7 @@ async function importSabnzbdFile({ repo, filePath, rootDir, history = [], minFil
          VALUES ($1, 'sabnzbd-import', 'done', 0, $2::jsonb, 100, 1, 1,
                  $3, $4::timestamptz, $4::timestamptz, $4::timestamptz)
          RETURNING id`,
-        [meta.url, JSON.stringify(meta.metadata), meta.lane, now],
+        [meta.url, JSON.stringify(meta.metadata), meta.lane, eventTime],
       );
       jobId = job.rows[0].id;
     }
@@ -358,7 +440,7 @@ async function importSabnzbdFile({ repo, filePath, rootDir, history = [], minFil
         stat.size,
         meta.format,
         JSON.stringify({ ...meta.metadata, hub_job_id: jobId }),
-        now,
+        eventTime,
         meta.type === 'image',
       ],
     );
@@ -392,7 +474,9 @@ async function scanSabnzbdCompleted({
     return { success: false, rootDir, error: 'completed dir missing', imported: 0, skipped: 0, errors: 0 };
   }
   const history = await fetchSabnzbdHistory({ configPath, url: sabnzbdUrl, apiKey: sabnzbdApiKey, logger });
-  const files = walkMediaFiles(rootDir, { sinceMtimeMs, maxFiles });
+  const historyFiles = walkSabnzbdHistoryFiles(rootDir, history, { maxFiles });
+  const recentFiles = walkMediaFiles(rootDir, { sinceMtimeMs, maxFiles: Math.max(0, maxFiles - historyFiles.length) });
+  const files = Array.from(new Set([...historyFiles, ...recentFiles]));
   let imported = 0;
   let skipped = 0;
   let errors = 0;

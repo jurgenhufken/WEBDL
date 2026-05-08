@@ -34,6 +34,41 @@ function matches(url) {
 
 // Output-template: alle media van één job in z'n eigen job-dir, nette naam.
 const OUTPUT_TEMPLATE = '%(title).200B [%(id)s].%(ext)s';
+const DIRECT_MEDIA_RE = /\.(jpe?g|png|webp|gif|avif|bmp|mp4|webm|mkv|mov|m4v|avi|flv|ts)(?:[/?#]|$)/i;
+
+function isDirectMediaUrl(url) {
+  try {
+    const u = new URL(String(url || ''));
+    return (u.protocol === 'http:' || u.protocol === 'https:') && DIRECT_MEDIA_RE.test(u.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeFileNamePart(value, fallback = 'download') {
+  const cleaned = String(value || '')
+    .normalize('NFKD')
+    .replace(/[^\w .()[\]-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120);
+  return cleaned || fallback;
+}
+
+function directMediaFileName(url, opts = {}) {
+  try {
+    const u = new URL(String(url || ''));
+    const parts = u.pathname.split('/').filter(Boolean);
+    const ext = path.extname(parts[parts.length - 1] || '').toLowerCase() || '.bin';
+    const idPart = [...parts].reverse()
+      .map((part) => part.replace(/\.(jpe?g|png|webp|gif|avif|bmp|mp4|webm|mkv|mov|m4v|avi|flv|ts)$/i, ''))
+      .find((part) => /^[a-z0-9]{8,}$/i.test(part));
+    const title = sanitizeFileNamePart(opts.title || idPart || parts[parts.length - 1] || 'download');
+    return `${title}${ext}`;
+  } catch {
+    return 'download.bin';
+  }
+}
 
 function normalizeFlatEntryUrl(obj, seedUrl) {
   const raw = String(obj && (obj.url || obj.webpage_url || obj.original_url) || '').trim();
@@ -172,6 +207,26 @@ async function expandXvideosListing(url) {
 
 function plan(url, opts = {}) {
   const cwd = opts.cwd;
+  if (isDirectMediaUrl(url)) {
+    return {
+      cmd: process.env.WEBDL_CURL || 'curl',
+      args: [
+        '-L',
+        '--fail',
+        '--retry', '2',
+        '--retry-delay', '1',
+        '--connect-timeout', '20',
+        '--max-time', process.env.WEBDL_DIRECT_MEDIA_MAX_TIME || '180',
+        '-A', process.env.WEBDL_DIRECT_MEDIA_USER_AGENT || 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+        '-o', directMediaFileName(url, opts),
+        url,
+      ],
+      cwd,
+      env: {},
+      timeoutMs: Number.parseInt(process.env.WEBDL_DIRECT_MEDIA_TIMEOUT_MS || String(4 * 60 * 1000), 10),
+      idleTimeoutMs: Number.parseInt(process.env.WEBDL_DIRECT_MEDIA_IDLE_TIMEOUT_MS || String(90 * 1000), 10),
+    };
+  }
   const quality = opts.quality || (isMergeVideoUrl(url) ? 'bv*+ba/best' : 'best/bv*+ba');
   const isYoutube = /(?:youtube\.com|youtu\.be)/i.test(String(url || ''));
   const isTikTok = isTikTokUrl(url);

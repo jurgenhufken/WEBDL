@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Screen Recorder Controller",
-  "version": "1.0.16",
+  "version": "1.0.20",
   "description": "Besturingsinterface voor de native Screen Recorder applicatie",
   "icons": {
     "48": "icons/icon-48.svg",
@@ -14,6 +14,7 @@
     "http://localhost/*",
     "http://127.0.0.1/*",
     "*://*.footfetishforum.com/*",
+    "*://*.vipergirls.to/*",
     "*://*.amateurvoyeurforum.com/*",
     "*://*.elitebabes.com/*"
   ],

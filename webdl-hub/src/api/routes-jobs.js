@@ -70,6 +70,8 @@ async function expandAndEnqueue({ repo, queue, adapters, url, priority, options,
       if (!force) {
         const existing = await repo.findRecentJobByUrl(entry.url);
         if (existing) { duplicates++; continue; }
+        const existingDownload = await repo.findGalleryDownloadByUrl(entry.url);
+        if (existingDownload) { duplicates++; continue; }
       }
       const job = await queue.enqueue({
         url: entry.url,
@@ -96,6 +98,14 @@ async function expandAndEnqueue({ repo, queue, adapters, url, priority, options,
   return { total: entries.length, queued, duplicates, skipped, errors, groupId, playlistName, jobs };
 }
 
+function hostnameFromUrl(value) {
+  try {
+    return new URL(String(value || '')).hostname.replace(/^www\./i, '').toLowerCase();
+  } catch (_) {
+    return '';
+  }
+}
+
 function createJobsRouter({ repo, queue, adapters, detect }) {
   const r = express.Router();
 
@@ -115,6 +125,22 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
       // simple-server scheduler picks it up via auto-rehydrate.
       const slave = isSlaveUrl(url);
       if (slave && !hint) {
+        if (!force) {
+          const existingDownload = await repo.findGalleryDownloadByUrl(url);
+          if (existingDownload) {
+            return res.status(200).json({
+              id: existingDownload.id,
+              status: existingDownload.status,
+              platform: existingDownload.platform,
+              title: existingDownload.title || existingDownload.filename || existingDownload.filepath,
+              duplicate: true,
+              delegated: true,
+              slave_platform: slave.platform,
+              simple_server_download_id: existingDownload.id,
+              existing_source: 'gallery',
+            });
+          }
+        }
         // Bookkeeping hub-job eerst aanmaken zodat we z'n ID kunnen meegeven.
         const bookJob = await queue.enqueue({
           url,
@@ -129,10 +155,23 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
         });
         // Delegeer aan simple-server met hub_job_id zodat poller het terug
         // kan koppelen.
+        const sourceContext = options.webdl_source_contexts?.[url] || options.sourceContext || null;
+        const originalUrl = sourceContext?.url || options.contextUrl || options.pageUrl || '';
+        const originalSite = hostnameFromUrl(originalUrl) || sourceContext?.platform || options.platform || '';
         const result = await delegateToSlave(repo.pool, {
           url,
           platform: slave.platform,
-          metadata: { delegated_from_hub: true, hub_job_id: bookJob.id },
+          metadata: {
+            delegated_from_hub: true,
+            hub_job_id: bookJob.id,
+            source_context: sourceContext,
+            source_site: originalSite || null,
+            original_site: originalSite || null,
+            original_platform: sourceContext?.platform || options.platform || null,
+            original_channel: sourceContext?.channel || options.channel || null,
+            original_title: sourceContext?.title || options.title || null,
+            original_url: originalUrl || null,
+          },
           priority,
         });
         // Markeer hub-job als 'running' en sla simple_server_download_id op.
@@ -186,6 +225,17 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
         if (existing) {
           return res.status(200).json({ ...existing, duplicate: true });
         }
+        const existingDownload = await repo.findGalleryDownloadByUrl(url);
+        if (existingDownload) {
+          return res.status(200).json({
+            id: existingDownload.id,
+            status: existingDownload.status,
+            platform: existingDownload.platform,
+            title: existingDownload.title || existingDownload.filename || existingDownload.filepath,
+            duplicate: true,
+            existing_source: 'gallery',
+          });
+        }
       }
       const job = await queue.enqueue({
         url, adapter: adapter.name, priority, options, maxAttempts,
@@ -235,6 +285,14 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
         repo.listGroups({ limit: 80 }),
       ]);
       res.json({ stats, lanes, groups });
+    } catch (e) { next(e); }
+  });
+
+  r.get('/group/:groupId', async (req, res, next) => {
+    try {
+      const limit = req.query.limit ? parseInt(req.query.limit, 10) : 1500;
+      const jobs = await repo.listJobsByGroup(req.params.groupId, { limit });
+      res.json({ jobs });
     } catch (e) { next(e); }
   });
 

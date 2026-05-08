@@ -12,8 +12,76 @@ const path = require('node:path');
 const { execFile } = require('node:child_process');
 
 const FFMPEG = process.env.WEBDL_FFMPEG || '/opt/homebrew/bin/ffmpeg';
-const VIDEO_EXTS = new Set(['.mp4', '.mkv', '.webm', '.mov', '.m4v', '.avi', '.flv', '.ts']);
+const VIDEO_EXTS = new Set(['.mp4', '.mkv', '.webm', '.mov', '.m4v', '.avi', '.wmv', '.flv', '.ts', '.m2ts', '.mpg', '.mpeg', '.ogv', '.3gp', '.3g2']);
 const MEDIA_EXTS = new Set([...VIDEO_EXTS, '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.avif']);
+const SKIP_BASENAME_RE = /(_thumb(_v\d+)?|_preview|_logo)\.(jpe?g|png|webp|gif|bmp|avif)$/i;
+const MEDIA_ROOTS = [
+  process.env.WEBDL_BASE_DIR,
+  process.env.WEBDL_MEDIA_ROOTS,
+  process.env.WEBDL_EXTRA_MEDIA_ROOTS,
+  process.env.WEBDL_ALLOWED_MEDIA_ROOTS,
+  '/Users/jurgen/Downloads/WEBDL',
+  '/Volumes/HDD - One Touch/WEBDL',
+  '/Volumes/WEBDL Extra/WEBDL',
+].filter(Boolean).flatMap((p) => String(p).split(/[;\n]/).map((v) => v.trim()).filter(Boolean));
+
+function isMediaPath(filePath) {
+  const base = path.basename(filePath || '');
+  if (SKIP_BASENAME_RE.test(base)) return false;
+  return MEDIA_EXTS.has(path.extname(base).toLowerCase());
+}
+
+function relativeToMediaRoot(filePath) {
+  const abs = path.resolve(filePath);
+  for (const root of MEDIA_ROOTS) {
+    const rel = path.relative(root, abs);
+    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) return rel;
+  }
+  return abs;
+}
+
+function resolveSlaveRelPath(relPath, basePath) {
+  const raw = String(relPath || '').trim();
+  if (!raw) return '';
+  if (path.isAbsolute(raw) && fsSync.existsSync(raw)) return raw;
+  const bases = [];
+  try {
+    const st = fsSync.statSync(basePath);
+    bases.push(st.isDirectory() ? basePath : path.dirname(basePath));
+  } catch (_) {
+    if (basePath) bases.push(path.dirname(basePath));
+  }
+  bases.push(...MEDIA_ROOTS);
+  for (const base of bases) {
+    const candidate = path.resolve(base, raw);
+    if (fsSync.existsSync(candidate)) return candidate;
+  }
+  return path.resolve(MEDIA_ROOTS[0] || process.cwd(), raw);
+}
+
+async function collectMediaFilesFromDir(dir, limit = 2000) {
+  const out = [];
+  const stack = [dir];
+  while (stack.length && out.length < limit) {
+    const current = stack.pop();
+    let entries;
+    try {
+      entries = await fs.readdir(current, { withFileTypes: true });
+    } catch (_) {
+      continue;
+    }
+    for (const entry of entries) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(full);
+      } else if (entry.isFile() && isMediaPath(full)) {
+        out.push(full);
+        if (out.length >= limit) break;
+      }
+    }
+  }
+  return out;
+}
 
 async function inspectSlaveFile(filePath) {
   let st;
@@ -61,6 +129,59 @@ function generateThumbnail(videoPath) {
   });
 }
 
+async function collectSlaveMediaFiles(repo, row) {
+  const files = [];
+  const seen = new Set();
+  const add = (filePath) => {
+    const fp = String(filePath || '').trim();
+    if (!fp || !isMediaPath(fp) || seen.has(fp)) return;
+    seen.add(fp);
+    files.push(fp);
+  };
+
+  const indexed = await repo.pool.query(
+    `SELECT relpath FROM download_files WHERE download_id = $1 AND relpath IS NOT NULL AND relpath <> '' ORDER BY id`,
+    [row.id],
+  );
+  for (const f of indexed.rows) {
+    add(resolveSlaveRelPath(f.relpath, row.filepath));
+  }
+  if (files.length) return files;
+
+  let st;
+  try {
+    st = await fs.stat(row.filepath);
+  } catch (_) {
+    return [];
+  }
+  if (st.isDirectory()) {
+    for (const filePath of await collectMediaFilesFromDir(row.filepath)) add(filePath);
+  } else {
+    add(row.filepath);
+  }
+  return files;
+}
+
+async function indexSlaveDownloadFiles(repo, downloadId, files) {
+  if (!files.length) return 0;
+  let indexed = 0;
+  for (const filePath of files) {
+    const st = await fs.stat(filePath);
+    const relpath = relativeToMediaRoot(filePath);
+    await repo.pool.query(
+      `INSERT INTO download_files (download_id, relpath, filesize, mtime_ms, updated_at)
+       VALUES ($1, $2, $3, $4, now())
+       ON CONFLICT (download_id, relpath) DO UPDATE SET
+         filesize = EXCLUDED.filesize,
+         mtime_ms = EXCLUDED.mtime_ms,
+         updated_at = now()`,
+      [downloadId, relpath, st.size, Math.floor(st.mtimeMs)],
+    );
+    indexed++;
+  }
+  return indexed;
+}
+
 function startSlavePoller({ repo, logger, intervalMs = 5000 }) {
   let stopping = false;
 
@@ -90,41 +211,53 @@ function startSlavePoller({ repo, logger, intervalMs = 5000 }) {
         return;
       }
       try {
-        const inspected = await inspectSlaveFile(row.filepath);
-        if (!inspected.ok) {
+        const mediaFiles = await collectSlaveMediaFiles(repo, row);
+        if (!mediaFiles.length) {
           await repo.pool.query(
             `UPDATE downloads
                 SET status='error',
                     error=$2,
                     updated_at=now()
               WHERE id=$1`,
-            [row.id, inspected.reason],
+            [row.id, 'slave download completed without importable media files'],
           );
-          await repo.failJob(hubJobId, inspected.reason, { retry: false });
-          await repo.appendLog(hubJobId, 'error', `❌ ${inspected.reason}: ${row.filepath}`);
-          logger.warn('slave.invalid_file', { hubJob: hubJobId, downloadId: row.id, filepath: row.filepath, reason: inspected.reason });
+          await repo.failJob(hubJobId, 'slave download completed without importable media files', { retry: false });
+          await repo.appendLog(hubJobId, 'error', `❌ geen importeerbare media in slave output: ${row.filepath}`);
+          logger.warn('slave.no_importable_media', { hubJob: hubJobId, downloadId: row.id, filepath: row.filepath });
           return;
         }
-        const size = inspected.size;
 
-        // File toevoegen aan webdl.files
-        await repo.addFile(hubJobId, { path: row.filepath, size, mime: null, checksum: null });
+        const indexed = await indexSlaveDownloadFiles(repo, row.id, mediaFiles);
+        let added = 0;
+        let thumbGenerated = 0;
 
-        // Thumb genereren via hub pipeline (als het een video is en nog geen thumb heeft)
-        const ext = path.extname(row.filepath).toLowerCase();
-        let thumbGenerated = false;
-        if (VIDEO_EXTS.has(ext)) {
-          const thumb = await generateThumbnail(row.filepath);
-          if (thumb) thumbGenerated = true;
+        for (const filePath of mediaFiles) {
+          const inspected = await inspectSlaveFile(filePath);
+          if (!inspected.ok) {
+            logger.warn('slave.invalid_file_skipped', { hubJob: hubJobId, downloadId: row.id, filepath: filePath, reason: inspected.reason });
+            continue;
+          }
+          await repo.addFile(hubJobId, { path: filePath, size: inspected.size, mime: null, checksum: null });
+          added++;
+          const ext = path.extname(filePath).toLowerCase();
+          if (VIDEO_EXTS.has(ext)) {
+            const thumb = await generateThumbnail(filePath);
+            if (thumb) thumbGenerated++;
+          }
         }
 
+        if (added === 0) {
+          await repo.failJob(hubJobId, 'slave media files were invalid', { retry: false });
+          await repo.appendLog(hubJobId, 'error', `❌ slave media ongeldig: ${row.filepath}`);
+          return;
+        }
         await repo.appendLog(
           hubJobId,
           'info',
-          `✅ slave klaar: ${path.basename(row.filepath)} (${size ? Math.round(size / 1024) + ' KB' : '?'}${thumbGenerated ? ', thumb gegenereerd' : ''})`,
+          `✅ slave klaar: ${added} bestand(en) gekoppeld, ${indexed} voor gallery geindexeerd${thumbGenerated ? `, ${thumbGenerated} thumb(s) gegenereerd` : ''}`,
         );
         await repo.completeJob(hubJobId);
-        logger.info('slave.done', { hubJob: hubJobId, downloadId: row.id, filepath: row.filepath });
+        logger.info('slave.done', { hubJob: hubJobId, downloadId: row.id, filepath: row.filepath, files: added, indexed });
       } catch (e) {
         logger.warn('slave.handoff.error', { hubJob: hubJobId, err: String(e.message || e) });
       }
