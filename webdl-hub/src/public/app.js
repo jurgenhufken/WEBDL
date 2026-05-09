@@ -1252,9 +1252,9 @@ async function loadServerDownloads() {
 
 async function refreshCurrentSource() {
   if (state.source === 'server') {
-    await Promise.all([loadJobStats(), loadServerStats(), loadServerPlatforms(), loadServerDownloads(), loadSabnzbdStatus()]);
+    await Promise.all([loadJobStats(), loadServerStats(), loadServerPlatforms(), loadServerDownloads()]);
   } else {
-    await Promise.all([loadJobs(), loadJobStats(), loadServerStats(), loadSabnzbdStatus()]);
+    await Promise.all([loadJobs(), loadJobStats(), loadServerStats()]);
   }
 }
 
