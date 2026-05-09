@@ -77,16 +77,36 @@ def message_title(message, file_path):
         return os.path.splitext(file_name)[0].replace('_', ' ').strip()
     return os.path.splitext(os.path.basename(str(file_path or '')))[0].replace('_', ' ').strip() or f"telegram_{message.id}"
 
-def write_sidecar(file_path, entity, message, chat_title):
+def topic_id_for_message(message):
+    reply_to = getattr(message, 'reply_to', None)
+    return getattr(reply_to, 'reply_to_top_id', None) or getattr(reply_to, 'reply_to_msg_id', None)
+
+async def collect_topic_titles(client, entity):
+    topics = {}
+    if not getattr(entity, 'forum', False):
+        return topics
+    async for message in client.iter_messages(entity, limit=None):
+        action = getattr(message, 'action', None)
+        title = getattr(action, 'title', None)
+        if title:
+            topics[message.id] = str(title)
+    return topics
+
+def write_sidecar(file_path, entity, message, chat_title, topic_titles=None):
     if not file_path:
         return
     try:
+        topic_titles = topic_titles or {}
+        topic_id = topic_id_for_message(message)
+        topic_title = topic_titles.get(topic_id, '') if topic_id else ''
         source_url = message_source_url(entity, message)
+        channel_title = topic_title or chat_title
         metadata = {
             'extractor_key': 'telegram',
             'platform': 'telegram',
-            'channel': chat_title,
+            'channel': channel_title,
             'uploader': chat_title,
+            'playlist_title': chat_title,
             'uploader_id': str(getattr(entity, 'id', '') or ''),
             'uploader_url': f"https://t.me/{getattr(entity, 'username', '')}" if getattr(entity, 'username', None) else '',
             'title': message_title(message, file_path),
@@ -96,20 +116,23 @@ def write_sidecar(file_path, entity, message, chat_title):
             'url': source_url,
             'timestamp': int(message.date.timestamp()) if getattr(message, 'date', None) else None,
             'telegram_message_id': message.id,
+            'telegram_chat_title': chat_title,
+            'telegram_topic_title': topic_title,
+            'telegram_topic_id': topic_id,
         }
         with open(str(file_path) + '.json', 'w', encoding='utf-8') as fh:
             json.dump(metadata, fh, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"⚠️  Could not write metadata for message {message.id}: {e}")
 
-async def download_message(client, message, output_dir, semaphore, stats, entity=None):
+async def download_message(client, message, output_dir, semaphore, stats, entity=None, topic_titles=None):
     """Download a single message's media with concurrency control"""
     async with semaphore:
         try:
             path = await message.download_media(file=output_dir)
             if path:
                 if entity is not None:
-                    write_sidecar(path, entity, message, stats.get('chat_title') or '')
+                    write_sidecar(path, entity, message, stats.get('chat_title') or '', topic_titles=topic_titles)
                 stats['count'] += 1
                 total = stats.get('total') or 0
                 if total:
@@ -141,6 +164,10 @@ async def download_entity(client, chat_id, output_dir, message_limit=None, paral
 
     os.makedirs(output_dir, exist_ok=True)
 
+    topic_titles = await collect_topic_titles(client, entity)
+    if topic_titles:
+        print("🧵 Topics: " + ", ".join(sorted(set(topic_titles.values()))))
+
     download_tasks = []
     semaphore = asyncio.Semaphore(parallel)
     stats = {'count': 0, 'chat_title': title}
@@ -148,7 +175,7 @@ async def download_entity(client, chat_id, output_dir, message_limit=None, paral
     async for message in client.iter_messages(entity, limit=message_limit):
         if message.media and isinstance(message.media, (MessageMediaPhoto, MessageMediaDocument)):
             print(f"📎 Message {message.id}: {type(message.media).__name__}")
-            download_tasks.append(download_message(client, message, output_dir, semaphore, stats, entity=entity))
+            download_tasks.append(download_message(client, message, output_dir, semaphore, stats, entity=entity, topic_titles=topic_titles))
             if media_limit and len(download_tasks) >= media_limit:
                 print(f"🎯 Media limit reached after message {message.id}")
                 break
