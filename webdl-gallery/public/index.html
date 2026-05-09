@@ -129,8 +129,6 @@
           </select>
         </div>
 
-        <div id="vFavoriteOverlay" class="vfavorite-overlay hidden"></div>
-
         <!-- Rechts: tools -->
         <div class="vtop-right">
           <label class="vtop-ctrl" title="Volume"><span>Vol</span> <input id="vVol" type="range" min="0" max="1" step="0.01" value="0.8"></label>
@@ -154,6 +152,7 @@
       <!-- Stage -->
       <div class="viewer-stage" id="vStage">
         <div id="vContent" class="vcontent"></div>
+        <div id="vFavoriteOverlay" class="vfavorite-overlay hidden" aria-label="Snelle tags"></div>
         <!-- Progress bar: absoluut gepositioneerd, JS alignt op video-onderkant -->
         <div class="vprogressbar" id="vProgressBar">
           <div class="vprogressbar-fill" id="vProgressFill"></div>
@@ -263,7 +262,7 @@
   </div><!-- /viewer -->
 
   <script src="/app.js?v=20260509-65"></script>
-  <script src="/viewer.js?v=20260509-37"></script>
+  <script src="/viewer.js?v=20260509-38"></script>
   <script>
   // ─── Thema switcher ─────────────────────────────────────────────────────
   (function() {
