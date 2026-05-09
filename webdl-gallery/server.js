@@ -1288,7 +1288,7 @@ function buildItemFilters({ req, params, fileExpr, extExpr, ratingExpr, includeC
     }
   }
   if (q) {
-    addSearchFilter(where, params, q, ['d.title', 'd.filename', 'd.channel', 'd.platform', 'd.source_url', 'd.url', 'd.metadata', fileExpr]);
+    addSearchFilter(where, params, q, ['d.title', 'd.filename', 'd.channel', 'd.platform', 'd.source_url', 'd.url', fileExpr]);
   }
   if (Number.isFinite(minRating)) { params.push(minRating); where.push(`${ratingExpr} >= $${params.length}`); }
   if (mediaType === 'video') { where.push(`lower(${extExpr}) IN (${VIDEO_EXTS.map(e=>`'${e}'`).join(',')})`); }

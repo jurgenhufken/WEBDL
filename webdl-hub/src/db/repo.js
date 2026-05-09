@@ -348,31 +348,12 @@ function createRepo({ databaseUrl = config.databaseUrl, schema = config.dbSchema
 
   async function listGroups({ limit = 100 } = {}) {
     const { rows } = await query(
-      `WITH download_rows AS MATERIALIZED (
-         SELECT DISTINCT ON (hub_job_id)
-                hub_job_id, channel, platform, title, finished_at
-           FROM (
-             SELECT NULLIF(substring(metadata from '"hub_job_id"\\s*:\\s*"?([0-9]+)"?'), '')::bigint AS hub_job_id,
-                    channel, platform, title, finished_at
-               FROM public.downloads
-              WHERE metadata LIKE '%hub_job_id%'
-           ) d
-          WHERE hub_job_id IS NOT NULL
-          ORDER BY hub_job_id, finished_at DESC NULLS LAST
-       )
-       SELECT
+      `SELECT
          j.options->>'expandGroup' AS group_id,
          MIN(j.options->>'expandName') AS name,
          MIN(j.options->>'expandUrl') AS url,
-         COALESCE(
-           (array_agg(NULLIF(d.channel, '') ORDER BY d.finished_at DESC NULLS LAST)
-             FILTER (WHERE NULLIF(d.channel, '') IS NOT NULL))[1],
-           (array_agg(NULLIF(d.platform, '') ORDER BY d.finished_at DESC NULLS LAST)
-             FILTER (WHERE NULLIF(d.platform, '') IS NOT NULL))[1],
-           MIN(j.options->>'expandName')
-         ) AS display_name,
-         (array_agg(NULLIF(d.title, '') ORDER BY d.finished_at DESC NULLS LAST)
-           FILTER (WHERE NULLIF(d.title, '') IS NOT NULL))[1] AS latest_title,
+         MIN(j.options->>'expandName') AS display_name,
+         NULL::text AS latest_title,
          MAX(NULLIF(j.options->>'expandTotal','')::int) AS total,
          COUNT(*)::int AS jobs,
          COUNT(*) FILTER (WHERE j.status = 'queued' AND j.lane <> 'paused')::int AS queued,
@@ -385,7 +366,6 @@ function createRepo({ databaseUrl = config.databaseUrl, schema = config.dbSchema
          MIN(j.created_at) AS first_created,
          MAX(j.finished_at) AS last_finished
        FROM ${T.jobs} j
-       LEFT JOIN download_rows d ON d.hub_job_id = j.id
        WHERE j.options ? 'expandGroup'
        GROUP BY j.options->>'expandGroup'
        ORDER BY
@@ -469,21 +449,17 @@ function createRepo({ databaseUrl = config.databaseUrl, schema = config.dbSchema
 
   async function listJobsByGroup(groupId, { limit = 1500 } = {}) {
     const { rows } = await query(
-      `WITH download_rows AS MATERIALIZED (
-         SELECT DISTINCT ON (hub_job_id)
-                hub_job_id, channel, platform, title, finished_at
-           FROM (
-             SELECT NULLIF(substring(metadata from '"hub_job_id"\\s*:\\s*"?([0-9]+)"?'), '')::bigint AS hub_job_id,
-                    channel, platform, title, finished_at
-               FROM public.downloads
-              WHERE metadata LIKE '%hub_job_id%'
-           ) d
-          WHERE hub_job_id IS NOT NULL
-          ORDER BY hub_job_id, finished_at DESC NULLS LAST
-       )
-       SELECT j.*, d.title AS downloaded_title, d.channel AS downloaded_channel, d.platform AS downloaded_platform
+      `SELECT j.*, d.title AS downloaded_title, d.channel AS downloaded_channel, d.platform AS downloaded_platform
          FROM ${T.jobs} j
-         LEFT JOIN download_rows d ON d.hub_job_id = j.id
+         LEFT JOIN LATERAL (
+           SELECT title, channel, platform
+             FROM public.downloads d
+            WHERE d.filepath LIKE '%/hub/' || j.id::text || '/%'
+               OR d.metadata LIKE '%"hub_job_id":"' || j.id::text || '"%'
+               OR d.metadata LIKE '%"hub_job_id":' || j.id::text || '%'
+            ORDER BY d.finished_at DESC NULLS LAST, d.id DESC
+            LIMIT 1
+         ) d ON true
         WHERE j.options->>'expandGroup' = $1
         ORDER BY
           NULLIF(j.options->>'expandIndex','')::int NULLS LAST,

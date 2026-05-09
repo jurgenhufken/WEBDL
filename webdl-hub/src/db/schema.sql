@@ -41,6 +41,13 @@ CREATE INDEX IF NOT EXISTS idx_jobs_lane_status
 -- Voor URL-dedupe: snel bestaande actieve/klare job vinden per URL.
 CREATE INDEX IF NOT EXISTS idx_jobs_url ON __SCHEMA__.jobs (url);
 
+-- Hub group/job views join public gallery rows back to hub jobs via metadata.
+-- Without this expression index, large gallery imports repeatedly scan and sort
+-- the full downloads table for every refresh.
+CREATE INDEX IF NOT EXISTS idx_downloads_hub_job_id_recent
+  ON public.downloads ((NULLIF(substring(metadata from '"hub_job_id"\s*:\s*"?([0-9]+)"?'), '')::bigint), finished_at DESC NULLS LAST)
+  WHERE metadata LIKE '%hub_job_id%';
+
 CREATE TABLE IF NOT EXISTS __SCHEMA__.files (
   id          BIGSERIAL PRIMARY KEY,
   job_id      BIGINT NOT NULL REFERENCES __SCHEMA__.jobs(id) ON DELETE CASCADE,
