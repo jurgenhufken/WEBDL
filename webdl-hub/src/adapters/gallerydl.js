@@ -80,7 +80,14 @@ function plan(url, opts = {}) {
     );
   }
   args.push(targetUrl);
-  return { cmd: 'gallery-dl', args, cwd: opts.cwd, env: {} };
+  return {
+    cmd: 'gallery-dl',
+    args,
+    cwd: opts.cwd,
+    env: {},
+    timeoutMs: Number.parseInt(process.env.WEBDL_GALLERYDL_TIMEOUT_MS || String(20 * 60 * 1000), 10),
+    idleTimeoutMs: Number.parseInt(process.env.WEBDL_GALLERYDL_IDLE_TIMEOUT_MS || String(120 * 1000), 10),
+  };
 }
 
 // gallery-dl schrijft per file een regel "./pad/naar/bestand.ext" op stdout

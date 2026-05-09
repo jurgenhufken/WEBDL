@@ -30,6 +30,7 @@
     activeRefreshMs: 30000,
     activeRefreshTimer: null,
     activeRefreshInFlight: false,
+    tagFilterOptions: [],
     newestFinishedAt: null,
     knownIds: new Set(),
     queryVersion: 0,
@@ -387,6 +388,10 @@
 
   function pumpPendingNewItems() {
     if (state.viewerActive) return;
+    if (state.filters.sort !== 'recent') {
+      state.pendingNewItems = new Map();
+      return;
+    }
     if (!state.pendingNewItems || state.pendingNewItems.size === 0) return;
     const inject = Array.from(state.pendingNewItems.values()).slice(0, state.autoInjectMax);
     for (const it of inject) state.pendingNewItems.delete(String(it.id));
@@ -414,6 +419,21 @@
     state.queryVersion += 1;
   }
 
+  function reconcileLiveRefreshForSort() {
+    if (state.filters.sort !== 'recent') {
+      state.autoRefresh = false;
+      state.liveAllMedia = false;
+      state.pendingNewItems = new Map();
+      if (state.autoInjectTimer) clearTimeout(state.autoInjectTimer);
+      state.autoInjectTimer = null;
+      stopAutoRefresh();
+      syncAutoButton();
+      return;
+    }
+    syncAutoButton();
+    if (state.autoRefresh && !state.viewerActive && !document.hidden) startAutoRefresh();
+  }
+
   function countFromOptionText(text) {
     const match = String(text || '').match(/\((\d+)\)\s*$/);
     return match ? Number(match[1]) : null;
@@ -433,7 +453,10 @@
     const platform = $('platform');
     if (platform && platform.value) return selectedOptionCount(platform);
     const tag = $('tagFilter');
-    if (tag && tag.value) return selectedOptionCount(tag);
+    if (tag && tag.value) {
+      const value = Number(tag.dataset.count);
+      return Number.isFinite(value) ? value : null;
+    }
     return null;
   }
 
@@ -446,11 +469,18 @@
     if (f.min_rating) parts.push(`${f.min_rating}+ sterren`);
     if (f.tag_id) {
       const tagSel = $('tagFilter');
-      const opt = tagSel && tagSel.options ? tagSel.options[tagSel.selectedIndex] : null;
-      const label = opt ? String(opt.textContent || '').replace(/\s*\(\d+\)\s*$/, '') : `tag ${f.tag_id}`;
+      const label = tagSel && tagSel.dataset.label ? tagSel.dataset.label : `tag ${f.tag_id}`;
       parts.push(label);
     }
-    if (f.sort === 'channel') parts.push('sort: kanaal/model');
+    const sortLabels = {
+      oldest: 'sort: oudste',
+      channel: 'sort: kanaal/model A-Z',
+      channel_desc: 'sort: kanaal/model Z-A',
+      rating: 'sort: rating hoog',
+      rating_asc: 'sort: rating laag',
+      random: 'sort: random',
+    };
+    if (sortLabels[f.sort]) parts.push(sortLabels[f.sort]);
     if (f.q) parts.push(`"${f.q}"`);
     return parts.join(' / ');
   }
@@ -497,7 +527,7 @@
             .filter((r) => r.status === 'queued')
             .sort((a, b) => Number(b.count || 0) - Number(a.count || 0))
             .slice(0, 3)
-            .map((r) => `${r.platform} ${r.count}`)
+            .map((r) => `${r.work_lane || r.platform} ${r.count}`)
             .join(' · ')
         : '';
       const card = document.createElement('div');
@@ -512,7 +542,7 @@
       const card = document.createElement('div');
       card.className = 'active-card active-thumb-card';
       const rawPlatform = (it.platform || it.source || 'active').toString();
-      const source = rawPlatform.toLowerCase() === 'jdownloader' ? 'JDownloader' : rawPlatform.toUpperCase();
+      const source = it.work_lane || (rawPlatform.toLowerCase() === 'jdownloader' ? 'JDownloader' : rawPlatform.toUpperCase());
       const status = (it.status || '').toString().toUpperCase();
       const statusLabel = status && status !== source.toUpperCase() ? status : '';
       const sub = [mediaTypeLabel(it), it.platform, it.channel, compactBytes(it.filesize)].filter(Boolean).join(' / ');
@@ -654,32 +684,58 @@
 
   async function loadTagFilterDropdown() {
     const sel = $('tagFilter');
-    if (!sel) return;
+    const matrix = $('tagFilterMatrix');
+    if (!sel && !matrix) return;
     try {
-      const prev = sel.value;
+      const prev = sel ? sel.value : state.filters.tag_id;
       const data = await apiFetch('/api/tags').then(r => r.json());
       const tags = Array.isArray(data.tags) ? data.tags : [];
       const sorted = tags
         .slice()
         .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' }));
       const total = sorted.reduce((sum, t) => sum + Number(t.applied_count || 0), 0);
-      sel.innerHTML = `<option value="">Alle tags (${total})</option>`;
-      for (const tag of sorted) {
-        const count = Number(tag.applied_count || tag.uses || 0);
-        const o = document.createElement('option');
-        o.value = String(tag.id);
-        o.dataset.count = String(count);
-        o.textContent = `#${tag.name} (${count})`;
-        sel.appendChild(o);
-      }
-      if (prev && [...sel.options].some(o => o.value === prev)) {
-        sel.value = prev;
+      state.tagFilterOptions = sorted.map((tag) => ({
+        id: String(tag.id),
+        name: String(tag.name || ''),
+        count: Number(tag.applied_count || tag.uses || 0),
+        favorite: Boolean(tag.is_favorite),
+      }));
+      if (prev && state.tagFilterOptions.some((tag) => tag.id === String(prev))) {
         state.filters.tag_id = prev;
       } else {
-        sel.value = '';
         state.filters.tag_id = '';
       }
+      syncTagFilterControl(total);
     } catch (e) { console.warn('tags filter load failed', e); }
+  }
+
+  function syncTagFilterControl(totalCount = null) {
+    const sel = $('tagFilter');
+    const selectedId = String(state.filters.tag_id || '');
+    const selectedTag = (state.tagFilterOptions || []).find((tag) => tag.id === selectedId);
+    if (sel) {
+      sel.value = selectedId;
+      sel.dataset.label = selectedTag ? `#${selectedTag.name}` : '';
+      sel.dataset.count = selectedTag ? String(selectedTag.count) : '';
+    }
+    const matrix = $('tagFilterMatrix');
+    if (!matrix) return;
+    const total = totalCount != null
+      ? Number(totalCount)
+      : (state.tagFilterOptions || []).reduce((sum, tag) => sum + Number(tag.count || 0), 0);
+    matrix.innerHTML = '';
+    const mkChip = (tag) => {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'tag-filter-chip' + (String(tag.id || '') === selectedId ? ' active' : '');
+      chip.dataset.tagId = String(tag.id || '');
+      chip.title = tag.id ? `Filter op #${tag.name}` : 'Tagfilter wissen';
+      chip.textContent = tag.id ? `#${tag.name} ${tag.count ? `(${tag.count})` : ''}` : `Alle tags (${total})`;
+      chip.addEventListener('click', () => applyTagFilter(tag.id || ''));
+      return chip;
+    };
+    matrix.appendChild(mkChip({ id: '', name: 'Alle tags', count: total }));
+    for (const tag of state.tagFilterOptions || []) matrix.appendChild(mkChip(tag));
   }
 
   function resetChannels() {
@@ -735,9 +791,10 @@
 
   function setFilter(key, value) {
     state.filters[key] = value;
-    // Sync dropdown als aanwezig
+    // Sync filter control als aanwezig
     const el = $(key === 'min_rating' ? 'minRating' : key === 'tag_id' ? 'tagFilter' : key);
     if (el) el.value = value;
+    if (key === 'tag_id') syncTagFilterControl();
   }
 
   async function applyTagFilter(tagId = '') {
@@ -788,8 +845,12 @@
   $('refresh').addEventListener('click', reloadGallery);
 
   for (const id of ['platform', 'channel', 'channelSort', 'sort', 'minRating', 'mediaType', 'tagFilter']) {
-    $(id).addEventListener('change', async () => {
+    const control = $(id);
+    if (!control) continue;
+    control.addEventListener('change', async () => {
       readFiltersFromControls();
+      if (id === 'sort') reconcileLiveRefreshForSort();
+      else syncAutoButton();
       if (id === 'minRating' || id === 'mediaType' || id === 'tagFilter') await loadFilterDropdowns();
       // Bij platform-wissel: kanalen herladen (filtert op geselecteerd platform)
       if (id === 'platform' || id === 'channelSort' || id === 'minRating' || id === 'mediaType' || id === 'tagFilter') await reloadChannels();
@@ -832,7 +893,10 @@
   // ─── Auto-refresh: poll voor nieuwe items ─────────────────────────────────
   async function pollNewItems() {
     if (!state.autoRefresh) return;
-    if (!state.liveAllMedia && state.filters.sort !== 'recent') return;
+    if (state.filters.sort !== 'recent') {
+      state.pendingNewItems = new Map();
+      return;
+    }
     if (state.autoRefreshInFlight) return;
     state.autoRefreshInFlight = true;
     const ctrl = new AbortController();
@@ -869,6 +933,11 @@
 
   function startAutoRefresh() {
     stopAutoRefresh();
+    if (state.filters.sort !== 'recent') {
+      state.pendingNewItems = new Map();
+      syncAutoButton();
+      return;
+    }
     pollNewItems();
     state.autoRefreshTimer = setInterval(pollNewItems, state.autoRefreshMs);
   }
@@ -915,15 +984,28 @@
   // Live-toggle knop
   const autoBtn = document.createElement('button');
   function syncAutoButton() {
-    autoBtn.textContent = state.autoRefresh ? (state.liveAllMedia ? '🔴 Live alles' : '🔴 Live') : '⚪ Live';
-    autoBtn.title = state.autoRefresh
+    const livePausedBySort = state.autoRefresh && state.filters.sort !== 'recent';
+    autoBtn.textContent = livePausedBySort ? '⏸ Live' : (state.autoRefresh ? (state.liveAllMedia ? '🔴 Live alles' : '🔴 Live') : '⚪ Live');
+    autoBtn.title = livePausedBySort
+      ? 'Live-refresh pauzeert bij deze sortering'
+      : state.autoRefresh
       ? (state.liveAllMedia ? 'Auto-refresh aan voor alle media (klik om uit te zetten)' : 'Auto-refresh aan voor huidige filter (klik om uit te zetten)')
       : 'Auto-refresh uit (klik om aan te zetten)';
-    autoBtn.style.cssText = state.autoRefresh ? 'background:#1f6feb;border-color:#1f6feb;color:#fff' : '';
+    autoBtn.style.cssText = livePausedBySort
+      ? 'background:#334155;border-color:#475569;color:#cbd5e1'
+      : (state.autoRefresh ? 'background:#1f6feb;border-color:#1f6feb;color:#fff' : '');
   }
   autoBtn.className = 'auto-toggle';
   syncAutoButton();
   autoBtn.addEventListener('click', () => {
+    if (state.filters.sort !== 'recent') {
+      state.autoRefresh = false;
+      state.liveAllMedia = false;
+      state.pendingNewItems = new Map();
+      stopAutoRefresh();
+      syncAutoButton();
+      return;
+    }
     state.autoRefresh = !state.autoRefresh;
     if (state.autoRefresh) {
       state.liveAllMedia = true;

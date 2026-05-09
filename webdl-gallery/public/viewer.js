@@ -36,6 +36,8 @@
     currentItemTags: [],
     tagRecipes: [],
     recipeDraftTagIds: [],
+    lastAppliedTags: [],
+    lastAppliedItemId: null,
     editingRecipeId: null,
     tagTarget: 'media',
     lastTagOpenAt: 0,
@@ -54,7 +56,10 @@
     // Afspeelsnelheid
     playbackRate: 1.0,
     reverseRAF: null,      // requestAnimationFrame ID voor achteruit
+    reverseTimer: null,
     reverseLastT: 0,
+    reverseBaseTime: 0,
+    reverseBaseT: 0,
 
     // Loop sectie
     loopStart: null,       // in seconden
@@ -96,6 +101,7 @@
   const VIEWER_POS_KEY = 'webdl:viewer:last-position';
   const VIEWER_SPEED_KEY = 'webdl:viewer:playback-rate';
   const TAG_RECIPES_OPEN_KEY = 'webdl:viewer:tag-recipes-open';
+  const LAST_APPLIED_TAGS_KEY = 'webdl:viewer:last-applied-tags';
 
   async function api(url, opts) {
     const sep = url.includes('?') ? '&' : '?';
@@ -268,7 +274,7 @@
   function init() {
     const ids = [
       'viewer','vSidebar','vSidebarBackdrop','vList',
-      'vMode','vFilter','vTagFilter','vReload',
+      'vMode','vFilter','vTagFilter','vTagFilterMatrix','vReload',
       'vSlideshow','vSlideshowSec','vWrap','vRandom','vVideoWait','vChannelScope',
       'vNowTitle','vNowSub','vNowRating',
       'vRatingSelect',
@@ -279,12 +285,12 @@
       'vBtnMuteBottom','vBottomVol','vBtnFullscreen',
       'vBtnTags','vBtnLog','vClose',
       'vSlideshow2','vRandom2',
-      'vStage','vContent','vPrev','vNext','vUp','vDown','vHudLeft','vHudRight',
+      'vStage','vContent','vPrev','vNext','vHudLeft','vHudRight',
       'vProgressBar','vProgressFill','vProgressHandle',
-      'vBottomControls','vBtnPlayPause','vTimeLabel','vBtnRotateBottom','vBtnRotateStage',
+      'vBottomControls','vBtnPlayPause','vTimeLabel','vBtnRotateBottom','vBtnRotateStage','vBtnCaptureStage',
       'vTagDialog','vTagDialogInner','vTagCurrent','vTagTargetMedia','vTagTargetRecipe','vTagQuick','vTagRecipes','vRecipeName','vRecipeDescription',
       'vRecipeDraft','vBtnRecipeFromItem','vBtnSaveRecipe','vBtnClearRecipe','vBtnToggleRecipes','vFavoriteOverlay',
-      'vTagSearch','vTagList','vNewTagInput','vBtnAddTag','vBtnCloseTagDialog',
+      'vTagLast','vTagSearch','vTagList','vNewTagInput','vBtnAddTag','vBtnCloseTagDialog',
       'vLogPanel','vLogBody',
     ];
     for (const id of ids) {
@@ -297,6 +303,7 @@
     bindMouse();
     restorePlaybackRate();
     restoreTagRecipeVisibility();
+    restoreLastAppliedTags();
     syncViewerModeControls();
     loadTags();
   }
@@ -392,27 +399,29 @@
       chip.className = 'vfavorite-chip'
         + (active ? ' active' : '')
         + (filterActive ? ' filter-active' : '');
-      chip.disabled = vs.quickTagMode === 'media' && active;
       chip.title = vs.quickTagMode === 'filter'
-        ? (filterActive ? 'Filter actief' : 'Filter viewer op deze tag')
-        : (active ? 'Staat al op media' : 'Tag aan huidige media toevoegen');
+        ? (filterActive ? 'Tagfilter wissen' : 'Filter viewer op deze tag')
+        : (active ? 'Tag van huidige media verwijderen' : 'Tag aan huidige media toevoegen');
       chip.textContent = `#${safeText(tag.name)}`;
       chip.addEventListener('click', async (e) => {
         e.stopPropagation();
         if (vs.quickTagMode === 'filter') {
-          await applyQuickTagFilter(tag);
+          await applyQuickTagFilter(filterActive ? null : tag);
           return;
         }
-        if (chip.disabled) return;
         try {
           chip.disabled = true;
-          await addTagToMedia(itemId, tag);
+          if (active) {
+            await removeTagFromMedia(itemId, tag);
+          } else {
+            await addTagToMedia(itemId, tag);
+          }
           if (el.vTagDialog && !el.vTagDialog.classList.contains('hidden')) renderTagDialog();
           const gallery = gal();
           if (gallery && typeof gallery.loadTagFilterDropdown === 'function') {
             gallery.loadTagFilterDropdown().catch(() => {});
           }
-          log(`Tag toegevoegd: ${tag.name}`);
+          log(active ? `Tag verwijderd: ${tag.name}` : `Tag toegevoegd: ${tag.name}`);
         } catch (err) {
           chip.disabled = false;
           log('Tag fout: ' + err.message);
@@ -428,6 +437,7 @@
     if (!vs.queryFilters) vs.queryFilters = snapshotGalleryFilters();
     vs.queryFilters.tag_id = tagId;
     if (el.vTagFilter) el.vTagFilter.value = tagId;
+    renderViewerTagFilterMatrix();
     vs.channels = [];
     const gallery = gal();
     if (gallery && typeof gallery.applyTagFilter === 'function') {
@@ -731,48 +741,12 @@
     applyTransform();
     attachZoomHandlers(mediaEl);
 
-    // Align progress bar exact op onderkant van de afgespeelde pixels
-    function alignProgressBar() {
-      const media = el.vContent.querySelector('video, img');
-      if (!media || !el.vProgressBar) return;
-      
-      const isVid = media.tagName === 'VIDEO';
-      const w = isVid ? media.videoWidth : media.naturalWidth;
-      const h = isVid ? media.videoHeight : media.naturalHeight;
-      if (!w || !h) return;
-      
-      const stageRect = el.vStage.getBoundingClientRect();
-      const stageRatio = stageRect.width / stageRect.height;
-      const mediaRatio = w / h;
-      
-      let actualHeight, actualWidth;
-      if (mediaRatio > stageRatio) {
-        // Breder dan stage: letterbox boven en onder
-        actualWidth = stageRect.width;
-        actualHeight = stageRect.width / mediaRatio;
-      } else {
-        // Hoger dan stage: letterbox links en rechts (portrait)
-        actualHeight = stageRect.height;
-        actualWidth = stageRect.height * mediaRatio;
-      }
-      
-      const bottomOffset = (stageRect.height - actualHeight) / 2;
-      const sideOffset = (stageRect.width - actualWidth) / 2;
-      
-      el.vProgressBar.style.bottom = bottomOffset + 'px';
-      el.vProgressBar.style.left = sideOffset + 'px';
-      el.vProgressBar.style.right = sideOffset + 'px';
+    if (el.vProgressBar) {
+      el.vProgressBar.style.removeProperty('bottom');
+      el.vProgressBar.style.removeProperty('left');
+      el.vProgressBar.style.removeProperty('right');
+      el.vProgressBar.style.removeProperty('width');
     }
-    mediaEl.addEventListener(mediaEl.tagName === 'VIDEO' ? 'loadedmetadata' : 'load', alignProgressBar);
-    // Ook bij resize
-    if (!vs._resizeAlignBound) {
-      vs._resizeAlignBound = true;
-      window.addEventListener('resize', () => {
-        requestAnimationFrame(alignProgressBar);
-      });
-    }
-    // Na een kort moment voor layout
-    requestAnimationFrame(() => setTimeout(alignProgressBar, 50));
 
     // Mute-knop initieel syncen
     el.vBtnMute.textContent = vs.muted ? '🔇' : '🔊';
@@ -1219,6 +1193,72 @@
     }
   }
 
+  function drawCurrentVideoFrame(videoEl) {
+    if (!videoEl || videoEl.tagName !== 'VIDEO') throw new Error('Geen video actief');
+    if (!videoEl.videoWidth || !videoEl.videoHeight || videoEl.readyState < 2) {
+      throw new Error('Video-frame is nog niet geladen');
+    }
+    const sourceW = videoEl.videoWidth;
+    const sourceH = videoEl.videoHeight;
+    const rotation = ((Number(vs.rotation || 0) % 360) + 360) % 360;
+    const rotated = rotation === 90 || rotation === 270;
+    const canvas = document.createElement('canvas');
+    canvas.width = rotated ? sourceH : sourceW;
+    canvas.height = rotated ? sourceW : sourceH;
+    const ctx = canvas.getContext('2d', { alpha: false });
+    if (!ctx) throw new Error('Canvas niet beschikbaar');
+    ctx.save();
+    ctx.translate(canvas.width / 2, canvas.height / 2);
+    if (rotation) ctx.rotate(rotation * Math.PI / 180);
+    ctx.drawImage(videoEl, -sourceW / 2, -sourceH / 2, sourceW, sourceH);
+    ctx.restore();
+    return canvas;
+  }
+
+  function canvasToBlob(canvas, type = 'image/jpeg', quality = 0.92) {
+    return new Promise((resolve, reject) => {
+      canvas.toBlob((blob) => {
+        if (!blob || !blob.size) reject(new Error('Screenshot is leeg'));
+        else resolve(blob);
+      }, type, quality);
+    });
+  }
+
+  async function captureCurrentVideoFrame() {
+    const it = vs.items[vs.idx];
+    const videoEl = vs.currentMediaEl && vs.currentMediaEl.tagName === 'VIDEO'
+      ? vs.currentMediaEl
+      : el.vContent.querySelector('video');
+    if (!it || !videoEl) {
+      showHudMessage('Geen video actief');
+      return;
+    }
+    if (el.vBtnCaptureStage) el.vBtnCaptureStage.disabled = true;
+    try {
+      const canvas = drawCurrentVideoFrame(videoEl);
+      const blob = await canvasToBlob(canvas);
+      const params = new URLSearchParams();
+      params.set('item_id', String(it.id));
+      params.set('title', String(it.title || it.filename || 'video'));
+      if (Number.isFinite(videoEl.currentTime)) params.set('time_seconds', String(videoEl.currentTime));
+      params.set('_t', VIEWER_TAB_ID);
+      const resp = await fetch(`/api/viewer-screenshot?${params.toString()}`, {
+        method: 'POST',
+        headers: { 'Content-Type': blob.type || 'image/jpeg' },
+        body: blob,
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data.success) throw new Error(data.error || `HTTP ${resp.status}`);
+      showHudMessage('Screenshot opgeslagen', 2200);
+      log('Screenshot opgeslagen bij huidige video');
+    } catch (e) {
+      showHudMessage('Screenshot fout');
+      log('Screenshot fout: ' + (e && e.message ? e.message : String(e)));
+    } finally {
+      if (el.vBtnCaptureStage) el.vBtnCaptureStage.disabled = false;
+    }
+  }
+
   // ─── HUD ──────────────────────────────────────────────────────────────────
   function updateHUD(it) {
     const total = vs.items.length;
@@ -1236,6 +1276,7 @@
     if (el.vBottomControls) el.vBottomControls.classList.toggle('hidden', it.type !== 'video');
     if (el.vStage) el.vStage.classList.toggle('viewer-stage--video', it.type === 'video');
     if (el.vBtnReloadMedia) el.vBtnReloadMedia.disabled = !it || (it.type !== 'video' && it.type !== 'image');
+    if (el.vBtnCaptureStage) el.vBtnCaptureStage.disabled = !it || it.type !== 'video';
     updatePlaybackControls(null);
   }
 
@@ -1364,7 +1405,7 @@
   }
 
   function userTagUses(tag) {
-    return Number(tag && (tag.user_use_count ?? tag.uses) || 0);
+    return Number(tag && (tag.user_use_count ?? tag.applied_count ?? tag.uses) || 0);
   }
 
   function sortUserTags(a, b) {
@@ -1380,6 +1421,39 @@
 
   function sortTagsByName(a, b) {
     return safeText(a && a.name).localeCompare(safeText(b && b.name));
+  }
+
+  function normalizeTagList(tags) {
+    const out = [];
+    const seen = new Set();
+    for (const tag of tags || []) {
+      const id = Number(tag && tag.id);
+      if (!Number.isFinite(id) || seen.has(id)) continue;
+      seen.add(id);
+      out.push({ id, name: safeText(tag.name || `tag ${id}`) });
+    }
+    return out;
+  }
+
+  function restoreLastAppliedTags() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(LAST_APPLIED_TAGS_KEY) || '[]');
+      vs.lastAppliedTags = normalizeTagList(parsed).slice(0, 24);
+    } catch (_) {
+      vs.lastAppliedTags = [];
+    }
+  }
+
+  function rememberAppliedTags(tags, opts = {}) {
+    const normalized = normalizeTagList(tags).slice(0, 24);
+    if (!normalized.length) return;
+    if (opts.itemId != null && String(vs.lastAppliedItemId || '') === String(opts.itemId || '')) {
+      vs.lastAppliedTags = normalizeTagList([...(vs.lastAppliedTags || []), ...normalized]).slice(0, 24);
+    } else {
+      vs.lastAppliedTags = normalized;
+    }
+    vs.lastAppliedItemId = opts.itemId != null ? String(opts.itemId) : null;
+    try { localStorage.setItem(LAST_APPLIED_TAGS_KEY, JSON.stringify(vs.lastAppliedTags)); } catch (_) {}
   }
 
   function syncTagTargetControls() {
@@ -1398,15 +1472,43 @@
     renderTagDialog();
   }
 
-  async function addTagToMedia(itemId, tag) {
+  async function addTagToMedia(itemId, tag, opts = {}) {
     await api(`/api/items/${itemId}/tags`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ tag_id: tag.id }),
     });
+    if (opts.remember !== false) rememberAppliedTags([tag], { itemId });
     await loadItemTags(itemId);
     await loadTags();
     renderFavoriteOverlay();
+  }
+
+  async function removeTagFromMedia(itemId, tag) {
+    await api(`/api/items/${itemId}/tags/${tag.id}`, { method: 'DELETE' });
+    vs.currentItemTags = (vs.currentItemTags || []).filter((t) => Number(t.id) !== Number(tag.id));
+    await loadItemTags(itemId);
+    await loadTags();
+    renderFavoriteOverlay();
+  }
+
+  async function applyTagsToMedia(itemId, tags, opts = {}) {
+    const normalized = normalizeTagList(tags);
+    if (!normalized.length) return 0;
+    const currentIds = new Set((vs.currentItemTags || []).map((t) => Number(t.id)));
+    const missing = normalized.filter((tag) => !currentIds.has(Number(tag.id)));
+    for (const tag of missing) {
+      await api(`/api/items/${itemId}/tags`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tag_id: tag.id }),
+      });
+    }
+    if (opts.remember !== false) rememberAppliedTags(normalized, { itemId });
+    await loadTags();
+    await loadItemTags(itemId);
+    renderFavoriteOverlay();
+    return missing.length;
   }
 
   async function applyPickedTag(itemId, tag) {
@@ -1435,19 +1537,36 @@
       const data = await api('/api/tags');
       vs.availableTags = (data.tags || []).sort(sortUserTags);
       renderFavoriteOverlay();
-      // Tag-filter select vullen
-      const sel = el.vTagFilter;
-      sel.innerHTML = '<option value="">Alle tags</option>';
-      for (const t of vs.availableTags) {
-        const o = document.createElement('option');
-        o.value = String(t.id);
-        const prefix = t.is_favorite ? '★ ' : '';
-        const useCount = userTagUses(t);
-        o.textContent = useCount ? `${prefix}${t.name} (${useCount})` : `${prefix}${t.name}`;
-        sel.appendChild(o);
-      }
+      renderViewerTagFilterMatrix();
     } catch (e) {
       console.warn('tags load failed', e);
+    }
+  }
+
+  function renderViewerTagFilterMatrix() {
+    if (!el.vTagFilterMatrix) return;
+    const selectedId = String((vs.queryFilters && vs.queryFilters.tag_id) || (el.vTagFilter && el.vTagFilter.value) || '');
+    if (el.vTagFilter) el.vTagFilter.value = selectedId;
+    el.vTagFilterMatrix.innerHTML = '';
+    const mkChip = (tag) => {
+      const tagId = tag && tag.id != null ? String(tag.id) : '';
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'tag-filter-chip' + (tagId === selectedId ? ' active' : '');
+      chip.title = tagId ? `Filter op #${safeText(tag.name)}` : 'Tagfilter wissen';
+      const count = tagId ? userTagUses(tag) : 0;
+      chip.textContent = tagId
+        ? `#${safeText(tag.name)}${count ? ` (${count})` : ''}`
+        : 'Alle tags';
+      chip.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        await applyQuickTagFilter(tagId ? tag : null);
+      });
+      return chip;
+    };
+    el.vTagFilterMatrix.appendChild(mkChip(null));
+    for (const tag of (vs.availableTags || []).slice(0, 80)) {
+      el.vTagFilterMatrix.appendChild(mkChip(tag));
     }
   }
 
@@ -1727,6 +1846,43 @@
       }
     }
 
+    if (el.vTagLast) {
+      el.vTagLast.innerHTML = '';
+      const lastTags = normalizeTagList(vs.lastAppliedTags);
+      if (!lastTags.length) {
+        const empty = document.createElement('span');
+        empty.className = 'tag-empty';
+        empty.textContent = 'Nog niets onthouden';
+        el.vTagLast.appendChild(empty);
+      } else {
+        const currentIdsForLast = new Set(vs.currentItemTags.map(t => Number(t.id)));
+        const chips = document.createElement('div');
+        chips.className = 'tag-last-chips';
+        for (const tag of lastTags.slice(0, 12)) {
+          const chip = document.createElement('span');
+          chip.className = 'tag-mini-chip' + (currentIdsForLast.has(Number(tag.id)) ? ' active' : '');
+          chip.textContent = `#${safeText(tag.name)}`;
+          chips.appendChild(chip);
+        }
+        const applyLast = document.createElement('button');
+        applyLast.type = 'button';
+        applyLast.className = 'tag-apply-last';
+        applyLast.textContent = 'Toepassen';
+        applyLast.disabled = lastTags.every((tag) => currentIdsForLast.has(Number(tag.id)));
+        applyLast.title = applyLast.disabled ? 'Alle laatst gebruikte tags staan al op dit item' : 'Laatste tag-set op dit item toepassen';
+        applyLast.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          if (applyLast.disabled) return;
+          try {
+            const added = await applyTagsToMedia(itemId, lastTags, { remember: false });
+            renderTagDialog();
+            log(added ? `Laatste tags toegepast: ${added}` : 'Laatste tags stonden al op dit item');
+          } catch (err) { log('Laatste tags fout: ' + err.message); }
+        });
+        el.vTagLast.append(chips, applyLast);
+      }
+    }
+
     const q = (el.vTagSearch?.value || '').trim().toLowerCase();
     const quickTags = favoriteTags();
 
@@ -1818,6 +1974,7 @@
             e.stopPropagation();
             try {
               await api(`/api/items/${itemId}/tag-recipes/${recipe.id}`, { method: 'POST' });
+              rememberAppliedTags(recipe.tags || [], { itemId });
               await loadTags();
               await loadItemTags(itemId);
               await loadTagRecipes();
@@ -2014,30 +2171,75 @@
     activeVideo.pause();
     activeVideo.playbackRate = 1;
     syncVideoProgress(activeVideo, { checkLoop: false });
-    vs.reverseLastT = performance.now();
-    function tick(now) {
+    vs.reverseBaseTime = activeVideo.currentTime;
+    vs.reverseBaseT = performance.now();
+    vs.reverseLastT = 0;
+
+    function seekVideo(video, time) {
+      try {
+        if (typeof video.fastSeek === 'function' && Math.abs(video.currentTime - time) > 0.45) video.fastSeek(time);
+        else video.currentTime = time;
+      } catch (_) {
+        video.currentTime = time;
+      }
+    }
+
+    function reverseBounds(video) {
+      const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : Infinity;
+      if (vs.loopStart != null && vs.loopEnd != null && Math.abs(vs.loopEnd - vs.loopStart) > 0.05) {
+        return {
+          start: Math.max(0, Math.min(vs.loopStart, vs.loopEnd)),
+          end: Math.min(duration, Math.max(vs.loopStart, vs.loopEnd)),
+          loop: true,
+        };
+      }
+      return { start: 0, end: duration, loop: false };
+    }
+
+    function resyncReverseClock(video, now) {
+      vs.reverseBaseTime = video.currentTime;
+      vs.reverseBaseT = now;
+    }
+
+    function tick() {
       const v = el.vContent.querySelector('video');
       if (!v || vs.playbackRate > 0) { stopReverse(); return; }
-      const dt = (now - vs.reverseLastT) / 1000;
-      vs.reverseLastT = now;
-      const step = Math.max(dt * speed, 1 / 120);
-      v.currentTime = Math.max(0, v.currentTime - step);
-      syncVideoProgress(v, { checkLoop: false });
-      if (v.currentTime <= 0) {
+      const now = performance.now();
+      const bounds = reverseBounds(v);
+
+      if (v.seeking && now - vs.reverseLastT < 500) {
+        vs.reverseTimer = setTimeout(tick, 45);
+        return;
+      }
+
+      let target = vs.reverseBaseTime - (((now - vs.reverseBaseT) / 1000) * speed);
+      if (bounds.loop && target < bounds.start) {
+        target = bounds.end - ((bounds.start - target) % Math.max(0.05, bounds.end - bounds.start));
+        seekVideo(v, target);
+        resyncReverseClock(v, now);
+      } else if (target <= bounds.start) {
+        target = bounds.start;
+        seekVideo(v, target);
         vs.playbackRate = 1;
         stopReverse();
         updateSpeedIndicator();
         syncVideoProgress(v, { checkLoop: false });
-        showHudMessage('Begin video', 900);
+        showHudMessage(bounds.loop ? 'Begin loop' : 'Begin video', 900);
         return;
+      } else if (Math.abs(v.currentTime - target) >= 0.025) {
+        seekVideo(v, target);
       }
-      vs.reverseRAF = requestAnimationFrame(tick);
+      vs.reverseLastT = now;
+      syncVideoProgress(v, { checkLoop: false });
+      vs.reverseTimer = setTimeout(tick, 70);
     }
-    vs.reverseRAF = requestAnimationFrame(tick);
+    vs.reverseTimer = setTimeout(tick, 70);
   }
 
   function stopReverse() {
     if (vs.reverseRAF) { cancelAnimationFrame(vs.reverseRAF); vs.reverseRAF = null; }
+    if (vs.reverseTimer) { clearTimeout(vs.reverseTimer); vs.reverseTimer = null; }
+    vs.reverseLastT = 0;
   }
 
   function updateSpeedIndicator() {
@@ -2428,8 +2630,6 @@
     el.vClose.addEventListener('click', close);
     el.vPrev.addEventListener('click', (e) => { e.stopPropagation(); navPrev(); });
     el.vNext.addEventListener('click', (e) => { e.stopPropagation(); navNext(); });
-    if (el.vUp) el.vUp.addEventListener('click', (e) => { e.stopPropagation(); navPost(-1); });
-    if (el.vDown) el.vDown.addEventListener('click', (e) => { e.stopPropagation(); navPost(1); });
     el.vBtnSidebar.addEventListener('click', () => toggleSidebar());
     el.vNowRating.addEventListener('click', (e) => {
       const btn = e.target && e.target.closest ? e.target.closest('.rating-star-btn') : null;
@@ -2482,6 +2682,13 @@
     if (el.vBtnRotateStage) {
       el.vBtnRotateStage.addEventListener('click', (e) => {
         window.__wdRotateMedia(e);
+      });
+    }
+    if (el.vBtnCaptureStage) {
+      el.vBtnCaptureStage.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        captureCurrentVideoFrame();
       });
     }
 
@@ -2674,6 +2881,7 @@
     el.vTagFilter.addEventListener('change', async () => {
       if (!vs.queryFilters) vs.queryFilters = snapshotGalleryFilters();
       vs.queryFilters.tag_id = el.vTagFilter.value || '';
+      renderViewerTagFilterMatrix();
       vs.channels = [];
       await reloadViewerItems({ preserveSelection: true });
     });

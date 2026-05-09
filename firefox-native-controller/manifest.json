@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Screen Recorder Controller",
-  "version": "1.0.21",
+  "version": "1.0.25",
   "description": "Besturingsinterface voor de native Screen Recorder applicatie",
   "icons": {
     "48": "icons/icon-48.svg",
@@ -13,6 +13,8 @@
     "storage",
     "http://localhost/*",
     "http://127.0.0.1/*",
+    "*://foot-fetish.club/*",
+    "*://*.foot-fetish.club/*",
     "*://*.footfetishforum.com/*",
     "*://*.vipergirls.to/*",
     "*://*.viper.to/*",

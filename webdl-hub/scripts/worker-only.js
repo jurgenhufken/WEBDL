@@ -15,6 +15,7 @@ const adapters = [
   require('../src/adapters/instaloader'),
   require('../src/adapters/reddit'),
   require('../src/adapters/redgifs'),
+  require('../src/adapters/xenforo'),
   require('../src/adapters/gallerydl'),
   require('../src/adapters/ytdlp'),
 ];

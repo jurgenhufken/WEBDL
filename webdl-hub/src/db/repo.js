@@ -7,11 +7,10 @@ const config = require('../config');
 const VALID_SCHEMA = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 
 // Lane classifier: bepaalt concurrency-bucket.
-//  - 'process-video': video + ffmpeg merge / zware sessie-adapters,
-//    max 1 tegelijk wegens zware CPU (ffmpeg-merge + transcodes)
-//  - 'video':         directe video download zonder merge
-//  - 'gallery':       gallery-dl thread/galleries; snel binnen job, 1 job tegelijk
-//  - 'image':         images/attachments (netwerk-bound)
+// Oude UI-banen:
+//  - Heavy:  'process-video' voor video met postprocessing/merge/transcode.
+//  - Middle: 'video' voor langere/directe video zonder postprocessing.
+//  - Fast:   'image' en 'gallery' voor afbeeldingen, imagehosts en scans.
 const IMAGE_URL_RE = /\.(jpe?g|png|webp|gif|avif|bmp|tiff?)(\?|$)/i;
 const DIRECT_VIDEO_RE = /\.(mp4|webm|mkv|mov|m4v|avi|wmv|flv|ts|m2ts|mpg|mpeg|ogv|3gp|3g2)(\?|$)/i;
 const MERGE_VIDEO_HOSTS = [
@@ -30,13 +29,14 @@ function isDirectTikTokVideo(pathname) {
 
 function classifyLane(url, adapter) {
   const u = String(url || '').toLowerCase();
+  if (DIRECT_VIDEO_RE.test(u)) return 'video';
   if (adapter === 'slave-delegate') {
     // Slave-delegated hosts are handled by simple-server; in the hub they
-    // should be grouped with lightweight media, not shown as video work.
+    // stay Fast unless the URL is a direct video, which belongs in Middle.
     return 'image';
   }
   if (IMAGE_URL_RE.test(u)) return 'image';
-  if (adapter === 'gallerydl') {
+  if (adapter === 'gallerydl' || adapter === 'xenforo') {
     // gallery-dl batches kunnen zelf veel media bevatten. Houd ze serieel,
     // zodat grote Viper/forum threads elkaar niet beconcurreren.
     return 'gallery';
@@ -54,7 +54,6 @@ function classifyLane(url, adapter) {
     // Deze adapters downloaden mixed content; default naar video-lane (geen ffmpeg merge).
     return 'video';
   }
-  if (DIRECT_VIDEO_RE.test(u)) return 'video';
   // Alleen bekende merge-/sessie-zware hosts blokkeren de zware lane.
   // Andere yt-dlp hosts (zoals directe tube sites) mogen parallel in video.
   if (adapter === 'ytdlp') {
@@ -78,7 +77,7 @@ function defaultJobPriority(url, adapter, lane = null) {
   if (adapter === 'slave-delegate') return 70;
   if (adapter === 'reddit' || adapter === 'reddit-dl') return 65;
   if (adapter === 'redgifs') return 25;
-  if (adapter === 'gallerydl') return 60;
+  if (adapter === 'gallerydl' || adapter === 'xenforo') return 60;
   if (finalLane === 'image') return 55;
   if (finalLane === 'video') return 20;
   return 0;
@@ -347,40 +346,53 @@ function createRepo({ databaseUrl = config.databaseUrl, schema = config.dbSchema
   }
 
   async function listGroups({ limit = 100 } = {}) {
-    const { rows } = await query(
-      `SELECT
-         j.options->>'expandGroup' AS group_id,
-         MIN(j.options->>'expandName') AS name,
-         MIN(j.options->>'expandUrl') AS url,
-         MIN(j.options->>'expandName') AS display_name,
-         NULL::text AS latest_title,
-         MAX(NULLIF(j.options->>'expandTotal','')::int) AS total,
-         COUNT(*)::int AS jobs,
-         COUNT(*) FILTER (WHERE j.status = 'queued' AND j.lane <> 'paused')::int AS queued,
-         COUNT(*) FILTER (WHERE j.status = 'queued' AND j.lane = 'paused')::int AS paused,
-         COUNT(*) FILTER (WHERE j.status = 'running')::int AS running,
-         COUNT(*) FILTER (WHERE j.status = 'done')::int AS done,
-         COUNT(*) FILTER (WHERE j.status = 'failed')::int AS failed,
-         MIN(NULLIF(j.options->>'expandIndex','')::int) FILTER (WHERE j.status <> 'done') AS next_index,
-         MAX(NULLIF(j.options->>'expandIndex','')::int) FILTER (WHERE j.status = 'done') AS max_done_index,
-         MIN(j.created_at) AS first_created,
-         MAX(j.finished_at) AS last_finished
-       FROM ${T.jobs} j
-       WHERE j.options ? 'expandGroup'
-       GROUP BY j.options->>'expandGroup'
-       ORDER BY
-         CASE
-           WHEN COUNT(*) FILTER (WHERE j.status = 'running') > 0 THEN 0
-           WHEN COUNT(*) FILTER (WHERE j.status = 'queued' AND j.lane <> 'paused') > 0 THEN 1
-           WHEN COUNT(*) FILTER (WHERE j.status = 'queued' AND j.lane = 'paused') > 0 THEN 2
-           WHEN COUNT(*) FILTER (WHERE j.status = 'failed') > 0 THEN 3
-           ELSE 4
-         END,
-         MIN(j.created_at) ASC
-       LIMIT $1`,
-      [limit],
-    );
-    return rows;
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      // Large playlist options are TOASTed JSONB values. For this dashboard
+      // aggregate the expression index is consistently faster than a seq scan.
+      await client.query('SET LOCAL enable_seqscan = off');
+      const { rows } = await client.query(
+        `SELECT
+           j.options->>'expandGroup' AS group_id,
+           MIN(j.options->>'expandName') AS name,
+           MIN(j.options->>'expandUrl') AS url,
+           MIN(j.options->>'expandName') AS display_name,
+           NULL::text AS latest_title,
+           MAX(NULLIF(j.options->>'expandTotal','')::int) AS total,
+           COUNT(*)::int AS jobs,
+           COUNT(*) FILTER (WHERE j.status = 'queued' AND j.lane <> 'paused')::int AS queued,
+           COUNT(*) FILTER (WHERE j.status = 'queued' AND j.lane = 'paused')::int AS paused,
+           COUNT(*) FILTER (WHERE j.status = 'running')::int AS running,
+           COUNT(*) FILTER (WHERE j.status = 'done')::int AS done,
+           COUNT(*) FILTER (WHERE j.status = 'failed')::int AS failed,
+           MIN(NULLIF(j.options->>'expandIndex','')::int) FILTER (WHERE j.status <> 'done') AS next_index,
+           MAX(NULLIF(j.options->>'expandIndex','')::int) FILTER (WHERE j.status = 'done') AS max_done_index,
+           MIN(j.created_at) AS first_created,
+           MAX(j.finished_at) AS last_finished
+         FROM ${T.jobs} j
+         WHERE j.options ? 'expandGroup'
+         GROUP BY j.options->>'expandGroup'
+         ORDER BY
+           CASE
+             WHEN COUNT(*) FILTER (WHERE j.status = 'running') > 0 THEN 0
+             WHEN COUNT(*) FILTER (WHERE j.status = 'queued' AND j.lane <> 'paused') > 0 THEN 1
+             WHEN COUNT(*) FILTER (WHERE j.status = 'queued' AND j.lane = 'paused') > 0 THEN 2
+             WHEN COUNT(*) FILTER (WHERE j.status = 'failed') > 0 THEN 3
+             ELSE 4
+           END,
+           MIN(j.created_at) ASC
+         LIMIT $1`,
+        [limit],
+      );
+      await client.query('COMMIT');
+      return rows;
+    } catch (e) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw e;
+    } finally {
+      client.release();
+    }
   }
 
   async function getGroupSummary(groupId) {

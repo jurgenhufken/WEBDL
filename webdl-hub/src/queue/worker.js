@@ -15,6 +15,8 @@ const DATABASE_URL = process.env.DATABASE_URL || 'postgres://jurgen@localhost:54
 const VIDEO_EXTS = new Set(['.mp4', '.mkv', '.webm', '.mov', '.m4v', '.avi', '.wmv', '.flv', '.ts', '.m2ts', '.mpg', '.mpeg', '.ogv', '.3gp', '.3g2']);
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.avif']);
 const SKIP_EXTS = new Set(['.part', '.ytdl', '.tmp']);
+const PARTIAL_MEDIA_BASENAME_RE = /(?:^|[._-])(?:temp|partial|part|download)(?:[._-]|$)/i;
+const YTDLP_FORMAT_FRAGMENT_RE = /\.f\d+\.(?:mp4|webm|m4a|mkv|mov|m4v|avi|wmv|flv|ts|m2ts|mpg|mpeg|ogv|3gp|3g2)$/i;
 const AUX_IMAGE_BASENAME_RE = /(^\d{1,3}[-_. ]?thumbnail|(?:^|[-_. ])thumbnail|_thumb(_v\d+)?|_preview|_logo)\.(jpe?g|png|webp|gif|bmp|avif)$/i;
 const SITE_SHELL_IMAGE_BASENAME_RE = /^(?:vipergirls|viper)[-_.]\d+\.(jpe?g|png|webp|gif|bmp|avif)$/i;
 const FORUM_CHROME_IMAGE_BASENAME_RE = /(?:^|[-_. ])(?:statusicon|reputation|avatar|button|spacer|blank)(?:[-_. ]|$)/i;
@@ -81,6 +83,7 @@ function detectPlatform(url) {
   try {
     const h = new URL(url).hostname.toLowerCase();
     const p = new URL(url).pathname.toLowerCase();
+    if (h === 'translated.turbopages.org' || h.endsWith('.translated.turbopages.org')) return 'turbopages';
     if (h.includes('vipergirls.to') || h.includes('viper.to')) return 'vipergirls';
     if (h.includes('youtube') || h.includes('youtu.be')) return 'youtube';
     if (h === 'flc.nyc3.digitaloceanspaces.com' && /\/data\/(?:attachments|video)\//i.test(p)) return 'footfetishforum';
@@ -96,6 +99,33 @@ function detectPlatform(url) {
     if (h.includes('danbooru')) return 'danbooru';
     return h.replace(/^www\./, '').split('.')[0];
   } catch { return 'unknown'; }
+}
+
+function platformOverrideFromJob(job) {
+  const optionPlatform = String(job?.options?.platform || '').trim().toLowerCase();
+  if (optionPlatform === 'turbopages') return 'turbopages';
+  try {
+    const contextUrl = String(job?.options?.contextUrl || job?.options?.pageUrl || '').trim();
+    if (contextUrl && detectPlatform(contextUrl) === 'turbopages') return 'turbopages';
+  } catch {}
+  return '';
+}
+
+function normalizeChaturbateTarget(parts = {}) {
+  const haystack = [
+    parts.platform,
+    parts.channel,
+    parts.title,
+    parts.filename,
+    parts.filepath,
+    parts.sourceUrl,
+    parts.contextUrl,
+  ].filter(Boolean).join(' ').toLowerCase().replace(/[_-]+/g, ' ');
+  const isCamSource = /\b(chaturbate|cloudbate|archivebate|xhomealone)\b/.test(haystack);
+  if (!isCamSource) return null;
+  if (/\bjuliana\s+gonebad\b/.test(haystack)) return { platform: 'chaturbate', channel: 'juliana_gonebad' };
+  if (/\bbreeding\s+material\b/.test(haystack)) return { platform: 'chaturbate', channel: 'breeding_material' };
+  return null;
 }
 
 function titleFromThreadUrl(rawUrl) {
@@ -268,6 +298,7 @@ function forumInfoFromJob(job) {
   const sourceThreadTitle = String(options.title || options.channel || titleFromThreadUrl(sourceUrl)).replace(/^thread_\d+$/i, '').trim();
   const sourceThreadId = forumThreadIdFromUrl(sourceUrl);
   if (!pinnedVipergirls && !sourceThreadTitle && !sourceThreadId) return null;
+  const platformOverride = platformOverrideFromJob(job);
   return {
     sourceThreadTitle,
     sourceThreadId,
@@ -275,7 +306,7 @@ function forumInfoFromJob(job) {
     sourcePostNum: '',
     sourcePostId: '',
     sourceForumTitle: '',
-    sourceSite: pinnedVipergirls ? 'vipergirls' : detectPlatform(sourceUrl || job?.url),
+    sourceSite: pinnedVipergirls ? 'vipergirls' : (platformOverride || detectPlatform(sourceUrl || job?.url)),
   };
 }
 
@@ -439,6 +470,8 @@ async function syncToGallery(job, outputFiles, logger, repo) {
       if (!isVideo && !isImage) continue;
       // Skip thumbnails en temp files
       if (isAuxiliaryImageBasename(path.basename(f.path))) continue;
+      if (YTDLP_FORMAT_FRAGMENT_RE.test(path.basename(f.path))) continue;
+      if (PARTIAL_MEDIA_BASENAME_RE.test(path.basename(f.path))) continue;
       if (SKIP_EXTS.has(ext)) continue;
 
       const fileInfo = await readInfoJsonForMedia(f.path, info);
@@ -474,20 +507,33 @@ async function syncToGallery(job, outputFiles, logger, repo) {
       const forumThreadChannel = forumInfo?.sourceThreadTitle
         ? String(forumInfo.sourceThreadTitle).trim().toLowerCase()
         : '';
-      const channel = isTelegram
+      let channel = isTelegram
         ? (fileInfo?.channel || job.options?.channel || 'telegram')
         : (forumThreadChannel || (pinnedVipergirls
           ? pinnedTarget.channel
           : (fileInfo?.channel || job.options?.channel || job.options?.playlistTitle || '')));
-      const realPlatform = isTelegram
+      let realPlatform = isTelegram
         ? 'telegram'
         : (pinnedVipergirls
           ? pinnedTarget.platform
-          : (infoPlatform && infoPlatform !== 'generic' ? infoPlatform : platform));
+          : (platformOverrideFromJob(job) || (infoPlatform && infoPlatform !== 'generic' ? infoPlatform : platform)));
       const sourceId = idFromMediaUrl(rawSourceUrl || job.url);
       const title = pinnedVipergirls
         ? `${sanitizeFilePart(job.options?.title || 'Vipergirls', 'Vipergirls')}${sourceId ? ` ${sourceId}` : ''}`
         : (fileInfo?.title || path.basename(f.path, ext).replace(/_/g, ' ').trim());
+      const chaturbateTarget = normalizeChaturbateTarget({
+        platform: realPlatform,
+        channel,
+        title,
+        filename: path.basename(f.path),
+        filepath: f.path,
+        sourceUrl: rawSourceUrl,
+        contextUrl: job.options?.contextUrl || job.url,
+      });
+      if (!isTelegram && chaturbateTarget) {
+        realPlatform = chaturbateTarget.platform;
+        channel = chaturbateTarget.channel;
+      }
       const sourceUrl = rawSourceUrl;
       const sourceUrlIsJobUrl = sourceUrl && String(sourceUrl) === String(job.url || '');
       const shouldDedupeBySourceUrl = Boolean(sourceUrl) && !(sourceUrlIsJobUrl && outputFiles.length > 1);
@@ -509,81 +555,89 @@ async function syncToGallery(job, outputFiles, logger, repo) {
         ],
       } : null;
 
-      // Check for duplicate by filepath
-      const existing = await galleryPool.query(
-        'SELECT id FROM downloads WHERE filepath = $1 LIMIT 1',
-        [f.path],
-      );
-      if (existing.rows.length > 0) continue;
-
-      // Check for duplicate by source URL
-      if (shouldDedupeBySourceUrl) {
-        const byUrl = await galleryPool.query(
-          'SELECT id FROM downloads WHERE source_url = $1 LIMIT 1',
-          [sourceUrl],
-        );
-        if (byUrl.rows.length > 0) continue;
-      }
-
       const stat = fsSync.statSync(f.path);
       // Gallery "recent" means imported/downloaded recently, not the original
       // publish date of a TikTok/YouTube post. Keep the source date only as
       // metadata so newly completed downloads actually surface at the top.
       const importedAt = new Date().toISOString();
-      const result = await galleryPool.query(
-        `INSERT INTO downloads
-          (url, platform, channel, title, filename, filepath, filesize, format,
-           status, progress, metadata, source_url, duration, created_at, updated_at, finished_at, is_thumb_ready)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-                 'completed', 100, $9::jsonb, $10, $11, $12::timestamptz, $12::timestamptz, $12::timestamptz, $13)
-         ON CONFLICT DO NOTHING`,
-        [
-          sourceUrl,
-          realPlatform,
-          channel,
-          title,
-          path.basename(f.path),
-          f.path,
-          stat.size,
-          ext.replace('.', ''),
-          JSON.stringify({
-            hub_job_id: job.id,
-            adapter: job.adapter,
-            source_published_at: fileInfo?.sourcePublishedAt || null,
-            source_site: forumInfo?.sourceSite || null,
-            source_thread_title: forumInfo?.sourceThreadTitle || null,
-            source_thread_id: forumInfo?.sourceThreadId || null,
-            source_forum_title: forumInfo?.sourceForumTitle || null,
-            source_post_title: forumInfo?.sourcePostTitle || null,
-            source_post_num: forumInfo?.sourcePostNum || null,
-            source_post_id: forumInfo?.sourcePostId || null,
-            source_graph: telegramSourceGraph || sourceGraphFromForumInfo(forumInfo, job.options?.contextUrl || job.url, realPlatform),
-            telegram_message_id: fileInfo?.telegramMessageId || null,
-            telegram_chat_title: fileInfo?.telegramChatTitle || null,
-            telegram_topic_title: fileInfo?.telegramTopicTitle || null,
-            telegram_topic_id: fileInfo?.telegramTopicId || null,
-            youtube_channel_id: fileInfo?.channelId || job.options?.youtubeChannelId || null,
-            youtube_channel_url: fileInfo?.channelUrl || job.options?.youtubeChannelUrl || null,
-            indexed_channel: channel || null,
-            webdl_image_quality: imageQuality.quality,
-            webdl_was_thumbnail_url: imageQuality.wasThumbnail === true,
-            source_context: pinnedVipergirls ? {
-              platform: pinnedTarget.sourcePlatform,
-              channel: pinnedTarget.sourceChannel,
-              target_platform: pinnedTarget.platform,
-              target_channel: pinnedTarget.channel,
-              title: job.options?.title || null,
-              url: job.options?.contextUrl || null,
-            } : null,
-          }),
-          sourceUrl,
-          fileInfo?.duration || null,
-          importedAt,
-          f._thumbPath ? true : false,
-        ],
-      );
+      let result = { rowCount: 0 };
+      const client = await galleryPool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [f.path]);
+
+        let duplicate = false;
+        const existing = await client.query('SELECT id FROM downloads WHERE filepath = $1 LIMIT 1', [f.path]);
+        duplicate = existing.rows.length > 0;
+
+        if (!duplicate && shouldDedupeBySourceUrl) {
+          const byUrl = await client.query('SELECT id FROM downloads WHERE source_url = $1 LIMIT 1', [sourceUrl]);
+          duplicate = byUrl.rows.length > 0;
+        }
+
+        if (!duplicate) {
+          result = await client.query(
+            `INSERT INTO downloads
+              (url, platform, channel, title, filename, filepath, filesize, format,
+               status, progress, metadata, source_url, duration, created_at, updated_at, finished_at, is_thumb_ready)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+                     'completed', 100, $9::jsonb, $10, $11, $12::timestamptz, $12::timestamptz, $12::timestamptz, $13)`,
+            [
+              sourceUrl,
+              realPlatform,
+              channel,
+              title,
+              path.basename(f.path),
+              f.path,
+              stat.size,
+              ext.replace('.', ''),
+              JSON.stringify({
+                hub_job_id: job.id,
+                adapter: job.adapter,
+                source_published_at: fileInfo?.sourcePublishedAt || null,
+                source_site: forumInfo?.sourceSite || null,
+                source_thread_title: forumInfo?.sourceThreadTitle || null,
+                source_thread_id: forumInfo?.sourceThreadId || null,
+                source_forum_title: forumInfo?.sourceForumTitle || null,
+                source_post_title: forumInfo?.sourcePostTitle || null,
+                source_post_num: forumInfo?.sourcePostNum || null,
+                source_post_id: forumInfo?.sourcePostId || null,
+                source_graph: telegramSourceGraph || sourceGraphFromForumInfo(forumInfo, job.options?.contextUrl || job.url, realPlatform),
+                telegram_message_id: fileInfo?.telegramMessageId || null,
+                telegram_chat_title: fileInfo?.telegramChatTitle || null,
+                telegram_topic_title: fileInfo?.telegramTopicTitle || null,
+                telegram_topic_id: fileInfo?.telegramTopicId || null,
+                youtube_channel_id: fileInfo?.channelId || job.options?.youtubeChannelId || null,
+                youtube_channel_url: fileInfo?.channelUrl || job.options?.youtubeChannelUrl || null,
+                indexed_channel: channel || null,
+                webdl_image_quality: imageQuality.quality,
+                webdl_was_thumbnail_url: imageQuality.wasThumbnail === true,
+                source_context: pinnedVipergirls ? {
+                  platform: pinnedTarget.sourcePlatform,
+                  channel: pinnedTarget.sourceChannel,
+                  target_platform: pinnedTarget.platform,
+                  target_channel: pinnedTarget.channel,
+                  title: job.options?.title || null,
+                  url: job.options?.contextUrl || null,
+                } : null,
+              }),
+              sourceUrl,
+              fileInfo?.duration || null,
+              importedAt,
+              f._thumbPath ? true : false,
+            ],
+          );
+        }
+
+        await client.query('COMMIT');
+      } catch (e) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw e;
+      } finally {
+        client.release();
+      }
       inserted += result.rowCount || 0;
-      logger.info('gallery.synced', { job: job.id, file: path.basename(f.path), platform: realPlatform, channel });
+      if (result.rowCount) logger.info('gallery.synced', { job: job.id, file: path.basename(f.path), platform: realPlatform, channel });
     }
     return inserted;
   } catch (e) {
@@ -598,6 +652,8 @@ function isImportableMedia(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   if (!VIDEO_EXTS.has(ext) && !IMAGE_EXTS.has(ext)) return false;
   if (isAuxiliaryImageBasename(path.basename(filePath))) return false;
+  if (YTDLP_FORMAT_FRAGMENT_RE.test(path.basename(filePath))) return false;
+  if (PARTIAL_MEDIA_BASENAME_RE.test(path.basename(filePath))) return false;
   if (SKIP_EXTS.has(ext)) return false;
   return true;
 }

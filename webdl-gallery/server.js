@@ -128,6 +128,7 @@ const activeThumbPaths = new Map();
 const videoStreamProbeCache = new Map();
 let activeThumbJobs = 0;
 const thumbQueue = [];
+let screenshotSourceColumnsEnsured = false;
 
 function runLimitedThumbJob(fn) {
   return new Promise((resolve, reject) => {
@@ -183,6 +184,7 @@ function collectPartFiles(root, limit = 40) {
 
 async function ensureSchema() {
   await pool.query('ALTER TABLE download_files ADD COLUMN IF NOT EXISTS rating double precision');
+  await ensureScreenshotSourceColumns();
   await pool.query('ALTER TABLE tags ADD COLUMN IF NOT EXISTS is_user boolean NOT NULL DEFAULT false');
   await pool.query('ALTER TABLE tags ADD COLUMN IF NOT EXISTS is_favorite boolean NOT NULL DEFAULT false');
   await pool.query('ALTER TABLE tags ADD COLUMN IF NOT EXISTS user_use_count integer NOT NULL DEFAULT 0');
@@ -202,6 +204,13 @@ async function ensureSchema() {
       PRIMARY KEY (download_id, tag_id)
     )`);
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS screenshot_user_tags (
+      screenshot_id bigint NOT NULL REFERENCES screenshots(id) ON DELETE CASCADE,
+      tag_id bigint NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (screenshot_id, tag_id)
+    )`);
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS tag_recipes (
       id bigserial PRIMARY KEY,
       name text NOT NULL UNIQUE,
@@ -219,6 +228,24 @@ async function ensureSchema() {
     )`);
 }
 
+async function ensureScreenshotSourceColumns() {
+  if (screenshotSourceColumnsEnsured) return;
+  await pool.query('ALTER TABLE screenshots ADD COLUMN IF NOT EXISTS source_item_id text');
+  await pool.query('ALTER TABLE screenshots ADD COLUMN IF NOT EXISTS source_media_url text');
+  await pool.query('ALTER TABLE screenshots ADD COLUMN IF NOT EXISTS source_time_seconds double precision');
+  screenshotSourceColumnsEnsured = true;
+}
+
+function safeFilenameSegment(value, fallback = 'media') {
+  const clean = String(value || '')
+    .normalize('NFKD')
+    .replace(/[^\w .()[\]-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 90);
+  return clean || fallback;
+}
+
 async function ensureSearchIndexes() {
   const statements = [
     'CREATE EXTENSION IF NOT EXISTS pg_trgm',
@@ -229,6 +256,7 @@ async function ensureSearchIndexes() {
     'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_downloads_thumb_pending_recent ON downloads (finished_at DESC NULLS LAST, updated_at DESC NULLS LAST, created_at DESC NULLS LAST, id DESC) WHERE is_thumb_ready = false',
     'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_download_files_relpath_trgm ON download_files USING gin (relpath gin_trgm_ops)',
     'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_download_files_thumb_ready_recent ON download_files (mtime_ms DESC NULLS LAST, updated_at DESC NULLS LAST, id DESC) WHERE is_thumb_ready = true',
+    'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_download_files_created_oldest ON download_files (created_at ASC NULLS LAST, id ASC) WHERE relpath IS NOT NULL AND relpath <> \'\' AND (filesize IS NULL OR filesize > 0)',
     'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_screenshots_title_trgm ON screenshots USING gin (title gin_trgm_ops)',
     'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_screenshots_filename_trgm ON screenshots USING gin (filename gin_trgm_ops)',
     'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_screenshots_filepath_trgm ON screenshots USING gin (filepath gin_trgm_ops)',
@@ -312,6 +340,20 @@ function thumbnailFromHubJob(row) {
     }
   } catch (_) {}
   return '';
+}
+
+function workLaneFromHubLane(lane) {
+  switch (String(lane || '')) {
+    case 'image':
+    case 'gallery':
+      return 'Fast';
+    case 'video':
+      return 'Middle';
+    case 'process-video':
+      return 'Heavy';
+    default:
+      return lane || 'Hub';
+  }
 }
 
 function normalizeSourceSiteLabel(value) {
@@ -618,15 +660,53 @@ async function filterPlayableMediaRows(rows, maxNeeded = rows.length) {
 }
 
 function galleryDedupeKey(row) {
-  if (String(row.platform || '').toLowerCase() !== 'keep2share') {
-    return `${row.item_kind}:${row.id}`;
+  if (String(row.item_kind || '') === 'download') {
+    const sourceKey = canonicalGallerySourceUrl(row.source_url || row.url);
+    if (sourceKey) return `source:${sourceKey}`;
+
+    const ext = fileExt(row.filepath, row.format);
+    const isVideo = VIDEO_EXTS.includes(ext);
+    if (isVideo) {
+      const titleKey = String(row.title || row.filename || '')
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, ' ');
+      const durationKey = parseDurationSeconds(row.duration) || '';
+      const sizeKey = row.filesize == null ? '' : String(row.filesize);
+      if (titleKey && (durationKey || sizeKey)) return `video:${titleKey}|${durationKey}|${sizeKey}`;
+    }
   }
-  return [
-    String(row.platform || '').toLowerCase(),
-    String(row.source_url || row.url || row.filepath || row.id).trim().toLowerCase(),
-    String(row.title || row.filename || '').trim().toLowerCase(),
-    row.filesize == null ? '' : String(row.filesize),
-  ].join('|');
+  return `${row.item_kind}:${row.id}`;
+}
+
+function canonicalGallerySourceUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw || !/^https?:\/\//i.test(raw)) return '';
+  try {
+    const u = new URL(raw);
+    const host = u.hostname.replace(/^www\./i, '').toLowerCase();
+    u.hostname = host;
+    u.hash = '';
+    if ((host === 'youtube.com' || host.endsWith('.youtube.com')) && u.searchParams.get('v')) {
+      return `youtube:${u.searchParams.get('v')}`;
+    }
+    if (host === 'youtu.be') {
+      const id = u.pathname.split('/').filter(Boolean)[0];
+      if (id) return `youtube:${id}`;
+    }
+    for (const key of Array.from(u.searchParams.keys())) {
+      if (/^(utm_|fbclid$|gclid$|dclid$|yclid$|mc_|promo$|ref$|src$|source$)/i.test(key)) {
+        u.searchParams.delete(key);
+      }
+    }
+    const params = Array.from(u.searchParams.entries()).sort(([a], [b]) => a.localeCompare(b));
+    u.search = '';
+    for (const [key, val] of params) u.searchParams.append(key, val);
+    u.pathname = u.pathname.replace(/\/+$/, '') || '/';
+    return u.toString().toLowerCase();
+  } catch (_) {
+    return raw.toLowerCase();
+  }
 }
 
 function dedupeGalleryRows(rows) {
@@ -1268,6 +1348,42 @@ async function resolveMediaPath(idRaw) {
   return rows.length ? rows[0].filepath : null;
 }
 
+async function resolveMediaContext(idRaw) {
+  const id = String(idRaw || '');
+  const fileMatch = id.match(/^file-(\d+)$/);
+  if (fileMatch) {
+    const { rows } = await pool.query(`
+      SELECT 'file-' || df.id::text AS id,
+             d.url, d.source_url, d.platform, d.channel, d.title,
+             regexp_replace(df.relpath, '^.*/', '') AS filename,
+             df.relpath AS filepath
+        FROM download_files df
+        JOIN downloads d ON d.id = df.download_id
+       WHERE df.id = $1
+       LIMIT 1`, [fileMatch[1]]);
+    return rows[0] || null;
+  }
+  const screenshotMatch = id.match(/^s-(\d+)$/);
+  if (screenshotMatch) {
+    const { rows } = await pool.query(`
+      SELECT 's-' || id::text AS id,
+             url, url AS source_url, platform, channel, title, filename, filepath
+        FROM screenshots
+       WHERE id = $1
+       LIMIT 1`, [screenshotMatch[1]]);
+    return rows[0] || null;
+  }
+  const numericId = parseInt(id, 10);
+  if (!Number.isFinite(numericId) || numericId <= 0) return null;
+  const { rows } = await pool.query(`
+    SELECT id::text AS id,
+           url, source_url, platform, channel, title, filename, filepath
+      FROM downloads
+     WHERE id = $1
+     LIMIT 1`, [numericId]);
+  return rows[0] || null;
+}
+
 function buildItemFilters({ req, params, fileExpr, extExpr, ratingExpr, includeChannel = true }) {
   const platform = req.query.platform ? String(req.query.platform) : null;
   const channel = req.query.channel ? String(req.query.channel) : null;
@@ -1324,7 +1440,14 @@ function buildScreenshotFilters({ req, params, includeChannel = true }) {
   }
   if (Number.isFinite(minRating)) { params.push(minRating); where.push(`s.rating >= $${params.length}`); }
   if (mediaType === 'video') where.push('false');
-  if (Number.isFinite(tagId)) where.push('false');
+  if (Number.isFinite(tagId)) {
+    params.push(tagId);
+    where.push(`s.id IN (
+      SELECT sut.screenshot_id
+        FROM screenshot_user_tags sut
+       WHERE sut.tag_id = $${params.length}
+    )`);
+  }
   return where;
 }
 
@@ -1365,10 +1488,10 @@ app.get('/api/active-items', async (_req, res) => {
          id DESC
        LIMIT 80`, [ACTIVE_DB_STATUSES]),
       pool.query(`
-        SELECT id::text, status, adapter, url, progress_pct AS progress,
+        SELECT id::text, status, adapter, lane, url, progress_pct AS progress,
                options, locked_at AS updated_at, created_at
           FROM webdl.jobs
-         WHERE status IN ('queued', 'running')
+         WHERE status = 'running'
            AND COALESCE(lane, '') <> 'paused'
          ORDER BY
            CASE status
@@ -1381,11 +1504,11 @@ app.get('/api/active-items', async (_req, res) => {
            id DESC
          LIMIT 40`),
       pool.query(`
-        SELECT status,
+        SELECT status, lane,
                COALESCE(options->>'platform', platform_guess, adapter, 'hub') AS platform,
                COUNT(*)::int AS count
           FROM (
-            SELECT status, adapter, options,
+            SELECT status, lane, adapter, options,
                    CASE
                      WHEN url LIKE '%youtube.com%' OR url LIKE '%youtu.be%' THEN 'youtube'
                      WHEN url LIKE '%tiktok.com%' THEN 'tiktok'
@@ -1402,8 +1525,8 @@ app.get('/api/active-items', async (_req, res) => {
              WHERE status IN ('queued', 'running')
                AND COALESCE(lane, '') <> 'paused'
           ) q
-         GROUP BY status, COALESCE(options->>'platform', platform_guess, adapter, 'hub')
-         ORDER BY status, count DESC`),
+         GROUP BY status, lane, COALESCE(options->>'platform', platform_guess, adapter, 'hub')
+         ORDER BY status, lane, count DESC`),
       listRecentRawRecordings(20),
     ]);
     const dbItems = rows.map((r) => ({
@@ -1416,6 +1539,8 @@ app.get('/api/active-items', async (_req, res) => {
       id: `hub-${r.id}`,
       source: 'hub',
       status: r.status,
+      lane: r.lane || '',
+      work_lane: workLaneFromHubLane(r.lane),
       platform: r.options?.platform || platformFromUrl(r.options?.url || r.url) || r.adapter || 'hub',
       channel: r.options?.channel || r.options?.expandName || '',
       title: r.options?.title || r.options?.videoTitle || r.url || `hub job ${r.id}`,
@@ -1428,7 +1553,7 @@ app.get('/api/active-items', async (_req, res) => {
       created_at: r.created_at,
     }));
     const summary = {
-      hub: hubCounts.rows,
+      hub: hubCounts.rows.map((r) => ({ ...r, work_lane: workLaneFromHubLane(r.lane) })),
       hub_total: hubCounts.rows.reduce((sum, r) => sum + Number(r.count || 0), 0),
       hub_queued: hubCounts.rows.filter((r) => r.status === 'queued').reduce((sum, r) => sum + Number(r.count || 0), 0),
       hub_running: hubCounts.rows.filter((r) => r.status === 'running').reduce((sum, r) => sum + Number(r.count || 0), 0),
@@ -1448,12 +1573,12 @@ app.get('/api/items', async (req, res) => {
   try {
     const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 100));
     const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
-    const sort = String(req.query.sort || 'recent'); // recent | channel | random | rating
+    const sort = String(req.query.sort || 'recent').toLowerCase(); // recent | oldest | channel | channel_desc | random | rating | rating_asc
     const cursorTs = req.query.cursor_ts ? String(req.query.cursor_ts) : '';
     const cursorOrder = req.query.cursor_order != null ? Number(req.query.cursor_order) : NaN;
     const useCursor = sort === 'recent' && cursorTs && Number.isFinite(cursorOrder);
     const platformFilter = req.query.platform ? String(req.query.platform).toLowerCase() : '';
-    const directOnlyPlatform = platformFilter === 'sabnzbd' || platformFilter === 'keep2share';
+    const directOnlyPlatform = platformFilter === 'sabnzbd';
     const hasSearchQuery = Boolean(req.query.q && String(req.query.q).trim());
     const thumbReadyOnly = wantsThumbReadyOnly(req);
     // Elke bron moet ruimer dan offset+limit leveren: infinite scroll mag niet
@@ -1480,7 +1605,14 @@ app.get('/api/items', async (req, res) => {
     directWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
     directWhere.push(`(d.filesize IS NULL OR d.filesize > 0)`);
     directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
-    const fastRecentDirectOnly = sort === 'recent' && !hasSearchQuery;
+    const hasItemScopeFilter = Boolean(
+      req.query.platform
+      || req.query.channel
+      || req.query.media_type
+      || req.query.min_rating
+      || req.query.tag_id
+    );
+    const fastRecentDirectOnly = sort === 'recent' && !hasSearchQuery && !hasItemScopeFilter;
     if (thumbReadyOnly || fastRecentDirectOnly) {
       directWhere.push(`(d.is_thumb_ready = true OR lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${IMAGE_EXT_SQL}))`);
     }
@@ -1535,7 +1667,7 @@ app.get('/api/items', async (req, res) => {
       fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
       fileWhere.push(`(df.filesize IS NULL OR df.filesize > 0)`);
       fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
-      if (thumbReadyOnly) fileWhere.push(`COALESCE(df.is_thumb_ready, d.is_thumb_ready, false) = true`);
+      if (thumbReadyOnly) fileWhere.push(`(COALESCE(df.is_thumb_ready, d.is_thumb_ready, false) = true OR lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${IMAGE_EXT_SQL}))`);
     }
     if (useCursor && !directOnlyPlatform) {
       addRecentCursor(
@@ -1550,34 +1682,77 @@ app.get('/api/items', async (req, res) => {
     if (useCursor) {
       addRecentCursor(screenshotWhere, 'COALESCE(s.created_at, s.updated_at)', '(2000000000000 + s.id)::bigint');
     }
+    const directDbSortExpr = 'COALESCE(d.created_at, d.finished_at, d.updated_at)';
+    const fileDbSortExpr = `COALESCE(
+      CASE
+        WHEN NULLIF(df.created_at, '') ~ '^\\d{4}-\\d{2}-\\d{2}'
+        THEN (NULLIF(df.created_at, '')::timestamptz AT TIME ZONE current_setting('TimeZone'))
+      END,
+      d.created_at,
+      df.updated_at,
+      d.finished_at,
+      d.updated_at
+    )`;
+    const screenshotDbSortExpr = 'COALESCE(s.created_at, s.updated_at)';
+    const directSortTsExpr = sort === 'oldest'
+      ? directDbSortExpr
+      : 'COALESCE(d.finished_at, d.updated_at, d.created_at)';
+    const fileSortTsExpr = sort === 'oldest'
+      ? fileDbSortExpr
+      : 'COALESCE(to_timestamp(NULLIF(df.mtime_ms,0) / 1000.0)::timestamp, df.updated_at, d.finished_at, d.updated_at, d.created_at)';
+    const screenshotSortTsExpr = screenshotDbSortExpr;
 
     const directOrder = sort === 'random'
       ? 'RANDOM()'
       : sort === 'rating'
         ? 'd.rating DESC NULLS LAST, d.id DESC'
+      : sort === 'rating_asc'
+        ? 'd.rating ASC NULLS LAST, d.id ASC'
       : sort === 'channel'
         ? 'LOWER(NULLIF(d.channel, \'\')) ASC NULLS LAST, d.finished_at DESC NULLS LAST, d.updated_at DESC NULLS LAST, d.created_at DESC NULLS LAST, d.id DESC'
+      : sort === 'channel_desc'
+        ? 'LOWER(NULLIF(d.channel, \'\')) DESC NULLS LAST, d.finished_at DESC NULLS LAST, d.updated_at DESC NULLS LAST, d.created_at DESC NULLS LAST, d.id DESC'
+      : sort === 'oldest'
+        ? 'd.id ASC'
         : 'd.finished_at DESC NULLS LAST, d.updated_at DESC NULLS LAST, d.created_at DESC NULLS LAST, d.id DESC';
     const fileOrder = sort === 'random'
       ? 'RANDOM()'
       : sort === 'rating'
         ? 'df.rating DESC NULLS LAST, df.id DESC'
+      : sort === 'rating_asc'
+        ? 'df.rating ASC NULLS LAST, df.id ASC'
       : sort === 'channel'
         ? 'LOWER(NULLIF(d.channel, \'\')) ASC NULLS LAST, df.mtime_ms DESC NULLS LAST, df.updated_at DESC NULLS LAST, d.finished_at DESC NULLS LAST, d.updated_at DESC NULLS LAST, d.created_at DESC NULLS LAST, df.id DESC'
+      : sort === 'channel_desc'
+        ? 'LOWER(NULLIF(d.channel, \'\')) DESC NULLS LAST, df.mtime_ms DESC NULLS LAST, df.updated_at DESC NULLS LAST, d.finished_at DESC NULLS LAST, d.updated_at DESC NULLS LAST, d.created_at DESC NULLS LAST, df.id DESC'
+      : sort === 'oldest'
+        ? 'd.id ASC, df.id ASC'
         : 'df.mtime_ms DESC NULLS LAST, df.updated_at DESC NULLS LAST, d.finished_at DESC NULLS LAST, d.updated_at DESC NULLS LAST, d.created_at DESC NULLS LAST, df.id DESC';
     const screenshotOrder = sort === 'random'
       ? 'RANDOM()'
       : sort === 'rating'
         ? 's.rating DESC NULLS LAST, s.id DESC'
+      : sort === 'rating_asc'
+        ? 's.rating ASC NULLS LAST, s.id ASC'
       : sort === 'channel'
         ? 'LOWER(NULLIF(s.channel, \'\')) ASC NULLS LAST, s.created_at DESC NULLS LAST, s.updated_at DESC NULLS LAST, s.id DESC'
+      : sort === 'channel_desc'
+        ? 'LOWER(NULLIF(s.channel, \'\')) DESC NULLS LAST, s.created_at DESC NULLS LAST, s.updated_at DESC NULLS LAST, s.id DESC'
+      : sort === 'oldest'
+        ? 's.created_at ASC NULLS LAST, s.id ASC'
         : 's.created_at DESC NULLS LAST, s.updated_at DESC NULLS LAST, s.id DESC';
     const orderBy = sort === 'random'
       ? 'RANDOM()'
       : sort === 'rating'
         ? 'rating DESC NULLS LAST, source_order DESC'
+      : sort === 'rating_asc'
+        ? 'rating ASC NULLS LAST, source_order ASC'
       : sort === 'channel'
         ? 'LOWER(NULLIF(channel, \'\')) ASC NULLS LAST, sort_ts DESC NULLS LAST, source_order DESC'
+      : sort === 'channel_desc'
+        ? 'LOWER(NULLIF(channel, \'\')) DESC NULLS LAST, sort_ts DESC NULLS LAST, source_order DESC'
+      : sort === 'oldest'
+        ? 'gallery_order ASC, source_order ASC'
         : 'sort_ts DESC NULLS LAST, source_order DESC';
 
     params.push(sourceLimit);
@@ -1591,7 +1766,8 @@ app.get('/api/items', async (req, res) => {
                  (d.is_thumb_ready = true OR lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${IMAGE_EXT_SQL})) AS is_thumb_ready,
                  d.metadata,
                  d.finished_at, d.created_at,
-                 COALESCE(d.finished_at, d.updated_at, d.created_at) AS sort_ts,
+                 ${directSortTsExpr} AS sort_ts,
+                 d.id::bigint AS gallery_order,
                  d.id::bigint AS source_order
            FROM downloads d
            WHERE ${directWhere.join(' AND ')}
@@ -1605,9 +1781,12 @@ app.get('/api/items', async (req, res) => {
                  regexp_replace(df.relpath, '^.*/', '') AS filename,
                  df.relpath AS filepath, df.filesize,
                  regexp_replace(df.relpath, '^.*\\.', '') AS format,
-                 d.duration, df.rating, COALESCE(df.is_thumb_ready, d.is_thumb_ready) AS is_thumb_ready, d.metadata,
+                 d.duration, df.rating,
+                 (COALESCE(df.is_thumb_ready, d.is_thumb_ready, false) = true OR lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${IMAGE_EXT_SQL})) AS is_thumb_ready,
+                 d.metadata,
                  d.finished_at, d.created_at,
-                 COALESCE(to_timestamp(NULLIF(df.mtime_ms,0) / 1000.0)::timestamp, df.updated_at, d.finished_at, d.updated_at, d.created_at) AS sort_ts,
+                 ${fileSortTsExpr} AS sort_ts,
+                 d.id::bigint AS gallery_order,
                  (1000000000000 + df.id)::bigint AS source_order
             FROM download_files df
            JOIN downloads d ON d.id = df.download_id
@@ -1622,7 +1801,8 @@ app.get('/api/items', async (req, res) => {
                  s.filepath, s.filesize, 'jpg' AS format, NULL::text AS duration,
                  s.rating, s.is_thumb_ready, NULL::text AS metadata,
                  s.created_at AS finished_at, s.created_at,
-                 COALESCE(s.created_at, s.updated_at) AS sort_ts,
+                 ${screenshotSortTsExpr} AS sort_ts,
+                 (2000000000000 + s.id)::bigint AS gallery_order,
                  (2000000000000 + s.id)::bigint AS source_order
             FROM screenshots s
            WHERE ${screenshotWhere.join(' AND ')}
@@ -1696,15 +1876,54 @@ app.get('/api/platforms', async (req, res) => {
     directWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
     directWhere.push(`(d.filesize IS NULL OR d.filesize > 0)`);
     directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
+    directWhere.push(`NOT EXISTS (
+      SELECT 1 FROM download_files mf
+       WHERE mf.download_id = d.id
+         AND mf.relpath !~* '${AUX_RELPATH_RE}'
+         AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
+    )`);
+
+    const fileWhere = buildItemFilters({
+      req, params,
+      fileExpr: 'df.relpath',
+      extExpr: "regexp_replace(df.relpath, '^.*\\.', '')",
+      ratingExpr: 'df.rating',
+      includeChannel: false,
+    });
+    fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
+    fileWhere.push(`df.relpath !~* '${TEMP_RELPATH_RE}'`);
+    fileWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
+    fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
+    fileWhere.push(`(df.filesize IS NULL OR df.filesize > 0)`);
+    fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
+
+    const screenshotWhere = buildScreenshotFilters({ req, params, includeChannel: false });
+    screenshotWhere.push(`(s.filesize IS NULL OR s.filesize > 0)`);
 
     const { rows } = await pool.query(`
-      SELECT ${platformGroupSql('d')} AS platform,
+      WITH platform_items AS (
+        SELECT ${platformGroupSql('d')} AS platform,
+               lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) AS ext
+          FROM downloads d
+         WHERE ${directWhere.join(' AND ')}
+        UNION ALL
+        SELECT ${platformGroupSql('d')} AS platform,
+               lower(regexp_replace(df.relpath, '^.*\\.', '')) AS ext
+          FROM download_files df
+          JOIN downloads d ON d.id = df.download_id
+         WHERE ${fileWhere.join(' AND ')}
+        UNION ALL
+        SELECT COALESCE(NULLIF(s.platform, ''), 'unknown') AS platform,
+               'jpg' AS ext
+          FROM screenshots s
+         WHERE ${screenshotWhere.join(' AND ')}
+      )
+      SELECT platform,
              COUNT(*)::bigint AS count,
-             COUNT(*) FILTER (WHERE lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${IMAGE_EXT_SQL}))::bigint AS image_count,
-             COUNT(*) FILTER (WHERE lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${VIDEO_EXT_SQL}))::bigint AS video_count
-        FROM downloads d
-       WHERE ${directWhere.join(' AND ')}
-       GROUP BY ${platformGroupSql('d')}
+             COUNT(*) FILTER (WHERE ext IN (${IMAGE_EXT_SQL}))::bigint AS image_count,
+             COUNT(*) FILTER (WHERE ext IN (${VIDEO_EXT_SQL}))::bigint AS video_count
+        FROM platform_items
+       GROUP BY platform
        ORDER BY COUNT(*) DESC`, params);
     res.json({ platforms: rows });
   } catch (e) {
@@ -1738,22 +1957,69 @@ app.get('/api/channels', async (req, res) => {
     directWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
     directWhere.push(`(d.filesize IS NULL OR d.filesize > 0)`);
     directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
+    directWhere.push(`NOT EXISTS (
+      SELECT 1 FROM download_files mf
+       WHERE mf.download_id = d.id
+         AND mf.relpath !~* '${AUX_RELPATH_RE}'
+         AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
+    )`);
     const directChannelExpr = channelGroupSql('d');
     const directPlatformExpr = platformGroupSql('d');
+
+    const fileWhere = buildItemFilters({
+      req, params,
+      fileExpr: 'df.relpath',
+      extExpr: "regexp_replace(df.relpath, '^.*\\.', '')",
+      ratingExpr: 'df.rating',
+      includeChannel: false,
+    });
+    fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
+    fileWhere.push(`df.relpath !~* '${TEMP_RELPATH_RE}'`);
+    fileWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
+    fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
+    fileWhere.push(`(df.filesize IS NULL OR df.filesize > 0)`);
+    fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
+
+    const screenshotWhere = buildScreenshotFilters({ req, params, includeChannel: false });
+    screenshotWhere.push(`(s.filesize IS NULL OR s.filesize > 0)`);
 
     const { rows } = await pool.query(`
       SELECT *
       FROM (
-        SELECT ${directChannelExpr} AS channel,
-               ${directPlatformExpr} AS platform,
+        SELECT channel,
+               platform,
                COUNT(*) AS count,
-               COUNT(*) FILTER (WHERE lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${IMAGE_EXT_SQL}))::bigint AS image_count,
-               COUNT(*) FILTER (WHERE lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${VIDEO_EXT_SQL}))::bigint AS video_count,
-               MAX(COALESCE(d.finished_at, d.updated_at, d.created_at)) AS latest_ts,
-               MAX(d.rating) AS max_rating
-          FROM downloads d
-         WHERE ${directWhere.join(' AND ')}
-        GROUP BY ${directChannelExpr}, ${directPlatformExpr}
+               COUNT(*) FILTER (WHERE ext IN (${IMAGE_EXT_SQL}))::bigint AS image_count,
+               COUNT(*) FILTER (WHERE ext IN (${VIDEO_EXT_SQL}))::bigint AS video_count,
+               MAX(sort_ts) AS latest_ts,
+               MAX(rating) AS max_rating
+          FROM (
+            SELECT ${directChannelExpr} AS channel,
+                   ${directPlatformExpr} AS platform,
+                   lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) AS ext,
+                   COALESCE(d.finished_at, d.updated_at, d.created_at) AS sort_ts,
+                   d.rating
+              FROM downloads d
+             WHERE ${directWhere.join(' AND ')}
+            UNION ALL
+            SELECT ${channelGroupSql('d')} AS channel,
+                   ${platformGroupSql('d')} AS platform,
+                   lower(regexp_replace(df.relpath, '^.*\\.', '')) AS ext,
+                   COALESCE(to_timestamp(NULLIF(df.mtime_ms,0) / 1000.0)::timestamp, df.updated_at, d.finished_at, d.updated_at, d.created_at) AS sort_ts,
+                   df.rating
+              FROM download_files df
+              JOIN downloads d ON d.id = df.download_id
+             WHERE ${fileWhere.join(' AND ')}
+            UNION ALL
+            SELECT s.channel,
+                   COALESCE(NULLIF(s.platform, ''), 'unknown') AS platform,
+                   'jpg' AS ext,
+                   COALESCE(s.created_at, s.updated_at) AS sort_ts,
+                   s.rating
+              FROM screenshots s
+             WHERE ${screenshotWhere.join(' AND ')}
+          ) all_channel_items
+        GROUP BY channel, platform
       ) channel_items
       ORDER BY ${orderBy}
       LIMIT 500`, params);
@@ -1784,6 +2050,84 @@ app.post('/api/rating', async (req, res) => {
         : await pool.query('UPDATE downloads SET rating=$1, updated_at=now() WHERE id=$2', [rating, id]);
     if (!result.rowCount) return res.status(404).json({ error: 'niet gevonden' });
     res.json({ success: true, id: fileMatch ? `file-${id}` : screenshotMatch ? `s-${id}` : id, rating });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/viewer-screenshot', express.raw({ type: 'image/*', limit: '35mb' }), async (req, res) => {
+  try {
+    const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+    const itemId = String(req.query.item_id || '').trim();
+    const contentType = String(req.headers['content-type'] || '').split(';')[0].toLowerCase();
+    if (!itemId) return res.status(400).json({ error: 'item_id ontbreekt' });
+    if (!body.length) return res.status(400).json({ error: 'lege screenshot' });
+    const ext = contentType === 'image/png' ? '.png' : '.jpg';
+    if (ext === '.jpg' && contentType && contentType !== 'image/jpeg') {
+      return res.status(415).json({ error: 'alleen image/jpeg of image/png screenshots' });
+    }
+    await ensureScreenshotSourceColumns();
+
+    const [context, sourcePath] = await Promise.all([
+      resolveMediaContext(itemId),
+      resolveMediaPath(itemId),
+    ]);
+    if (!context) return res.status(404).json({ error: 'media niet gevonden' });
+
+    const sourceDir = sourcePath ? path.dirname(sourcePath) : '';
+    const sourceBase = safeFilenameSegment(
+      path.basename(String(sourcePath || context.filename || context.title || 'media'), path.extname(String(sourcePath || context.filename || ''))),
+      'media',
+    );
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const timeSeconds = Number(req.query.time_seconds);
+    const timeSuffix = Number.isFinite(timeSeconds) && timeSeconds >= 0
+      ? `_t${String(Math.floor(timeSeconds)).padStart(5, '0')}`
+      : '';
+    const dir = sourceDir
+      ? path.join(sourceDir, 'screenshots')
+      : path.join(BASE_DIR, 'screenshots', safeFilenameSegment(context.platform || 'media'));
+    await fs.promises.mkdir(dir, { recursive: true });
+
+    let filePath = path.join(dir, `screenshot_${sourceBase}${timeSuffix}_${stamp}${ext}`);
+    for (let i = 1; fs.existsSync(filePath) && i < 1000; i += 1) {
+      filePath = path.join(dir, `screenshot_${sourceBase}${timeSuffix}_${stamp}_${i}${ext}`);
+    }
+    await fs.promises.writeFile(filePath, body, { flag: 'wx' });
+    const stat = await fs.promises.stat(filePath);
+
+    const titleBase = String(req.query.title || context.title || context.filename || sourceBase || 'media').trim();
+    const timeLabel = Number.isFinite(timeSeconds) && timeSeconds >= 0
+      ? ` @ ${Math.floor(timeSeconds / 60)}:${String(Math.floor(timeSeconds % 60)).padStart(2, '0')}`
+      : '';
+    const title = safeFilenameSegment(`Screenshot${timeLabel} - ${titleBase}`, `Screenshot${timeLabel}`);
+    const sourceUrl = String(context.source_url || context.url || `/media/${itemId}`).trim();
+    const now = new Date();
+    const result = await pool.query(`
+      INSERT INTO screenshots
+        (url, platform, channel, title, filename, filepath, filesize,
+         created_at, updated_at, ts_ms, is_thumb_ready,
+         source_item_id, source_media_url, source_time_seconds)
+      VALUES ($1, $2, $3, $4, $5, $6, $7,
+              $8, $8, $9, true,
+              $10, $11, $12)
+      RETURNING id, url, platform, channel, title, filename, filepath, filesize, created_at`,
+      [
+        sourceUrl || `/media/${itemId}`,
+        context.platform || 'screenshot',
+        context.channel || '',
+        title,
+        path.basename(filePath),
+        filePath,
+        stat.size,
+        now,
+        Math.round(now.getTime()),
+        itemId,
+        sourceUrl || `/media/${itemId}`,
+        Number.isFinite(timeSeconds) ? timeSeconds : null,
+      ],
+    );
+    res.status(201).json({ success: true, screenshot: { ...result.rows[0], id: `s-${result.rows[0].id}` } });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -1874,10 +2218,14 @@ app.get('/api/tags', async (_req, res) => {
       SELECT t.id, t.name, t.is_favorite,
              COALESCE(t.user_use_count, 0)::int AS user_use_count,
              t.last_used_at,
-             COUNT(iut.download_id)::int AS applied_count,
+             (
+               COUNT(DISTINCT iut.download_id) +
+               COUNT(DISTINCT sut.screenshot_id)
+             )::int AS applied_count,
              COALESCE(t.user_use_count, 0)::int AS uses
         FROM tags t
         LEFT JOIN item_user_tags iut ON iut.tag_id = t.id
+        LEFT JOIN screenshot_user_tags sut ON sut.tag_id = t.id
        WHERE t.is_user = true
        GROUP BY t.id, t.name, t.is_favorite, t.user_use_count, t.last_used_at
        ORDER BY t.is_favorite DESC,
@@ -1922,6 +2270,7 @@ app.delete('/api/tags/:id', async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
     await pool.query('DELETE FROM item_user_tags WHERE tag_id=$1', [id]);
+    await pool.query('DELETE FROM screenshot_user_tags WHERE tag_id=$1', [id]);
     await pool.query('UPDATE tags SET is_user=false WHERE id=$1', [id]);
     await pool.query(`
       DELETE FROM tags t
@@ -2178,10 +2527,37 @@ app.get('/api/items/:id/tag-suggestions', async (req, res) => {
 
 app.post('/api/items/:id/tag-recipes/:recipeId', async (req, res) => {
   try {
-    if (String(req.params.id || '').startsWith('s-')) return res.status(400).json({ error: 'screenshots ondersteunen nog geen tags' });
-    const itemId = parseInt(req.params.id, 10);
+    const rawId = String(req.params.id || '');
+    const screenshotMatch = rawId.match(/^s-(\d+)$/);
+    const itemId = screenshotMatch ? parseInt(screenshotMatch[1], 10) : parseInt(rawId, 10);
     const recipeId = parseInt(req.params.recipeId, 10);
     if (!Number.isFinite(itemId) || !Number.isFinite(recipeId)) return res.status(400).json({ error: 'id vereist' });
+    if (screenshotMatch) {
+      const { rows } = await pool.query(`
+        WITH recipe_tags AS (
+          SELECT tag_id FROM tag_recipe_tags WHERE recipe_id=$2
+        ), inserted AS (
+          INSERT INTO screenshot_user_tags (screenshot_id, tag_id)
+          SELECT $1, tag_id FROM recipe_tags
+          ON CONFLICT DO NOTHING
+          RETURNING tag_id
+        ), bumped AS (
+          UPDATE tags t
+             SET is_user=true,
+                 user_use_count = COALESCE(user_use_count, 0) + 1,
+                 last_used_at = now()
+            FROM recipe_tags rt
+           WHERE t.id=rt.tag_id
+           RETURNING t.id
+        )
+        UPDATE tag_recipes
+           SET last_used_at=now(), updated_at=now()
+         WHERE id=$2
+         RETURNING id`,
+        [itemId, recipeId]);
+      if (!rows[0]) return res.status(404).json({ error: 'recept niet gevonden' });
+      return res.json({ success: true });
+    }
     const { rows } = await pool.query(`
       WITH recipe_tags AS (
         SELECT tag_id FROM tag_recipe_tags WHERE recipe_id=$2
@@ -2212,9 +2588,16 @@ app.post('/api/items/:id/tag-recipes/:recipeId', async (req, res) => {
 // Tags op een item
 app.get('/api/items/:id/tags', async (req, res) => {
   try {
-    if (String(req.params.id || '').startsWith('s-')) return res.json({ tags: [] });
-    const id = parseInt(req.params.id, 10);
+    const rawId = String(req.params.id || '');
+    const screenshotMatch = rawId.match(/^s-(\d+)$/);
+    const id = screenshotMatch ? parseInt(screenshotMatch[1], 10) : parseInt(rawId, 10);
     if (!Number.isFinite(id)) return res.json({ tags: [] });
+    if (screenshotMatch) {
+      const { rows } = await pool.query(
+        'SELECT t.id, t.name FROM tags t JOIN screenshot_user_tags sut ON sut.tag_id=t.id WHERE sut.screenshot_id=$1 ORDER BY t.name',
+        [id]);
+      return res.json({ tags: rows.filter((r) => !isJunkTagName(r.name)) });
+    }
     const { rows } = await pool.query(
       'SELECT t.id, t.name FROM tags t JOIN item_user_tags iut ON iut.tag_id=t.id WHERE iut.download_id=$1 ORDER BY t.name',
       [id]);
@@ -2224,9 +2607,11 @@ app.get('/api/items/:id/tags', async (req, res) => {
 
 app.post('/api/items/:id/tags', async (req, res) => {
   try {
-    if (String(req.params.id || '').startsWith('s-')) return res.status(400).json({ error: 'screenshots ondersteunen nog geen tags' });
-    const itemId = parseInt(req.params.id, 10);
+    const rawId = String(req.params.id || '');
+    const screenshotMatch = rawId.match(/^s-(\d+)$/);
+    const itemId = screenshotMatch ? parseInt(screenshotMatch[1], 10) : parseInt(rawId, 10);
     const tagId = parseInt(req.body.tag_id, 10);
+    if (!Number.isFinite(itemId)) return res.status(400).json({ error: 'id vereist' });
     if (!Number.isFinite(tagId)) return res.status(400).json({ error: 'tag_id vereist' });
     const tag = await pool.query(`
       UPDATE tags
@@ -2236,19 +2621,31 @@ app.post('/api/items/:id/tags', async (req, res) => {
        WHERE id=$1
        RETURNING id`, [tagId]);
     if (!tag.rows[0]) return res.status(404).json({ error: 'tag niet gevonden' });
-    await pool.query(
-      'INSERT INTO item_user_tags (download_id, tag_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
-      [itemId, tagId]);
+    if (screenshotMatch) {
+      await pool.query(
+        'INSERT INTO screenshot_user_tags (screenshot_id, tag_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
+        [itemId, tagId]);
+    } else {
+      await pool.query(
+        'INSERT INTO item_user_tags (download_id, tag_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
+        [itemId, tagId]);
+    }
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.delete('/api/items/:id/tags/:tagId', async (req, res) => {
   try {
-    if (String(req.params.id || '').startsWith('s-')) return res.json({ success: true });
-    const itemId = parseInt(req.params.id, 10);
+    const rawId = String(req.params.id || '');
+    const screenshotMatch = rawId.match(/^s-(\d+)$/);
+    const itemId = screenshotMatch ? parseInt(screenshotMatch[1], 10) : parseInt(rawId, 10);
     const tagId = parseInt(req.params.tagId, 10);
-    await pool.query('DELETE FROM item_user_tags WHERE download_id=$1 AND tag_id=$2', [itemId, tagId]);
+    if (!Number.isFinite(itemId) || !Number.isFinite(tagId)) return res.status(400).json({ error: 'id vereist' });
+    if (screenshotMatch) {
+      await pool.query('DELETE FROM screenshot_user_tags WHERE screenshot_id=$1 AND tag_id=$2', [itemId, tagId]);
+    } else {
+      await pool.query('DELETE FROM item_user_tags WHERE download_id=$1 AND tag_id=$2', [itemId, tagId]);
+    }
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

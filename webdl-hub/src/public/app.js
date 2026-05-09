@@ -20,6 +20,7 @@ const state = {
   adapters: [],
   collapsedGroups: new Set(),
   jobStats: { queued: 0, running: 0, paused: 0, done: 0, failed: 0, cancelled: 0, total: 0 },
+  laneStats: [],
   jobGroups: [],
   queueDiagnostics: null,
   sabnzbd: null,
@@ -96,6 +97,33 @@ function canonicalVipergirlsThreadUrl(rawUrl, wholeThread) {
   }
 }
 
+function normalizeTranslatedProxyUrl(rawUrl) {
+  try {
+    const u = new URL(String(rawUrl || '').trim());
+    const host = u.hostname.toLowerCase().replace(/^www\./, '');
+    if (host !== 'translated.turbopages.org') return u.toString();
+    const parts = u.pathname.split('/').filter(Boolean);
+    const schemeIndex = parts.findIndex((p) => p === 'http' || p === 'https');
+    if (schemeIndex < 0 || !parts[schemeIndex + 1]) return u.toString();
+    const scheme = parts[schemeIndex];
+    const targetHost = parts[schemeIndex + 1];
+    const targetPath = '/' + parts.slice(schemeIndex + 2).join('/');
+    return `${scheme}://${targetHost}${targetPath}${u.search}${u.hash}`;
+  } catch (_) {
+    return String(rawUrl || '').trim();
+  }
+}
+
+function isXenForoThreadUrl(rawUrl) {
+  try {
+    const u = new URL(normalizeTranslatedProxyUrl(rawUrl));
+    const host = u.hostname.toLowerCase().replace(/^www\./, '');
+    return host === 'foot-fetish.club' && /^\/threads\/[^/]+/i.test(u.pathname);
+  } catch (_) {
+    return false;
+  }
+}
+
 function statusIcon(status) {
   switch (status) {
     case 'pending':   return '⏳';
@@ -133,6 +161,54 @@ function displayStatus(status) {
 function effectiveStatus(job) {
   if (job && job.status === 'queued' && job.lane === 'paused') return 'paused';
   return job?.status || '';
+}
+
+function workLane(lane) {
+  switch (lane) {
+    case 'image':
+    case 'gallery':
+      return { key: 'fast', label: 'Fast', detail: 'afbeeldingen', lanes: ['image', 'gallery'] };
+    case 'video':
+      return { key: 'middle', label: 'Middle', detail: 'video zonder postprocessing', lanes: ['video'] };
+    case 'process-video':
+      return { key: 'heavy', label: 'Heavy', detail: 'video met postprocessing', lanes: ['process-video'] };
+    case 'paused':
+      return { key: 'paused', label: 'Pauze', detail: 'staat stil', lanes: ['paused'] };
+    default:
+      return { key: 'other', label: lane || 'Onbekend', detail: 'technisch', lanes: [lane] };
+  }
+}
+
+function laneLabel(lane) {
+  const work = workLane(lane);
+  return work.key === 'paused' ? 'Pauze' : work.label;
+}
+
+function laneMetaLabel(lane) {
+  const work = workLane(lane);
+  return work.detail ? `${work.label} (${work.detail})` : work.label;
+}
+
+function aggregateWorkLanes(rows = []) {
+  const base = [
+    { key: 'fast', label: 'Fast', detail: 'afbeeldingen', queued: 0, running: 0, failed: 0, paused: 0 },
+    { key: 'middle', label: 'Middle', detail: 'video zonder postprocessing', queued: 0, running: 0, failed: 0, paused: 0 },
+    { key: 'heavy', label: 'Heavy', detail: 'video met postprocessing', queued: 0, running: 0, failed: 0, paused: 0 },
+  ];
+  const byKey = new Map(base.map((row) => [row.key, row]));
+  for (const row of rows || []) {
+    const work = workLane(row.lane);
+    if (work.key === 'paused') {
+      continue;
+    }
+    const target = byKey.get(work.key);
+    if (!target) continue;
+    const count = Number(row.count || 0);
+    if (row.status === 'queued') target.queued += count;
+    else if (row.status === 'running') target.running += count;
+    else if (row.status === 'failed') target.failed += count;
+  }
+  return base;
 }
 
 function videoTitle(job) {
@@ -232,6 +308,7 @@ function renderOverview() {
   setText('ovQueued', s.queued || 0);
   setText('ovPaused', s.paused || 0);
   setText('ovFailed', s.failed || 0);
+  renderWorkLanes();
   renderQueueDiagnosis();
   renderSabnzbdStatus();
 
@@ -272,6 +349,27 @@ function renderOverview() {
   }
 }
 
+function renderWorkLanes() {
+  const target = $('workLanes');
+  if (!target) return;
+  const lanes = aggregateWorkLanes(state.laneStats);
+  target.innerHTML = lanes.map((lane) => `
+    <div class="work-lane ${esc(lane.key)}">
+      <div class="work-lane-head">
+        <strong>${esc(lane.label)}</strong>
+        <span>${esc(lane.detail)}</span>
+      </div>
+      <div class="work-lane-counts">
+        ${lane.running ? `<span class="running">${lane.running} actief</span>` : ''}
+        ${lane.queued ? `<span>${lane.queued} wacht</span>` : ''}
+        ${lane.paused ? `<span class="paused">${lane.paused} pauze</span>` : ''}
+        ${lane.failed ? `<span class="failed">${lane.failed} fout</span>` : ''}
+        ${(!lane.running && !lane.queued && !lane.paused && !lane.failed) ? '<span>leeg</span>' : ''}
+      </div>
+    </div>
+  `).join('');
+}
+
 function shortTitle(row) {
   return firstReadable(row.video_title, row.group_name, row.name) || row.url || `Job #${row.id}`;
 }
@@ -289,7 +387,7 @@ function renderQueueDiagnosis() {
   const running = (d.running || []).slice(0, 4);
   const failures = (d.recentFailures || []).slice(0, 4);
   const pausedLanes = (d.pausedLanes || [])
-    .map((lane) => `${lane.count} ${lane.resume_lane}`)
+    .map((lane) => `${lane.count} ${laneLabel(lane.resume_lane)}`)
     .join(' · ');
 
   const rows = [];
@@ -323,7 +421,7 @@ function renderQueueDiagnosis() {
         <div class="diagnosis-label">Hubstatus</div>
         <h3>${esc(d.reason || 'Status onbekend')}</h3>
         <p>${esc(d.action || '')}</p>
-        ${pausedLanes ? `<p class="diagnosis-muted">Gepauzeerde lanes: ${esc(pausedLanes)}</p>` : ''}
+        ${pausedLanes ? `<p class="diagnosis-muted">Gepauzeerd: ${esc(pausedLanes)}</p>` : ''}
       </div>
       <div class="diagnosis-actions">
         ${(d.stats && Number(d.stats.paused || 0) > 0) ? '<button id="diagResumeAll" type="button" class="btn-download">▶ Hervat alles</button>' : ''}
@@ -602,15 +700,15 @@ function renderJobItem(job, isStandalone) {
   if (status === 'running') {
     const speed = live?.speed || '';
     const eta = live?.eta || '';
-    metaHtml = `<div class="job-meta">${esc([groupName, job.adapter, job.lane, pct + '%'].filter(Boolean).join(' · '))}${speed ? ' · ' + esc(speed) : ''}${eta && eta !== 'Unknown' ? ' · ETA ' + esc(eta) : ''}</div>`;
+    metaHtml = `<div class="job-meta">${esc([groupName, laneMetaLabel(job.lane), pct + '%'].filter(Boolean).join(' · '))}${speed ? ' · ' + esc(speed) : ''}${eta && eta !== 'Unknown' ? ' · ETA ' + esc(eta) : ''}</div>`;
   } else if (status === 'failed' && job.error) {
     metaHtml = `<div class="job-meta job-error">${esc(job.error).slice(0, 80)}</div>`;
   } else if (status === 'done') {
     metaHtml = `<div class="job-meta">${esc([groupName, gallerySynced ? 'in gallery' : job.adapter].filter(Boolean).join(' · '))}</div>`;
   } else if (status === 'paused') {
-    metaHtml = `<div class="job-meta">${esc([groupName, job.options?.pauseLane || job.lane, 'gepauzeerd'].filter(Boolean).join(' · '))}</div>`;
+    metaHtml = `<div class="job-meta">${esc([groupName, laneMetaLabel(job.options?.pauseLane || job.lane), 'gepauzeerd'].filter(Boolean).join(' · '))}</div>`;
   } else if (status === 'queued') {
-    metaHtml = `<div class="job-meta">${esc([groupName, job.lane, 'wachtrij'].filter(Boolean).join(' · '))}</div>`;
+    metaHtml = `<div class="job-meta">${esc([groupName, laneMetaLabel(job.lane), 'wachtrij'].filter(Boolean).join(' · '))}</div>`;
   }
 
   // Progress bar bij running
@@ -791,7 +889,7 @@ function renderDetail(job, files, logs) {
   setText('dUrl', job.url);
   $('dUrl').href = job.url || '#';
   setText('dAdapter', job.adapter);
-  setText('dPlatformBadge', job.adapter || '');
+  setText('dPlatformBadge', laneLabel(job.options?.pauseLane || job.lane));
   const groupName = jobGroupDisplay(job);
   setText('dChannelBadge', groupName || '');
   setText('dChannel', groupName || job.options?.expandName || '—');
@@ -1193,8 +1291,9 @@ async function loadJobs() {
 
 async function loadJobStats() {
   try {
-    const { stats, groups, diagnostics } = await api('GET', '/api/jobs/meta/stats');
+    const { stats, lanes, groups, diagnostics } = await api('GET', '/api/jobs/meta/stats');
     state.jobStats = stats || state.jobStats;
+    state.laneStats = lanes || [];
     state.jobGroups = groups || [];
     state.queueDiagnostics = diagnostics || null;
     updateStats();
@@ -1279,12 +1378,17 @@ function bind() {
     ev.preventDefault();
     const rawUrl = $('url').value.trim();
     const wholeThread = $('wholeThread')?.checked !== false;
-    const url = canonicalVipergirlsThreadUrl(rawUrl, wholeThread);
+    const url = isXenForoThreadUrl(rawUrl)
+      ? normalizeTranslatedProxyUrl(rawUrl)
+      : canonicalVipergirlsThreadUrl(rawUrl, wholeThread);
     if (!url) return;
     const force = $('force')?.checked;
     const options = { vipergirlsWholeThread: wholeThread };
     try {
-      const job = await api('POST', '/api/jobs', { url, force, options });
+      const payload = isXenForoThreadUrl(url)
+        ? { url, adapter: 'xenforo', force, options: { ...options, platform: 'xenforo' } }
+        : { url, force, options };
+      const job = await api('POST', '/api/jobs', payload);
       state.source = 'hub';
       updateSourceControls();
       if (job && job.expanded) {
@@ -1318,16 +1422,24 @@ function bind() {
   $('btnExpand').addEventListener('click', async () => {
     const rawUrl = $('url').value.trim();
     const wholeThread = $('wholeThread')?.checked !== false;
-    const url = canonicalVipergirlsThreadUrl(rawUrl, wholeThread);
+    const url = isXenForoThreadUrl(rawUrl)
+      ? normalizeTranslatedProxyUrl(rawUrl)
+      : canonicalVipergirlsThreadUrl(rawUrl, wholeThread);
     if (!url) { setMsg('Vul een playlist/kanaal URL in', true); return; }
     const force = $('force')?.checked;
     const options = { vipergirlsWholeThread: wholeThread };
     setMsg('⏳ Playlist uitpakken…');
     $('btnExpand').disabled = true;
     try {
-      const result = await api('POST', '/api/jobs/expand', { url, force, options });
+      const result = isXenForoThreadUrl(url)
+        ? await api('POST', '/api/jobs', { url, adapter: 'xenforo', force, options: { ...options, platform: 'xenforo' } })
+        : await api('POST', '/api/jobs/expand', { url, force, options });
       $('url').value = '';
-      setMsg(`✅ ${result.total} video's → ${result.queued} ingepland, ${result.duplicates} overgeslagen${result.skipped ? `, ${result.skipped} verwijderd/privé geskipt` : ''}`, false, true);
+      if (result && result.expanded) {
+        setMsg(`✅ ${result.total} video's → ${result.queued} ingepland, ${result.duplicates} overgeslagen${result.skipped ? `, ${result.skipped} verwijderd/privé geskipt` : ''}`, false, true);
+      } else {
+        setMsg(`✅ Forum-thread ingepland als job #${result.id}`, false, true);
+      }
       await loadJobs();
     } catch (e) {
       setMsg(e.message, true);

@@ -19,11 +19,15 @@ const MEDIA_EXTS = new Set([...IMAGE_EXTS, ...VIDEO_EXTS]);
 const AUX_IMAGE_BASENAME_RE = /(^\d{1,3}[-_. ]?thumbnail|(?:^|[-_. ])thumbnail|_thumb(_v\d+)?|_preview|_logo)\.(jpe?g|png|webp|gif|bmp|avif)$/i;
 const SITE_SHELL_IMAGE_BASENAME_RE = /^(?:vipergirls|viper)[-_.]\d+\.(jpe?g|png|webp|gif|bmp|avif)$/i;
 const FORUM_CHROME_IMAGE_BASENAME_RE = /(?:^|[-_. ])(?:statusicon|reputation|avatar|button|spacer|blank)(?:[-_. ]|$)/i;
+const YTDLP_FORMAT_FRAGMENT_RE = /\.f\d+\.(?:mp4|webm|m4a|mkv|mov|m4v|avi|wmv|flv|ts|m2ts|mpg|mpeg|ogv|3gp|3g2)$/i;
+const PARTIAL_MEDIA_BASENAME_RE = /(?:^|[._-])(?:temp|partial|part|download)(?:[._-]|$)/i;
+const THUMBNAIL_IMAGE_BASENAME_RE = /\.(?:md|th|thumb|thumbnail|preview|small)\.(?:jpe?g|png|gif|webp|bmp|avif)$/i;
 
 function isAuxiliaryImageBasename(name) {
   return AUX_IMAGE_BASENAME_RE.test(name)
     || SITE_SHELL_IMAGE_BASENAME_RE.test(name)
-    || FORUM_CHROME_IMAGE_BASENAME_RE.test(name);
+    || FORUM_CHROME_IMAGE_BASENAME_RE.test(name)
+    || THUMBNAIL_IMAGE_BASENAME_RE.test(name);
 }
 
 const pool = new Pool({ connectionString: DATABASE_URL, max: 2 });
@@ -39,6 +43,23 @@ function platformFromUrl(rawUrl) {
   } catch {
     return 'unknown';
   }
+}
+
+function normalizeChaturbateTarget(parts = {}) {
+  const haystack = [
+    parts.platform,
+    parts.channel,
+    parts.title,
+    parts.filename,
+    parts.filepath,
+    parts.sourceUrl,
+    parts.contextUrl,
+  ].filter(Boolean).join(' ').toLowerCase().replace(/[_-]+/g, ' ');
+  const isCamSource = /\b(chaturbate|cloudbate|archivebate|xhomealone)\b/.test(haystack);
+  if (!isCamSource) return null;
+  if (/\bjuliana\s+gonebad\b/.test(haystack)) return { platform: 'chaturbate', channel: 'juliana_gonebad' };
+  if (/\bbreeding\s+material\b/.test(haystack)) return { platform: 'chaturbate', channel: 'breeding_material' };
+  return null;
 }
 
 function threadIdFromUrl(rawUrl) {
@@ -113,6 +134,8 @@ async function collectMedia(dir) {
     const ext = path.extname(name).toLowerCase();
     if (!MEDIA_EXTS.has(ext)) continue;
     if (/\.(part|tmp|ytdl)$/i.test(name)) continue;
+    if (YTDLP_FORMAT_FRAGMENT_RE.test(name)) continue;
+    if (PARTIAL_MEDIA_BASENAME_RE.test(name)) continue;
     if (isAuxiliaryImageBasename(name)) continue;
     try {
       const stat = await fsp.stat(filePath);
@@ -159,10 +182,23 @@ async function syncJob(job) {
     const title = String(side.fulltitle || side.title || side.filename || path.basename(item.name, item.ext) || threadTitle || '').trim();
     if (isThreadShellImage(item, job, sourceUrl, title, threadTitle)) continue;
     const sourceSite = String(side.category || '').toLowerCase() || null;
-    const realPlatform = isTelegram ? 'telegram' : platform;
-    const realChannel = isTelegram
+    let realPlatform = isTelegram ? 'telegram' : platform;
+    let realChannel = isTelegram
       ? String(side.channel || side.telegram_chat_title || opts.channel || 'telegram').trim()
       : channel;
+    const chaturbateTarget = normalizeChaturbateTarget({
+      platform: realPlatform,
+      channel: realChannel,
+      title,
+      filename: item.name,
+      filepath: item.filePath,
+      sourceUrl,
+      contextUrl: threadUrl || job.url,
+    });
+    if (!isTelegram && chaturbateTarget) {
+      realPlatform = chaturbateTarget.platform;
+      realChannel = chaturbateTarget.channel;
+    }
     const metadata = {
       hub_job_id: String(job.id),
       adapter: job.adapter,
@@ -191,26 +227,40 @@ async function syncJob(job) {
       indexed_channel: realChannel,
     };
 
-    const result = await pool.query(
-      `INSERT INTO downloads
-        (url, platform, channel, title, filename, filepath, filesize, format,
-         status, progress, metadata, source_url, duration, created_at, updated_at, finished_at, is_thumb_ready)
-       SELECT $1, $2, $3, $4, $5, $6, $7, $8,
-              'completed', 100, $9::jsonb, $10, NULL, now(), now(), now(), false
-       WHERE NOT EXISTS (SELECT 1 FROM downloads WHERE filepath = $6)`,
-      [
-        sourceUrl || threadUrl || job.url,
-        realPlatform,
-        realChannel,
-        title || threadTitle || item.name,
-        item.name,
-        item.filePath,
-        item.stat.size,
-        item.ext.slice(1),
-        JSON.stringify(metadata),
-        sourceUrl || threadUrl || job.url,
-      ],
-    );
+    let result = { rowCount: 0 };
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [item.filePath]);
+      const existing = await client.query('SELECT id FROM downloads WHERE filepath = $1 LIMIT 1', [item.filePath]);
+      if (existing.rows.length === 0) {
+        result = await client.query(
+          `INSERT INTO downloads
+            (url, platform, channel, title, filename, filepath, filesize, format,
+             status, progress, metadata, source_url, duration, created_at, updated_at, finished_at, is_thumb_ready)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+                  'completed', 100, $9::jsonb, $10, NULL, now(), now(), now(), false)`,
+          [
+            sourceUrl || threadUrl || job.url,
+            realPlatform,
+            realChannel,
+            title || threadTitle || item.name,
+            item.name,
+            item.filePath,
+            item.stat.size,
+            item.ext.slice(1),
+            JSON.stringify(metadata),
+            sourceUrl || threadUrl || job.url,
+          ],
+        );
+      }
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw e;
+    } finally {
+      client.release();
+    }
     inserted += result.rowCount || 0;
   }
   return inserted;

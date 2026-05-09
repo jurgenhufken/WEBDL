@@ -1320,7 +1320,7 @@ async function getKeep2ShareWebAccessToken(cookieHeader = '', preferredHost = ''
     'User-Agent': keep2ShareUserAgentFromEnv(),
   };
   if (cookieHeader) baseHeaders.Cookie = cookieHeader;
-  const xbc = tokenInfo.source === 'firefox-localstorage' ? '' : keep2ShareXbcFromEnv();
+  const xbc = keep2ShareXbcFromEnv();
   if (xbc) baseHeaders['X-BC'] = xbc;
 
   if (cookieHeader) {
@@ -12555,72 +12555,91 @@ async function startGalleryDlDownload(downloadId, url, platform, channel, title,
       } catch (e) {}
     }, 5 * 60 * 1000);
 
-    let stderr = '';
-    proc.stderr.on('data', (d) => { stderr += d.toString(); });
-    proc.stdout.on('data', () => { });
+	    let stderr = '';
+	    proc.stderr.on('data', (d) => { stderr += d.toString(); });
+	    proc.stdout.on('data', () => { });
 
-    proc.on('close', async (code) => {
-      activeProcesses.delete(downloadId);
-      if (code === 0) {
-        // Index all downloaded files
-        try {
-          const files = listMediaFilesInDir(dir);
-          let indexed = 0;
-          for (const fullPath of files) {
-            try {
-              const file = path.basename(fullPath);
-              const st = fs.statSync(fullPath);
-              // Skip gallery-dl downloaded thumbnails/logos (not server-generated ones)
-              if (file.endsWith('_thumb.jpg') || file.endsWith('_thumb.png') || file.endsWith('_logo.jpg') || file.endsWith('_logo.png')) continue;
-              if (st.isFile()) {
-                const relPath = path.relative(BASE_DIR, fullPath);
-                if (relPath && !relPath.startsWith('..')) {
-                  const indexedAt = new Date().toISOString();
-                  await upsertDownloadFile.run(downloadId, relPath, st.size, Math.floor(st.mtimeMs), indexedAt, indexedAt);
-                  indexed++;
-                }
-              }
-            } catch (e) { }
-            if (indexed % 10 === 0) await yieldEventLoop();
-          }
-          console.log(`   📂 Geïndexeerd: ${indexed} files voor download #${downloadId}`);
-          recentFilesTopCache.clear();
+	    const indexGalleryDlFilesAndComplete = async (files, extraMeta = {}) => {
+	      let indexed = 0;
+	      let safeTotalBytes = 0;
+	      for (const fullPath of files) {
+	        try {
+	          const file = path.basename(fullPath);
+	          const st = fs.statSync(fullPath);
+	          // Skip gallery-dl downloaded thumbnails/logos (not server-generated ones)
+	          if (file.endsWith('_thumb.jpg') || file.endsWith('_thumb.png') || file.endsWith('_logo.jpg') || file.endsWith('_logo.png')) continue;
+	          if (st.isFile()) {
+	            const relPath = path.relative(BASE_DIR, fullPath);
+	            if (relPath && !relPath.startsWith('..')) {
+	              const indexedAt = new Date().toISOString();
+	              await upsertDownloadFile.run(downloadId, relPath, st.size, Math.floor(st.mtimeMs), indexedAt, indexedAt);
+	              indexed++;
+	              safeTotalBytes += Number(st.size || 0);
+	            }
+	          }
+	        } catch (e) { }
+	        if (indexed % 10 === 0) await yieldEventLoop();
+	      }
+	      console.log(`   📂 Geïndexeerd: ${indexed} files voor download #${downloadId}`);
+	      recentFilesTopCache.clear();
 
-          // Post-download channel derivation: if channel is still 'unknown', try to derive from gallery-dl output
-          if (!outChannel || outChannel === 'unknown') {
-            try {
-              let betterChannel = null;
-              for (const fullPath of files) {
-                const relFromDir = path.relative(dir, fullPath);
-                // gallery-dl/pornpics/94245654 Gallery Title/file.jpg
-                const gdMatch = relFromDir.match(/gallery-dl\/pornpics\/(?:\d+\s+)?([^\/]+)\//i);
-                if (gdMatch && gdMatch[1]) {
-                  betterChannel = gdMatch[1];
-                  break;
-                }
-              }
-              if (betterChannel) {
-                await db.prepare(
-                  db.isPostgres
-                    ? 'UPDATE downloads SET channel = $1 WHERE id = $2'
-                    : 'UPDATE downloads SET channel = ? WHERE id = ?'
-                ).run(betterChannel, downloadId);
-                console.log(`   📝 Channel afgeleid: "${betterChannel}" voor download #${downloadId}`);
-              }
-            } catch (e) { }
-          }
-        } catch (e) {
-          console.log(`   ⚠️  Indexing fout: ${e.message}`);
-        }
+	      // Post-download channel derivation: if channel is still 'unknown', try to derive from gallery-dl output
+	      if (!outChannel || outChannel === 'unknown') {
+	        try {
+	          let betterChannel = null;
+	          for (const fullPath of files) {
+	            const relFromDir = path.relative(dir, fullPath);
+	            // gallery-dl/pornpics/94245654 Gallery Title/file.jpg
+	            const gdMatch = relFromDir.match(/gallery-dl\/pornpics\/(?:\d+\s+)?([^\/]+)\//i);
+	            if (gdMatch && gdMatch[1]) {
+	              betterChannel = gdMatch[1];
+	              break;
+	            }
+	          }
+	          if (betterChannel) {
+	            await db.prepare(
+	              db.isPostgres
+	                ? 'UPDATE downloads SET channel = $1 WHERE id = $2'
+	                : 'UPDATE downloads SET channel = ? WHERE id = ?'
+	            ).run(betterChannel, downloadId);
+	            console.log(`   📝 Channel afgeleid: "${betterChannel}" voor download #${downloadId}`);
+	          }
+	        } catch (e) { }
+	      }
 
-        const metaObj = { tool: 'gallery-dl', platform, channel: outChannel, title, url, outputDir: dir };
-        await updateDownload.run('completed', 100, dir, '(multiple)', 0, '', JSON.stringify(metaObj), null, downloadId);
-        try { runDownloadSchedulerSoon(); } catch (e) { }
-        try { syncRuntimeActiveState().catch(() => { }); } catch (e) { }
-      } else {
-        await updateDownloadStatus.run('error', 0, stderr || `gallery-dl exit code: ${code}`, downloadId);
-        try { runDownloadSchedulerSoon(); } catch (e) { }
-        try { syncRuntimeActiveState().catch(() => { }); } catch (e) { }
+	      const metaObj = { tool: 'gallery-dl', platform, channel: outChannel, title, url, outputDir: dir, ...extraMeta };
+	      await updateDownload.run('completed', 100, dir, indexed > 1 ? `(multiple: ${indexed} files)` : '(multiple)', safeTotalBytes, '', JSON.stringify(metaObj), null, downloadId);
+	    };
+
+	    proc.on('close', async (code) => {
+	      activeProcesses.delete(downloadId);
+	      if (code === 0) {
+	        // Index all downloaded files
+	        try {
+	          const files = listMediaFilesInDir(dir);
+	          await indexGalleryDlFilesAndComplete(files);
+	        } catch (e) {
+	          console.log(`   ⚠️  Indexing fout: ${e.message}`);
+	        }
+	        try { runDownloadSchedulerSoon(); } catch (e) { }
+	        try { syncRuntimeActiveState().catch(() => { }); } catch (e) { }
+	      } else {
+	        try {
+	          const files = listMediaFilesInDir(dir);
+	          if (files && files.length) {
+	            console.log(`   ⚠️  gallery-dl exit ${code}, maar ${files.length} media-bestanden gevonden; indexeer als completed voor download #${downloadId}`);
+	            await indexGalleryDlFilesAndComplete(files, {
+	              recoveredFromExitCode: code,
+	              stderr: String(stderr || '').slice(-2000),
+	            });
+	            try { runDownloadSchedulerSoon(); } catch (e) { }
+	            try { syncRuntimeActiveState().catch(() => { }); } catch (e) { }
+	            return;
+	          }
+	        } catch (e) { }
+	        await updateDownloadStatus.run('error', 0, stderr || `gallery-dl exit code: ${code}`, downloadId);
+	        try { runDownloadSchedulerSoon(); } catch (e) { }
+	        try { syncRuntimeActiveState().catch(() => { }); } catch (e) { }
       }
     });
 

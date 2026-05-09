@@ -12,7 +12,7 @@ const HTTP_TIMEOUT_MS = 6000;
 const PROBE_FAILURES_BEFORE_DISCONNECT = 2; // Reduced so it detects faster
 const PROBE_DISCONNECT_GRACE_MS = 12000; // Drop after 12s of no heartbeat
 const SOCKET_ENABLED = false;
-const BACKGROUND_BUILD = 'simple-background-v4-hub-intake-only';
+const BACKGROUND_BUILD = 'simple-background-v5-context-menu-restore';
 const HUB_URL = 'http://localhost:35730';
 
 
@@ -84,6 +84,7 @@ async function postHubJob(url, metadata = {}) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         url,
+        ...(metadata && metadata.adapter ? { adapter: metadata.adapter } : {}),
         priority: 10,
         options: {
           ...(metadata || {}),
@@ -330,15 +331,22 @@ async function notifyRecordingStateChange(state, urls, keys) {
   }
 }
 
-function ensureContextMenu() {
+async function ensureContextMenu() {
+  const menusApi = browser.contextMenus || browser.menus;
+  if (!menusApi || !menusApi.create) {
+    console.error('context menu API ontbreekt');
+    return;
+  }
   try {
-    browser.contextMenus.removeAll();
-  } catch (e) {}
+    if (menusApi.removeAll) await menusApi.removeAll();
+  } catch (e) {
+    console.warn('context menu removeAll failed', e && e.message ? e.message : e);
+  }
   try {
-    browser.contextMenus.create({
+    menusApi.create({
       id: CONTEXT_MENU_ID,
-      title: 'WEBDL Download',
-      contexts: ['link', 'image', 'video', 'audio']
+      title: 'Download with WEBDL',
+      contexts: ['page', 'selection', 'link', 'image', 'video', 'audio']
     });
   } catch (e) {
     console.error('context menu create failed', e);
@@ -662,7 +670,17 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
-ensureContextMenu();
+ensureContextMenu().catch((e) => console.error('context menu init failed', e));
+if (browser.runtime && browser.runtime.onInstalled) {
+  browser.runtime.onInstalled.addListener(() => {
+    ensureContextMenu().catch((e) => console.error('context menu install refresh failed', e));
+  });
+}
+if (browser.runtime && browser.runtime.onStartup) {
+  browser.runtime.onStartup.addListener(() => {
+    ensureContextMenu().catch((e) => console.error('context menu startup refresh failed', e));
+  });
+}
 if (SOCKET_ENABLED) {
   connectPersistentSocket();
 } else {

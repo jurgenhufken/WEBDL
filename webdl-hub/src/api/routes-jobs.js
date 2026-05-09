@@ -25,9 +25,13 @@ function isMultiItemUrl(url) {
     const pathname = u.pathname.toLowerCase();
     const isYoutubeHost = host === 'youtube.com' || host === 'youtu.be' || host.endsWith('.youtube.com');
     const isXvideosHost = host === 'xvideos.com' || host.endsWith('.xvideos.com');
+    const isXhomealoneHost = host === 'xhomealone.com' || host.endsWith('.xhomealone.com');
     const isRedgifsHost = host === 'redgifs.com' || host.endsWith('.redgifs.com');
     if (isXvideosHost) {
       return !/^\/video[./]/i.test(pathname);
+    }
+    if (isXhomealoneHost) {
+      return !/^\/videos\/\d+\//i.test(pathname);
     }
     if (isRedgifsHost) {
       if (/^\/users\/[^/]+\/?$/.test(pathname)) return true;
@@ -94,6 +98,79 @@ function normalizeVipergirlsThreadUrl(url, { wholeThread = true } = {}) {
     return u.toString();
   } catch {}
   return String(url || '');
+}
+
+function normalizeTranslatedProxyUrl(url) {
+  try {
+    const u = new URL(String(url || '').trim());
+    const host = u.hostname.toLowerCase().replace(/^www\./, '');
+    if (host !== 'translated.turbopages.org') return u.toString();
+    const parts = u.pathname.split('/').filter(Boolean);
+    const schemeIndex = parts.findIndex((p) => p === 'http' || p === 'https');
+    if (schemeIndex < 0 || !parts[schemeIndex + 1]) return u.toString();
+    const scheme = parts[schemeIndex];
+    const targetHost = parts[schemeIndex + 1];
+    const targetPath = '/' + parts.slice(schemeIndex + 2).join('/');
+    return `${scheme}://${targetHost}${targetPath}${u.search}${u.hash}`;
+  } catch (_) {
+    return String(url || '');
+  }
+}
+
+function canonicalDedupeUrl(url) {
+  const raw = normalizeTranslatedProxyUrl(url);
+  try {
+    const u = new URL(String(raw || '').trim());
+    const host = u.hostname.replace(/^www\./i, '').toLowerCase();
+    u.hostname = host;
+    u.hash = '';
+    if ((host === 'youtube.com' || host.endsWith('.youtube.com')) && u.searchParams.get('v')) {
+      return `youtube:${u.searchParams.get('v')}`;
+    }
+    if (host === 'youtu.be') {
+      const id = u.pathname.split('/').filter(Boolean)[0];
+      if (id) return `youtube:${id}`;
+    }
+    for (const key of Array.from(u.searchParams.keys())) {
+      if (/^(utm_|fbclid$|gclid$|dclid$|yclid$|mc_|promo$|ref$|src$|source$)/i.test(key)) {
+        u.searchParams.delete(key);
+      }
+    }
+    const params = Array.from(u.searchParams.entries()).sort(([a], [b]) => a.localeCompare(b));
+    u.search = '';
+    for (const [key, val] of params) u.searchParams.append(key, val);
+    u.pathname = u.pathname.replace(/\/+$/, '') || '/';
+    return u.toString().toLowerCase();
+  } catch (_) {
+    return String(raw || '').trim().toLowerCase();
+  }
+}
+
+function isFootFetishClubBrowserOnlyUrl(url) {
+  try {
+    const normalized = normalizeTranslatedProxyUrl(url);
+    const u = new URL(String(normalized || '').trim());
+    const host = u.hostname.replace(/^www\./i, '').toLowerCase();
+    if (host !== 'foot-fetish.club' && !host.endsWith('.foot-fetish.club')) return false;
+    return /^\/(?:threads|attachments)\//i.test(u.pathname);
+  } catch (_) {
+    return false;
+  }
+}
+
+async function withUrlDedupeLock(repo, url, fn) {
+  const key = canonicalDedupeUrl(url);
+  const client = await repo.pool.connect();
+  try {
+    await client.query('SELECT pg_advisory_lock(hashtextextended($1, 0))', [key]);
+    return await fn();
+  } finally {
+    try {
+      await client.query('SELECT pg_advisory_unlock(hashtextextended($1, 0))', [key]);
+    } finally {
+      client.release();
+    }
+  }
 }
 
 async function expandAndEnqueue({ repo, queue, adapters, url, priority, options, maxAttempts, force }) {
@@ -275,15 +352,33 @@ async function mapWithConcurrency(values, limit, fn) {
 function createJobsRouter({ repo, queue, adapters, detect }) {
   const r = express.Router();
 
-  async function enqueueOneUrl({ url, hint = null, options = {}, maxAttempts = 3, force = false, requestedPriority = null }) {
+  async function enqueueOneUrl({ url, hint = null, options = {}, maxAttempts = 3, force = false, requestedPriority = null, lockHeld = false }) {
     const sourceContext = options.webdl_source_contexts?.[url] || options.sourceContext || null;
     const contextUrl = sourceContext?.url || options.contextUrl || options.pageUrl || '';
     const sourcePlatform = String(sourceContext?.platform || options.platform || '').toLowerCase();
     const vipergirlsWholeThread = options.vipergirlsWholeThread !== false;
     const isVipergirlsContext = sourcePlatform === 'vipergirls'
       || /(?:vipergirls\.to|viper\.to)\/threads\//i.test(String(contextUrl || ''));
-    const isThreadUrl = /(?:vipergirls\.to|viper\.to)\/threads\//i.test(String(url || ''));
-    const jobUrl = isThreadUrl ? normalizeVipergirlsThreadUrl(url, { wholeThread: vipergirlsWholeThread }) : url;
+    const inputUrl = normalizeTranslatedProxyUrl(url);
+    const isThreadUrl = /(?:vipergirls\.to|viper\.to)\/threads\//i.test(String(inputUrl || ''));
+    const jobUrl = isThreadUrl ? normalizeVipergirlsThreadUrl(inputUrl, { wholeThread: vipergirlsWholeThread }) : inputUrl;
+    if (isFootFetishClubBrowserOnlyUrl(jobUrl)) {
+      throw Object.assign(
+        new Error('Foot-Fetish.Club vereist browser-cookies. Gebruik de toolbar browser-upload/fullscale route; server-jobs worden geblokkeerd om 403/done-met-0-bestanden te voorkomen.'),
+        { httpStatus: 409 },
+      );
+    }
+    if (!lockHeld) {
+      return withUrlDedupeLock(repo, jobUrl, () => enqueueOneUrl({
+        url,
+        hint,
+        options,
+        maxAttempts,
+        force,
+        requestedPriority,
+        lockHeld: true,
+      }));
+    }
     if (!hint && isVipergirlsContext && contextUrl && !isThreadUrl) {
       const threadUrl = normalizeVipergirlsThreadUrl(contextUrl, { wholeThread: vipergirlsWholeThread });
       if (!force) {

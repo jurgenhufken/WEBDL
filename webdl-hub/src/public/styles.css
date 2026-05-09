@@ -185,6 +185,30 @@ main { display: grid; grid-template-columns: 400px 1fr; height: calc(100vh - 120
 .bar-fill { background: var(--accent); height: 100%; width: 0%; transition: width 0.3s; }
 .bar-fill.done { background: var(--ok); }
 
+.work-lanes {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px; margin: 10px 0 12px;
+}
+.work-lane {
+  border: 1px solid var(--border); background: var(--panel);
+  border-radius: 8px; padding: 8px 10px; min-width: 0;
+}
+.work-lane-head {
+  display: flex; justify-content: space-between; gap: 8px; align-items: baseline;
+  font-size: 12px;
+}
+.work-lane-head strong { color: var(--fg); }
+.work-lane-head span {
+  color: var(--fg-dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.work-lane-counts {
+  display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px;
+  color: var(--fg-dim); font-size: 11px;
+}
+.work-lane-counts .running { color: var(--running); }
+.work-lane-counts .paused { color: var(--warn); }
+.work-lane-counts .failed { color: var(--err); }
+
 /* ─── Detail panel ─── */
 .detail-panel { overflow-y: auto; padding: 20px; }
 .empty { color: var(--fg-dim); padding: 60px 20px; text-align: center; font-size: 13px; }
@@ -492,6 +516,9 @@ ol.logs .lvl.error { color: var(--err); }
 .overview-groups {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
   gap: 10px;
+}
+.overview-groups-top {
+  margin-bottom: 14px;
 }
 .overview-group {
   background: var(--panel); border: 1px solid var(--border);

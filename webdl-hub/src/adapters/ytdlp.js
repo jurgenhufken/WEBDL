@@ -12,6 +12,7 @@ const YOUTUBE_SLEEP_REQUESTS = process.env.WEBDL_YTDLP_YOUTUBE_SLEEP_REQUESTS ||
 const YOUTUBE_SLEEP_INTERVAL = process.env.WEBDL_YTDLP_YOUTUBE_SLEEP_INTERVAL || '2';
 const YOUTUBE_MAX_SLEEP_INTERVAL = process.env.WEBDL_YTDLP_YOUTUBE_MAX_SLEEP_INTERVAL || '8';
 const XVIDEOS_EXPAND_LIMIT = Number.parseInt(process.env.WEBDL_XVIDEOS_EXPAND_LIMIT || '50', 10) || 50;
+const XHOMEALONE_EXPAND_LIMIT = Number.parseInt(process.env.WEBDL_XHOMEALONE_EXPAND_LIMIT || '100', 10) || 100;
 const YTDLP_TIMEOUT_MS = Number.parseInt(process.env.WEBDL_YTDLP_TIMEOUT_MS || String(4 * 60 * 60 * 1000), 10);
 const YTDLP_IDLE_TIMEOUT_MS = Number.parseInt(process.env.WEBDL_YTDLP_IDLE_TIMEOUT_MS || String(12 * 60 * 1000), 10);
 const MERGE_VIDEO_HOSTS = [
@@ -152,6 +153,17 @@ function isXvideosListingUrl(url) {
   }
 }
 
+function isXhomealoneListingUrl(url) {
+  try {
+    const u = new URL(String(url || ''));
+    const host = u.hostname.replace(/^www\./, '').toLowerCase();
+    if (host !== 'xhomealone.com' && !host.endsWith('.xhomealone.com')) return false;
+    return !/^\/videos\/\d+\//i.test(u.pathname);
+  } catch {
+    return false;
+  }
+}
+
 function decodeHtml(text) {
   return String(text || '')
     .replace(/&amp;/g, '&')
@@ -168,7 +180,7 @@ function titleFromXvideosHref(href) {
   return decodeURIComponent(slug).replace(/[_-]+/g, ' ').trim();
 }
 
-function absoluteXvideosUrl(href, seedUrl) {
+function absoluteUrl(href, seedUrl) {
   try {
     return new URL(href, seedUrl).toString().split('#')[0];
   } catch {
@@ -190,7 +202,7 @@ async function expandXvideosListing(url) {
   const re = /<a\b[^>]*href=["']([^"']*\/video[./][^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
   let m;
   while ((m = re.exec(html)) && entries.length < XVIDEOS_EXPAND_LIMIT) {
-    const entryUrl = absoluteXvideosUrl(decodeHtml(m[1]), url);
+    const entryUrl = absoluteUrl(decodeHtml(m[1]), url);
     if (!entryUrl || seen.has(entryUrl)) continue;
     seen.add(entryUrl);
     const textTitle = decodeHtml(String(m[2] || '').replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
@@ -200,6 +212,52 @@ async function expandXvideosListing(url) {
       title: textTitle && !/^\d+p$/i.test(textTitle) ? textTitle : hrefTitle,
       url: entryUrl,
       thumbnail: '',
+    });
+  }
+  return entries;
+}
+
+function xhomealoneChannelFromUrl(seedUrl) {
+  try {
+    const parts = new URL(String(seedUrl || '')).pathname.split('/').filter(Boolean);
+    if (parts[0] === 'tags' && parts[1]) return decodeURIComponent(parts[1]).replace(/-/g, '_');
+  } catch {}
+  return '';
+}
+
+async function expandXhomealoneListing(url) {
+  const res = await fetch(url, {
+    headers: {
+      'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+      'accept': 'text/html,application/xhtml+xml',
+    },
+  });
+  if (!res.ok) throw new Error(`xhomealone listing fetch failed: HTTP ${res.status}`);
+  const html = await res.text();
+  const entries = [];
+  const seen = new Set();
+  const re = /<a\b([^>]*?)href=["']([^"']*\/videos\/\d+\/[^"']*)["']([^>]*)>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = re.exec(html)) && entries.length < XHOMEALONE_EXPAND_LIMIT) {
+    const entryUrl = absoluteUrl(decodeHtml(m[2]), url);
+    if (!entryUrl || seen.has(entryUrl)) continue;
+    seen.add(entryUrl);
+    const attrs = `${m[1] || ''} ${m[3] || ''}`;
+    const titleMatch = attrs.match(/\btitle=["']([^"']+)["']/i);
+    const body = String(m[4] || '');
+    const thumbMatch = body.match(/\bdata-original=["']([^"']+)["']/i)
+      || body.match(/\bdata-webp=["']([^"']+)["']/i)
+      || body.match(/\bsrc=["']([^"']+)["']/i);
+    const textTitle = decodeHtml(String(m[4] || '').replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+    const title = decodeHtml(titleMatch ? titleMatch[1] : textTitle).replace(/\s+/g, ' ').trim()
+      || titleFromXvideosHref(entryUrl);
+    entries.push({
+      id: (entryUrl.match(/\/videos\/(\d+)\//i) || [])[1] || '',
+      title,
+      url: entryUrl,
+      thumbnail: thumbMatch ? absoluteUrl(decodeHtml(thumbMatch[1]), url) : '',
+      channel: xhomealoneChannelFromUrl(url) || '',
+      playlistTitle: xhomealoneChannelFromUrl(url) ? `xhomealone tag ${xhomealoneChannelFromUrl(url)}` : 'xhomealone listing',
     });
   }
   return entries;
@@ -263,13 +321,24 @@ function plan(url, opts = {}) {
 
 // Matcht op onze custom progress-template hierboven.
 const PROG_RE = /^PROG pct=\s*([\d.]+)%\s+speed=\s*(\S+)\s+eta=\s*(\S+)/;
+const CURL_PROGRESS_RE = /^\s*(\d{1,3})\s+\S+\s+\d{1,3}\s+\S+\s+\d+\s+\d+\s+(\S+)\s+\S+\s+\S+\s+\S+\s+(\S+)/;
 
 function parseProgress(line) {
   const m = PROG_RE.exec(line);
-  if (!m) return null;
-  const pct = Number.parseFloat(m[1]);
-  if (!Number.isFinite(pct)) return null;
-  return { pct, speed: m[2], eta: m[3] };
+  if (m) {
+    const pct = Number.parseFloat(m[1]);
+    if (!Number.isFinite(pct)) return null;
+    return { pct, speed: m[2], eta: m[3] };
+  }
+  const curl = CURL_PROGRESS_RE.exec(line);
+  if (curl) {
+    const pct = Number.parseFloat(curl[1]);
+    if (!Number.isFinite(pct) || pct < 0 || pct > 100) return null;
+    const speed = curl[2] && curl[2] !== '0' ? `${curl[2]}/s` : '';
+    const eta = curl[3] && curl[3] !== '--:--:--' ? curl[3] : '';
+    return { pct, speed, eta };
+  }
+  return null;
 }
 
 // Eenvoudige file-collectie: alles wat in workdir staat na afloop, niet-recursief.
@@ -297,6 +366,10 @@ function expandPlaylist(url) {
   return new Promise((resolve, reject) => {
     if (isXvideosListingUrl(url)) {
       expandXvideosListing(url).then(resolve, reject);
+      return;
+    }
+    if (isXhomealoneListingUrl(url)) {
+      expandXhomealoneListing(url).then(resolve, reject);
       return;
     }
     const args = [

@@ -22,10 +22,10 @@ CREATE TABLE IF NOT EXISTS __SCHEMA__.jobs (
   finished_at   TIMESTAMPTZ,
   error         TEXT,
   -- Lane voor concurrency-buckets:
-  --  'process-video': video + ffmpeg merge (YouTube enz.), max 1 tegelijk
-  --  'video':         directe video download zonder merge, max 2 tegelijk
-  --  'gallery':       gallery-dl thread/galleries, max 1 tegelijk
-  --  'image':         images/attachments, max 8 tegelijk
+  -- Oude UI-banen:
+  --  Heavy:  'process-video' voor video met postprocessing/merge/transcode
+  --  Middle: 'video' voor directe video zonder postprocessing
+  --  Fast:   'image'/'gallery' voor afbeeldingen, imagehosts en scans
   lane          TEXT        NOT NULL DEFAULT 'video'
 );
 
@@ -37,6 +37,12 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status_prio
 
 CREATE INDEX IF NOT EXISTS idx_jobs_lane_status
   ON __SCHEMA__.jobs (lane, status, priority DESC, created_at ASC);
+
+-- Dashboard group stats filter and group by JSONB metadata. The partial
+-- expression index avoids repeated full scans over large job options values.
+CREATE INDEX IF NOT EXISTS idx_jobs_expand_group_stats
+  ON __SCHEMA__.jobs ((options->>'expandGroup'), status, lane, created_at ASC, finished_at DESC)
+  WHERE options ? 'expandGroup';
 
 -- Voor URL-dedupe: snel bestaande actieve/klare job vinden per URL.
 CREATE INDEX IF NOT EXISTS idx_jobs_url ON __SCHEMA__.jobs (url);

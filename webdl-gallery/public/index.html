@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WEBDL Gallery</title>
-<link rel="stylesheet" href="/styles.css?v=20260509-79">
+<link rel="stylesheet" href="/styles.css?v=20260509-89">
 </head>
 <body>
   <header class="topbar">
@@ -21,8 +21,11 @@
       </select>
       <select id="sort">
         <option value="recent">Nieuwste</option>
-        <option value="channel">Kanaal/model</option>
-        <option value="rating">Rating</option>
+        <option value="oldest">Oudste</option>
+        <option value="channel">Kanaal/model A-Z</option>
+        <option value="channel_desc">Kanaal/model Z-A</option>
+        <option value="rating">Rating hoog</option>
+        <option value="rating_asc">Rating laag</option>
         <option value="random">Random</option>
       </select>
       <select id="minRating">
@@ -38,9 +41,8 @@
         <option value="video">🎬 Video</option>
         <option value="image">🖼 Afbeelding</option>
       </select>
-      <select id="tagFilter" title="Tag filter">
-        <option value="">Alle tags</option>
-      </select>
+      <input id="tagFilter" type="hidden" value="">
+      <div id="tagFilterMatrix" class="tag-filter-matrix" aria-label="Tag filter"></div>
       <button id="refresh">Ververs</button>
       <button id="themeBtn" class="theme-btn" title="Thema wisselen">💎</button>
       <span id="stats" class="stats"></span>
@@ -68,9 +70,8 @@
           <option value="video">Video</option>
           <option value="image">Foto</option>
         </select>
-        <select id="vTagFilter" title="Tag filter">
-          <option value="">Alle tags</option>
-        </select>
+        <input id="vTagFilter" type="hidden" value="">
+        <div id="vTagFilterMatrix" class="tag-filter-matrix viewer-tag-filter" aria-label="Tag filter"></div>
         <button id="vReload" title="Herladen">↻</button>
       </div>
 
@@ -155,7 +156,7 @@
       <!-- Stage -->
       <div class="viewer-stage" id="vStage">
         <div id="vContent" class="vcontent"></div>
-        <!-- Progress bar: absoluut gepositioneerd, JS alignt op video-onderkant -->
+        <!-- Progress bar: vaste plek in de control-zone -->
         <div class="vprogressbar" id="vProgressBar">
           <div class="vprogressbar-fill" id="vProgressFill"></div>
           <div class="vprogressbar-handle" id="vProgressHandle"></div>
@@ -198,10 +199,9 @@
           </div>
         </div>
         <button id="vBtnRotateStage" class="vrotate-float" title="Media 90° draaien">↻ +90°</button>
+        <button id="vBtnCaptureStage" class="vcapture-float" type="button" title="Screenshot van huidige video/frame">📷</button>
         <button class="viewer-nav prev" id="vPrev" title="Vorige binnen huidige lijst (←)">‹</button>
         <button class="viewer-nav next" id="vNext" title="Volgende binnen huidige lijst (→)">›</button>
-        <button class="viewer-nav up" id="vUp" title="Vorig model/set in thread (↑)">↑</button>
-        <button class="viewer-nav down" id="vDown" title="Volgend model/set in thread (↓)">↓</button>
       </div>
 
     </div><!-- /viewer-main -->
@@ -220,6 +220,10 @@
           <div class="tag-current-wrap">
             <div class="tag-label">Op dit item</div>
             <div id="vTagCurrent" class="tag-current"></div>
+          </div>
+          <div class="tag-last-wrap">
+            <div class="tag-label">Laatst toegepast</div>
+            <div id="vTagLast" class="tag-last"></div>
           </div>
           <div class="tag-target-wrap">
             <div class="tag-label">Waar moet een tag heen?</div>
@@ -268,8 +272,8 @@
 
   </div><!-- /viewer -->
 
-  <script src="/app.js?v=20260509-68"></script>
-  <script src="/viewer.js?v=20260509-39"></script>
+  <script src="/app.js?v=20260509-71"></script>
+  <script src="/viewer.js?v=20260509-56"></script>
   <script>
   // ─── Thema switcher ─────────────────────────────────────────────────────
   (function() {
