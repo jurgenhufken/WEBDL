@@ -34,6 +34,13 @@ function intEnv(name, fallback) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+function nonNegativeIntEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
 // ─── Thumbnail generatie ──────────────────────────────────────────────────────
 function generateThumbnail(videoPath) {
   return new Promise((resolve) => {
@@ -966,10 +973,10 @@ function startWorkerPool({
   //   gallery:       1 (gallery-dl batches; intern snel, onderling serieel)
   //   image:         8 (snel, netwerk-bound)
   const LANES = [
-    { name: 'process-video', concurrency: intEnv('WEBDL_PROCESS_VIDEO_CONCURRENCY', 1) },
-    { name: 'video',         concurrency: intEnv('WEBDL_DIRECT_VIDEO_CONCURRENCY', 2) },
-    { name: 'gallery',       concurrency: intEnv('WEBDL_GALLERY_CONCURRENCY', 1) },
-    { name: 'image',         concurrency: intEnv('WEBDL_IMAGE_CONCURRENCY', 8) },
+    { name: 'process-video', concurrency: nonNegativeIntEnv('WEBDL_PROCESS_VIDEO_CONCURRENCY', 1) },
+    { name: 'video',         concurrency: nonNegativeIntEnv('WEBDL_DIRECT_VIDEO_CONCURRENCY', 2) },
+    { name: 'gallery',       concurrency: nonNegativeIntEnv('WEBDL_GALLERY_CONCURRENCY', 1) },
+    { name: 'image',         concurrency: nonNegativeIntEnv('WEBDL_IMAGE_CONCURRENCY', 8) },
   ];
   const laneActive = new Map(LANES.map((l) => [l.name, new Set()]));
 
