@@ -34,6 +34,7 @@ function platformFromUrl(rawUrl) {
   try {
     const host = new URL(String(rawUrl || '')).hostname.toLowerCase();
     if (host.includes('vipergirls.to') || host.includes('viper.to')) return 'vipergirls';
+    if (host === 't.me' || host.endsWith('.t.me') || host === 'telegram.me' || host.endsWith('.telegram.me')) return 'telegram';
     return host.replace(/^www\./, '').split('.')[0] || 'unknown';
   } catch {
     return 'unknown';
@@ -90,7 +91,9 @@ function readSidecar(filePath) {
   ];
   for (const candidate of candidates) {
     try {
-      return JSON.parse(fs.readFileSync(candidate, 'utf8'));
+      const data = JSON.parse(fs.readFileSync(candidate, 'utf8'));
+      data.__sidecar_path = candidate;
+      return data;
     } catch {}
   }
   return {};
@@ -138,38 +141,54 @@ async function syncJob(job) {
   const threadId = threadIdFromUrl(threadUrl);
   const threadTitle = String(opts.title || opts.channel || titleFromThreadUrl(threadUrl) || '').replace(/^thread_\d+$/i, '').trim();
   const platform = opts.platform || platformFromUrl(threadUrl || job.url);
+  const jobIsTelegram = job.adapter === 'tdl' || platform === 'telegram';
   const channel = String(threadTitle || opts.channel || platform || 'unknown').toLowerCase();
 
   for (const item of media) {
     if (existing.has(item.filePath)) continue;
     const side = readSidecar(item.filePath);
+    const sidePlatform = String(side.platform || side.extractor_key || '').toLowerCase();
+    const isTelegram = jobIsTelegram || sidePlatform === 'telegram';
+    // Telegram media sidecars are written immediately after each download.
+    // If live sync sees the media first, wait instead of importing it as
+    // platform "t" / channel "+invitehash".
+    if (isTelegram && !side.__sidecar_path) continue;
+
     const sourceUrl = side.post_url || side.webpage_url || side.original_url || side.url || threadUrl || job.url;
     const postId = side.token || (sourceUrl ? String(sourceUrl).split('/').filter(Boolean).pop() : '');
     const title = String(side.fulltitle || side.title || side.filename || path.basename(item.name, item.ext) || threadTitle || '').trim();
     if (isThreadShellImage(item, job, sourceUrl, title, threadTitle)) continue;
     const sourceSite = String(side.category || '').toLowerCase() || null;
+    const realPlatform = isTelegram ? 'telegram' : platform;
+    const realChannel = isTelegram
+      ? String(side.channel || side.telegram_chat_title || opts.channel || 'telegram').trim()
+      : channel;
     const metadata = {
       hub_job_id: String(job.id),
       adapter: job.adapter,
-      source_site: platform === 'vipergirls' ? 'vipergirls' : sourceSite,
-      source_thread_title: threadTitle || null,
+      source_site: realPlatform === 'vipergirls' ? 'vipergirls' : sourceSite,
+      source_thread_title: isTelegram ? (side.telegram_chat_title || side.channel || null) : (threadTitle || null),
       source_thread_id: threadId || null,
       source_thread_url: threadUrl || null,
       source_host: sourceSite,
       source_post_url: sourceUrl || null,
       source_post_id: postId || null,
       source_post_title: title || null,
+      telegram_message_id: side.telegram_message_id || null,
+      telegram_chat_title: side.telegram_chat_title || null,
+      telegram_topic_title: side.telegram_topic_title || null,
+      telegram_topic_id: side.telegram_topic_id || null,
       source_graph: {
         nodes: [
-          { type: 'host', platform },
-          { type: 'thread', id: threadId || null, title: threadTitle || '', url: threadUrl || null },
+          { type: 'host', platform: realPlatform },
+          { type: 'thread', id: threadId || null, title: isTelegram ? (side.telegram_chat_title || side.channel || '') : threadTitle || '', url: threadUrl || null },
           { type: 'post', id: postId || null, title: title || '', url: sourceUrl || null },
         ],
       },
       live_partial_import: true,
       imported_from_running_job: true,
       webdl_image_quality: IMAGE_EXTS.has(item.ext) ? 'direct_image' : 'not_image',
-      indexed_channel: channel,
+      indexed_channel: realChannel,
     };
 
     const result = await pool.query(
@@ -181,8 +200,8 @@ async function syncJob(job) {
        WHERE NOT EXISTS (SELECT 1 FROM downloads WHERE filepath = $6)`,
       [
         sourceUrl || threadUrl || job.url,
-        platform,
-        channel,
+        realPlatform,
+        realChannel,
         title || threadTitle || item.name,
         item.name,
         item.filePath,

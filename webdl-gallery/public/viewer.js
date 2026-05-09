@@ -199,13 +199,20 @@
   }
 
   function syncRotationUi() {
-    for (const btn of [el.vBtnRotate, el.vBtnRotateBottom, el.vBtnRotateStage]) {
+    for (const btn of [el.vBtnRotate, el.vBtnRotateStage]) {
       if (!btn) continue;
       const degrees = Number(vs.rotation || 0);
       btn.textContent = degrees ? `↻ ${degrees}°` : '↻ +90°';
       btn.title = degrees ? `Rotatie: ${degrees}° (klik voor +90°)` : 'Media 90° draaien';
       btn.dataset.rotation = String(degrees);
       btn.classList.toggle('active', Boolean(vs.rotation));
+    }
+    if (el.vBtnRotateBottom) {
+      const degrees = Number(vs.rotation || 0);
+      el.vBtnRotateBottom.textContent = '⟳';
+      el.vBtnRotateBottom.title = degrees ? `Rotatie: ${degrees}° (klik voor +90°)` : 'Media 90° draaien';
+      el.vBtnRotateBottom.dataset.rotation = String(degrees);
+      el.vBtnRotateBottom.classList.toggle('active', Boolean(vs.rotation));
     }
   }
 
@@ -258,6 +265,7 @@
       'vZoomRange','vZoomReset',
       'vVol','vBtnMute','vBtnReloadMedia','vSeek',
       'vBtnReverse','vSpeedSelect','vSpeedDown','vSpeedUp',
+      'vBtnMuteBottom','vBottomVol','vBtnFullscreen',
       'vBtnTags','vBtnLog','vClose',
       'vSlideshow2','vRandom2',
       'vStage','vContent','vPrev','vNext','vUp','vDown','vHudLeft','vHudRight',
@@ -979,6 +987,8 @@
     if (el.vBtnPlayPause) el.vBtnPlayPause.textContent = v && !v.paused && !v.ended ? '⏸' : '▶';
     if (el.vSpeedSelect) el.vSpeedSelect.value = String(vs.playbackRate > 0 ? vs.playbackRate : 1);
     if (el.vBtnReverse) el.vBtnReverse.classList.toggle('active', vs.playbackRate < 0);
+    if (el.vBtnMuteBottom) el.vBtnMuteBottom.textContent = vs.muted ? '🔇' : '🔊';
+    if (el.vBottomVol && String(el.vBottomVol.value) !== String(vs.vol)) el.vBottomVol.value = String(vs.vol);
     if (el.vTimeLabel) {
       el.vTimeLabel.textContent = v
         ? `${formatTime(v.currentTime)} / ${formatTime(v.duration)}`
@@ -1007,6 +1017,7 @@
     if (!vs.seekDragging && Number.isFinite(v.duration) && v.duration > 0) {
       const pct = Math.max(0, Math.min(100, (v.currentTime / v.duration) * 100));
       el.vSeek.value = String(Math.round(pct * 10));
+      el.vSeek.style.setProperty('--vseek-progress', pct + '%');
       if (el.vProgressFill) el.vProgressFill.style.width = pct + '%';
       if (el.vProgressHandle) el.vProgressHandle.style.left = pct + '%';
     }
@@ -1037,6 +1048,17 @@
     updatePlaybackControls(v);
   }
 
+  function toggleFullscreen() {
+    const target = el.vStage || el.viewer || document.documentElement;
+    if (!document.fullscreenElement) {
+      const p = target.requestFullscreen && target.requestFullscreen();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    } else if (document.exitFullscreen) {
+      const p = document.exitFullscreen();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    }
+  }
+
   // ─── HUD ──────────────────────────────────────────────────────────────────
   function updateHUD(it) {
     const total = vs.items.length;
@@ -1048,6 +1070,7 @@
     // Reset progress bar
     if (el.vProgressFill) el.vProgressFill.style.width = '0%';
     if (el.vProgressHandle) el.vProgressHandle.style.left = '0%';
+    if (el.vSeek) el.vSeek.style.setProperty('--vseek-progress', '0%');
     // Show progress bar alleen bij video
     if (el.vProgressBar) el.vProgressBar.style.display = it.type === 'video' ? '' : 'none';
     if (el.vBottomControls) el.vBottomControls.classList.toggle('hidden', it.type !== 'video');
@@ -1257,6 +1280,7 @@
     const now = Date.now();
     if (now - vs.lastTagOpenAt < 250) return false;
     vs.lastTagOpenAt = now;
+    showHUD();
     openTagDialog().catch((err) => log('Tags openen mislukt: ' + err.message));
     return false;
   }
@@ -1435,7 +1459,7 @@
   }
 
   // ─── Afspeelsnelheid ─────────────────────────────────────────────────────
-  const FORWARD_SPEED_STEPS = [0.25, 0.5, 1, 1.5, 2, 3, 4];
+  const FORWARD_SPEED_STEPS = [0.1, 0.25, 0.5, 1, 1.5, 2, 3, 4];
   const SPEED_STEPS = FORWARD_SPEED_STEPS;
 
   function changeSpeed(dir) {
@@ -1444,6 +1468,10 @@
     if (idx === -1) {
       idx = FORWARD_SPEED_STEPS.findIndex(s => s >= cur);
       if (idx === -1) idx = FORWARD_SPEED_STEPS.length - 1;
+    }
+    if (dir < 0 && idx <= 0) {
+      setSpeed(-1);
+      return;
     }
     idx = Math.max(0, Math.min(FORWARD_SPEED_STEPS.length - 1, idx + dir));
     setSpeed(FORWARD_SPEED_STEPS[idx]);
@@ -1653,6 +1681,7 @@
           vs.muted = !vs.muted;
           if (v) v.muted = vs.muted;
           el.vBtnMute.textContent = vs.muted ? '🔇' : '🔊';
+          if (el.vBtnMuteBottom) el.vBtnMuteBottom.textContent = vs.muted ? '🔇' : '🔊';
           e.preventDefault();
           break;
         }
@@ -1663,6 +1692,9 @@
         case 'l': case 'L':
           toggleLog();
           e.preventDefault();
+          break;
+        case 't': case 'T':
+          openTagsFromEvent(e);
           break;
         case '[': changeSpeed(-1); e.preventDefault(); break;
         case ']': changeSpeed(1);  e.preventDefault(); break;
@@ -1893,6 +1925,15 @@
 
   // ─── Controls binding ─────────────────────────────────────────────────────
   function bindControls() {
+    const topbar = document.querySelector('.viewer-topbar');
+    if (topbar) {
+      for (const eventName of ['pointerdown', 'mousedown', 'mouseup', 'click', 'dblclick']) {
+        topbar.addEventListener(eventName, (e) => {
+          e.stopPropagation();
+        });
+      }
+    }
+
     el.vClose.addEventListener('click', close);
     el.vPrev.addEventListener('click', (e) => { e.stopPropagation(); navPrev(); });
     el.vNext.addEventListener('click', (e) => { e.stopPropagation(); navNext(); });
@@ -1953,11 +1994,18 @@
       });
     }
 
-    el.vBtnMute.addEventListener('click', () => {
+    function toggleMute() {
       const v = el.vContent.querySelector('video');
       vs.muted = !vs.muted;
       if (v) v.muted = vs.muted;
-      el.vBtnMute.textContent = vs.muted ? '🔇' : '🔊';
+      if (el.vBtnMute) el.vBtnMute.textContent = vs.muted ? '🔇' : '🔊';
+      if (el.vBtnMuteBottom) el.vBtnMuteBottom.textContent = vs.muted ? '🔇' : '🔊';
+    }
+
+    el.vBtnMute.addEventListener('click', toggleMute);
+    if (el.vBtnMuteBottom) el.vBtnMuteBottom.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleMute();
     });
 
     if (el.vBtnReloadMedia) {
@@ -1988,11 +2036,23 @@
       });
     }
 
-    el.vVol.addEventListener('input', () => {
-      vs.vol = parseFloat(el.vVol.value);
+    function setVolumeFrom(input) {
+      vs.vol = parseFloat(input.value);
       const v = el.vContent.querySelector('video');
       if (v) v.volume = vs.vol;
+      if (el.vVol && el.vVol !== input) el.vVol.value = String(vs.vol);
+      if (el.vBottomVol && el.vBottomVol !== input) el.vBottomVol.value = String(vs.vol);
+    }
+
+    el.vVol.addEventListener('input', () => {
+      setVolumeFrom(el.vVol);
     });
+    if (el.vBottomVol) {
+      el.vBottomVol.addEventListener('input', (e) => {
+        e.stopPropagation();
+        setVolumeFrom(el.vBottomVol);
+      });
+    }
 
     el.vSeek.addEventListener('mousedown', () => { vs.seekDragging = true; });
     el.vSeek.addEventListener('mouseup', () => {
@@ -2002,6 +2062,15 @@
     el.vSeek.addEventListener('touchend', () => {
       vs.seekDragging = false;
       seekVideoFromRange(el.vSeek);
+    });
+    el.vSeek.addEventListener('input', () => {
+      const v = el.vContent.querySelector('video');
+      const pct = Math.max(0, Math.min(100, (parseInt(el.vSeek.value, 10) || 0) / 10));
+      el.vSeek.style.setProperty('--vseek-progress', pct + '%');
+      if (v && Number.isFinite(v.duration) && v.duration > 0 && vs.seekDragging && el.vTimeLabel) {
+        const t = (pct / 100) * v.duration;
+        el.vTimeLabel.textContent = `${formatTime(t)} / ${formatTime(v.duration)}`;
+      }
     });
 
     for (const btn of el.vBottomControls.querySelectorAll('[data-seek]')) {
@@ -2020,6 +2089,12 @@
       el.vSpeedUp.addEventListener('click', (e) => {
         e.stopPropagation();
         changeSpeed(1);
+      });
+    }
+    if (el.vBtnFullscreen) {
+      el.vBtnFullscreen.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleFullscreen();
       });
     }
     el.vSlideshow.addEventListener('click', () => {
@@ -2113,14 +2188,12 @@
     });
 
     // Tags dialog
-    ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach((eventName) => {
-      el.vBtnTags.addEventListener(eventName, openTagsFromEvent);
-      document.addEventListener(eventName, (e) => {
-        if (e.target && e.target.closest && e.target.closest('#vBtnTags')) {
-          openTagsFromEvent(e);
-        }
-      }, true);
-    });
+    for (const eventName of ['pointerdown', 'mousedown', 'mouseup']) {
+      el.vBtnTags.addEventListener(eventName, (e) => {
+        e.stopPropagation();
+      });
+    }
+    el.vBtnTags.addEventListener('click', openTagsFromEvent);
     el.vBtnCloseTagDialog.addEventListener('click', (e) => {
       e.stopPropagation();
       closeTagDialog({ force: true });

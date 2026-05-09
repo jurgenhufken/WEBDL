@@ -125,6 +125,7 @@
     const raw = String(value || '').trim().toLowerCase().replace(/^www\./, '');
     if (!raw) return '';
     if (raw === 'youtube' || raw === 'youtube.com' || raw === 'youtu.be' || raw.endsWith('.youtube.com')) return 'youtube';
+    if (raw === 'telegram' || raw === 't' || raw === 't.me' || raw === 'telegram.me' || raw.endsWith('.t.me') || raw.endsWith('.telegram.me')) return 'telegram';
     if (raw === 'twitter' || raw === 'x.com' || raw === 'twitter.com' || raw.endsWith('.x.com') || raw.endsWith('.twitter.com')) return 'twitter';
     if (raw === 'reddit' || raw === 'reddit.com' || raw === 'redd.it' || raw.endsWith('.reddit.com')) return 'reddit';
     if (raw === 'redgifs' || raw === 'redgifs.com' || raw === 'gifdeliverynetwork.com' || raw.endsWith('.redgifs.com') || raw.endsWith('.gifdeliverynetwork.com')) return 'redgifs';

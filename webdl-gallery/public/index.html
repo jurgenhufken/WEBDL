@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WEBDL Gallery</title>
-<link rel="stylesheet" href="/styles.css?v=20260508-60">
+<link rel="stylesheet" href="/styles.css?v=20260509-67">
 </head>
 <body>
   <header class="topbar">
@@ -138,7 +138,7 @@
           <button id="vBtnOpen" class="vtop-btn" title="Bron-URL openen in browser">🔗 Bron</button>
           <button id="vBtnFinder" class="vtop-btn" title="Bestand tonen in Finder">📁 Finder</button>
           <button id="vBtnRotate" class="vtop-btn" title="Media 90° draaien" onmousedown="window.__wdRotateMedia && window.__wdRotateMedia(event)" onclick="window.__wdRotateMedia && window.__wdRotateMedia(event)">↻ +90°</button>
-          <button id="vBtnTags" class="vtop-btn" title="Tags beheren" onmousedown="return window.__wdOpenTags && window.__wdOpenTags(event)" onclick="return window.__wdOpenTags && window.__wdOpenTags(event)">🏷 Tags</button>
+          <button id="vBtnTags" class="vtop-btn" type="button" title="Tags beheren">🏷 Tags</button>
           <button id="vBtnLog" class="vtop-btn" title="Activiteitenlog tonen (L)">📋 Log</button>
           <button id="vBtnTheme" class="vtop-btn" title="Thema wisselen">💎</button>
           <input id="vZoomRange" class="vzoom-hidden" type="range" min="100" max="600" step="10" value="100" aria-hidden="true" tabindex="-1">
@@ -160,23 +160,18 @@
         <div class="vbottom-controls hidden" id="vBottomControls" aria-label="Video bediening">
           <input id="vSeek" class="vbottom-seek" type="range" min="0" max="1000" step="1" value="0" title="Positie in video">
           <div class="vbottom-row">
-            <button id="vBtnPlayPause" class="vplay-btn" title="Afspelen/pauzeren (spatie)">▶</button>
+            <div class="vbottom-left">
+              <button id="vBtnPlayPause" class="vplay-btn" title="Afspelen/pauzeren (spatie)">▶</button>
+              <button class="vicon-btn" data-seek="-10" title="10 seconden terug">↶ 10</button>
+              <button class="vicon-btn" data-seek="10" title="10 seconden vooruit">10 ↷</button>
+              <button id="vBtnMuteBottom" class="vicon-btn" title="Geluid dempen (M)">🔊</button>
+              <input id="vBottomVol" class="vvolume-range" type="range" min="0" max="1" step="0.01" value="0.8" title="Volume">
+            </div>
             <div class="vtime-label" id="vTimeLabel">0:00 / 0:00</div>
-            <div class="vjump-group" aria-label="Achteruit spoelen">
-              <span class="vcontrol-label">Terug</span>
-              <button class="vjump-btn" data-seek="-30" title="30 seconden terug">30s</button>
-              <button class="vjump-btn" data-seek="-10" title="10 seconden terug">10s</button>
-              <button class="vjump-btn" data-seek="-5" title="5 seconden terug">5s</button>
-            </div>
-            <div class="vjump-group" aria-label="Vooruit spoelen">
-              <span class="vcontrol-label">Vooruit</span>
-              <button class="vjump-btn" data-seek="5" title="5 seconden vooruit">5s</button>
-              <button class="vjump-btn" data-seek="10" title="10 seconden vooruit">10s</button>
-              <button class="vjump-btn" data-seek="30" title="30 seconden vooruit">30s</button>
-            </div>
-            <div class="vspeed-group" aria-label="Afspeelsnelheid">
-              <button id="vSpeedDown" class="vspeed-btn" title="Langzamer ([)">Trager</button>
+            <div class="vbottom-right">
+              <button id="vSpeedDown" class="vicon-btn" title="Langzamer ([)">−</button>
               <select id="vSpeedSelect" class="vspeed-select" title="Afspeelsnelheid">
+                <option value="0.1">0.1×</option>
                 <option value="0.25">0.25×</option>
                 <option value="0.5">0.5×</option>
                 <option value="1" selected>1×</option>
@@ -185,10 +180,11 @@
                 <option value="3">3×</option>
                 <option value="4">4×</option>
               </select>
-              <button id="vSpeedUp" class="vspeed-btn" title="Sneller (])">Sneller</button>
+              <button id="vSpeedUp" class="vicon-btn" title="Sneller (])">+</button>
+              <button id="vBtnReverse" class="vicon-btn" title="Achteruit afspelen">↤</button>
+              <button id="vBtnRotateBottom" class="vicon-btn" title="Media 90° draaien">⟳</button>
+              <button id="vBtnFullscreen" class="vicon-btn" title="Volledig scherm">⛶</button>
             </div>
-            <button id="vBtnReverse" class="vreverse-btn" title="Speel de video achteruit af">Terugspelen</button>
-            <button id="vBtnRotateBottom" class="vbottom-rotate" title="Media 90° draaien">Draai 90°</button>
           </div>
         </div>
         <button id="vBtnRotateStage" class="vrotate-float" title="Media 90° draaien">↻ +90°</button>
@@ -237,7 +233,7 @@
   </div><!-- /viewer -->
 
   <script src="/app.js?v=20260509-63"></script>
-  <script src="/viewer.js?v=20260509-21"></script>
+  <script src="/viewer.js?v=20260509-26"></script>
   <script>
   // ─── Thema switcher ─────────────────────────────────────────────────────
   (function() {

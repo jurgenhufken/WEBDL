@@ -240,6 +240,13 @@ function sourceSiteSql(alias = 'd') {
   return `NULLIF(substring(COALESCE(${metadata}, '') from '"source_site"\\s*:\\s*"([^"]+)"'), '')`;
 }
 
+function platformGroupSql(alias = 'd') {
+  return `CASE
+    WHEN LOWER(COALESCE(${alias}.platform, '')) IN ('t', 'telegram') THEN 'telegram'
+    ELSE COALESCE(NULLIF(${alias}.platform, ''), 'unknown')
+  END`;
+}
+
 function channelGroupSql(alias = 'd') {
   const sourceSite = sourceSiteSql(alias);
   return `CASE
@@ -257,6 +264,7 @@ function platformFromUrl(url) {
   const value = String(url || '').toLowerCase();
   if (value.includes('tiktok.com')) return 'tiktok';
   if (value.includes('youtube.com') || value.includes('youtu.be')) return 'youtube';
+  if (value.includes('t.me') || value.includes('telegram.me')) return 'telegram';
   if (value.includes('instagram.com')) return 'instagram';
   if (value.includes('reddit.com') || value.includes('redd.it')) return 'reddit';
   if (value.includes('vipergirls.to') || value.includes('viper.to')) return 'vipergirls';
@@ -288,6 +296,7 @@ function thumbnailFromHubJob(row) {
 function normalizeSourceSiteLabel(value) {
   const raw = String(value || '').trim().toLowerCase().replace(/^www\./, '');
   if (!raw) return '';
+  if (raw === 't' || raw === 'telegram' || raw === 't.me' || raw === 'telegram.me' || raw.endsWith('.t.me') || raw.endsWith('.telegram.me')) return 'telegram';
   if (raw === 'vipergirls.to' || raw === 'viper.to' || raw.endsWith('.vipergirls.to') || raw.endsWith('.viper.to')) return 'vipergirls';
   if (raw === 'youtube.com' || raw === 'youtu.be' || raw.endsWith('.youtube.com')) return 'youtube';
   if (raw === 'twitter.com' || raw === 'x.com' || raw.endsWith('.twitter.com') || raw.endsWith('.x.com')) return 'twitter';
@@ -1212,7 +1221,7 @@ function buildItemFilters({ req, params, fileExpr, extExpr, ratingExpr, includeC
   const tagId = req.query.tag_id ? parseInt(req.query.tag_id, 10) : null;
 
   const where = [`${fileExpr} IS NOT NULL`, `${fileExpr} <> ''`];
-  if (platform) { params.push(platform); where.push(`d.platform = $${params.length}`); }
+  if (platform) { params.push(platform); where.push(`${platformGroupSql('d')} = $${params.length}`); }
   if (includeChannel && channel) {
     if (String(channel).startsWith('site:')) {
       params.push('%' + String(channel).slice(5).toLowerCase() + '%');
@@ -1660,11 +1669,11 @@ app.get('/api/platforms', async (req, res) => {
 
     const { rows } = await pool.query(`
       WITH media_platforms AS (
-        SELECT COALESCE(NULLIF(d.platform, ''), 'unknown') AS platform
+        SELECT ${platformGroupSql('d')} AS platform
           FROM downloads d
          WHERE ${directWhere.join(' AND ')}
         UNION ALL
-        SELECT COALESCE(NULLIF(d.platform, ''), 'unknown') AS platform
+        SELECT ${platformGroupSql('d')} AS platform
           FROM download_files df
           JOIN downloads d ON d.id = df.download_id
          WHERE ${fileWhere.join(' AND ')}
@@ -1742,13 +1751,13 @@ app.get('/api/channels', async (req, res) => {
              MAX(sort_ts) AS latest_ts,
              MAX(rating) AS max_rating
       FROM (
-        SELECT ${directChannelExpr} AS channel, d.platform,
+        SELECT ${directChannelExpr} AS channel, ${platformGroupSql('d')} AS platform,
                COALESCE(d.finished_at, d.updated_at, d.created_at) AS sort_ts,
                d.rating
           FROM downloads d
          WHERE ${directWhere.join(' AND ')}
         UNION ALL
-        SELECT ${fileChannelExpr} AS channel, d.platform,
+        SELECT ${fileChannelExpr} AS channel, ${platformGroupSql('d')} AS platform,
                COALESCE(to_timestamp(NULLIF(df.mtime_ms,0) / 1000.0)::timestamp, df.updated_at, d.finished_at, d.updated_at, d.created_at) AS sort_ts,
                df.rating
           FROM download_files df

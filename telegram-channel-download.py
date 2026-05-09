@@ -8,6 +8,7 @@ import argparse
 from telethon import TelegramClient
 from telethon.tl.functions.channels import GetFullChannelRequest
 from telethon.tl.functions.contacts import SearchRequest
+from telethon.tl.functions.messages import CheckChatInviteRequest, ImportChatInviteRequest
 from telethon.tl.types import Channel, MessageMediaPhoto, MessageMediaDocument, PeerChannel
 
 # Using Telegram Desktop API credentials (public, used by many open source tools)
@@ -43,7 +44,39 @@ def normalize_chat_ref(chat_ref):
     except ValueError:
         return chat_ref
 
+def invite_hash_from_ref(chat_ref):
+    chat_ref = str(chat_ref).strip()
+    chat_ref = chat_ref.split('?', 1)[0].strip()
+
+    patterns = [
+        r'^https?://(?:t\.me|telegram\.me)/\+([^/?#]+)',
+        r'^https?://(?:t\.me|telegram\.me)/joinchat/([^/?#]+)',
+        r'^tg://join\?invite=([^&#]+)',
+        r'^\+([^/?#]+)$',
+    ]
+    for pattern in patterns:
+        match = re.match(pattern, chat_ref, flags=re.I)
+        if match:
+            return match.group(1)
+    return None
+
+async def resolve_invite_entity(client, invite_hash):
+    info = await client(CheckChatInviteRequest(invite_hash))
+    chat = getattr(info, 'chat', None)
+    if chat is not None:
+        return chat
+
+    updates = await client(ImportChatInviteRequest(invite_hash))
+    chats = getattr(updates, 'chats', None) or []
+    if chats:
+        return chats[0]
+    raise RuntimeError(f"Invite link resolved without a chat: {invite_hash}")
+
 async def resolve_entity(client, chat_ref):
+    invite_hash = invite_hash_from_ref(chat_ref)
+    if invite_hash:
+        return await resolve_invite_entity(client, invite_hash)
+
     normalized = normalize_chat_ref(chat_ref)
     try:
         return await client.get_entity(normalized)
@@ -71,11 +104,23 @@ def message_source_url(entity, message):
         return f"https://t.me/c/{entity_id}/{message.id}"
     return ''
 
-def message_title(message, file_path):
+def message_title(message, file_path, chat_title=''):
+    caption = str(getattr(message, 'message', '') or '').strip()
+    if caption:
+        caption = re.sub(r'\s+', ' ', caption)
+        return caption[:140].strip()
+
     file_name = getattr(getattr(message, 'file', None), 'name', None)
+    stem = ''
     if file_name:
-        return os.path.splitext(file_name)[0].replace('_', ' ').strip()
-    return os.path.splitext(os.path.basename(str(file_path or '')))[0].replace('_', ' ').strip() or f"telegram_{message.id}"
+        stem = os.path.splitext(file_name)[0].replace('_', ' ').strip()
+    if not stem:
+        stem = os.path.splitext(os.path.basename(str(file_path or '')))[0].replace('_', ' ').strip()
+
+    if re.match(r'^(?:document|video|photo)(?:\s+\d{4}|\s*$)', stem, flags=re.I):
+        prefix = str(chat_title or 'Telegram').strip() or 'Telegram'
+        return f"{prefix} #{message.id}"
+    return stem or f"Telegram #{message.id}"
 
 def topic_id_for_message(message):
     reply_to = getattr(message, 'reply_to', None)
@@ -101,20 +146,30 @@ def write_sidecar(file_path, entity, message, chat_title, topic_titles=None):
         topic_title = topic_titles.get(topic_id, '') if topic_id else ''
         source_url = message_source_url(entity, message)
         channel_title = topic_title or chat_title
+        uploader_url = f"https://t.me/{getattr(entity, 'username', '')}" if getattr(entity, 'username', None) else ''
+        title = message_title(message, file_path, channel_title)
         metadata = {
             'extractor_key': 'telegram',
             'platform': 'telegram',
             'channel': channel_title,
             'uploader': chat_title,
             'playlist_title': chat_title,
+            'channel_id': str(getattr(entity, 'id', '') or ''),
+            'channel_url': uploader_url,
             'uploader_id': str(getattr(entity, 'id', '') or ''),
-            'uploader_url': f"https://t.me/{getattr(entity, 'username', '')}" if getattr(entity, 'username', None) else '',
-            'title': message_title(message, file_path),
+            'uploader_url': uploader_url,
+            'fulltitle': title,
+            'title': title,
             'filename': os.path.basename(str(file_path)),
             'webpage_url': source_url,
             'original_url': source_url,
             'url': source_url,
             'timestamp': int(message.date.timestamp()) if getattr(message, 'date', None) else None,
+            'source_site': 'telegram',
+            'source_thread_title': chat_title,
+            'source_post_title': title,
+            'source_post_id': str(message.id),
+            'source_post_url': source_url,
             'telegram_message_id': message.id,
             'telegram_chat_title': chat_title,
             'telegram_topic_title': topic_title,

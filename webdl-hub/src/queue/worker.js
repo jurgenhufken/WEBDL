@@ -166,6 +166,13 @@ async function readInfoJsonForMedia(mediaPath, fallbackInfo = null) {
         title: data.fulltitle || data.title || data.filename || '',
         sourceUrl: data.webpage_url || data.original_url || data.url || '',
         platform: data.extractor_key ? data.extractor_key.toLowerCase() : '',
+        telegramMessageId: data.telegram_message_id || null,
+        telegramChatTitle: data.telegram_chat_title || null,
+        telegramTopicTitle: data.telegram_topic_title || null,
+        telegramTopicId: data.telegram_topic_id || null,
+        sourcePostTitle: data.source_post_title || null,
+        sourcePostId: data.source_post_id || null,
+        sourceThreadTitle: data.source_thread_title || null,
         duration: data.duration_string || (Number.isFinite(Number(data.duration)) ? String(Math.round(Number(data.duration))) : null),
         sourcePublishedAt: getYtdlpSourceTimestamp(data),
         ...galleryDlForumInfo(data),
@@ -477,6 +484,23 @@ async function syncToGallery(job, outputFiles, logger, repo) {
       const sourceUrl = rawSourceUrl;
       const sourceUrlIsJobUrl = sourceUrl && String(sourceUrl) === String(job.url || '');
       const shouldDedupeBySourceUrl = Boolean(sourceUrl) && !(sourceUrlIsJobUrl && outputFiles.length > 1);
+      const telegramSourceGraph = isTelegram ? {
+        nodes: [
+          { type: 'host', platform: 'telegram' },
+          {
+            type: 'thread',
+            id: fileInfo?.channelId || null,
+            title: fileInfo?.telegramChatTitle || channel || '',
+            url: fileInfo?.channelUrl || null,
+          },
+          {
+            type: 'post',
+            id: fileInfo?.telegramMessageId ? String(fileInfo.telegramMessageId) : (fileInfo?.sourcePostId || null),
+            title: fileInfo?.sourcePostTitle || title || '',
+            url: sourceUrl || null,
+          },
+        ],
+      } : null;
 
       // Check for duplicate by filepath
       const existing = await galleryPool.query(
@@ -526,7 +550,11 @@ async function syncToGallery(job, outputFiles, logger, repo) {
             source_post_title: forumInfo?.sourcePostTitle || null,
             source_post_num: forumInfo?.sourcePostNum || null,
             source_post_id: forumInfo?.sourcePostId || null,
-            source_graph: sourceGraphFromForumInfo(forumInfo, job.options?.contextUrl || job.url, realPlatform),
+            source_graph: telegramSourceGraph || sourceGraphFromForumInfo(forumInfo, job.options?.contextUrl || job.url, realPlatform),
+            telegram_message_id: fileInfo?.telegramMessageId || null,
+            telegram_chat_title: fileInfo?.telegramChatTitle || null,
+            telegram_topic_title: fileInfo?.telegramTopicTitle || null,
+            telegram_topic_id: fileInfo?.telegramTopicId || null,
             youtube_channel_id: fileInfo?.channelId || job.options?.youtubeChannelId || null,
             youtube_channel_url: fileInfo?.channelUrl || job.options?.youtubeChannelUrl || null,
             indexed_channel: channel || null,
