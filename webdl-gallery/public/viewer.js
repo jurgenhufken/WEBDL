@@ -912,8 +912,18 @@
     vs.idx = 0;
     await loadMoreViewerItems();
     if (currentId) {
-      const nextIdx = vs.items.findIndex((it) => String(it.id) === currentId);
-      if (nextIdx >= 0) vs.idx = nextIdx;
+      let nextIdx = vs.items.findIndex((it) => String(it.id) === currentId);
+      for (let tries = 0; nextIdx < 0 && !vs.done && tries < 20; tries++) {
+        const beforeLen = vs.items.length;
+        await loadMoreViewerItems();
+        nextIdx = vs.items.findIndex((it) => String(it.id) === currentId);
+        if (vs.items.length === beforeLen) break;
+      }
+      if (nextIdx >= 0) {
+        vs.idx = nextIdx;
+      } else {
+        showHudMessage('Huidig item niet meer gevonden na verversen');
+      }
     }
     if (vs.items.length > 0) showCurrent();
     renderSidebarList();

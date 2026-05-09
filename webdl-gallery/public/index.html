@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WEBDL Gallery</title>
-<link rel="stylesheet" href="/styles.css?v=20260509-73">
+<link rel="stylesheet" href="/styles.css?v=20260509-74">
 </head>
 <body>
   <header class="topbar">
@@ -205,42 +205,44 @@
           <strong>Tags</strong>
           <button id="vBtnCloseTagDialog">✕</button>
         </div>
-        <div class="tag-current-wrap">
-          <div class="tag-label">Op dit item</div>
-          <div id="vTagCurrent" class="tag-current"></div>
-        </div>
-        <div class="tag-target-wrap">
-          <div class="tag-label">Waar moet een tag heen?</div>
-          <div class="tag-target-buttons">
-            <button id="vTagTargetMedia" type="button" class="tag-target active">Media</button>
-            <button id="vTagTargetRecipe" type="button" class="tag-target">Recept</button>
+        <div class="tag-dialog-body">
+          <div class="tag-current-wrap">
+            <div class="tag-label">Op dit item</div>
+            <div id="vTagCurrent" class="tag-current"></div>
           </div>
-        </div>
-        <div class="tag-quick-wrap">
-          <div class="tag-label">Favorieten</div>
-          <div id="vTagQuick" class="tag-quick"></div>
-        </div>
-        <div class="tag-recipes-wrap">
-          <div class="tag-label">Recepten</div>
-          <div id="vTagRecipes" class="tag-recipes"></div>
-          <div id="vTagSuggestions" class="tag-suggestions"></div>
-          <div class="tag-label tag-recipe-edit-label">Recept maken / wijzigen</div>
-          <div class="tag-recipe-editor">
-            <input id="vRecipeName" type="text" placeholder="Naam recept...">
-            <input id="vRecipeDescription" type="text" placeholder="Omschrijving...">
+          <div class="tag-target-wrap">
+            <div class="tag-label">Waar moet een tag heen?</div>
+            <div class="tag-target-buttons">
+              <button id="vTagTargetMedia" type="button" class="tag-target active">Media</button>
+              <button id="vTagTargetRecipe" type="button" class="tag-target">Recept</button>
+            </div>
           </div>
-          <div class="tag-label tag-recipe-draft-label">Tags in recept</div>
-          <div id="vRecipeDraft" class="tag-recipe-draft"></div>
-          <div class="tag-recipe-actions">
-            <button id="vBtnRecipeFromItem" type="button">Creëer recept van media-tags</button>
-            <button id="vBtnSaveRecipe" type="button">Opslaan</button>
-            <button id="vBtnClearRecipe" type="button">Reset</button>
+          <div class="tag-quick-wrap">
+            <div class="tag-label">Favorieten</div>
+            <div id="vTagQuick" class="tag-quick"></div>
           </div>
+          <div class="tag-recipes-wrap">
+            <div class="tag-label">Recepten</div>
+            <div id="vTagRecipes" class="tag-recipes"></div>
+            <div id="vTagSuggestions" class="tag-suggestions"></div>
+            <div class="tag-label tag-recipe-edit-label">Recept maken / wijzigen</div>
+            <div class="tag-recipe-editor">
+              <input id="vRecipeName" type="text" placeholder="Naam recept...">
+              <input id="vRecipeDescription" type="text" placeholder="Omschrijving...">
+            </div>
+            <div class="tag-label tag-recipe-draft-label">Tags in recept</div>
+            <div id="vRecipeDraft" class="tag-recipe-draft"></div>
+            <div class="tag-recipe-actions">
+              <button id="vBtnRecipeFromItem" type="button">Creëer recept van media-tags</button>
+              <button id="vBtnSaveRecipe" type="button">Opslaan</button>
+              <button id="vBtnClearRecipe" type="button">Reset</button>
+            </div>
+          </div>
+          <div class="tag-search">
+            <input id="vTagSearch" type="search" placeholder="Zoek bestaande tags...">
+          </div>
+          <div id="vTagList" class="tag-list"></div>
         </div>
-        <div class="tag-search">
-          <input id="vTagSearch" type="search" placeholder="Zoek bestaande tags...">
-        </div>
-        <div id="vTagList" class="tag-list"></div>
         <div class="tag-new">
           <input id="vNewTagInput" type="text" placeholder="Nieuwe tag voor dit item...">
           <button id="vBtnAddTag">＋ Maak + voeg toe</button>
@@ -257,7 +259,7 @@
   </div><!-- /viewer -->
 
   <script src="/app.js?v=20260509-65"></script>
-  <script src="/viewer.js?v=20260509-32"></script>
+  <script src="/viewer.js?v=20260509-34"></script>
   <script>
   // ─── Thema switcher ─────────────────────────────────────────────────────
   (function() {
