@@ -844,17 +844,16 @@
         sort: 'recent',
         thumb_ready: '1',
       });
-      if (!state.liveAllMedia) {
+      const hasActiveFilter = ['platform', 'channel', 'q', 'media_type', 'min_rating', 'tag_id']
+        .some((key) => Boolean(state.filters[key]));
+      if (!state.liveAllMedia || hasActiveFilter) {
         for (const [k, v] of Object.entries(state.filters)) {
           if (v) params.set(k, v);
         }
       }
       const data = await apiFetch('/api/items?' + params.toString(), { signal: ctrl.signal }).then(r => r.json());
       if (!data.items || data.items.length === 0) return;
-      const fresh = data.items.filter((it) => {
-        if (state.knownIds.has(String(it.id))) return false;
-        return state.liveAllMedia || itemMatchesCurrentFilters(it);
-      });
+      const fresh = data.items.filter(it => !state.knownIds.has(String(it.id)) && itemMatchesCurrentFilters(it));
       if (fresh.length > 0) {
         for (const it of fresh) state.pendingNewItems.set(String(it.id), it);
         pumpPendingNewItems();

@@ -1692,62 +1692,19 @@ app.get('/api/platforms', async (req, res) => {
       ratingExpr: 'd.rating',
       includeChannel: false,
     });
-    directWhere.push(`(
-      d.platform IN ('sabnzbd', 'keep2share')
-      OR NOT EXISTS (
-        SELECT 1 FROM download_files mf
-         WHERE mf.download_id = d.id
-           AND mf.relpath !~* '${AUX_RELPATH_RE}'
-           AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
-      )
-    )`);
     directWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
     directWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
     directWhere.push(`(d.filesize IS NULL OR d.filesize > 0)`);
     directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
 
-    const fileWhere = buildItemFilters({
-      req, params,
-      fileExpr: 'df.relpath',
-      extExpr: "regexp_replace(df.relpath, '^.*\\.', '')",
-      ratingExpr: 'df.rating',
-      includeChannel: false,
-    });
-    fileWhere.push(`d.platform NOT IN ('sabnzbd', 'keep2share')`);
-    fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
-    fileWhere.push(`df.relpath !~* '${TEMP_RELPATH_RE}'`);
-    fileWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
-    fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
-    fileWhere.push(`(df.filesize IS NULL OR df.filesize > 0)`);
-    fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
-
-    const screenshotWhere = buildScreenshotFilters({ req, params, includeChannel: false });
-    screenshotWhere.push(`(s.filesize IS NULL OR s.filesize > 0)`);
-
     const { rows } = await pool.query(`
-      WITH media_platforms AS (
-        SELECT ${platformGroupSql('d')} AS platform,
-               lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) AS ext
-          FROM downloads d
-         WHERE ${directWhere.join(' AND ')}
-        UNION ALL
-        SELECT ${platformGroupSql('d')} AS platform,
-               lower(regexp_replace(df.relpath, '^.*\\.', '')) AS ext
-          FROM download_files df
-          JOIN downloads d ON d.id = df.download_id
-         WHERE ${fileWhere.join(' AND ')}
-        UNION ALL
-        SELECT COALESCE(NULLIF(s.platform, ''), 'unknown') AS platform,
-               lower(regexp_replace(s.filepath, '^.*\\.', '')) AS ext
-          FROM screenshots s
-         WHERE ${screenshotWhere.join(' AND ')}
-      )
-      SELECT platform,
+      SELECT ${platformGroupSql('d')} AS platform,
              COUNT(*)::bigint AS count,
-             COUNT(*) FILTER (WHERE ext IN (${IMAGE_EXT_SQL}))::bigint AS image_count,
-             COUNT(*) FILTER (WHERE ext IN (${VIDEO_EXT_SQL}))::bigint AS video_count
-        FROM media_platforms
-       GROUP BY platform
+             COUNT(*) FILTER (WHERE lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${IMAGE_EXT_SQL}))::bigint AS image_count,
+             COUNT(*) FILTER (WHERE lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${VIDEO_EXT_SQL}))::bigint AS video_count
+        FROM downloads d
+       WHERE ${directWhere.join(' AND ')}
+       GROUP BY ${platformGroupSql('d')}
        ORDER BY COUNT(*) DESC`, params);
     res.json({ platforms: rows });
   } catch (e) {
@@ -1777,70 +1734,27 @@ app.get('/api/channels', async (req, res) => {
       ratingExpr: 'd.rating',
       includeChannel: false,
     });
-    directWhere.push(`(
-      d.platform IN ('sabnzbd', 'keep2share')
-      OR NOT EXISTS (
-        SELECT 1 FROM download_files mf
-         WHERE mf.download_id = d.id
-           AND mf.relpath !~* '${AUX_RELPATH_RE}'
-           AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
-      )
-    )`);
     directWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
     directWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
     directWhere.push(`(d.filesize IS NULL OR d.filesize > 0)`);
     directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
-    const fileWhere = buildItemFilters({
-      req, params,
-      fileExpr: 'df.relpath',
-      extExpr: "regexp_replace(df.relpath, '^.*\\.', '')",
-      ratingExpr: 'df.rating',
-      includeChannel: false,
-    });
-    fileWhere.push(`d.platform NOT IN ('sabnzbd', 'keep2share')`);
-    fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
-    fileWhere.push(`df.relpath !~* '${TEMP_RELPATH_RE}'`);
-    fileWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
-    fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
-    fileWhere.push(`(df.filesize IS NULL OR df.filesize > 0)`);
-    fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
-    const screenshotWhere = buildScreenshotFilters({ req, params, includeChannel: false });
-    screenshotWhere.push(`(s.filesize IS NULL OR s.filesize > 0)`);
     const directChannelExpr = channelGroupSql('d');
-    const fileChannelExpr = channelGroupSql('d');
+    const directPlatformExpr = platformGroupSql('d');
 
     const { rows } = await pool.query(`
-      SELECT channel,
-             platform,
-             COUNT(*) AS count,
-             COUNT(*) FILTER (WHERE ext IN (${IMAGE_EXT_SQL}))::bigint AS image_count,
-             COUNT(*) FILTER (WHERE ext IN (${VIDEO_EXT_SQL}))::bigint AS video_count,
-             MAX(sort_ts) AS latest_ts,
-             MAX(rating) AS max_rating
+      SELECT *
       FROM (
-        SELECT ${directChannelExpr} AS channel, ${platformGroupSql('d')} AS platform,
-               COALESCE(d.finished_at, d.updated_at, d.created_at) AS sort_ts,
-               d.rating,
-               lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) AS ext
+        SELECT ${directChannelExpr} AS channel,
+               ${directPlatformExpr} AS platform,
+               COUNT(*) AS count,
+               COUNT(*) FILTER (WHERE lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${IMAGE_EXT_SQL}))::bigint AS image_count,
+               COUNT(*) FILTER (WHERE lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${VIDEO_EXT_SQL}))::bigint AS video_count,
+               MAX(COALESCE(d.finished_at, d.updated_at, d.created_at)) AS latest_ts,
+               MAX(d.rating) AS max_rating
           FROM downloads d
          WHERE ${directWhere.join(' AND ')}
-        UNION ALL
-        SELECT ${fileChannelExpr} AS channel, ${platformGroupSql('d')} AS platform,
-               COALESCE(to_timestamp(NULLIF(df.mtime_ms,0) / 1000.0)::timestamp, df.updated_at, d.finished_at, d.updated_at, d.created_at) AS sort_ts,
-               df.rating,
-               lower(regexp_replace(df.relpath, '^.*\\.', '')) AS ext
-          FROM download_files df
-          JOIN downloads d ON d.id = df.download_id
-         WHERE ${fileWhere.join(' AND ')}
-        UNION ALL
-        SELECT s.channel, s.platform,
-               COALESCE(s.created_at, s.updated_at) AS sort_ts,
-               s.rating,
-               lower(regexp_replace(s.filepath, '^.*\\.', '')) AS ext
-          FROM screenshots s
-         WHERE ${screenshotWhere.join(' AND ')}
-      ) media_items
-      GROUP BY channel, platform
+        GROUP BY ${directChannelExpr}, ${directPlatformExpr}
+      ) channel_items
       ORDER BY ${orderBy}
       LIMIT 500`, params);
     res.json({ channels: rows });
