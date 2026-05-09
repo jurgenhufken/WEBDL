@@ -194,6 +194,16 @@ function startSlavePoller({ repo, logger, intervalMs = 5000 }) {
       return; // al afgehandeld of niet meer bestaand
     }
 
+    // Slave cancelled? Sluit de hub-booking ook af. Zonder deze branch blijft
+    // dezelfde cancelled rij in elke LIMIT-batch terugkomen en blokkeert die
+    // completed slave downloads achteraan de poller.
+    if (row.slave_status === 'cancelled') {
+      await repo.cancelJob(hubJobId);
+      await repo.appendLog(hubJobId, 'warn', `↯ slave cancelled: ${row.slave_error || 'cancelled'}`);
+      logger.info('slave.cancelled', { hubJob: hubJobId, downloadId: row.id });
+      return;
+    }
+
     // Slave error? Markeer hub-job failed.
     if (row.slave_status === 'error') {
       await repo.failJob(hubJobId, row.slave_error || 'slave download failed', { retry: false });
@@ -283,7 +293,15 @@ function startSlavePoller({ repo, logger, intervalMs = 5000 }) {
          WHERE j.status = 'running'
            AND j.adapter = 'slave-delegate'
            AND d.status IN ('completed','error','cancelled')
-         LIMIT 50`,
+         ORDER BY CASE d.status
+                    WHEN 'completed' THEN 0
+                    WHEN 'error' THEN 1
+                    WHEN 'cancelled' THEN 2
+                    ELSE 9
+                  END,
+                  d.updated_at ASC NULLS LAST,
+                  d.id ASC
+         LIMIT 200`,
       );
       for (const row of rows) {
         if (stopping) break;
