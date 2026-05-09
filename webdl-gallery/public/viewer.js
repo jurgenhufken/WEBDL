@@ -40,6 +40,9 @@
     editingRecipeId: null,
     tagTarget: 'media',
     lastTagOpenAt: 0,
+    tagDialogX: 0,
+    tagDialogY: 0,
+    tagDialogDrag: null,
 
     // Video
     vol: 0.8,
@@ -276,7 +279,7 @@
       'vStage','vContent','vPrev','vNext','vUp','vDown','vHudLeft','vHudRight',
       'vProgressBar','vProgressFill','vProgressHandle',
       'vBottomControls','vBtnPlayPause','vTimeLabel','vBtnRotateBottom','vBtnRotateStage',
-      'vTagDialog','vTagCurrent','vTagTargetMedia','vTagTargetRecipe','vTagQuick','vTagRecipes','vTagSuggestions','vRecipeName','vRecipeDescription',
+      'vTagDialog','vTagDialogInner','vTagCurrent','vTagTargetMedia','vTagTargetRecipe','vTagQuick','vTagRecipes','vTagSuggestions','vRecipeName','vRecipeDescription',
       'vRecipeDraft','vBtnRecipeFromItem','vBtnSaveRecipe','vBtnClearRecipe',
       'vTagSearch','vTagList','vNewTagInput','vBtnAddTag','vBtnCloseTagDialog',
       'vLogPanel','vLogBody',
@@ -1422,6 +1425,7 @@
   async function openTagDialog() {
     const it = vs.items[vs.idx];
     el.vTagDialog.classList.remove('hidden');
+    clampTagDialogPosition();
     if (el.vTagSearch) el.vTagSearch.value = '';
     if (el.vTagCurrent) el.vTagCurrent.textContent = 'Tags laden...';
     if (el.vTagQuick) el.vTagQuick.textContent = '';
@@ -1459,7 +1463,63 @@
 
   function closeTagDialog(opts = {}) {
     if (!opts.force && Date.now() - vs.lastTagOpenAt < 2000) return;
+    stopTagDialogDrag();
     if (el.vTagDialog) el.vTagDialog.classList.add('hidden');
+  }
+
+  function applyTagDialogPosition() {
+    if (!el.vTagDialogInner) return;
+    el.vTagDialogInner.style.setProperty('--tag-dialog-x', `${Math.round(vs.tagDialogX || 0)}px`);
+    el.vTagDialogInner.style.setProperty('--tag-dialog-y', `${Math.round(vs.tagDialogY || 0)}px`);
+  }
+
+  function clampTagDialogPosition(x = vs.tagDialogX, y = vs.tagDialogY) {
+    if (!el.vTagDialogInner) return;
+    const rect = el.vTagDialogInner.getBoundingClientRect();
+    const baseLeft = (window.innerWidth - rect.width) / 2;
+    const baseTop = (window.innerHeight - rect.height) / 2;
+    const margin = 8;
+    const minX = margin - baseLeft;
+    const maxX = window.innerWidth - margin - rect.width - baseLeft;
+    const minY = margin - baseTop;
+    const maxY = window.innerHeight - margin - rect.height - baseTop;
+    vs.tagDialogX = Math.min(Math.max(x || 0, minX), maxX);
+    vs.tagDialogY = Math.min(Math.max(y || 0, minY), maxY);
+    applyTagDialogPosition();
+  }
+
+  function stopTagDialogDrag() {
+    if (!vs.tagDialogDrag) return;
+    const drag = vs.tagDialogDrag;
+    if (drag.move) window.removeEventListener('pointermove', drag.move);
+    if (drag.up) window.removeEventListener('pointerup', drag.up);
+    vs.tagDialogDrag = null;
+    if (el.vTagDialogInner) el.vTagDialogInner.classList.remove('dragging');
+  }
+
+  function startTagDialogDrag(e) {
+    if (!el.vTagDialogInner || !el.vTagDialog || el.vTagDialog.classList.contains('hidden')) return;
+    if (e.button != null && e.button !== 0) return;
+    if (e.target && e.target.closest && e.target.closest('button')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    stopTagDialogDrag();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startOffsetX = vs.tagDialogX || 0;
+    const startOffsetY = vs.tagDialogY || 0;
+    const onMove = (moveEvent) => {
+      moveEvent.preventDefault();
+      clampTagDialogPosition(
+        startOffsetX + moveEvent.clientX - startX,
+        startOffsetY + moveEvent.clientY - startY,
+      );
+    };
+    const onUp = () => stopTagDialogDrag();
+    vs.tagDialogDrag = { move: onMove, up: onUp };
+    el.vTagDialogInner.classList.add('dragging');
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp, { once: true });
   }
 
   function renderTagDialog() {
@@ -2522,6 +2582,15 @@
     el.vBtnCloseTagDialog.addEventListener('click', (e) => {
       e.stopPropagation();
       closeTagDialog({ force: true });
+    });
+    if (el.vTagDialogInner) {
+      const tagDialogHead = el.vTagDialogInner.querySelector('.tag-dialog-head');
+      if (tagDialogHead) tagDialogHead.addEventListener('pointerdown', startTagDialogDrag);
+    }
+    window.addEventListener('resize', () => {
+      if (el.vTagDialog && !el.vTagDialog.classList.contains('hidden')) {
+        requestAnimationFrame(() => clampTagDialogPosition());
+      }
     });
     el.vTagDialog.addEventListener('click', (e) => {
       if (e.target === el.vTagDialog) closeTagDialog();
