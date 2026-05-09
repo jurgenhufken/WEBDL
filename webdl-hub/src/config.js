@@ -69,7 +69,7 @@ const config = Object.freeze({
   workerConcurrency: intEnv('WORKER_CONCURRENCY', 2),
   logLevel: required('LOG_LEVEL', 'info'),
   avfCookie: process.env.AVF_COOKIE || '',
-  sabnzbdWatchEnabled: boolEnv('WEBDL_SABNZBD_WATCH', true),
+  sabnzbdWatchEnabled: boolEnv('WEBDL_SABNZBD_WATCH', false),
   sabnzbdCompletedDir: SABNZBD_COMPLETED_DIRS[0] || DEFAULT_SABNZBD_COMPLETED_DIR,
   sabnzbdCompletedDirs: SABNZBD_COMPLETED_DIRS,
   sabnzbdPollMs: intEnv('WEBDL_SABNZBD_POLL_MS', 30_000),
