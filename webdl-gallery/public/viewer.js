@@ -1459,6 +1459,32 @@
     const itemId = it.rating_id || it.id;
     const currentIds = new Set(vs.currentItemTags.map(t => Number(t.id)));
     const recipeDraftIds = new Set((vs.recipeDraftTagIds || []).map((id) => Number(id)));
+    const tagState = (tag) => {
+      const tagId = Number(tag && tag.id);
+      return {
+        tagId,
+        isOnMedia: currentIds.has(tagId),
+        isInRecipe: recipeDraftIds.has(tagId),
+      };
+    };
+    const appendStateBadges = (parent, state) => {
+      if (!state.isOnMedia && !state.isInRecipe) return;
+      const badges = document.createElement('span');
+      badges.className = 'tag-state-badges';
+      if (state.isOnMedia) {
+        const badge = document.createElement('span');
+        badge.className = 'tag-state-badge';
+        badge.textContent = 'Media';
+        badges.appendChild(badge);
+      }
+      if (state.isInRecipe) {
+        const badge = document.createElement('span');
+        badge.className = 'tag-state-badge';
+        badge.textContent = 'Recept';
+        badges.appendChild(badge);
+      }
+      parent.appendChild(badges);
+    };
 
     if (el.vTagCurrent) {
       el.vTagCurrent.innerHTML = '';
@@ -1509,16 +1535,23 @@
         el.vTagQuick.appendChild(empty);
       } else {
         for (const t of quickTags) {
+          const state = tagState(t);
+          const selectedForTarget = vs.tagTarget === 'recipe' ? state.isInRecipe : state.isOnMedia;
           const item = document.createElement('span');
           item.className = 'tag-quick-item';
 
           const chip = document.createElement('button');
           chip.type = 'button';
           chip.className = 'tag-chip tag-chip-quick';
-          chip.title = vs.tagTarget === 'recipe' ? 'Tag aan recept toevoegen' : 'Tag aan huidig item toevoegen';
+          chip.disabled = selectedForTarget;
+          chip.title = selectedForTarget
+            ? (vs.tagTarget === 'recipe' ? 'Staat al in recept' : 'Staat al op media')
+            : (vs.tagTarget === 'recipe' ? 'Tag aan recept toevoegen' : 'Tag aan huidig item toevoegen');
           chip.textContent = `#${safeText(t.name)}`;
+          appendStateBadges(chip, state);
           chip.addEventListener('click', async (e) => {
             e.stopPropagation();
+            if (chip.disabled) return;
             try {
               await applyPickedTag(itemId, t);
             } catch (err) { log('Tag fout: ' + err.message); }
@@ -1663,15 +1696,14 @@
     }
 
     for (const t of candidates) {
-      const tagId = Number(t.id);
-      const isOnMedia = currentIds.has(tagId);
-      const isInRecipe = recipeDraftIds.has(tagId);
+      const { tagId, isOnMedia, isInRecipe } = tagState(t);
       const addDisabled = vs.tagTarget === 'recipe' ? isInRecipe : isOnMedia;
       const row = document.createElement('div');
       row.className = 'tag-row';
       const name = document.createElement('span');
       name.className = 'tag-name';
       name.textContent = `#${safeText(t.name)}`;
+      appendStateBadges(name, { tagId, isOnMedia, isInRecipe });
 
       const fav = document.createElement('button');
       fav.className = 'tag-fav' + (t.is_favorite ? ' active' : '');
@@ -2506,7 +2538,19 @@
 
     if (el.vBtnRecipeFromItem) {
       el.vBtnRecipeFromItem.addEventListener('click', () => {
-        setRecipeDraft(vs.currentItemTags || []);
+        const tags = vs.currentItemTags || [];
+        if (!tags.length) {
+          log('Geen gekoppelde media-tags om een recept van te maken');
+          return;
+        }
+        setRecipeDraft(tags);
+        const it = vs.items[vs.idx] || {};
+        if (el.vRecipeName && !el.vRecipeName.value.trim()) {
+          el.vRecipeName.value = safeText(it.title || it.filename || it.channel || 'Nieuw recept').slice(0, 80);
+        }
+        setTagTarget('recipe');
+        if (el.vRecipeName) el.vRecipeName.focus();
+        log(`Recept gevuld met ${tags.length} gekoppelde tag${tags.length === 1 ? '' : 's'}`);
       });
     }
     if (el.vBtnSaveRecipe) {
