@@ -4,15 +4,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WEBDL Gallery</title>
-<link rel="stylesheet" href="/styles.css?v=20260509-89">
+<link rel="stylesheet" href="/styles.css?v=20260509-92">
 </head>
 <body>
   <header class="topbar">
     <h1>WEBDL Gallery</h1>
     <div class="filters">
       <input id="q" type="search" placeholder="Zoeken...">
-      <select id="platform"><option value="">Alle platforms</option></select>
-      <select id="channel"><option value="">Alle kanalen</option></select>
+      <select id="platform" class="legacy-filter-select"><option value="">Alle platforms</option></select>
+      <div id="platformPicker" class="facet-picker"></div>
+      <select id="channel" class="legacy-filter-select"><option value="">Alle kanalen</option></select>
+      <div id="channelPicker" class="facet-picker"></div>
       <select id="channelSort" title="Kanaalsortering">
         <option value="count">Kanalen: aantal</option>
         <option value="name">Kanalen: naam</option>
@@ -161,6 +163,7 @@
           <div class="vprogressbar-fill" id="vProgressFill"></div>
           <div class="vprogressbar-handle" id="vProgressHandle"></div>
         </div>
+        <button id="vBtnMainProgress" class="vmain-progress-toggle active" title="Grote voortgangsbalk verbergen">▰</button>
         <div class="vbottom-overlay" id="vBottomOverlay">
           <div class="vbottom-meta-row">
             <div class="hud-pill hud-left" id="vHudLeft"></div>
@@ -272,8 +275,8 @@
 
   </div><!-- /viewer -->
 
-  <script src="/app.js?v=20260509-71"></script>
-  <script src="/viewer.js?v=20260509-56"></script>
+  <script src="/app.js?v=20260509-76"></script>
+  <script src="/viewer.js?v=20260509-59"></script>
   <script>
   // ─── Thema switcher ─────────────────────────────────────────────────────
   (function() {

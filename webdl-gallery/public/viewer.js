@@ -30,6 +30,7 @@
     sidebarOpen: false,
     logOpen: false,
     hudTimer: null,
+    mainProgressVisible: true,
 
     // Tags
     availableTags: [],
@@ -100,6 +101,7 @@
   const VIEWER_TAB_ID = Math.random().toString(36).slice(2, 8);
   const VIEWER_POS_KEY = 'webdl:viewer:last-position';
   const VIEWER_SPEED_KEY = 'webdl:viewer:playback-rate';
+  const MAIN_PROGRESS_KEY = 'webdl:viewer:main-progress-visible';
   const TAG_RECIPES_OPEN_KEY = 'webdl:viewer:tag-recipes-open';
   const LAST_APPLIED_TAGS_KEY = 'webdl:viewer:last-applied-tags';
 
@@ -282,7 +284,7 @@
       'vZoomRange','vZoomReset',
       'vVol','vBtnMute','vBtnReloadMedia','vSeek',
       'vBtnReverse','vSpeedSelect','vSpeedDown','vSpeedUp',
-      'vBtnMuteBottom','vBottomVol','vBtnFullscreen',
+      'vBtnMuteBottom','vBottomVol','vBtnMainProgress','vBtnFullscreen',
       'vBtnTags','vBtnLog','vClose',
       'vSlideshow2','vRandom2',
       'vStage','vContent','vPrev','vNext','vHudLeft','vHudRight',
@@ -302,6 +304,7 @@
     bindKeyboard();
     bindMouse();
     restorePlaybackRate();
+    restoreMainProgressVisibility();
     restoreTagRecipeVisibility();
     restoreLastAppliedTags();
     syncViewerModeControls();
@@ -313,6 +316,38 @@
       const stored = Number(localStorage.getItem(VIEWER_SPEED_KEY) || '1');
       if (SPEED_STEPS.includes(stored)) vs.playbackRate = stored;
     } catch (_) {}
+  }
+
+  function restoreMainProgressVisibility() {
+    try {
+      const stored = localStorage.getItem(MAIN_PROGRESS_KEY);
+      vs.mainProgressVisible = stored == null ? true : stored !== '0';
+    } catch (_) {
+      vs.mainProgressVisible = true;
+    }
+    syncMainProgressVisibility();
+  }
+
+  function syncMainProgressVisibility() {
+    if (el.vStage) {
+      el.vStage.classList.toggle('viewer-stage--main-progress-hidden', !vs.mainProgressVisible);
+    }
+    if (el.vBtnMainProgress) {
+      el.vBtnMainProgress.classList.toggle('active', vs.mainProgressVisible);
+      el.vBtnMainProgress.textContent = vs.mainProgressVisible ? '▰' : '▱';
+      el.vBtnMainProgress.title = vs.mainProgressVisible
+        ? 'Grote voortgangsbalk verbergen'
+        : 'Grote voortgangsbalk tonen';
+      el.vBtnMainProgress.setAttribute('aria-pressed', vs.mainProgressVisible ? 'true' : 'false');
+    }
+  }
+
+  function setMainProgressVisible(visible, { persist = true } = {}) {
+    vs.mainProgressVisible = Boolean(visible);
+    syncMainProgressVisibility();
+    if (persist) {
+      try { localStorage.setItem(MAIN_PROGRESS_KEY, vs.mainProgressVisible ? '1' : '0'); } catch (_) {}
+    }
   }
 
   function restoreTagRecipeVisibility() {
@@ -345,8 +380,7 @@
   function favoriteTags() {
     return (vs.availableTags || [])
       .filter((t) => t.is_favorite)
-      .sort(sortTagsByName)
-      .slice(0, 24);
+      .sort(sortUserTags);
   }
 
   function renderFavoriteOverlay() {
@@ -1266,7 +1300,7 @@
     el.vHudLeft.textContent =
       `${vs.idx + 1} / ${total}${plus}  ·  ${it.platform || '?'}  ·  ` +
       `${(it.channel && it.channel !== 'unknown') ? it.channel : '—'}`;
-    el.vHudRight.textContent = it.duration ? String(it.duration) : '';
+    el.vHudRight.textContent = it.type === 'video' ? '' : (it.duration ? String(it.duration) : '');
     // Reset progress bar
     if (el.vProgressFill) el.vProgressFill.style.width = '0%';
     if (el.vProgressHandle) el.vProgressHandle.style.left = '0%';
@@ -2016,7 +2050,7 @@
     renderRecipeDraft();
 
     const candidates = vs.availableTags
-      .filter(t => !q || safeText(t.name).toLowerCase().includes(q))
+      .filter(t => q ? safeText(t.name).toLowerCase().includes(q) : !t.is_favorite)
       .slice(0, 120);
 
     el.vTagList.innerHTML = '';
@@ -2724,6 +2758,13 @@
       el.vBtnReverse.addEventListener('click', (e) => {
         e.stopPropagation();
         setSpeed(vs.playbackRate < 0 ? 1 : -1);
+      });
+    }
+
+    if (el.vBtnMainProgress) {
+      el.vBtnMainProgress.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setMainProgressVisible(!vs.mainProgressVisible);
       });
     }
 

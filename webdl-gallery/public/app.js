@@ -542,10 +542,10 @@
       const card = document.createElement('div');
       card.className = 'active-card active-thumb-card';
       const rawPlatform = (it.platform || it.source || 'active').toString();
-      const source = it.work_lane || (rawPlatform.toLowerCase() === 'jdownloader' ? 'JDownloader' : rawPlatform.toUpperCase());
+      const source = rawPlatform.toLowerCase() === 'jdownloader' ? 'JDownloader' : rawPlatform.toUpperCase();
       const status = (it.status || '').toString().toUpperCase();
       const statusLabel = status && status !== source.toUpperCase() ? status : '';
-      const sub = [mediaTypeLabel(it), it.platform, it.channel, compactBytes(it.filesize)].filter(Boolean).join(' / ');
+      const sub = [it.work_lane, mediaTypeLabel(it), it.channel, compactBytes(it.filesize)].filter(Boolean).join(' / ');
       card.innerHTML = `
         <div class="active-thumb" style="background-image:url('${escHtml(it.thumb_url)}')"></div>
         <div class="active-top"><span>${escHtml(source)}</span><span>${escHtml(statusLabel)}</span></div>
@@ -645,6 +645,87 @@
     return `${images} afb · ${videos} vid`;
   }
 
+  function splitFilterList(value) {
+    return String(value || '').split(',').map((v) => v.trim()).filter(Boolean);
+  }
+
+  function joinFilterList(values) {
+    return Array.from(new Set((values || []).map((v) => String(v || '').trim()).filter(Boolean))).join(',');
+  }
+
+  function facetButtonLabel(kind, total, selected) {
+    const base = kind === 'platform' ? 'Platforms' : 'Mappen';
+    if (!selected.length) return `Alle ${base.toLowerCase()} (${total})`;
+    if (selected.length === 1) return selected[0];
+    return `${selected.length} ${base.toLowerCase()}`;
+  }
+
+  function renderFacetPicker(kind, rows, total) {
+    const picker = $(kind === 'platform' ? 'platformPicker' : 'channelPicker');
+    if (!picker) return;
+    const selected = splitFilterList(state.filters[kind]);
+    const selectedSet = new Set(selected);
+    const options = rows.slice(0, kind === 'platform' ? 90 : 300);
+    picker.innerHTML = '';
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'facet-button' + (selected.length ? ' active' : '');
+    button.innerHTML = `<span>${escHtml(facetButtonLabel(kind, total, selected))}</span><span>⌄</span>`;
+    button.addEventListener('click', (e) => {
+      e.stopPropagation();
+      picker.classList.toggle('open');
+    });
+    const menu = document.createElement('div');
+    menu.className = 'facet-menu';
+
+    const addOption = (value, label, count, checked) => {
+      const row = document.createElement('label');
+      row.className = 'facet-option';
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.checked = checked;
+      input.addEventListener('change', async () => {
+        const current = new Set(splitFilterList(state.filters[kind]));
+        if (!value) current.clear();
+        else if (input.checked) current.add(value);
+        else current.delete(value);
+        state.filters[kind] = joinFilterList(current);
+        const sel = $(kind);
+        if (sel) sel.value = state.filters[kind];
+        if (kind === 'platform') {
+          state.filters.channel = '';
+          const cSel = $('channel');
+          if (cSel) cSel.value = '';
+          await reloadChannels();
+        }
+        state.totalHint = selectedTotalHint();
+        updateStats();
+        await reloadGallery();
+      });
+      row.appendChild(input);
+      const text = document.createElement('span');
+      text.className = 'facet-label';
+      text.textContent = label;
+      row.appendChild(text);
+      const num = document.createElement('span');
+      num.className = 'facet-count';
+      num.textContent = count ? String(count) : '';
+      row.appendChild(num);
+      menu.appendChild(row);
+    };
+
+    addOption('', kind === 'platform' ? 'Alle platforms' : 'Alle mappen', total, selected.length === 0);
+    for (const row of options) {
+      const value = kind === 'platform' ? row.platform : row.channel;
+      if (!value || value === 'unknown') continue;
+      if (kind === 'channel' && String(value).startsWith('site:')) continue;
+      const label = String(value).startsWith('site:') ? String(value).slice(5) : String(value);
+      addOption(value, label, countForCurrentMediaType(row), selectedSet.has(String(value)));
+    }
+    picker.appendChild(button);
+    picker.appendChild(menu);
+  }
+
   function countForCurrentMediaType(row) {
     if (state.filters.media_type === 'image') return Number(row.image_count || 0);
     if (state.filters.media_type === 'video') return Number(row.video_count || 0);
@@ -658,7 +739,7 @@
       const platformsResp = await apiFetch(platformsUrl).then(r => r.json());
       const platforms = Array.isArray(platformsResp.platforms) ? platformsResp.platforms : [];
       const pSel = $('platform');
-      const prev = pSel.value;
+      const prev = state.filters.platform || pSel.value;
       const total = platforms.reduce((s, p) => s + Number(p.count), 0);
       pSel.innerHTML = `<option value="">Alle platforms (${total})</option>`;
       for (const p of platforms) {
@@ -668,14 +749,16 @@
         o.textContent = `${p.platform} (${p.count} · ${mediaSplitLabel(p)})`;
         pSel.appendChild(o);
       }
-      if (prev && [...pSel.options].some(o => o.value === prev)) {
+      renderFacetPicker('platform', platforms, total);
+      if (prev && splitFilterList(prev).every((value) => [...pSel.options].some(o => o.value === value))) {
         pSel.value = prev;
         state.filters.platform = prev;
         await reloadChannels();
       } else {
         pSel.value = '';
         state.filters.platform = '';
-        await reloadChannels();
+        resetChannels();
+        renderFacetPicker('channel', [], 0);
       }
       state.totalHint = selectedTotalHint();
       updateStats();
@@ -692,7 +775,13 @@
       const tags = Array.isArray(data.tags) ? data.tags : [];
       const sorted = tags
         .slice()
-        .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' }));
+        .sort((a, b) => {
+          const favDelta = Number(Boolean(b.is_favorite)) - Number(Boolean(a.is_favorite));
+          if (favDelta) return favDelta;
+          const useDelta = Number(b.user_use_count || b.applied_count || b.uses || 0) - Number(a.user_use_count || a.applied_count || a.uses || 0);
+          if (useDelta) return useDelta;
+          return String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' });
+        });
       const total = sorted.reduce((sum, t) => sum + Number(t.applied_count || 0), 0);
       state.tagFilterOptions = sorted.map((tag) => ({
         id: String(tag.id),
@@ -759,7 +848,7 @@
       const channelsResp = await apiFetch(url).then(r => r.json());
       const channels = Array.isArray(channelsResp.channels) ? channelsResp.channels : [];
       const cSel = $('channel');
-      const prev = cSel.value;
+      const prev = state.filters.channel || cSel.value;
       const total = channels.reduce((sum, c) => sum + Number(c.count || 0), 0);
       cSel.innerHTML = `<option value="">Alle kanalen (${total})</option>`;
       for (const c of channels.slice(0, 300)) {
@@ -772,12 +861,14 @@
         cSel.appendChild(o);
       }
       // Herstel vorige selectie als die nog bestaat
-      if (prev && [...cSel.options].some(o => o.value === prev)) {
+      if (prev && splitFilterList(prev).every((value) => [...cSel.options].some(o => o.value === value))) {
         cSel.value = prev;
+        state.filters.channel = prev;
       } else {
         cSel.value = '';
         state.filters.channel = '';
       }
+      renderFacetPicker('channel', channels, total);
       state.channelsLoadedFor = [
         plat || '__all__',
         state.filters.q || '',
@@ -805,8 +896,8 @@
   }
 
   function readFiltersFromControls() {
-    state.filters.platform   = $('platform').value;
-    state.filters.channel    = $('channel').value;
+    state.filters.platform   = state.filters.platform || $('platform').value;
+    state.filters.channel    = state.filters.channel || $('channel').value;
     state.filters.channel_sort = $('channelSort') ? $('channelSort').value : 'count';
     state.filters.sort       = $('sort').value;
     state.filters.min_rating = $('minRating').value;
@@ -844,7 +935,7 @@
   // ─── Event listeners (gallery filters) ───────────────────────────────────
   $('refresh').addEventListener('click', reloadGallery);
 
-  for (const id of ['platform', 'channel', 'channelSort', 'sort', 'minRating', 'mediaType', 'tagFilter']) {
+  for (const id of ['channelSort', 'sort', 'minRating', 'mediaType', 'tagFilter']) {
     const control = $(id);
     if (!control) continue;
     control.addEventListener('change', async () => {
@@ -871,7 +962,14 @@
     reloadChannels().catch((err) => console.warn('channels load failed', err));
     reloadGallery();
   });
-  $('channel').addEventListener('focus', () => {
+  document.addEventListener('click', (e) => {
+    for (const id of ['platformPicker', 'channelPicker']) {
+      const picker = $(id);
+      if (picker && !picker.contains(e.target)) picker.classList.remove('open');
+    }
+  });
+
+  $('channelPicker')?.addEventListener('pointerenter', () => {
     const key = [
       state.filters.platform || '__all__',
       state.filters.q || '',

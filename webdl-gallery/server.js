@@ -107,13 +107,16 @@ const THUMB_HEIGHT = Math.max(90, Number(process.env.WEBDL_GALLERY_THUMB_HEIGHT 
 const THUMB_CONCURRENCY = Math.max(1, Number(process.env.WEBDL_GALLERY_THUMB_CONCURRENCY || 4));
 const THUMB_WARM_INTERVAL_MS = Math.max(500, Number(process.env.WEBDL_GALLERY_THUMB_WARM_INTERVAL_MS || 1000));
 const THUMB_WARM_BATCH = Math.max(1, Number(process.env.WEBDL_GALLERY_THUMB_WARM_BATCH || 100));
-const AUX_RELPATH_RE = String.raw`((^|[\\/])\d{1,3}[-_. ]?thumbnail\.(jpe?g|png|webp|gif|bmp|avif)$|(^|[-_. ])thumbnail\.(jpe?g|png|webp|gif|bmp|avif)$|_thumb(_v[0-9]+)?\.(jpe?g|png|webp)$|_preview\.(jpe?g|png|webp|gif|bmp|avif)$|_logo\.(jpe?g|png|webp)$|\.(json|part|tmp|ytdl)$)`;
+const AUX_RELPATH_RE = String.raw`((^|[\\/])\d{1,3}[-_. ]?thumbnail\.(jpe?g|png|webp|gif|bmp|avif)$|(^|[-_. ])(thumb|thumbnail)\.(jpe?g|png|webp|gif|bmp|avif)$|(^|[-_. ])sample\.(mp4|webm|mkv|mov|m4v|avi|wmv|flv|ts|m2ts|mpg|mpeg|ogv|3gp|3g2)$|_thumb(_v[0-9]+)?\.(jpe?g|png|webp)$|_preview\.(jpe?g|png|webp|gif|bmp|avif)$|\.(json|part|tmp|ytdl)$)`;
 const TEMP_RELPATH_RE = String.raw`(^|[\\/])(_UNPACK_|_FAILED_|_ADMIN_|__ADMIN__|incomplete)([^\\/]*)([\\/]|$)`;
+const AUX_RELPATH_PATTERN = new RegExp(AUX_RELPATH_RE, 'i');
+const TEMP_RELPATH_PATTERN = new RegExp(TEMP_RELPATH_RE, 'i');
 const MEDIA_EXT_SQL = MEDIA_EXTS.map(e => `'${e}'`).join(',');
 const IMAGE_EXT_SQL = IMAGE_EXTS.map(e => `'${e}'`).join(',');
 const VIDEO_EXT_SQL = VIDEO_EXTS.map(e => `'${e}'`).join(',');
 const ACTIVE_DB_STATUSES = ['downloading', 'postprocessing'];
 const HIDDEN_GALLERY_STATUSES = ['pending', 'queued', 'downloading', 'postprocessing', 'superseded'];
+const HIDDEN_FILE_PARENT_STATUSES = ['pending', 'queued', 'downloading', 'postprocessing', 'cancelled'];
 const KEEP2SHARE_DIR = path.join(BASE_DIR, '_Keep2Share');
 const JDOWNLOADER_CFG_DIR = process.env.JDOWNLOADER_CFG_DIR || path.join(process.env.HOME || '/Users/jurgen', 'Library/Application Support/JDownloader 2/cfg');
 const KEEP2SHARE_SYNC_MS = Number(process.env.KEEP2SHARE_SYNC_MS || 60000);
@@ -576,6 +579,22 @@ function hasNonEmptyMedia(row) {
   return !Number.isFinite(size) || size > 0;
 }
 
+function isAuxMediaPath(value) {
+  return AUX_RELPATH_PATTERN.test(String(value || ''));
+}
+
+function isTempMediaPath(value) {
+  return TEMP_RELPATH_PATTERN.test(String(value || ''));
+}
+
+function isGalleryMediaCandidate(row, { requireThumbReady = false } = {}) {
+  const ext = fileExt(row.filepath, row.format);
+  if (!MEDIA_EXTS.includes(ext)) return false;
+  if (isTempMediaPath(row.filepath) || isAuxMediaPath(row.filepath)) return false;
+  if (requireThumbReady && row.is_thumb_ready !== true && !IMAGE_EXTS.includes(ext)) return false;
+  return true;
+}
+
 function mediaPathForRow(row) {
   const raw = String(row && row.filepath || '').trim();
   if (!raw) return '';
@@ -638,10 +657,11 @@ function hasVideoStream(filePath) {
 async function rowHasPlayableMedia(row) {
   if (!hasNonEmptyMedia(row)) return false;
   const ext = fileExt(row.filepath, row.format);
-  if (!VIDEO_EXTS.includes(ext)) return true;
   const fp = mediaPathForRow(row);
   if (!fp) return false;
   if (!fs.existsSync(fp)) return false;
+  if (!VIDEO_EXTS.includes(ext)) return true;
+  if (row.is_thumb_ready === true) return true;
   return hasVideoStream(fp);
 }
 
@@ -660,10 +680,10 @@ async function filterPlayableMediaRows(rows, maxNeeded = rows.length) {
 }
 
 function galleryDedupeKey(row) {
-  if (String(row.item_kind || '') === 'download') {
-    const fileKey = String(row.filepath || '').trim();
-    if (fileKey) return `file:${fileKey.toLowerCase()}`;
+  const fileKey = String(row.filepath || '').trim();
+  if (fileKey) return `file:${fileKey.toLowerCase()}`;
 
+  if (String(row.item_kind || '') === 'download') {
     const sourceKey = canonicalGallerySourceUrl(row.source_url || row.url);
     if (sourceKey) return `source:${sourceKey}`;
 
@@ -1387,23 +1407,34 @@ async function resolveMediaContext(idRaw) {
   return rows[0] || null;
 }
 
+function splitMultiFilter(value) {
+  const raw = Array.isArray(value) ? value : [value];
+  return raw
+    .flatMap((entry) => String(entry || '').split(','))
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
 function buildItemFilters({ req, params, fileExpr, extExpr, ratingExpr, includeChannel = true }) {
-  const platform = req.query.platform ? String(req.query.platform) : null;
-  const channel = req.query.channel ? String(req.query.channel) : null;
+  const platformValues = splitMultiFilter(req.query.platform);
+  const channelValues = splitMultiFilter(req.query.channel);
   const q = req.query.q ? String(req.query.q).trim() : null;
   const minRating = req.query.min_rating != null ? Number(req.query.min_rating) : null;
   const mediaType = req.query.media_type ? String(req.query.media_type) : null;
   const tagId = req.query.tag_id ? parseInt(req.query.tag_id, 10) : null;
 
   const where = [`${fileExpr} IS NOT NULL`, `${fileExpr} <> ''`];
-  if (platform) { params.push(platform); where.push(`${platformGroupSql('d')} = $${params.length}`); }
-  if (includeChannel && channel) {
-    if (String(channel).startsWith('site:')) {
+  if (platformValues.length) { params.push(platformValues); where.push(`${platformGroupSql('d')} = ANY($${params.length}::text[])`); }
+  if (includeChannel && channelValues.length) {
+    const siteChannels = channelValues.filter((value) => String(value).startsWith('site:'));
+    const plainChannels = channelValues.filter((value) => !String(value).startsWith('site:'));
+    if (plainChannels.length) {
+      params.push(plainChannels);
+      where.push(`d.channel = ANY($${params.length}::text[])`);
+    }
+    for (const channel of siteChannels) {
       params.push('%' + String(channel).slice(5).toLowerCase() + '%');
       where.push(`LOWER(COALESCE(d.metadata, '')) LIKE $${params.length}`);
-    } else {
-      params.push(channel);
-      where.push(`d.channel = $${params.length}`);
     }
   }
   if (q) {
@@ -1584,10 +1615,17 @@ app.get('/api/items', async (req, res) => {
     const directOnlyPlatform = platformFilter === 'sabnzbd';
     const hasSearchQuery = Boolean(req.query.q && String(req.query.q).trim());
     const thumbReadyOnly = wantsThumbReadyOnly(req);
+    const hasItemScopeFilter = Boolean(
+      req.query.platform
+      || req.query.channel
+      || req.query.media_type
+      || req.query.min_rating
+      || req.query.tag_id
+    );
     // Elke bron moet ruimer dan offset+limit leveren: infinite scroll mag niet
     // vroeg stoppen, en oude importmappen kunnen dubbele records bevatten die
     // later in deze query worden weggefilterd.
-    const overfetch = hasSearchQuery ? 2 : 3;
+    const overfetch = hasSearchQuery ? 2 : (hasItemScopeFilter ? 30 : 3);
     const sourceLimit = useCursor ? limit * overfetch : offset + (limit * overfetch);
     const params = [];
     function addRecentCursor(where, sortExpr, orderExpr) {
@@ -1608,13 +1646,6 @@ app.get('/api/items', async (req, res) => {
     directWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
     directWhere.push(`(d.filesize IS NULL OR d.filesize > 0)`);
     directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
-    const hasItemScopeFilter = Boolean(
-      req.query.platform
-      || req.query.channel
-      || req.query.media_type
-      || req.query.min_rating
-      || req.query.tag_id
-    );
     const fastRecentDirectOnly = sort === 'recent' && !hasSearchQuery && !hasItemScopeFilter;
     if (thumbReadyOnly || fastRecentDirectOnly) {
       directWhere.push(`(d.is_thumb_ready = true OR lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${IMAGE_EXT_SQL}))`);
@@ -1623,8 +1654,28 @@ app.get('/api/items', async (req, res) => {
       addRecentCursor(directWhere, 'COALESCE(d.finished_at, d.updated_at, d.created_at)', 'd.id::bigint');
     }
     if (fastRecentDirectOnly) {
-      params.push(useCursor ? limit : offset + limit);
-      const fastLimitParam = params.length;
+      const fastParams = [];
+      const fastWhere = buildItemFilters({
+        req, params: fastParams,
+        fileExpr: 'd.filepath',
+        extExpr: "COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))",
+        ratingExpr: 'd.rating',
+      });
+      fastWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
+      fastWhere.push(`(d.filesize IS NULL OR d.filesize > 0)`);
+      if (useCursor) {
+        fastParams.push(cursorTs);
+        const cursorTsParam = fastParams.length;
+        fastParams.push(cursorOrder);
+        const cursorOrderParam = fastParams.length;
+        const cursorTsExpr = `($${cursorTsParam}::timestamptz AT TIME ZONE current_setting('TimeZone'))`;
+        fastWhere.push(`(COALESCE(d.finished_at, d.updated_at, d.created_at) < ${cursorTsExpr} OR (COALESCE(d.finished_at, d.updated_at, d.created_at) = ${cursorTsExpr} AND d.id::bigint < $${cursorOrderParam}::bigint))`);
+      }
+      const fastSourceLimit = useCursor
+        ? Math.max(limit * 10, 80)
+        : Math.max(offset + (limit * 10), 80);
+      fastParams.push(fastSourceLimit);
+      const fastLimitParam = fastParams.length;
       const { rows } = await pool.query(`
         SELECT 'download' AS item_kind,
                d.id::text AS id, d.id AS rating_id,
@@ -1636,12 +1687,15 @@ app.get('/api/items', async (req, res) => {
                COALESCE(d.finished_at, d.updated_at, d.created_at) AS sort_ts,
                d.id::bigint AS source_order
           FROM downloads d
-         WHERE ${directWhere.join(' AND ')}
+         WHERE ${fastWhere.join(' AND ')}
          ORDER BY d.finished_at DESC NULLS LAST, d.updated_at DESC NULLS LAST, d.created_at DESC NULLS LAST, d.id DESC
          LIMIT $${fastLimitParam}`,
-        params,
+        fastParams,
       );
-      const pageRows = await filterPlayableMediaRows(dedupeGalleryRows(rows), useCursor ? limit : offset + limit);
+      const pageRows = await filterPlayableMediaRows(
+        dedupeGalleryRows(rows).filter((row) => isGalleryMediaCandidate(row, { requireThumbReady: true })),
+        useCursor ? limit : offset + limit,
+      );
       const items = (useCursor ? pageRows.slice(0, limit) : pageRows.slice(offset, offset + limit)).map(mapItem);
       const last = items[items.length - 1] || null;
       const nextCursor = last && items.length === limit
@@ -1667,7 +1721,7 @@ app.get('/api/items', async (req, res) => {
       fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
       fileWhere.push(`df.relpath !~* '${TEMP_RELPATH_RE}'`);
       fileWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
-      fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
+      fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_FILE_PARENT_STATUSES.map(s => `'${s}'`).join(',')}])`);
       fileWhere.push(`(df.filesize IS NULL OR df.filesize > 0)`);
       fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
       if (thumbReadyOnly) fileWhere.push(`(COALESCE(df.is_thumb_ready, d.is_thumb_ready, false) = true OR lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${IMAGE_EXT_SQL}))`);
@@ -1825,7 +1879,10 @@ app.get('/api/items', async (req, res) => {
     const { rows } = await pool.query(sql, params);
 
     const pageTarget = useCursor ? limit : offset + limit;
-    const pageRows = await filterPlayableMediaRows(dedupeGalleryRows(rows), pageTarget);
+    const pageRows = await filterPlayableMediaRows(
+      dedupeGalleryRows(rows).filter((row) => isGalleryMediaCandidate(row, { requireThumbReady: thumbReadyOnly })),
+      pageTarget,
+    );
     const items = (useCursor ? pageRows.slice(0, limit) : pageRows.slice(offset, offset + limit)).map(mapItem);
     const last = items[items.length - 1] || null;
     const moreRecentRowsLikely = sort === 'recent' && (items.length === limit || rows.length >= sourceLimit);
@@ -1867,6 +1924,35 @@ app.get('/api/items-since', async (req, res) => {
 // ─── Platforms lijst ───────────────────────────────────────────────────────
 app.get('/api/platforms', async (req, res) => {
   try {
+    const scoped = Boolean(req.query.platform || req.query.channel || req.query.q || req.query.min_rating || req.query.media_type || req.query.tag_id);
+    if (!scoped) {
+      const params = [];
+      const where = buildItemFilters({
+        req, params,
+        fileExpr: 'd.filepath',
+        extExpr: "COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))",
+        ratingExpr: 'd.rating',
+        includeChannel: false,
+      });
+      where.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
+      where.push(`(d.filesize IS NULL OR d.filesize > 0)`);
+      where.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
+      const { rows } = await pool.query(`
+        SELECT platform,
+               COUNT(*)::bigint AS count,
+               COUNT(*) FILTER (WHERE ext IN (${IMAGE_EXT_SQL}))::bigint AS image_count,
+               COUNT(*) FILTER (WHERE ext IN (${VIDEO_EXT_SQL}))::bigint AS video_count
+          FROM (
+            SELECT ${platformGroupSql('d')} AS platform,
+                   lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) AS ext
+              FROM downloads d
+             WHERE ${where.join(' AND ')}
+          ) platform_items
+         GROUP BY platform
+         ORDER BY COUNT(*) DESC`, params);
+      return res.json({ platforms: rows });
+    }
+
     const params = [];
     const directWhere = buildItemFilters({
       req, params,
@@ -1896,7 +1982,7 @@ app.get('/api/platforms', async (req, res) => {
     fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
     fileWhere.push(`df.relpath !~* '${TEMP_RELPATH_RE}'`);
     fileWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
-    fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
+    fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_FILE_PARENT_STATUSES.map(s => `'${s}'`).join(',')}])`);
     fileWhere.push(`(df.filesize IS NULL OR df.filesize > 0)`);
     fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
 
@@ -1906,25 +1992,28 @@ app.get('/api/platforms', async (req, res) => {
     const { rows } = await pool.query(`
       WITH platform_items AS (
         SELECT ${platformGroupSql('d')} AS platform,
-               lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) AS ext
+               lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) AS ext,
+               lower(d.filepath) AS media_key
           FROM downloads d
          WHERE ${directWhere.join(' AND ')}
         UNION ALL
         SELECT ${platformGroupSql('d')} AS platform,
-               lower(regexp_replace(df.relpath, '^.*\\.', '')) AS ext
+               lower(regexp_replace(df.relpath, '^.*\\.', '')) AS ext,
+               lower(df.relpath) AS media_key
           FROM download_files df
           JOIN downloads d ON d.id = df.download_id
          WHERE ${fileWhere.join(' AND ')}
         UNION ALL
         SELECT COALESCE(NULLIF(s.platform, ''), 'unknown') AS platform,
-               'jpg' AS ext
+               'jpg' AS ext,
+               lower(s.filepath) AS media_key
           FROM screenshots s
          WHERE ${screenshotWhere.join(' AND ')}
       )
       SELECT platform,
-             COUNT(*)::bigint AS count,
-             COUNT(*) FILTER (WHERE ext IN (${IMAGE_EXT_SQL}))::bigint AS image_count,
-             COUNT(*) FILTER (WHERE ext IN (${VIDEO_EXT_SQL}))::bigint AS video_count
+             COUNT(DISTINCT media_key)::bigint AS count,
+             COUNT(DISTINCT media_key) FILTER (WHERE ext IN (${IMAGE_EXT_SQL}))::bigint AS image_count,
+             COUNT(DISTINCT media_key) FILTER (WHERE ext IN (${VIDEO_EXT_SQL}))::bigint AS video_count
         FROM platform_items
        GROUP BY platform
        ORDER BY COUNT(*) DESC`, params);
@@ -1948,6 +2037,38 @@ app.get('/api/channels', async (req, res) => {
       : channelSort === 'rating' || sort === 'rating'
         ? 'max_rating DESC NULLS LAST, latest_ts DESC NULLS LAST, count DESC'
         : 'latest_ts DESC NULLS LAST, count DESC';
+    const scoped = Boolean(req.query.platform || req.query.channel || req.query.q || req.query.min_rating || req.query.media_type || req.query.tag_id);
+    if (!scoped) {
+      const params = [];
+      const where = buildItemFilters({
+        req, params,
+        fileExpr: 'd.filepath',
+        extExpr: "COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))",
+        ratingExpr: 'd.rating',
+        includeChannel: false,
+      });
+      where.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
+      where.push(`(d.filesize IS NULL OR d.filesize > 0)`);
+      where.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
+      const { rows } = await pool.query(`
+        SELECT *
+          FROM (
+            SELECT ${channelGroupSql('d')} AS channel,
+                   ${platformGroupSql('d')} AS platform,
+                   COUNT(*) AS count,
+                   COUNT(*) FILTER (WHERE lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${IMAGE_EXT_SQL}))::bigint AS image_count,
+                   COUNT(*) FILTER (WHERE lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${VIDEO_EXT_SQL}))::bigint AS video_count,
+                   MAX(COALESCE(d.finished_at, d.updated_at, d.created_at)) AS latest_ts,
+                   MAX(d.rating) AS max_rating
+              FROM downloads d
+             WHERE ${where.join(' AND ')}
+             GROUP BY ${channelGroupSql('d')}, ${platformGroupSql('d')}
+          ) channel_items
+         ORDER BY ${orderBy}
+         LIMIT 500`, params);
+      return res.json({ channels: rows });
+    }
+
     const params = [];
     const directWhere = buildItemFilters({
       req, params,
@@ -1979,7 +2100,7 @@ app.get('/api/channels', async (req, res) => {
     fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
     fileWhere.push(`df.relpath !~* '${TEMP_RELPATH_RE}'`);
     fileWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
-    fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
+    fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_FILE_PARENT_STATUSES.map(s => `'${s}'`).join(',')}])`);
     fileWhere.push(`(df.filesize IS NULL OR df.filesize > 0)`);
     fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
 
@@ -1988,44 +2109,47 @@ app.get('/api/channels', async (req, res) => {
 
     const { rows } = await pool.query(`
       SELECT *
-      FROM (
-        SELECT channel,
-               platform,
-               COUNT(*) AS count,
-               COUNT(*) FILTER (WHERE ext IN (${IMAGE_EXT_SQL}))::bigint AS image_count,
-               COUNT(*) FILTER (WHERE ext IN (${VIDEO_EXT_SQL}))::bigint AS video_count,
-               MAX(sort_ts) AS latest_ts,
-               MAX(rating) AS max_rating
-          FROM (
-            SELECT ${directChannelExpr} AS channel,
-                   ${directPlatformExpr} AS platform,
-                   lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) AS ext,
-                   COALESCE(d.finished_at, d.updated_at, d.created_at) AS sort_ts,
-                   d.rating
-              FROM downloads d
-             WHERE ${directWhere.join(' AND ')}
-            UNION ALL
-            SELECT ${channelGroupSql('d')} AS channel,
-                   ${platformGroupSql('d')} AS platform,
-                   lower(regexp_replace(df.relpath, '^.*\\.', '')) AS ext,
-                   COALESCE(to_timestamp(NULLIF(df.mtime_ms,0) / 1000.0)::timestamp, df.updated_at, d.finished_at, d.updated_at, d.created_at) AS sort_ts,
-                   df.rating
-              FROM download_files df
-              JOIN downloads d ON d.id = df.download_id
-             WHERE ${fileWhere.join(' AND ')}
-            UNION ALL
-            SELECT s.channel,
-                   COALESCE(NULLIF(s.platform, ''), 'unknown') AS platform,
-                   'jpg' AS ext,
-                   COALESCE(s.created_at, s.updated_at) AS sort_ts,
-                   s.rating
-              FROM screenshots s
-             WHERE ${screenshotWhere.join(' AND ')}
-          ) all_channel_items
-        GROUP BY channel, platform
-      ) channel_items
-      ORDER BY ${orderBy}
-      LIMIT 500`, params);
+        FROM (
+          SELECT channel,
+                 platform,
+                 COUNT(DISTINCT media_key) AS count,
+                 COUNT(DISTINCT media_key) FILTER (WHERE ext IN (${IMAGE_EXT_SQL}))::bigint AS image_count,
+                 COUNT(DISTINCT media_key) FILTER (WHERE ext IN (${VIDEO_EXT_SQL}))::bigint AS video_count,
+                 MAX(sort_ts) AS latest_ts,
+                 MAX(rating) AS max_rating
+            FROM (
+              SELECT ${directChannelExpr} AS channel,
+                     ${directPlatformExpr} AS platform,
+                     lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) AS ext,
+                     lower(d.filepath) AS media_key,
+                     COALESCE(d.finished_at, d.updated_at, d.created_at) AS sort_ts,
+                     d.rating
+                FROM downloads d
+               WHERE ${directWhere.join(' AND ')}
+              UNION ALL
+              SELECT ${channelGroupSql('d')} AS channel,
+                     ${platformGroupSql('d')} AS platform,
+                     lower(regexp_replace(df.relpath, '^.*\\.', '')) AS ext,
+                     lower(df.relpath) AS media_key,
+                     COALESCE(to_timestamp(NULLIF(df.mtime_ms,0) / 1000.0)::timestamp, df.updated_at, d.finished_at, d.updated_at, d.created_at) AS sort_ts,
+                     df.rating
+                FROM download_files df
+                JOIN downloads d ON d.id = df.download_id
+               WHERE ${fileWhere.join(' AND ')}
+              UNION ALL
+              SELECT s.channel,
+                     COALESCE(NULLIF(s.platform, ''), 'unknown') AS platform,
+                     'jpg' AS ext,
+                     lower(s.filepath) AS media_key,
+                     COALESCE(s.created_at, s.updated_at) AS sort_ts,
+                     s.rating
+                FROM screenshots s
+               WHERE ${screenshotWhere.join(' AND ')}
+            ) all_channel_items
+           GROUP BY channel, platform
+        ) channel_items
+       ORDER BY ${orderBy}
+       LIMIT 500`, params);
     res.json({ channels: rows });
   } catch (e) {
     res.status(500).json({ error: e.message });
