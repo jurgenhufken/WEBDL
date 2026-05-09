@@ -14,16 +14,16 @@
   const state = {
     items: [],
     offset: 0,
-    limit: 80,
+    limit: 100,
     loading: false,
     done: false,
     filters: { platform: '', channel: '', q: '', sort: 'recent', min_rating: '', media_type: '', channel_sort: 'count' },
     // Auto-refresh
     autoRefresh: true,
     liveAllMedia: true,
-    autoRefreshMs: 3000,
-    autoInjectMax: 60,
-    autoInjectPumpMs: 350,
+    autoRefreshMs: 1000,
+    autoInjectMax: 100,
+    autoInjectPumpMs: 50,
     autoRefreshTimer: null,
     autoInjectTimer: null,
     autoRefreshInFlight: false,
@@ -740,7 +740,7 @@
     const timer = setTimeout(() => ctrl.abort(), 8000);
     try {
       const params = new URLSearchParams({
-        limit: String(Math.min(state.limit, 50)),
+        limit: String(Math.min(state.limit, 100)),
         offset: '0',
         sort: 'recent',
         thumb_ready: '1',
