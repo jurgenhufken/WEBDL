@@ -114,7 +114,9 @@
     if (it && it.source_thread_title && it.source_thread_title !== it.channel) {
       parts.push(it.source_thread_title);
     }
-    if (it && (it.source_post_num || it.source_post_id || it.source_post_title)) {
+    if (it && sourceModelTitle(it)) {
+      parts.push(`set/model ${sourceModelTitle(it)}`);
+    } else if (it && (it.source_post_num || it.source_post_id || it.source_post_title)) {
       const postLabel = it.source_post_num || it.source_post_id || '';
       const postTitle = it.source_post_title ? ` · ${it.source_post_title}` : '';
       parts.push(postLabel ? `post ${postLabel}${postTitle}` : it.source_post_title);
@@ -134,6 +136,48 @@
   function sourcePostKey(it) {
     if (!it) return '';
     return String(it.source_post_num || it.source_post_id || it.source_post_url || it.source_post_title || '').trim().toLowerCase();
+  }
+
+  function sourceModelTitleFromText(value) {
+    let title = String(value || '').trim();
+    if (!title) return '';
+    title = title
+      .replace(/\.[a-z0-9]{2,5}$/i, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const stripPatterns = [
+      /(?:[._ -])p(?:[._ -])?\d{1,5}[a-z]?$/i,
+      /(?:[._ -])(?:img|image|pic|photo)(?:[._ -])?\d{1,5}[a-z]?$/i,
+      /(?:[._ -])\d{1,5}[a-z]?$/i,
+    ];
+    for (const re of stripPatterns) {
+      const stripped = title.replace(re, '').trim();
+      if (stripped && stripped !== title) return stripped;
+    }
+    return title;
+  }
+
+  function sourceModelTitle(it) {
+    if (!it) return '';
+    const explicit = String(it.source_model_title || '').trim();
+    if (explicit) return explicit;
+    return sourceModelTitleFromText(it.source_post_title || it.title || it.filename || '');
+  }
+
+  function sourceModelKey(it) {
+    if (!it) return '';
+    const explicit = String(it.source_model_key || '').trim().toLowerCase();
+    if (explicit) return explicit;
+    const title = sourceModelTitle(it);
+    if (title) {
+      return title
+        .trim()
+        .toLowerCase()
+        .replace(/[\s._-]+/g, '-')
+        .replace(/[^a-z0-9-]+/g, '')
+        .replace(/^-+|-+$/g, '');
+    }
+    return sourcePostKey(it);
   }
 
   function loadMediaRotation(it) {
@@ -701,23 +745,23 @@
     return enqueueNavigation(async () => {
       const currentItem = vs.items[vs.idx] || null;
       const currentThreadKey = sourceThreadKey(currentItem);
-      const currentPostKey = sourcePostKey(currentItem);
-      if (!currentThreadKey || !currentPostKey) {
+      const currentModelKey = sourceModelKey(currentItem);
+      if (!currentThreadKey || !currentModelKey) {
         await navChannel(dir);
         return;
       }
 
-      async function findLoadedPost(startIdx) {
+      async function findLoadedModel(startIdx) {
         for (let i = startIdx; i >= 0 && i < vs.items.length; i += dir) {
           const it = vs.items[i];
           if (sourceThreadKey(it) !== currentThreadKey) continue;
-          const postKey = sourcePostKey(it);
-          if (postKey && postKey !== currentPostKey) return i;
+          const modelKey = sourceModelKey(it);
+          if (modelKey && modelKey !== currentModelKey) return i;
         }
         return -1;
       }
 
-      let nextIdx = await findLoadedPost(vs.idx + dir);
+      let nextIdx = await findLoadedModel(vs.idx + dir);
       if (nextIdx >= 0) {
         await navTo(nextIdx);
         return;
@@ -728,7 +772,7 @@
           const beforeLen = vs.items.length;
           const loaded = await loadMoreViewerItems();
           if (!loaded && vs.items.length === beforeLen) break;
-          nextIdx = await findLoadedPost(Math.max(beforeLen, vs.idx + 1));
+          nextIdx = await findLoadedModel(Math.max(beforeLen, vs.idx + 1));
           if (nextIdx >= 0) {
             await navTo(nextIdx);
             return;
@@ -736,7 +780,7 @@
         }
       }
 
-      showHudMessage(dir > 0 ? 'Geen volgende post in thread' : 'Geen vorige post in thread');
+      showHudMessage(dir > 0 ? 'Geen volgend model/set in thread' : 'Geen vorig model/set in thread');
     });
   }
 

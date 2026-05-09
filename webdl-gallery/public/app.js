@@ -162,8 +162,36 @@
     return String((it && (it.source_post_url || it.source_url || it.url)) || '').trim();
   }
 
+  function sourceModelTitleFromText(value) {
+    let title = String(value || '').trim();
+    if (!title) return '';
+    title = title
+      .replace(/\.[a-z0-9]{2,5}$/i, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const stripPatterns = [
+      /(?:[._ -])p(?:[._ -])?\d{1,5}[a-z]?$/i,
+      /(?:[._ -])(?:img|image|pic|photo)(?:[._ -])?\d{1,5}[a-z]?$/i,
+      /(?:[._ -])\d{1,5}[a-z]?$/i,
+    ];
+    for (const re of stripPatterns) {
+      const stripped = title.replace(re, '').trim();
+      if (stripped && stripped !== title) return stripped;
+    }
+    return title;
+  }
+
+  function sourceModelTitle(it) {
+    if (!it) return '';
+    const explicit = String(it.source_model_title || '').trim();
+    if (explicit) return explicit;
+    return sourceModelTitleFromText(it.source_post_title || it.title || it.filename || '');
+  }
+
   function postLabelForItem(it, titleText = '') {
     if (!it) return '';
+    const modelTitle = sourceModelTitle(it);
+    if (modelTitle && modelTitle !== titleText) return `set/model ${modelTitle}`;
     const postNum = String(it.source_post_num || '').trim();
     const postId = String(it.source_post_id || '').trim();
     const postTitle = String(it.source_post_title || '').trim();

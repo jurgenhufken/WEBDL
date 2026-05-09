@@ -43,8 +43,16 @@ function normalizeGalleryDlUrl(url) {
     const host = u.hostname.toLowerCase().replace(/^www\./, '');
     if (host === 'viper.to' || host.endsWith('.viper.to')) {
       u.hostname = 'vipergirls.to';
-      return u.toString();
     }
+    if (u.hostname.toLowerCase().replace(/^www\./, '') === 'vipergirls.to') {
+      const m = u.pathname.match(/^\/threads\/(\d+)(-[^/?#]+)?(?:\/page\d+)?\/?$/i);
+      if (m) {
+        u.pathname = `/threads/${m[1]}${m[2] || ''}`;
+        u.search = '';
+        u.hash = '';
+      }
+    }
+    return u.toString();
   } catch {}
   return url;
 }

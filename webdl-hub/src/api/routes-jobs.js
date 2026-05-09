@@ -76,14 +76,22 @@ function stableExpandGroupId(url) {
   return crypto.createHash('sha1').update(canonicalExpandUrl(url)).digest('hex').slice(0, 12);
 }
 
-function normalizeVipergirlsThreadUrl(url) {
+function normalizeVipergirlsThreadUrl(url, { wholeThread = true } = {}) {
   try {
     const u = new URL(String(url || ''));
     const host = u.hostname.toLowerCase().replace(/^www\./, '');
     if (host === 'viper.to' || host.endsWith('.viper.to')) {
       u.hostname = 'vipergirls.to';
-      return u.toString();
     }
+    if (u.hostname.toLowerCase().replace(/^www\./, '') === 'vipergirls.to') {
+      const m = u.pathname.match(/^\/threads\/(\d+)(-[^/?#]+)?(?:\/page\d+)?\/?$/i);
+      if (m && wholeThread) {
+        u.pathname = `/threads/${m[1]}${m[2] || ''}`;
+        u.search = '';
+        u.hash = '';
+      }
+    }
+    return u.toString();
   } catch {}
   return String(url || '');
 }
@@ -271,12 +279,13 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
     const sourceContext = options.webdl_source_contexts?.[url] || options.sourceContext || null;
     const contextUrl = sourceContext?.url || options.contextUrl || options.pageUrl || '';
     const sourcePlatform = String(sourceContext?.platform || options.platform || '').toLowerCase();
+    const vipergirlsWholeThread = options.vipergirlsWholeThread !== false;
     const isVipergirlsContext = sourcePlatform === 'vipergirls'
       || /(?:vipergirls\.to|viper\.to)\/threads\//i.test(String(contextUrl || ''));
     const isThreadUrl = /(?:vipergirls\.to|viper\.to)\/threads\//i.test(String(url || ''));
-    const jobUrl = isThreadUrl ? normalizeVipergirlsThreadUrl(url) : url;
+    const jobUrl = isThreadUrl ? normalizeVipergirlsThreadUrl(url, { wholeThread: vipergirlsWholeThread }) : url;
     if (!hint && isVipergirlsContext && contextUrl && !isThreadUrl) {
-      const threadUrl = normalizeVipergirlsThreadUrl(contextUrl);
+      const threadUrl = normalizeVipergirlsThreadUrl(contextUrl, { wholeThread: vipergirlsWholeThread });
       if (!force) {
         const existing = await repo.findRecentJobByUrl(threadUrl);
         if (existing) return { ...existing, duplicate: true, redirected_from: url };

@@ -78,6 +78,24 @@ function esc(s) {
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 }
 
+function canonicalVipergirlsThreadUrl(rawUrl, wholeThread) {
+  if (!wholeThread) return rawUrl;
+  try {
+    const u = new URL(String(rawUrl || '').trim());
+    const host = u.hostname.toLowerCase().replace(/^www\./, '');
+    if (host === 'viper.to' || host.endsWith('.viper.to')) u.hostname = 'vipergirls.to';
+    if (u.hostname.toLowerCase().replace(/^www\./, '') !== 'vipergirls.to') return rawUrl;
+    const m = u.pathname.match(/^\/threads\/(\d+)(-[^/?#]+)?(?:\/page\d+)?\/?$/i);
+    if (!m) return rawUrl;
+    u.pathname = `/threads/${m[1]}${m[2] || ''}`;
+    u.search = '';
+    u.hash = '';
+    return u.toString();
+  } catch (_) {
+    return rawUrl;
+  }
+}
+
 function statusIcon(status) {
   switch (status) {
     case 'pending':   return '⏳';
@@ -1259,11 +1277,14 @@ function bind() {
   // Single download
   $('newJobForm').addEventListener('submit', async (ev) => {
     ev.preventDefault();
-    const url = $('url').value.trim();
+    const rawUrl = $('url').value.trim();
+    const wholeThread = $('wholeThread')?.checked !== false;
+    const url = canonicalVipergirlsThreadUrl(rawUrl, wholeThread);
     if (!url) return;
     const force = $('force')?.checked;
+    const options = { vipergirlsWholeThread: wholeThread };
     try {
-      const job = await api('POST', '/api/jobs', { url, force });
+      const job = await api('POST', '/api/jobs', { url, force, options });
       state.source = 'hub';
       updateSourceControls();
       if (job && job.expanded) {
@@ -1295,13 +1316,16 @@ function bind() {
 
   // Expand playlist
   $('btnExpand').addEventListener('click', async () => {
-    const url = $('url').value.trim();
+    const rawUrl = $('url').value.trim();
+    const wholeThread = $('wholeThread')?.checked !== false;
+    const url = canonicalVipergirlsThreadUrl(rawUrl, wholeThread);
     if (!url) { setMsg('Vul een playlist/kanaal URL in', true); return; }
     const force = $('force')?.checked;
+    const options = { vipergirlsWholeThread: wholeThread };
     setMsg('⏳ Playlist uitpakken…');
     $('btnExpand').disabled = true;
     try {
-      const result = await api('POST', '/api/jobs/expand', { url, force });
+      const result = await api('POST', '/api/jobs/expand', { url, force, options });
       $('url').value = '';
       setMsg(`✅ ${result.total} video's → ${result.queued} ingepland, ${result.duplicates} overgeslagen${result.skipped ? `, ${result.skipped} verwijderd/privé geskipt` : ''}`, false, true);
       await loadJobs();

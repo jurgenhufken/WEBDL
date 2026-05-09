@@ -110,6 +110,8 @@ const THUMB_WARM_BATCH = Math.max(1, Number(process.env.WEBDL_GALLERY_THUMB_WARM
 const AUX_RELPATH_RE = String.raw`((^|[\\/])\d{1,3}[-_. ]?thumbnail\.(jpe?g|png|webp|gif|bmp|avif)$|(^|[-_. ])thumbnail\.(jpe?g|png|webp|gif|bmp|avif)$|_thumb(_v[0-9]+)?\.(jpe?g|png|webp)$|_preview\.(jpe?g|png|webp|gif|bmp|avif)$|_logo\.(jpe?g|png|webp)$|\.(json|part|tmp|ytdl)$)`;
 const TEMP_RELPATH_RE = String.raw`(^|[\\/])(_UNPACK_|_FAILED_|_ADMIN_|__ADMIN__|incomplete)([^\\/]*)([\\/]|$)`;
 const MEDIA_EXT_SQL = MEDIA_EXTS.map(e => `'${e}'`).join(',');
+const IMAGE_EXT_SQL = IMAGE_EXTS.map(e => `'${e}'`).join(',');
+const VIDEO_EXT_SQL = VIDEO_EXTS.map(e => `'${e}'`).join(',');
 const ACTIVE_DB_STATUSES = ['downloading', 'postprocessing'];
 const HIDDEN_GALLERY_STATUSES = ['pending', 'queued', 'downloading', 'postprocessing', 'superseded'];
 const KEEP2SHARE_DIR = path.join(BASE_DIR, '_Keep2Share');
@@ -344,6 +346,34 @@ function sourceGraphSummary(parsedMetadata) {
   };
 }
 
+function sourceModelTitleFromText(value) {
+  let title = String(value || '').trim();
+  if (!title) return '';
+  title = title
+    .replace(/\.[a-z0-9]{2,5}$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const stripPatterns = [
+    /(?:[._ -])p(?:[._ -])?\d{1,5}[a-z]?$/i,
+    /(?:[._ -])(?:img|image|pic|photo)(?:[._ -])?\d{1,5}[a-z]?$/i,
+    /(?:[._ -])\d{1,5}[a-z]?$/i,
+  ];
+  for (const re of stripPatterns) {
+    const stripped = title.replace(re, '').trim();
+    if (stripped && stripped !== title) return stripped;
+  }
+  return title;
+}
+
+function sourceModelKeyFromTitle(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s._-]+/g, '-')
+    .replace(/[^a-z0-9-]+/g, '')
+    .replace(/^-+|-+$/g, '');
+}
+
 function contentSitesFromRow(row, parsedMetadata) {
   const graph = parsedMetadata && parsedMetadata.source_graph && typeof parsedMetadata.source_graph === 'object'
     ? parsedMetadata.source_graph
@@ -382,6 +412,8 @@ function mapItem(row) {
   if (sourceSite && !sourceSites.some((s) => String(s || '').toLowerCase() === sourceSite.toLowerCase())) sourceSites.unshift(sourceSite);
   const graphSummary = sourceGraphSummary(parsedMetadata);
   const sourceUrl = graphSummary.source_post_url || row.source_url || row.url || '';
+  const sourceModelTitle = sourceModelTitleFromText(graphSummary.source_post_title || row.title || filename);
+  const sourceModelKey = sourceModelKeyFromTitle(sourceModelTitle);
   return {
     ...row,
     source_url: sourceUrl,
@@ -400,6 +432,8 @@ function mapItem(row) {
     source_post_num: graphSummary.source_post_num || null,
     source_post_id: graphSummary.source_post_id || null,
     source_post_url: graphSummary.source_post_url || null,
+    source_model_title: sourceModelTitle || null,
+    source_model_key: sourceModelKey || null,
     source_host: graphSummary.source_host || null,
     content_sites: contentSitesFromRow(row, parsedMetadata),
   };
@@ -632,41 +666,7 @@ function thumbPathForMedia(filePath) {
 }
 
 async function generateImageThumb(filePath) {
-  if (!isImageFile(filePath)) return null;
-  const outPath = thumbPathForMedia(filePath);
-  if (fs.existsSync(outPath)) {
-    try {
-      if (fs.statSync(outPath).size > 1000) return outPath;
-    } catch (_) {}
-  }
-  if (thumbInflight.has(filePath)) return thumbInflight.get(filePath);
-  const job = runLimitedThumbJob(async () => {
-    const ok = await new Promise((resolve) => {
-      const args = [
-        '-y',
-        '-hide_banner',
-        '-loglevel', 'error',
-        '-i', filePath,
-        '-frames:v', '1',
-        '-an',
-        '-vf', `scale=${THUMB_WIDTH}:${THUMB_HEIGHT}:force_original_aspect_ratio=decrease,pad=${THUMB_WIDTH}:${THUMB_HEIGHT}:(ow-iw)/2:(oh-ih)/2:black,setsar=1`,
-        '-q:v', '4',
-        outPath,
-      ];
-      const proc = spawn(FFMPEG_BIN, args, { stdio: ['ignore', 'ignore', 'ignore'] });
-      proc.on('close', () => {
-        try {
-          if (fs.existsSync(outPath) && fs.statSync(outPath).size > 1000) return resolve(true);
-          fs.rmSync(outPath, { force: true });
-        } catch (_) {}
-        resolve(false);
-      });
-      proc.on('error', () => resolve(false));
-    });
-    return ok ? outPath : null;
-  }).finally(() => thumbInflight.delete(filePath));
-  thumbInflight.set(filePath, job);
-  return job;
+  return null;
 }
 
 async function generateVideoThumb(filePath) {
@@ -884,6 +884,10 @@ async function warmThumbForItem(item) {
   const id = String(item.id || '');
   const fp = resolveStoredMediaPath(item.filepath);
   if (!id || !fp || !fs.existsSync(fp)) return false;
+  if (isImageFile(fp)) {
+    markThumbReady(id);
+    return true;
+  }
   const existing = thumbPathForMedia(fp);
   try {
     if (fs.existsSync(existing) && fs.statSync(existing).size > 1000) {
@@ -891,11 +895,7 @@ async function warmThumbForItem(item) {
       return true;
     }
   } catch (_) {}
-  const generated = isVideoFile(fp)
-    ? await generateVideoThumb(fp)
-    : isImageFile(fp)
-      ? await generateImageThumb(fp)
-      : null;
+  const generated = isVideoFile(fp) ? await generateVideoThumb(fp) : null;
   if (generated && fs.existsSync(generated)) {
     markThumbReady(id);
     return true;
@@ -917,7 +917,7 @@ async function warmThumbBacklog(reason = 'timer') {
          AND d.filepath <> ''
          AND d.status <> ALL($1::text[])
          AND d.filepath !~* $2
-         AND lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})
+         AND lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${VIDEO_EXT_SQL})
        ORDER BY d.finished_at DESC NULLS LAST, d.updated_at DESC NULLS LAST, d.created_at DESC NULLS LAST, d.id DESC
        LIMIT $3`,
       [HIDDEN_GALLERY_STATUSES, TEMP_RELPATH_RE, THUMB_WARM_BATCH],
@@ -1415,7 +1415,9 @@ app.get('/api/items', async (req, res) => {
     directWhere.push(`(d.filesize IS NULL OR d.filesize > 0)`);
     directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
     const fastRecentDirectOnly = sort === 'recent' && !hasSearchQuery;
-    if (thumbReadyOnly || fastRecentDirectOnly) directWhere.push(`d.is_thumb_ready = true`);
+    if (thumbReadyOnly || fastRecentDirectOnly) {
+      directWhere.push(`(d.is_thumb_ready = true OR lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${IMAGE_EXT_SQL}))`);
+    }
     if (useCursor) {
       addRecentCursor(directWhere, 'COALESCE(d.finished_at, d.updated_at, d.created_at)', 'd.id::bigint');
     }
@@ -1426,7 +1428,9 @@ app.get('/api/items', async (req, res) => {
         SELECT 'download' AS item_kind,
                d.id::text AS id, d.id AS rating_id,
                d.url, d.source_url, d.platform, d.channel, d.title, d.filename,
-               d.filepath, d.filesize, d.format, d.duration, d.rating, d.is_thumb_ready, d.metadata,
+               d.filepath, d.filesize, d.format, d.duration, d.rating,
+               (d.is_thumb_ready = true OR lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${IMAGE_EXT_SQL})) AS is_thumb_ready,
+               d.metadata,
                d.finished_at, d.created_at,
                COALESCE(d.finished_at, d.updated_at, d.created_at) AS sort_ts,
                d.id::bigint AS source_order
@@ -1517,7 +1521,9 @@ app.get('/api/items', async (req, res) => {
           SELECT 'download' AS item_kind,
                  d.id::text AS id, d.id AS rating_id,
                  d.url, d.source_url, d.platform, d.channel, d.title, d.filename,
-                 d.filepath, d.filesize, d.format, d.duration, d.rating, d.is_thumb_ready, d.metadata,
+                 d.filepath, d.filesize, d.format, d.duration, d.rating,
+                 (d.is_thumb_ready = true OR lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${IMAGE_EXT_SQL})) AS is_thumb_ready,
+                 d.metadata,
                  d.finished_at, d.created_at,
                  COALESCE(d.finished_at, d.updated_at, d.created_at) AS sort_ts,
                  d.id::bigint AS source_order
@@ -1825,6 +1831,11 @@ app.get('/thumb/:id', async (req, res) => {
     const dir = path.dirname(fp);
     const base = path.basename(fp, path.extname(fp));
     const isVideo = isVideoFile(fp);
+    if (!isVideo && isImageFile(fp)) {
+      markThumbReady(req.params.id);
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+      return res.sendFile(fp);
+    }
     // Probeer meerdere thumb-varianten
     const candidates = [
       path.join(dir, `${base}_thumb_v3.jpg`),
@@ -1836,24 +1847,6 @@ app.get('/thumb/:id', async (req, res) => {
         res.setHeader('Cache-Control', 'public, max-age=86400');
         return res.sendFile(c);
       }
-    }
-    if (!isVideo && isImageFile(fp)) {
-      let canGenerate = false;
-      try {
-        canGenerate = fs.existsSync(fp) && fs.statSync(fp).size > 0;
-      } catch (_) {}
-      if (canGenerate) {
-        const generated = await generateImageThumb(fp);
-        if (generated && fs.existsSync(generated)) {
-          markThumbReady(req.params.id);
-          res.setHeader('Cache-Control', 'public, max-age=86400');
-          return res.sendFile(generated);
-        }
-      }
-      // Fallback naar origineel houdt nieuwe items zichtbaar, maar alleen als
-      // thumbnail-generatie niet kan slagen.
-      res.setHeader('Cache-Control', 'public, max-age=3600');
-      return res.sendFile(fp);
     }
     if (isVideo) {
       let canGenerate = false;
