@@ -83,6 +83,7 @@ function detectPlatform(url) {
     if (h.includes('reddit')) return 'reddit';
     if (h.includes('redgifs') || h.includes('gifdeliverynetwork') || h.includes('gfycat')) return 'redgifs';
     if (h.includes('instagram')) return 'instagram';
+    if (h === 't.me' || h.endsWith('.t.me') || h === 'telegram.me' || h.endsWith('.telegram.me')) return 'telegram';
     if (h.includes('twitter') || h.includes('x.com')) return 'twitter';
     if (h.includes('twitch')) return 'twitch';
     if (h.includes('danbooru')) return 'danbooru';
@@ -450,20 +451,25 @@ async function syncToGallery(job, outputFiles, logger, repo) {
         } catch (_) {}
         f.path = finalPath;
       }
+      const infoPlatform = String(fileInfo?.platform || '').toLowerCase();
+      const isTelegram = job.adapter === 'tdl' || platform === 'telegram' || infoPlatform === 'telegram';
       const fileForumInfo = fileInfo && (fileInfo.sourceThreadTitle || fileInfo.sourceThreadId || fileInfo.sourcePostId || fileInfo.sourcePostNum)
         ? fileInfo
         : null;
-      const forumInfo = mergeForumInfo(fileForumInfo, forumInfoFromJob(job));
+      const forumInfo = isTelegram ? null : mergeForumInfo(fileForumInfo, forumInfoFromJob(job));
       const forumThreadChannel = forumInfo?.sourceThreadTitle
         ? String(forumInfo.sourceThreadTitle).trim().toLowerCase()
         : '';
-      const channel = forumThreadChannel || (pinnedVipergirls
-        ? pinnedTarget.channel
-        : (fileInfo?.channel || job.options?.channel || job.options?.playlistTitle || ''));
-      const infoPlatform = String(fileInfo?.platform || '').toLowerCase();
-      const realPlatform = pinnedVipergirls
-        ? pinnedTarget.platform
-        : (infoPlatform && infoPlatform !== 'generic' ? infoPlatform : platform);
+      const channel = isTelegram
+        ? (fileInfo?.channel || job.options?.channel || 'telegram')
+        : (forumThreadChannel || (pinnedVipergirls
+          ? pinnedTarget.channel
+          : (fileInfo?.channel || job.options?.channel || job.options?.playlistTitle || '')));
+      const realPlatform = isTelegram
+        ? 'telegram'
+        : (pinnedVipergirls
+          ? pinnedTarget.platform
+          : (infoPlatform && infoPlatform !== 'generic' ? infoPlatform : platform));
       const sourceId = idFromMediaUrl(rawSourceUrl || job.url);
       const title = pinnedVipergirls
         ? `${sanitizeFilePart(job.options?.title || 'Vipergirls', 'Vipergirls')}${sourceId ? ` ${sourceId}` : ''}`

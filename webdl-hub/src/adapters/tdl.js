@@ -1,8 +1,19 @@
-// src/adapters/tdl.js — Telegram via tdl (github.com/iyear/tdl).
+// src/adapters/tdl.js — Telegram via lokale Telethon downloader.
 'use strict';
 
+const path = require('node:path');
 const { defineAdapter } = require('./base');
 const { collectOutputsRecursive } = require('./_fs');
+
+const DEFAULT_SCRIPT = path.resolve(__dirname, '..', '..', '..', 'telegram-channel-download.py');
+
+function pickPositiveInt(...values) {
+  for (const value of values) {
+    const n = Number.parseInt(String(value || ''), 10);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
 
 function matches(url) {
   try {
@@ -13,15 +24,23 @@ function matches(url) {
 }
 
 function plan(url, opts = {}) {
-  // `tdl dl -u <url> -d <dir>`: download single message of album.
-  const args = ['dl', '-u', url, '-d', opts.cwd];
-  return { cmd: 'tdl', args, cwd: opts.cwd, env: {} };
+  const script = process.env.WEBDL_TELEGRAM_SCRIPT || DEFAULT_SCRIPT;
+  const python = process.env.WEBDL_PYTHON || 'python3';
+  const args = [script, url, opts.cwd];
+  const messageLimit = pickPositiveInt(opts.telegramMessageLimit, opts.messageLimit, opts.limit, process.env.WEBDL_TELEGRAM_MESSAGE_LIMIT);
+  const parallel = pickPositiveInt(opts.telegramParallel, opts.parallel, process.env.WEBDL_TELEGRAM_PARALLEL) || 8;
+  const mediaLimit = pickPositiveInt(opts.telegramMediaLimit, opts.mediaLimit, process.env.WEBDL_TELEGRAM_MEDIA_LIMIT);
+  if (messageLimit) args.push(String(messageLimit));
+  args.push('--parallel', String(parallel));
+  if (mediaLimit) args.push('--media-limit', String(mediaLimit));
+  if (opts.telegramWithLinked || opts.withLinked) args.push('--with-linked');
+  return { cmd: python, args, cwd: opts.cwd, env: {}, logStdout: true };
 }
 
-// tdl toont voortgang als "50.0% @ 1.2MB/s" op stderr.
-const PROG_RE = /(\d+(?:\.\d+)?)%\s*@\s*([\d.]+\s*[KMGT]?i?B\/s)/i;
+const PROG_RE = /(?:PROG\s+)?pct=(\d+(?:\.\d+)?)%?(?:\s+speed=([^\s]+))?/i;
+const TDL_PROG_RE = /(\d+(?:\.\d+)?)%\s*@\s*([\d.]+\s*[KMGT]?i?B\/s)/i;
 function parseProgress(line) {
-  const m = PROG_RE.exec(line);
+  const m = PROG_RE.exec(line) || TDL_PROG_RE.exec(line);
   if (!m) return null;
   const pct = Number.parseFloat(m[1]);
   if (!Number.isFinite(pct)) return null;

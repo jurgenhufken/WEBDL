@@ -2,6 +2,7 @@
 import os
 import sys
 import re
+import json
 import asyncio
 import argparse
 from telethon import TelegramClient
@@ -59,13 +60,61 @@ async def resolve_entity(client, chat_ref):
                 return candidate
         raise
 
-async def download_message(client, message, output_dir, semaphore, stats):
+def message_source_url(entity, message):
+    username = getattr(entity, 'username', None)
+    if username:
+        return f"https://t.me/{username}/{message.id}"
+    entity_id = str(getattr(entity, 'id', '') or '')
+    if entity_id.startswith('-100'):
+        entity_id = entity_id[4:]
+    if entity_id:
+        return f"https://t.me/c/{entity_id}/{message.id}"
+    return ''
+
+def message_title(message, file_path):
+    file_name = getattr(getattr(message, 'file', None), 'name', None)
+    if file_name:
+        return os.path.splitext(file_name)[0].replace('_', ' ').strip()
+    return os.path.splitext(os.path.basename(str(file_path or '')))[0].replace('_', ' ').strip() or f"telegram_{message.id}"
+
+def write_sidecar(file_path, entity, message, chat_title):
+    if not file_path:
+        return
+    try:
+        source_url = message_source_url(entity, message)
+        metadata = {
+            'extractor_key': 'telegram',
+            'platform': 'telegram',
+            'channel': chat_title,
+            'uploader': chat_title,
+            'uploader_id': str(getattr(entity, 'id', '') or ''),
+            'uploader_url': f"https://t.me/{getattr(entity, 'username', '')}" if getattr(entity, 'username', None) else '',
+            'title': message_title(message, file_path),
+            'filename': os.path.basename(str(file_path)),
+            'webpage_url': source_url,
+            'original_url': source_url,
+            'url': source_url,
+            'timestamp': int(message.date.timestamp()) if getattr(message, 'date', None) else None,
+            'telegram_message_id': message.id,
+        }
+        with open(str(file_path) + '.json', 'w', encoding='utf-8') as fh:
+            json.dump(metadata, fh, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"⚠️  Could not write metadata for message {message.id}: {e}")
+
+async def download_message(client, message, output_dir, semaphore, stats, entity=None):
     """Download a single message's media with concurrency control"""
     async with semaphore:
         try:
             path = await message.download_media(file=output_dir)
             if path:
+                if entity is not None:
+                    write_sidecar(path, entity, message, stats.get('chat_title') or '')
                 stats['count'] += 1
+                total = stats.get('total') or 0
+                if total:
+                    pct = min(100, max(0, (stats['count'] / total) * 100))
+                    print(f"PROG pct={pct:.1f}%")
                 print(f"✅ [{stats['count']}] Downloaded: {os.path.basename(path)}")
             return True
         except Exception as e:
@@ -94,12 +143,12 @@ async def download_entity(client, chat_id, output_dir, message_limit=None, paral
 
     download_tasks = []
     semaphore = asyncio.Semaphore(parallel)
-    stats = {'count': 0}
+    stats = {'count': 0, 'chat_title': title}
 
     async for message in client.iter_messages(entity, limit=message_limit):
         if message.media and isinstance(message.media, (MessageMediaPhoto, MessageMediaDocument)):
             print(f"📎 Message {message.id}: {type(message.media).__name__}")
-            download_tasks.append(download_message(client, message, output_dir, semaphore, stats))
+            download_tasks.append(download_message(client, message, output_dir, semaphore, stats, entity=entity))
             if media_limit and len(download_tasks) >= media_limit:
                 print(f"🎯 Media limit reached after message {message.id}")
                 break
@@ -109,6 +158,7 @@ async def download_entity(client, chat_id, output_dir, message_limit=None, paral
             print(f"💬 Message {message.id}: geen media")
 
     if download_tasks:
+        stats['total'] = len(download_tasks)
         print(f"\n⚡ Starting {len(download_tasks)} downloads...")
         await asyncio.gather(*download_tasks)
 
@@ -151,7 +201,8 @@ if __name__ == '__main__':
     parser.add_argument('chat_ref', help='chat_id, @username, t.me URL, or search name')
     parser.add_argument('output_dir')
     parser.add_argument('message_limit', nargs='?', type=int, help='maximum messages to scan')
-    parser.add_argument('parallel', nargs='?', type=int, default=5, help='simultaneous downloads')
+    parser.add_argument('parallel_positional', nargs='?', type=int, help='simultaneous downloads (legacy positional)')
+    parser.add_argument('--parallel', type=int, default=None, help='simultaneous downloads')
     parser.add_argument('--with-linked', action='store_true', help='also download linked discussion/sub-chat when Telegram exposes one')
     parser.add_argument('--media-limit', type=int, default=None, help='stop after this many downloadable media messages')
     args = parser.parse_args()
@@ -160,7 +211,7 @@ if __name__ == '__main__':
         args.chat_ref,
         args.output_dir,
         message_limit=args.message_limit,
-        parallel=args.parallel,
+        parallel=args.parallel or args.parallel_positional or 5,
         with_linked=args.with_linked,
         media_limit=args.media_limit,
     ))

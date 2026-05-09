@@ -1,0 +1,49 @@
+#!/usr/bin/env node
+'use strict';
+
+const path = require('node:path');
+const { spawn } = require('node:child_process');
+
+function usage() {
+  console.error('Usage: tdl dl -u <telegram-url> -d <output-dir>');
+}
+
+const args = process.argv.slice(2);
+if (args[0] !== 'dl') {
+  usage();
+  process.exit(2);
+}
+
+let url = '';
+let outputDir = '';
+for (let i = 1; i < args.length; i++) {
+  const arg = args[i];
+  if ((arg === '-u' || arg === '--url') && args[i + 1]) {
+    url = args[++i];
+  } else if ((arg === '-d' || arg === '--dir') && args[i + 1]) {
+    outputDir = args[++i];
+  }
+}
+
+if (!url || !outputDir) {
+  usage();
+  process.exit(2);
+}
+
+const script = process.env.WEBDL_TELEGRAM_SCRIPT
+  || path.resolve(__dirname, '..', '..', 'telegram-channel-download.py');
+const python = process.env.WEBDL_PYTHON || 'python3';
+const parallel = process.env.WEBDL_TELEGRAM_PARALLEL || '8';
+const child = spawn(python, [script, url, outputDir, '--parallel', parallel], {
+  stdio: 'inherit',
+});
+
+child.on('exit', (code, signal) => {
+  if (signal) process.kill(process.pid, signal);
+  process.exit(code ?? 1);
+});
+
+child.on('error', (err) => {
+  console.error(err && err.message ? err.message : String(err));
+  process.exit(1);
+});
