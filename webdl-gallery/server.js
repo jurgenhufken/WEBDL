@@ -201,6 +201,22 @@ async function ensureSchema() {
       created_at timestamptz NOT NULL DEFAULT now(),
       PRIMARY KEY (download_id, tag_id)
     )`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tag_recipes (
+      id bigserial PRIMARY KEY,
+      name text NOT NULL UNIQUE,
+      description text NOT NULL DEFAULT '',
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now(),
+      last_used_at timestamptz
+    )`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tag_recipe_tags (
+      recipe_id bigint NOT NULL REFERENCES tag_recipes(id) ON DELETE CASCADE,
+      tag_id integer NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+      position integer NOT NULL DEFAULT 0,
+      PRIMARY KEY (recipe_id, tag_id)
+    )`);
 }
 
 async function ensureSearchIndexes() {
@@ -237,7 +253,12 @@ function addSearchFilter(where, params, q, columns) {
 
 function sourceSiteSql(alias = 'd') {
   const metadata = `${alias}.metadata`;
-  return `NULLIF(substring(COALESCE(${metadata}, '') from '"source_site"\\s*:\\s*"([^"]+)"'), '')`;
+  return `NULLIF(COALESCE(
+    substring(COALESCE(${metadata}, '') from '"source_site"\\s*:\\s*"([^"]+)"'),
+    substring(COALESCE(${metadata}, '') from '"original_site"\\s*:\\s*"([^"]+)"'),
+    substring(COALESCE(${metadata}, '') from '"source_context"\\s*:\\s*\\{[^}]*"platform"\\s*:\\s*"([^"]+)"'),
+    substring(COALESCE(${metadata}, '') from '"origin_thread"\\s*:\\s*\\{[^}]*"platform"\\s*:\\s*"([^"]+)"')
+  ), '')`;
 }
 
 function platformGroupSql(alias = 'd') {
@@ -298,6 +319,7 @@ function normalizeSourceSiteLabel(value) {
   if (!raw) return '';
   if (raw === 't' || raw === 'telegram' || raw === 't.me' || raw === 'telegram.me' || raw.endsWith('.t.me') || raw.endsWith('.telegram.me')) return 'telegram';
   if (raw === 'vipergirls.to' || raw === 'viper.to' || raw.endsWith('.vipergirls.to') || raw.endsWith('.viper.to')) return 'vipergirls';
+  if (raw === 'footfetishforum' || raw === 'footfetishforum.com' || raw.endsWith('.footfetishforum.com')) return 'footfetishforum';
   if (raw === 'youtube.com' || raw === 'youtu.be' || raw.endsWith('.youtube.com')) return 'youtube';
   if (raw === 'twitter.com' || raw === 'x.com' || raw.endsWith('.twitter.com') || raw.endsWith('.x.com')) return 'twitter';
   if (raw === 'reddit.com' || raw === 'redd.it' || raw.endsWith('.reddit.com')) return 'reddit';
@@ -315,7 +337,21 @@ function sourceSiteFromMetadata(metadata, sourceUrl) {
           ? new URL(String(parsed.source_context.url)).hostname.replace(/^www\./i, '').toLowerCase()
           : '';
       } catch (_) {}
-      const fromMetadata = normalizeSourceSiteLabel(parsed.source_site || parsed.original_site || contextHost || parsed.source_context?.platform || '');
+      let originHost = '';
+      try {
+        originHost = parsed.origin_thread?.url
+          ? new URL(String(parsed.origin_thread.url)).hostname.replace(/^www\./i, '').toLowerCase()
+          : '';
+      } catch (_) {}
+      const fromMetadata = normalizeSourceSiteLabel(
+        parsed.source_site
+        || parsed.original_site
+        || contextHost
+        || parsed.source_context?.platform
+        || parsed.origin_thread?.platform
+        || originHost
+        || ''
+      );
       if (fromMetadata) return fromMetadata;
     }
   } catch (_) {}
@@ -341,17 +377,20 @@ function sourceGraphSummary(parsedMetadata) {
   const thread = nodes.find((n) => n && n.type === 'thread') || null;
   const post = nodes.find((n) => n && n.type === 'post') || null;
   const host = nodes.find((n) => n && n.type === 'host') || null;
+  const originThread = parsedMetadata?.origin_thread && typeof parsedMetadata.origin_thread === 'object'
+    ? parsedMetadata.origin_thread
+    : null;
   const postNum = parsedMetadata?.source_post_num || parsedMetadata?.post_num || post?.num || '';
   const postId = parsedMetadata?.source_post_id || parsedMetadata?.post_id || post?.id || '';
   const postTitle = parsedMetadata?.source_post_title || parsedMetadata?.post_title || (post && post.title) || '';
   return {
-    source_thread_title: parsedMetadata?.source_thread_title || parsedMetadata?.thread_title || (thread && thread.title) ? String(parsedMetadata?.source_thread_title || parsedMetadata?.thread_title || thread.title) : '',
-    source_thread_url: parsedMetadata?.source_thread_url || (thread && thread.url) ? String(parsedMetadata?.source_thread_url || thread.url) : '',
+    source_thread_title: parsedMetadata?.source_thread_title || parsedMetadata?.thread_title || (thread && thread.title) || originThread?.title ? String(parsedMetadata?.source_thread_title || parsedMetadata?.thread_title || (thread && thread.title) || originThread.title) : '',
+    source_thread_url: parsedMetadata?.source_thread_url || (thread && thread.url) || originThread?.url ? String(parsedMetadata?.source_thread_url || (thread && thread.url) || originThread.url) : '',
     source_post_title: postTitle ? String(postTitle) : '',
     source_post_num: postNum ? String(postNum) : '',
     source_post_id: postId ? String(postId) : '',
     source_post_url: parsedMetadata?.source_post_url || (post && post.url) ? String(parsedMetadata?.source_post_url || post.url) : '',
-    source_host: host && host.platform ? normalizeSourceSiteLabel(host.platform) : '',
+    source_host: host && host.platform ? normalizeSourceSiteLabel(host.platform) : originThread?.platform ? normalizeSourceSiteLabel(originThread.platform) : '',
   };
 }
 
@@ -457,6 +496,23 @@ function cleanTagName(value) {
     .replace(/[^a-z0-9_-]/g, '')
     .replace(/^-+|-+$/g, '')
     .slice(0, 64);
+}
+
+function cleanRecipeName(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+}
+
+function cleanRecipeDescription(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ').slice(0, 300);
+}
+
+function parseMetadataObject(value) {
+  try {
+    if (!value) return null;
+    return typeof value === 'string' ? JSON.parse(value) : value;
+  } catch (_) {
+    return null;
+  }
 }
 
 function isJunkTagName(value) {
@@ -1669,20 +1725,26 @@ app.get('/api/platforms', async (req, res) => {
 
     const { rows } = await pool.query(`
       WITH media_platforms AS (
-        SELECT ${platformGroupSql('d')} AS platform
+        SELECT ${platformGroupSql('d')} AS platform,
+               lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) AS ext
           FROM downloads d
          WHERE ${directWhere.join(' AND ')}
         UNION ALL
-        SELECT ${platformGroupSql('d')} AS platform
+        SELECT ${platformGroupSql('d')} AS platform,
+               lower(regexp_replace(df.relpath, '^.*\\.', '')) AS ext
           FROM download_files df
           JOIN downloads d ON d.id = df.download_id
          WHERE ${fileWhere.join(' AND ')}
         UNION ALL
-        SELECT COALESCE(NULLIF(s.platform, ''), 'unknown') AS platform
+        SELECT COALESCE(NULLIF(s.platform, ''), 'unknown') AS platform,
+               lower(regexp_replace(s.filepath, '^.*\\.', '')) AS ext
           FROM screenshots s
          WHERE ${screenshotWhere.join(' AND ')}
       )
-      SELECT platform, COUNT(*)::bigint AS count
+      SELECT platform,
+             COUNT(*)::bigint AS count,
+             COUNT(*) FILTER (WHERE ext IN (${IMAGE_EXT_SQL}))::bigint AS image_count,
+             COUNT(*) FILTER (WHERE ext IN (${VIDEO_EXT_SQL}))::bigint AS video_count
         FROM media_platforms
        GROUP BY platform
        ORDER BY COUNT(*) DESC`, params);
@@ -1747,26 +1809,33 @@ app.get('/api/channels', async (req, res) => {
     const fileChannelExpr = channelGroupSql('d');
 
     const { rows } = await pool.query(`
-      SELECT channel, platform, COUNT(*) AS count,
+      SELECT channel,
+             platform,
+             COUNT(*) AS count,
+             COUNT(*) FILTER (WHERE ext IN (${IMAGE_EXT_SQL}))::bigint AS image_count,
+             COUNT(*) FILTER (WHERE ext IN (${VIDEO_EXT_SQL}))::bigint AS video_count,
              MAX(sort_ts) AS latest_ts,
              MAX(rating) AS max_rating
       FROM (
         SELECT ${directChannelExpr} AS channel, ${platformGroupSql('d')} AS platform,
                COALESCE(d.finished_at, d.updated_at, d.created_at) AS sort_ts,
-               d.rating
+               d.rating,
+               lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) AS ext
           FROM downloads d
          WHERE ${directWhere.join(' AND ')}
         UNION ALL
         SELECT ${fileChannelExpr} AS channel, ${platformGroupSql('d')} AS platform,
                COALESCE(to_timestamp(NULLIF(df.mtime_ms,0) / 1000.0)::timestamp, df.updated_at, d.finished_at, d.updated_at, d.created_at) AS sort_ts,
-               df.rating
+               df.rating,
+               lower(regexp_replace(df.relpath, '^.*\\.', '')) AS ext
           FROM download_files df
           JOIN downloads d ON d.id = df.download_id
          WHERE ${fileWhere.join(' AND ')}
         UNION ALL
         SELECT s.channel, s.platform,
                COALESCE(s.created_at, s.updated_at) AS sort_ts,
-               s.rating
+               s.rating,
+               lower(regexp_replace(s.filepath, '^.*\\.', '')) AS ext
           FROM screenshots s
          WHERE ${screenshotWhere.join(' AND ')}
       ) media_items
@@ -1944,6 +2013,283 @@ app.delete('/api/tags/:id', async (req, res) => {
        WHERE t.id=$1
          AND NOT EXISTS (SELECT 1 FROM download_tags dt WHERE dt.tag=t.name)`,
       [id]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+async function recipeRows(clientOrPool = pool, id = null) {
+  const params = [];
+  const where = [];
+  if (id != null) {
+    params.push(id);
+    where.push(`r.id=$${params.length}`);
+  }
+  const { rows } = await clientOrPool.query(`
+    SELECT r.id,
+           r.name,
+           r.description,
+           r.created_at,
+           r.updated_at,
+           r.last_used_at,
+           COALESCE(
+             json_agg(
+               json_build_object('id', t.id, 'name', t.name)
+               ORDER BY rt.position, t.name
+             ) FILTER (WHERE t.id IS NOT NULL),
+             '[]'::json
+           ) AS tags
+      FROM tag_recipes r
+      LEFT JOIN tag_recipe_tags rt ON rt.recipe_id = r.id
+      LEFT JOIN tags t ON t.id = rt.tag_id
+     ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+     GROUP BY r.id
+     ORDER BY r.last_used_at DESC NULLS LAST, r.updated_at DESC, r.name ASC`, params);
+  return rows.map((row) => ({
+    ...row,
+    tags: Array.isArray(row.tags) ? row.tags.filter((tag) => tag && !isJunkTagName(tag.name)) : [],
+  }));
+}
+
+async function tagIdsFromRecipeBody(client, body) {
+  const ids = [];
+  const seen = new Set();
+  const rawIds = Array.isArray(body && body.tag_ids) ? body.tag_ids : [];
+  for (const raw of rawIds) {
+    const id = parseInt(raw, 10);
+    if (Number.isFinite(id) && id > 0 && !seen.has(id)) {
+      seen.add(id);
+      ids.push(id);
+    }
+  }
+  const rawNames = Array.isArray(body && body.tag_names) ? body.tag_names : [];
+  for (const raw of rawNames) {
+    const name = cleanTagName(raw);
+    if (!name || isJunkTagName(name)) continue;
+    const { rows } = await client.query(
+      `INSERT INTO tags (name, is_user)
+       VALUES ($1, true)
+       ON CONFLICT (name) DO UPDATE SET is_user=true
+       RETURNING id`,
+      [name]);
+    const id = Number(rows[0]?.id);
+    if (Number.isFinite(id) && !seen.has(id)) {
+      seen.add(id);
+      ids.push(id);
+    }
+  }
+  return ids;
+}
+
+async function replaceRecipeTags(client, recipeId, tagIds) {
+  await client.query('DELETE FROM tag_recipe_tags WHERE recipe_id=$1', [recipeId]);
+  for (let i = 0; i < tagIds.length; i += 1) {
+    await client.query(
+      `INSERT INTO tag_recipe_tags (recipe_id, tag_id, position)
+       SELECT $1, t.id, $3
+         FROM tags t
+        WHERE t.id=$2 AND t.is_user=true
+       ON CONFLICT (recipe_id, tag_id) DO UPDATE SET position=EXCLUDED.position`,
+      [recipeId, tagIds[i], i]);
+  }
+}
+
+app.get('/api/tag-recipes', async (_req, res) => {
+  try {
+    res.json({ recipes: await recipeRows(pool) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/tag-recipes', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const name = cleanRecipeName(req.body && req.body.name);
+    if (!name || name.length < 2) return res.status(400).json({ error: 'naam vereist' });
+    const description = cleanRecipeDescription(req.body && req.body.description);
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `INSERT INTO tag_recipes (name, description)
+       VALUES ($1, $2)
+       ON CONFLICT (name) DO UPDATE SET description=EXCLUDED.description, updated_at=now()
+       RETURNING id`,
+      [name, description]);
+    const recipeId = Number(rows[0].id);
+    const tagIds = await tagIdsFromRecipeBody(client, req.body || {});
+    await replaceRecipeTags(client, recipeId, tagIds);
+    await client.query('COMMIT');
+    const [recipe] = await recipeRows(pool, recipeId);
+    res.json({ recipe });
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.patch('/api/tag-recipes/:id', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'id vereist' });
+    const name = cleanRecipeName(req.body && req.body.name);
+    const description = cleanRecipeDescription(req.body && req.body.description);
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `UPDATE tag_recipes
+          SET name = COALESCE(NULLIF($2, ''), name),
+              description = $3,
+              updated_at = now()
+        WHERE id=$1
+        RETURNING id`,
+      [id, name, description]);
+    if (!rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'recept niet gevonden' });
+    }
+    const tagIds = await tagIdsFromRecipeBody(client, req.body || {});
+    await replaceRecipeTags(client, id, tagIds);
+    await client.query('COMMIT');
+    const [recipe] = await recipeRows(pool, id);
+    res.json({ recipe });
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.delete('/api/tag-recipes/:id', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    await pool.query('DELETE FROM tag_recipes WHERE id=$1', [id]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+function graphSignalsForRow(row) {
+  const metadata = parseMetadataObject(row.metadata);
+  const graph = sourceGraphSummary(metadata);
+  const sourceSite = sourceSiteFromMetadata(row.metadata, row.source_url);
+  const sourceModelTitle = sourceModelTitleFromText(graph.source_post_title || row.title || row.filename || '');
+  const sourceModelKey = sourceModelKeyFromTitle(sourceModelTitle);
+  const signals = {
+    source_site: sourceSite || '',
+    source_host: graph.source_host || '',
+    source_thread_url: graph.source_thread_url || '',
+    source_thread_title: graph.source_thread_title || '',
+    source_post_url: graph.source_post_url || '',
+    source_model_key: sourceModelKey || '',
+    platform: normalizeSourceSiteLabel(row.platform || ''),
+    channel: row.channel && row.channel !== 'unknown' ? String(row.channel) : '',
+  };
+  return signals;
+}
+
+function scoreGraphTagCandidate(candidate, signals) {
+  const haystack = [
+    candidate.platform,
+    candidate.channel,
+    candidate.source_url,
+    candidate.url,
+    candidate.metadata,
+  ].map((v) => String(v || '').toLowerCase()).join(' ');
+  let score = 0;
+  if (signals.source_thread_url && haystack.includes(signals.source_thread_url.toLowerCase())) score += 50;
+  if (signals.source_post_url && haystack.includes(signals.source_post_url.toLowerCase())) score += 35;
+  if (signals.channel && String(candidate.channel || '') === signals.channel) score += 20;
+  if (signals.source_site && haystack.includes(signals.source_site.toLowerCase())) score += 14;
+  if (signals.source_host && haystack.includes(signals.source_host.toLowerCase())) score += 10;
+  if (signals.platform && normalizeSourceSiteLabel(candidate.platform || '') === signals.platform) score += 6;
+  if (signals.source_model_key) {
+    const candidateModelKey = sourceModelKeyFromTitle(candidate.title || candidate.filename || '');
+    if (candidateModelKey && candidateModelKey === signals.source_model_key) score += 8;
+  }
+  return score;
+}
+
+app.get('/api/items/:id/tag-suggestions', async (req, res) => {
+  try {
+    if (String(req.params.id || '').startsWith('s-')) return res.json({ suggestions: [], signals: {} });
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) return res.json({ suggestions: [], signals: {} });
+    const current = await pool.query(
+      'SELECT id, platform, channel, url, source_url, title, filename, metadata FROM downloads WHERE id=$1',
+      [id]);
+    if (!current.rows[0]) return res.json({ suggestions: [], signals: {} });
+    const signals = graphSignalsForRow(current.rows[0]);
+    const params = [id];
+    const clauses = [];
+    if (signals.source_thread_url) {
+      params.push(signals.source_thread_url, '%' + signals.source_thread_url + '%');
+      clauses.push(`(d.source_url=$${params.length - 1} OR d.metadata ILIKE $${params.length})`);
+    }
+    if (signals.source_post_url) {
+      params.push(signals.source_post_url, '%' + signals.source_post_url + '%');
+      clauses.push(`(d.source_url=$${params.length - 1} OR d.metadata ILIKE $${params.length})`);
+    }
+    if (signals.channel) {
+      params.push(signals.channel);
+      clauses.push(`d.channel=$${params.length}`);
+    }
+    if (!clauses.length) return res.json({ suggestions: [], signals });
+    const { rows } = await pool.query(`
+      SELECT d.id, d.platform, d.channel, d.url, d.source_url, d.title, d.filename, d.metadata,
+             t.id AS tag_id, t.name AS tag_name
+        FROM downloads d
+        JOIN item_user_tags iut ON iut.download_id = d.id
+        JOIN tags t ON t.id = iut.tag_id
+       WHERE d.id <> $1
+         AND (${clauses.join(' OR ')})
+       ORDER BY d.id DESC
+       LIMIT 3000`, params);
+    const byTag = new Map();
+    for (const row of rows) {
+      if (isJunkTagName(row.tag_name)) continue;
+      const score = scoreGraphTagCandidate(row, signals);
+      if (score <= 0) continue;
+      const key = Number(row.tag_id);
+      const entry = byTag.get(key) || { id: key, name: row.tag_name, score: 0, uses: 0 };
+      entry.score += score;
+      entry.uses += 1;
+      byTag.set(key, entry);
+    }
+    const suggestions = Array.from(byTag.values())
+      .sort((a, b) => b.score - a.score || b.uses - a.uses || String(a.name).localeCompare(String(b.name)))
+      .slice(0, 24);
+    res.json({ suggestions, signals });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/items/:id/tag-recipes/:recipeId', async (req, res) => {
+  try {
+    if (String(req.params.id || '').startsWith('s-')) return res.status(400).json({ error: 'screenshots ondersteunen nog geen tags' });
+    const itemId = parseInt(req.params.id, 10);
+    const recipeId = parseInt(req.params.recipeId, 10);
+    if (!Number.isFinite(itemId) || !Number.isFinite(recipeId)) return res.status(400).json({ error: 'id vereist' });
+    const { rows } = await pool.query(`
+      WITH recipe_tags AS (
+        SELECT tag_id FROM tag_recipe_tags WHERE recipe_id=$2
+      ), inserted AS (
+        INSERT INTO item_user_tags (download_id, tag_id)
+        SELECT $1, tag_id FROM recipe_tags
+        ON CONFLICT DO NOTHING
+        RETURNING tag_id
+      ), bumped AS (
+        UPDATE tags t
+           SET is_user=true,
+               user_use_count = COALESCE(user_use_count, 0) + 1,
+               last_used_at = now()
+          FROM recipe_tags rt
+         WHERE t.id=rt.tag_id
+         RETURNING t.id
+      )
+      UPDATE tag_recipes
+         SET last_used_at=now(), updated_at=now()
+       WHERE id=$2
+       RETURNING id`,
+      [itemId, recipeId]);
+    if (!rows[0]) return res.status(404).json({ error: 'recept niet gevonden' });
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

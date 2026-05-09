@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WEBDL Gallery</title>
-<link rel="stylesheet" href="/styles.css?v=20260509-67">
+<link rel="stylesheet" href="/styles.css?v=20260509-70">
 </head>
 <body>
   <header class="topbar">
@@ -213,6 +213,23 @@
           <div class="tag-label">Favoriet / vaak gebruikt</div>
           <div id="vTagQuick" class="tag-quick"></div>
         </div>
+        <div class="tag-recipes-wrap">
+          <div class="tag-label">Recepten</div>
+          <div id="vTagRecipes" class="tag-recipes"></div>
+          <div id="vTagSuggestions" class="tag-suggestions"></div>
+          <div class="tag-label tag-recipe-edit-label">Recept maken / wijzigen</div>
+          <div class="tag-recipe-editor">
+            <input id="vRecipeName" type="text" placeholder="Naam recept...">
+            <input id="vRecipeDescription" type="text" placeholder="Omschrijving...">
+          </div>
+          <div class="tag-label tag-recipe-draft-label">Tags in recept</div>
+          <div id="vRecipeDraft" class="tag-recipe-draft"></div>
+          <div class="tag-recipe-actions">
+            <button id="vBtnRecipeFromItem" type="button">Vul met itemtags</button>
+            <button id="vBtnSaveRecipe" type="button">Opslaan</button>
+            <button id="vBtnClearRecipe" type="button">Reset</button>
+          </div>
+        </div>
         <div class="tag-search">
           <input id="vTagSearch" type="search" placeholder="Zoek bestaande tags...">
         </div>
@@ -232,8 +249,8 @@
 
   </div><!-- /viewer -->
 
-  <script src="/app.js?v=20260509-63"></script>
-  <script src="/viewer.js?v=20260509-26"></script>
+  <script src="/app.js?v=20260509-64"></script>
+  <script src="/viewer.js?v=20260509-29"></script>
   <script>
   // ─── Thema switcher ─────────────────────────────────────────────────────
   (function() {

@@ -419,11 +419,19 @@
     return match ? Number(match[1]) : null;
   }
 
+  function selectedOptionCount(selectEl) {
+    const opt = selectEl && selectEl.options ? selectEl.options[selectEl.selectedIndex] : null;
+    if (!opt) return null;
+    const value = Number(opt.dataset.count);
+    if (Number.isFinite(value)) return value;
+    return countFromOptionText(opt.textContent);
+  }
+
   function selectedTotalHint() {
     const channel = $('channel');
-    if (channel && channel.value) return countFromOptionText(channel.options[channel.selectedIndex]?.textContent);
+    if (channel && channel.value) return selectedOptionCount(channel);
     const platform = $('platform');
-    if (platform && platform.value) return countFromOptionText(platform.options[platform.selectedIndex]?.textContent);
+    if (platform && platform.value) return selectedOptionCount(platform);
     return null;
   }
 
@@ -443,7 +451,7 @@
     const pending = state.pendingNewItems ? state.pendingNewItems.size : 0;
     const filterText = activeFilterText();
     const total = Number.isFinite(Number(state.totalHint)) ? Number(state.totalHint) : null;
-    const loadedText = total && total >= state.items.length
+    const loadedText = total !== null && total >= state.items.length
       ? `${state.items.length} / ${total} geladen`
       : `${state.items.length} items${state.done ? '' : '+'}`;
     const parts = [loadedText];
@@ -588,9 +596,20 @@
   function platformCountParams() {
     const params = new URLSearchParams();
     if (state.filters.q) params.set('q', state.filters.q);
-    if (state.filters.media_type) params.set('media_type', state.filters.media_type);
     if (state.filters.min_rating) params.set('min_rating', state.filters.min_rating);
     return params;
+  }
+
+  function mediaSplitLabel(row) {
+    const images = Number(row.image_count || 0);
+    const videos = Number(row.video_count || 0);
+    return `${images} afb · ${videos} vid`;
+  }
+
+  function countForCurrentMediaType(row) {
+    if (state.filters.media_type === 'image') return Number(row.image_count || 0);
+    if (state.filters.media_type === 'video') return Number(row.video_count || 0);
+    return Number(row.count || 0);
   }
 
   async function loadFilterDropdowns() {
@@ -606,7 +625,8 @@
       for (const p of platforms) {
         const o = document.createElement('option');
         o.value = p.platform;
-        o.textContent = `${p.platform} (${p.count})`;
+        o.dataset.count = String(countForCurrentMediaType(p));
+        o.textContent = `${p.platform} (${p.count} · ${mediaSplitLabel(p)})`;
         pSel.appendChild(o);
       }
       if (prev && [...pSel.options].some(o => o.value === prev)) {
@@ -637,7 +657,6 @@
       const params = new URLSearchParams();
       if (plat) params.set('platform', plat);
       if (state.filters.q) params.set('q', state.filters.q);
-      if (state.filters.media_type) params.set('media_type', state.filters.media_type);
       if (state.filters.min_rating) params.set('min_rating', state.filters.min_rating);
       params.set('channel_sort', state.filters.channel_sort || 'count');
       const url = '/api/channels' + (params.toString() ? '?' + params.toString() : '');
@@ -652,7 +671,8 @@
         const o = document.createElement('option');
         o.value = c.channel;
         const label = String(c.channel || '').startsWith('site:') ? String(c.channel).slice(5) : c.channel;
-        o.textContent = `${label} (${c.count})`;
+        o.dataset.count = String(countForCurrentMediaType(c));
+        o.textContent = `${label} (${c.count} · ${mediaSplitLabel(c)})`;
         cSel.appendChild(o);
       }
       // Herstel vorige selectie als die nog bestaat
