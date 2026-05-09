@@ -1467,7 +1467,8 @@ app.get('/api/items', async (req, res) => {
       const tsParam = params.length;
       params.push(cursorOrder);
       const orderParam = params.length;
-      where.push(`(${sortExpr} < $${tsParam}::timestamp OR (${sortExpr} = $${tsParam}::timestamp AND ${orderExpr} < $${orderParam}::bigint))`);
+      const cursorTsExpr = `($${tsParam}::timestamptz AT TIME ZONE current_setting('TimeZone'))`;
+      where.push(`(${sortExpr} < ${cursorTsExpr} OR (${sortExpr} = ${cursorTsExpr} AND ${orderExpr} < $${orderParam}::bigint))`);
     }
     const directWhere = buildItemFilters({
       req, params,

@@ -851,7 +851,10 @@
       }
       const data = await apiFetch('/api/items?' + params.toString(), { signal: ctrl.signal }).then(r => r.json());
       if (!data.items || data.items.length === 0) return;
-      const fresh = data.items.filter(it => !state.knownIds.has(String(it.id)) && itemMatchesCurrentFilters(it));
+      const fresh = data.items.filter((it) => {
+        if (state.knownIds.has(String(it.id))) return false;
+        return state.liveAllMedia || itemMatchesCurrentFilters(it);
+      });
       if (fresh.length > 0) {
         for (const it of fresh) state.pendingNewItems.set(String(it.id), it);
         pumpPendingNewItems();
