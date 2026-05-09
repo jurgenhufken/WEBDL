@@ -17,7 +17,7 @@
     limit: 100,
     loading: false,
     done: false,
-    filters: { platform: '', channel: '', q: '', sort: 'recent', min_rating: '', media_type: '', channel_sort: 'count' },
+    filters: { platform: '', channel: '', q: '', sort: 'recent', min_rating: '', media_type: '', channel_sort: 'count', tag_id: '' },
     // Auto-refresh
     autoRefresh: true,
     liveAllMedia: true,
@@ -432,6 +432,8 @@
     if (channel && channel.value) return selectedOptionCount(channel);
     const platform = $('platform');
     if (platform && platform.value) return selectedOptionCount(platform);
+    const tag = $('tagFilter');
+    if (tag && tag.value) return selectedOptionCount(tag);
     return null;
   }
 
@@ -442,6 +444,12 @@
     if (f.channel) parts.push(f.channel);
     if (f.media_type) parts.push(f.media_type === 'video' ? 'video' : 'afbeelding');
     if (f.min_rating) parts.push(`${f.min_rating}+ sterren`);
+    if (f.tag_id) {
+      const tagSel = $('tagFilter');
+      const opt = tagSel && tagSel.options ? tagSel.options[tagSel.selectedIndex] : null;
+      const label = opt ? String(opt.textContent || '').replace(/\s*\(\d+\)\s*$/, '') : `tag ${f.tag_id}`;
+      parts.push(label);
+    }
     if (f.sort === 'channel') parts.push('sort: kanaal/model');
     if (f.q) parts.push(`"${f.q}"`);
     return parts.join(' / ');
@@ -597,6 +605,7 @@
     const params = new URLSearchParams();
     if (state.filters.q) params.set('q', state.filters.q);
     if (state.filters.min_rating) params.set('min_rating', state.filters.min_rating);
+    if (state.filters.tag_id) params.set('tag_id', state.filters.tag_id);
     return params;
   }
 
@@ -643,6 +652,36 @@
     } catch (e) { console.warn('filters load failed', e); }
   }
 
+  async function loadTagFilterDropdown() {
+    const sel = $('tagFilter');
+    if (!sel) return;
+    try {
+      const prev = sel.value;
+      const data = await apiFetch('/api/tags').then(r => r.json());
+      const tags = Array.isArray(data.tags) ? data.tags : [];
+      const sorted = tags
+        .slice()
+        .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' }));
+      const total = sorted.reduce((sum, t) => sum + Number(t.applied_count || 0), 0);
+      sel.innerHTML = `<option value="">Alle tags (${total})</option>`;
+      for (const tag of sorted) {
+        const count = Number(tag.applied_count || tag.uses || 0);
+        const o = document.createElement('option');
+        o.value = String(tag.id);
+        o.dataset.count = String(count);
+        o.textContent = `#${tag.name} (${count})`;
+        sel.appendChild(o);
+      }
+      if (prev && [...sel.options].some(o => o.value === prev)) {
+        sel.value = prev;
+        state.filters.tag_id = prev;
+      } else {
+        sel.value = '';
+        state.filters.tag_id = '';
+      }
+    } catch (e) { console.warn('tags filter load failed', e); }
+  }
+
   function resetChannels() {
     const cSel = $('channel');
     cSel.innerHTML = '<option value="">Alle kanalen</option>';
@@ -658,6 +697,7 @@
       if (plat) params.set('platform', plat);
       if (state.filters.q) params.set('q', state.filters.q);
       if (state.filters.min_rating) params.set('min_rating', state.filters.min_rating);
+      if (state.filters.tag_id) params.set('tag_id', state.filters.tag_id);
       params.set('channel_sort', state.filters.channel_sort || 'count');
       const url = '/api/channels' + (params.toString() ? '?' + params.toString() : '');
       const channelsResp = await apiFetch(url).then(r => r.json());
@@ -687,6 +727,7 @@
         state.filters.q || '',
         state.filters.media_type || '',
         state.filters.min_rating || '',
+        state.filters.tag_id || '',
         state.filters.channel_sort || 'count',
       ].join('|');
     } catch (e) { console.warn('channels load failed', e); }
@@ -695,8 +736,15 @@
   function setFilter(key, value) {
     state.filters[key] = value;
     // Sync dropdown als aanwezig
-    const el = $(key === 'min_rating' ? 'minRating' : key);
+    const el = $(key === 'min_rating' ? 'minRating' : key === 'tag_id' ? 'tagFilter' : key);
     if (el) el.value = value;
+  }
+
+  async function applyTagFilter(tagId = '') {
+    setFilter('tag_id', String(tagId || ''));
+    await loadFilterDropdowns();
+    await reloadChannels();
+    await reloadGallery();
   }
 
   function readFiltersFromControls() {
@@ -706,6 +754,7 @@
     state.filters.sort       = $('sort').value;
     state.filters.min_rating = $('minRating').value;
     state.filters.media_type = $('mediaType').value;
+    state.filters.tag_id     = $('tagFilter') ? $('tagFilter').value : '';
     state.filters.q          = $('q').value.trim();
   }
 
@@ -738,12 +787,12 @@
   // ─── Event listeners (gallery filters) ───────────────────────────────────
   $('refresh').addEventListener('click', reloadGallery);
 
-  for (const id of ['platform', 'channel', 'channelSort', 'sort', 'minRating', 'mediaType']) {
+  for (const id of ['platform', 'channel', 'channelSort', 'sort', 'minRating', 'mediaType', 'tagFilter']) {
     $(id).addEventListener('change', async () => {
       readFiltersFromControls();
-      if (id === 'minRating' || id === 'mediaType') await loadFilterDropdowns();
+      if (id === 'minRating' || id === 'mediaType' || id === 'tagFilter') await loadFilterDropdowns();
       // Bij platform-wissel: kanalen herladen (filtert op geselecteerd platform)
-      if (id === 'platform' || id === 'channelSort' || id === 'minRating' || id === 'mediaType') await reloadChannels();
+      if (id === 'platform' || id === 'channelSort' || id === 'minRating' || id === 'mediaType' || id === 'tagFilter') await reloadChannels();
       reloadGallery();
     });
   }
@@ -767,6 +816,7 @@
       state.filters.q || '',
       state.filters.media_type || '',
       state.filters.min_rating || '',
+      state.filters.tag_id || '',
       state.filters.channel_sort || 'count',
     ].join('|');
     if (state.channelsLoadedFor !== key) {
@@ -892,15 +942,18 @@
     updateCardRating,
     shouldShowSourceSite,
     setFilter,
+    applyTagFilter,
     setViewerActive,
     restoreViewerAnchor,
     loadMore,
     reload: reloadGallery,
+    loadTagFilterDropdown,
   };
 
   // ─── Init ─────────────────────────────────────────────────────────────────
   async function init() {
     readFiltersFromControls();
+    loadTagFilterDropdown().catch((e) => console.warn('tags filter load failed', e));
     loadFilterDropdowns().catch((e) => console.warn('filters load failed', e));
     await loadMore();
     io.observe(sentinel);

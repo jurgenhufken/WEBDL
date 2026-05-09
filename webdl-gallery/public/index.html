@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WEBDL Gallery</title>
-<link rel="stylesheet" href="/styles.css?v=20260509-76">
+<link rel="stylesheet" href="/styles.css?v=20260509-78">
 </head>
 <body>
   <header class="topbar">
@@ -37,6 +37,9 @@
         <option value="">Alles</option>
         <option value="video">🎬 Video</option>
         <option value="image">🖼 Afbeelding</option>
+      </select>
+      <select id="tagFilter" title="Tag filter">
+        <option value="">Alle tags</option>
       </select>
       <button id="refresh">Ververs</button>
       <button id="themeBtn" class="theme-btn" title="Thema wisselen">💎</button>
@@ -152,39 +155,45 @@
       <!-- Stage -->
       <div class="viewer-stage" id="vStage">
         <div id="vContent" class="vcontent"></div>
-        <div id="vFavoriteOverlay" class="vfavorite-overlay hidden" aria-label="Snelle tags"></div>
         <!-- Progress bar: absoluut gepositioneerd, JS alignt op video-onderkant -->
         <div class="vprogressbar" id="vProgressBar">
           <div class="vprogressbar-fill" id="vProgressFill"></div>
           <div class="vprogressbar-handle" id="vProgressHandle"></div>
         </div>
-        <div class="vbottom-controls hidden" id="vBottomControls" aria-label="Video bediening">
-          <input id="vSeek" class="vbottom-seek" type="range" min="0" max="1000" step="1" value="0" title="Positie in video">
-          <div class="vbottom-row">
-            <div class="vbottom-left">
-              <button id="vBtnPlayPause" class="vplay-btn" title="Afspelen/pauzeren (spatie)">▶</button>
-              <button class="vicon-btn" data-seek="-10" title="10 seconden terug">↶ 10</button>
-              <button class="vicon-btn" data-seek="10" title="10 seconden vooruit">10 ↷</button>
-              <button id="vBtnMuteBottom" class="vicon-btn" title="Geluid dempen (M)">🔊</button>
-              <input id="vBottomVol" class="vvolume-range" type="range" min="0" max="1" step="0.01" value="0.8" title="Volume">
-            </div>
-            <div class="vtime-label" id="vTimeLabel">0:00 / 0:00</div>
-            <div class="vbottom-right">
-              <button id="vSpeedDown" class="vicon-btn" title="Langzamer ([)">−</button>
-              <select id="vSpeedSelect" class="vspeed-select" title="Afspeelsnelheid">
-                <option value="0.1">0.1×</option>
-                <option value="0.25">0.25×</option>
-                <option value="0.5">0.5×</option>
-                <option value="1" selected>1×</option>
-                <option value="1.5">1.5×</option>
-                <option value="2">2×</option>
-                <option value="3">3×</option>
-                <option value="4">4×</option>
-              </select>
-              <button id="vSpeedUp" class="vicon-btn" title="Sneller (])">+</button>
-              <button id="vBtnReverse" class="vicon-btn" title="Achteruit afspelen">↤</button>
-              <button id="vBtnRotateBottom" class="vicon-btn" title="Media 90° draaien">⟳</button>
-              <button id="vBtnFullscreen" class="vicon-btn" title="Volledig scherm">⛶</button>
+        <div class="vbottom-overlay" id="vBottomOverlay">
+          <div class="vbottom-meta-row">
+            <div class="hud-pill hud-left" id="vHudLeft"></div>
+            <div class="hud-pill hud-right" id="vHudRight"></div>
+          </div>
+          <div id="vFavoriteOverlay" class="vfavorite-overlay hidden" aria-label="Snelle tags"></div>
+          <div class="vbottom-controls hidden" id="vBottomControls" aria-label="Video bediening">
+            <input id="vSeek" class="vbottom-seek" type="range" min="0" max="1000" step="1" value="0" title="Positie in video">
+            <div class="vbottom-row">
+              <div class="vbottom-left">
+                <button id="vBtnPlayPause" class="vplay-btn" title="Afspelen/pauzeren (spatie)">▶</button>
+                <button class="vicon-btn" data-seek="-10" title="10 seconden terug">↶ 10</button>
+                <button class="vicon-btn" data-seek="10" title="10 seconden vooruit">10 ↷</button>
+                <button id="vBtnMuteBottom" class="vicon-btn" title="Geluid dempen (M)">🔊</button>
+                <input id="vBottomVol" class="vvolume-range" type="range" min="0" max="1" step="0.01" value="0.8" title="Volume">
+              </div>
+              <div class="vtime-label" id="vTimeLabel">0:00 / 0:00</div>
+              <div class="vbottom-right">
+                <button id="vSpeedDown" class="vicon-btn" title="Langzamer ([)">−</button>
+                <select id="vSpeedSelect" class="vspeed-select" title="Afspeelsnelheid">
+                  <option value="0.1">0.1×</option>
+                  <option value="0.25">0.25×</option>
+                  <option value="0.5">0.5×</option>
+                  <option value="1" selected>1×</option>
+                  <option value="1.5">1.5×</option>
+                  <option value="2">2×</option>
+                  <option value="3">3×</option>
+                  <option value="4">4×</option>
+                </select>
+                <button id="vSpeedUp" class="vicon-btn" title="Sneller (])">+</button>
+                <button id="vBtnReverse" class="vicon-btn" title="Achteruit afspelen">↤</button>
+                <button id="vBtnRotateBottom" class="vicon-btn" title="Media 90° draaien">⟳</button>
+                <button id="vBtnFullscreen" class="vicon-btn" title="Volledig scherm">⛶</button>
+              </div>
             </div>
           </div>
         </div>
@@ -193,8 +202,6 @@
         <button class="viewer-nav next" id="vNext" title="Volgende binnen huidige lijst (→)">›</button>
         <button class="viewer-nav up" id="vUp" title="Vorig model/set in thread (↑)">↑</button>
         <button class="viewer-nav down" id="vDown" title="Volgend model/set in thread (↓)">↓</button>
-        <div class="hud-pill hud-left" id="vHudLeft"></div>
-        <div class="hud-pill hud-right" id="vHudRight"></div>
       </div>
 
     </div><!-- /viewer-main -->
@@ -261,8 +268,8 @@
 
   </div><!-- /viewer -->
 
-  <script src="/app.js?v=20260509-65"></script>
-  <script src="/viewer.js?v=20260509-38"></script>
+  <script src="/app.js?v=20260509-66"></script>
+  <script src="/viewer.js?v=20260509-39"></script>
   <script>
   // ─── Thema switcher ─────────────────────────────────────────────────────
   (function() {

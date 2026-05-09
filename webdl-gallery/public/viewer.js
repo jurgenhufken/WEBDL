@@ -43,6 +43,7 @@
     tagDialogY: 0,
     tagDialogDrag: null,
     tagRecipesOpen: false,
+    quickTagMode: 'media',
     currentItemTagRequestKey: '',
 
     // Video
@@ -352,23 +353,65 @@
     }
     const itemId = it.rating_id || it.id;
     const currentIds = new Set((vs.currentItemTags || []).map((t) => Number(t.id)));
+    const activeFilterId = String((vs.queryFilters && vs.queryFilters.tag_id) || viewerFilters().tag_id || '');
     el.vFavoriteOverlay.innerHTML = '';
+    const modeWrap = document.createElement('div');
+    modeWrap.className = 'vfavorite-mode';
+    for (const [mode, label] of [['media', 'Media +'], ['filter', 'Filter']]) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'vfavorite-mode-btn' + (vs.quickTagMode === mode ? ' active' : '');
+      btn.textContent = label;
+      btn.title = mode === 'media' ? 'Klik tags om ze aan media toe te voegen' : 'Klik tags om de viewer te filteren';
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        vs.quickTagMode = mode;
+        renderFavoriteOverlay();
+      });
+      modeWrap.appendChild(btn);
+    }
+    if (activeFilterId) {
+      const clear = document.createElement('button');
+      clear.type = 'button';
+      clear.className = 'vfavorite-clear';
+      clear.textContent = 'Alle tags';
+      clear.title = 'Tagfilter wissen';
+      clear.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        await applyQuickTagFilter(null);
+      });
+      modeWrap.appendChild(clear);
+    }
+    el.vFavoriteOverlay.appendChild(modeWrap);
     for (const tag of tags) {
       const tagId = Number(tag.id);
       const active = currentIds.has(tagId);
+      const filterActive = String(tagId) === activeFilterId;
       const chip = document.createElement('button');
       chip.type = 'button';
-      chip.className = 'vfavorite-chip' + (active ? ' active' : '');
-      chip.disabled = active;
-      chip.title = active ? 'Staat al op media' : 'Tag aan huidige media toevoegen';
+      chip.className = 'vfavorite-chip'
+        + (active ? ' active' : '')
+        + (filterActive ? ' filter-active' : '');
+      chip.disabled = vs.quickTagMode === 'media' && active;
+      chip.title = vs.quickTagMode === 'filter'
+        ? (filterActive ? 'Filter actief' : 'Filter viewer op deze tag')
+        : (active ? 'Staat al op media' : 'Tag aan huidige media toevoegen');
       chip.textContent = `#${safeText(tag.name)}`;
       chip.addEventListener('click', async (e) => {
         e.stopPropagation();
+        if (vs.quickTagMode === 'filter') {
+          await applyQuickTagFilter(tag);
+          return;
+        }
         if (chip.disabled) return;
         try {
           chip.disabled = true;
           await addTagToMedia(itemId, tag);
           if (el.vTagDialog && !el.vTagDialog.classList.contains('hidden')) renderTagDialog();
+          const gallery = gal();
+          if (gallery && typeof gallery.loadTagFilterDropdown === 'function') {
+            gallery.loadTagFilterDropdown().catch(() => {});
+          }
           log(`Tag toegevoegd: ${tag.name}`);
         } catch (err) {
           chip.disabled = false;
@@ -378,6 +421,24 @@
       el.vFavoriteOverlay.appendChild(chip);
     }
     el.vFavoriteOverlay.classList.remove('hidden');
+  }
+
+  async function applyQuickTagFilter(tag) {
+    const tagId = tag && tag.id != null ? String(tag.id) : '';
+    if (!vs.queryFilters) vs.queryFilters = snapshotGalleryFilters();
+    vs.queryFilters.tag_id = tagId;
+    if (el.vTagFilter) el.vTagFilter.value = tagId;
+    vs.channels = [];
+    const gallery = gal();
+    if (gallery && typeof gallery.applyTagFilter === 'function') {
+      gallery.applyTagFilter(tagId).catch((err) => log('Gallery filter fout: ' + err.message));
+    } else if (gallery && typeof gallery.setFilter === 'function') {
+      gallery.setFilter('tag_id', tagId);
+      if (typeof gallery.reload === 'function') gallery.reload().catch(() => {});
+    }
+    await reloadViewerItems({ preserveSelection: true });
+    renderFavoriteOverlay();
+    log(tagId ? `Filter: #${safeText(tag.name)}` : 'Tagfilter gewist');
   }
 
   function rememberCurrentPosition() {
@@ -2716,6 +2777,10 @@
         }
         el.vNewTagInput.value = '';
         await loadTags();
+        const gallery = gal();
+        if (gallery && typeof gallery.loadTagFilterDropdown === 'function') {
+          gallery.loadTagFilterDropdown().catch(() => {});
+        }
         await loadItemTags(itemId);
         renderTagDialog();
         log(vs.tagTarget === 'recipe' ? `Tag naar recept: ${name}` : `Tag toegevoegd: ${name}`);
