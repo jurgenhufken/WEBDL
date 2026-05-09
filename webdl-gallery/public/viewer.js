@@ -1259,6 +1259,10 @@
       addTagToRecipeDraft(tag);
       return;
     }
+    if ((vs.currentItemTags || []).some((t) => Number(t.id) === Number(tag.id))) {
+      renderTagDialog();
+      return;
+    }
     await addTagToMedia(itemId, tag);
     renderTagDialog();
   }
@@ -1454,6 +1458,7 @@
     syncTagTargetControls();
     const itemId = it.rating_id || it.id;
     const currentIds = new Set(vs.currentItemTags.map(t => Number(t.id)));
+    const recipeDraftIds = new Set((vs.recipeDraftTagIds || []).map((id) => Number(id)));
 
     if (el.vTagCurrent) {
       el.vTagCurrent.innerHTML = '';
@@ -1491,36 +1496,50 @@
 
     const q = (el.vTagSearch?.value || '').trim().toLowerCase();
     const quickTags = vs.availableTags
-      .filter(t => !currentIds.has(Number(t.id)))
-      .filter(t => t.is_favorite || userTagUses(t) > 0)
+      .filter(t => t.is_favorite)
       .sort(sortTagsByName)
-      .slice(0, 14);
+      .slice(0, 24);
 
     if (el.vTagQuick) {
       el.vTagQuick.innerHTML = '';
       if (!quickTags.length) {
         const empty = document.createElement('span');
         empty.className = 'tag-empty';
-        empty.textContent = 'Nog geen favoriete of gebruikte tags';
+        empty.textContent = 'Nog geen favoriete tags';
         el.vTagQuick.appendChild(empty);
       } else {
         for (const t of quickTags) {
+          const item = document.createElement('span');
+          item.className = 'tag-quick-item';
+
           const chip = document.createElement('button');
           chip.type = 'button';
           chip.className = 'tag-chip tag-chip-quick';
-          const useCount = userTagUses(t);
-          chip.title = [
-            t.is_favorite ? 'Favoriet' : '',
-            useCount ? `${useCount}× door jou gebruikt` : '',
-          ].filter(Boolean).join(' / ');
-          chip.textContent = `${t.is_favorite ? '★ ' : ''}#${safeText(t.name)}`;
+          chip.title = vs.tagTarget === 'recipe' ? 'Tag aan recept toevoegen' : 'Tag aan huidig item toevoegen';
+          chip.textContent = `#${safeText(t.name)}`;
           chip.addEventListener('click', async (e) => {
             e.stopPropagation();
             try {
               await applyPickedTag(itemId, t);
             } catch (err) { log('Tag fout: ' + err.message); }
           });
-          el.vTagQuick.appendChild(chip);
+
+          const unstar = document.createElement('button');
+          unstar.type = 'button';
+          unstar.className = 'tag-quick-unstar';
+          unstar.title = 'Uit favorieten halen';
+          unstar.textContent = '★';
+          unstar.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            try {
+              await toggleTagFavorite(t);
+              await loadTags();
+              renderTagDialog();
+            } catch (err) { log('Favoriet fout: ' + err.message); }
+          });
+
+          item.append(unstar, chip);
+          el.vTagQuick.appendChild(item);
         }
       }
     }
@@ -1604,8 +1623,6 @@
     if (el.vTagSuggestions) {
       el.vTagSuggestions.innerHTML = '';
       const suggestions = vs.tagSuggestions
-        .filter(t => !currentIds.has(Number(t.id)))
-        .filter(t => !vs.recipeDraftTagIds.includes(Number(t.id)))
         .sort((a, b) => Number(b.score || 0) - Number(a.score || 0) || sortTagsByName(a, b))
         .slice(0, 10);
       if (suggestions.length) {
@@ -1633,7 +1650,6 @@
     renderRecipeDraft();
 
     const candidates = vs.availableTags
-      .filter(t => !currentIds.has(Number(t.id)))
       .filter(t => !q || safeText(t.name).toLowerCase().includes(q))
       .slice(0, 120);
 
@@ -1647,6 +1663,10 @@
     }
 
     for (const t of candidates) {
+      const tagId = Number(t.id);
+      const isOnMedia = currentIds.has(tagId);
+      const isInRecipe = recipeDraftIds.has(tagId);
+      const addDisabled = vs.tagTarget === 'recipe' ? isInRecipe : isOnMedia;
       const row = document.createElement('div');
       row.className = 'tag-row';
       const name = document.createElement('span');
@@ -1667,8 +1687,13 @@
       const add = document.createElement('button');
       add.className = 'tag-toggle';
       add.type = 'button';
-      add.title = vs.tagTarget === 'recipe' ? 'Tag aan recept toevoegen' : 'Tag aan huidig item toevoegen';
-      add.textContent = 'Toevoegen';
+      add.disabled = addDisabled;
+      add.title = addDisabled
+        ? (vs.tagTarget === 'recipe' ? 'Tag staat al in dit recept' : 'Tag staat al op dit item')
+        : (vs.tagTarget === 'recipe' ? 'Tag aan recept toevoegen' : 'Tag aan huidig item toevoegen');
+      add.textContent = addDisabled
+        ? (vs.tagTarget === 'recipe' ? 'In recept' : 'Op media')
+        : (vs.tagTarget === 'recipe' ? 'Recept +' : 'Media +');
 
       const del = document.createElement('button');
       del.className = 'tag-del';
@@ -1689,6 +1714,7 @@
 
       add.addEventListener('click', async (e) => {
         e.stopPropagation();
+        if (add.disabled) return;
         try {
           await applyPickedTag(itemId, t);
         } catch (err) { log('Tag fout: ' + err.message); }

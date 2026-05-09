@@ -774,6 +774,27 @@ input[type="range"]:disabled { opacity: 0.35; cursor: default; }
   max-height: none;
   overflow: visible;
 }
+.tag-quick-item {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+.tag-quick-unstar {
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 999px 0 0 999px;
+  border-right: 0;
+  color: #ffd166;
+  background: var(--chip-bg);
+  border-color: var(--chip-border);
+  font-size: 13px;
+  line-height: 1;
+}
+.tag-quick-item .tag-chip {
+  border-radius: 0 999px 999px 0;
+}
 .tag-recipes-wrap {
   flex: 0 0 auto;
   padding: 10px 12px;
@@ -940,6 +961,13 @@ input[type="range"]:disabled { opacity: 0.35; cursor: default; }
 .tag-fav.active:hover { color: #ffe08a; }
 .tag-toggle { padding: 2px 10px; font-size: 12px; font-weight: 800; flex: 0 0 auto; white-space: nowrap; }
 .tag-toggle.tag-has { background: var(--btn-active-bg); border-color: var(--btn-active-border); color: var(--btn-active-color); }
+.tag-toggle:disabled {
+  opacity: 0.62;
+  cursor: default;
+  background: var(--btn-active-bg);
+  border-color: var(--btn-active-border);
+  color: var(--btn-active-color);
+}
 .tag-del { background: transparent; border: 0; color: var(--text-muted); font-size: 14px; padding: 2px 4px; flex: 0 0 auto; }
 .tag-del:hover { color: #ff6b6b; }
 .tag-empty {
