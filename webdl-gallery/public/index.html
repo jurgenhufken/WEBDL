@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WEBDL Gallery</title>
-<link rel="stylesheet" href="/styles.css?v=20260509-74">
+<link rel="stylesheet" href="/styles.css?v=20260509-75">
 </head>
 <body>
   <header class="topbar">
@@ -152,6 +152,7 @@
       <!-- Stage -->
       <div class="viewer-stage" id="vStage">
         <div id="vContent" class="vcontent"></div>
+        <div id="vFavoriteOverlay" class="vfavorite-overlay hidden"></div>
         <!-- Progress bar: absoluut gepositioneerd, JS alignt op video-onderkant -->
         <div class="vprogressbar" id="vProgressBar">
           <div class="vprogressbar-fill" id="vProgressFill"></div>
@@ -203,7 +204,10 @@
       <div id="vTagDialogInner" class="tag-dialog-inner">
         <div class="tag-dialog-head">
           <strong>Tags</strong>
-          <button id="vBtnCloseTagDialog">✕</button>
+          <div class="tag-dialog-head-actions">
+            <button id="vBtnToggleRecipes" type="button">Recepten</button>
+            <button id="vBtnCloseTagDialog" type="button">✕</button>
+          </div>
         </div>
         <div class="tag-dialog-body">
           <div class="tag-current-wrap">
@@ -224,7 +228,6 @@
           <div class="tag-recipes-wrap">
             <div class="tag-label">Recepten</div>
             <div id="vTagRecipes" class="tag-recipes"></div>
-            <div id="vTagSuggestions" class="tag-suggestions"></div>
             <div class="tag-label tag-recipe-edit-label">Recept maken / wijzigen</div>
             <div class="tag-recipe-editor">
               <input id="vRecipeName" type="text" placeholder="Naam recept...">
@@ -259,7 +262,7 @@
   </div><!-- /viewer -->
 
   <script src="/app.js?v=20260509-65"></script>
-  <script src="/viewer.js?v=20260509-35"></script>
+  <script src="/viewer.js?v=20260509-36"></script>
   <script>
   // ─── Thema switcher ─────────────────────────────────────────────────────
   (function() {

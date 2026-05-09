@@ -35,7 +35,6 @@
     availableTags: [],
     currentItemTags: [],
     tagRecipes: [],
-    tagSuggestions: [],
     recipeDraftTagIds: [],
     editingRecipeId: null,
     tagTarget: 'media',
@@ -43,6 +42,8 @@
     tagDialogX: 0,
     tagDialogY: 0,
     tagDialogDrag: null,
+    tagRecipesOpen: false,
+    currentItemTagRequestKey: '',
 
     // Video
     vol: 0.8,
@@ -93,6 +94,7 @@
   const VIEWER_TAB_ID = Math.random().toString(36).slice(2, 8);
   const VIEWER_POS_KEY = 'webdl:viewer:last-position';
   const VIEWER_SPEED_KEY = 'webdl:viewer:playback-rate';
+  const TAG_RECIPES_OPEN_KEY = 'webdl:viewer:tag-recipes-open';
 
   async function api(url, opts) {
     const sep = url.includes('?') ? '&' : '?';
@@ -279,8 +281,8 @@
       'vStage','vContent','vPrev','vNext','vUp','vDown','vHudLeft','vHudRight',
       'vProgressBar','vProgressFill','vProgressHandle',
       'vBottomControls','vBtnPlayPause','vTimeLabel','vBtnRotateBottom','vBtnRotateStage',
-      'vTagDialog','vTagDialogInner','vTagCurrent','vTagTargetMedia','vTagTargetRecipe','vTagQuick','vTagRecipes','vTagSuggestions','vRecipeName','vRecipeDescription',
-      'vRecipeDraft','vBtnRecipeFromItem','vBtnSaveRecipe','vBtnClearRecipe',
+      'vTagDialog','vTagDialogInner','vTagCurrent','vTagTargetMedia','vTagTargetRecipe','vTagQuick','vTagRecipes','vRecipeName','vRecipeDescription',
+      'vRecipeDraft','vBtnRecipeFromItem','vBtnSaveRecipe','vBtnClearRecipe','vBtnToggleRecipes','vFavoriteOverlay',
       'vTagSearch','vTagList','vNewTagInput','vBtnAddTag','vBtnCloseTagDialog',
       'vLogPanel','vLogBody',
     ];
@@ -293,6 +295,7 @@
     bindKeyboard();
     bindMouse();
     restorePlaybackRate();
+    restoreTagRecipeVisibility();
     syncViewerModeControls();
     loadTags();
   }
@@ -302,6 +305,79 @@
       const stored = Number(localStorage.getItem(VIEWER_SPEED_KEY) || '1');
       if (SPEED_STEPS.includes(stored)) vs.playbackRate = stored;
     } catch (_) {}
+  }
+
+  function restoreTagRecipeVisibility() {
+    try {
+      vs.tagRecipesOpen = localStorage.getItem(TAG_RECIPES_OPEN_KEY) === '1';
+    } catch (_) {
+      vs.tagRecipesOpen = false;
+    }
+    syncTagRecipeVisibility();
+  }
+
+  function syncTagRecipeVisibility() {
+    const wrap = el.vTagRecipes ? el.vTagRecipes.closest('.tag-recipes-wrap') : null;
+    if (wrap) wrap.classList.toggle('tag-section-collapsed', !vs.tagRecipesOpen);
+    if (el.vBtnToggleRecipes) {
+      el.vBtnToggleRecipes.classList.toggle('active', vs.tagRecipesOpen);
+      el.vBtnToggleRecipes.textContent = vs.tagRecipesOpen ? 'Recepten aan' : 'Recepten uit';
+      el.vBtnToggleRecipes.title = vs.tagRecipesOpen ? 'Recepten verbergen' : 'Recepten tonen';
+    }
+  }
+
+  function setTagRecipesOpen(open, { persist = true } = {}) {
+    vs.tagRecipesOpen = Boolean(open);
+    syncTagRecipeVisibility();
+    if (persist) {
+      try { localStorage.setItem(TAG_RECIPES_OPEN_KEY, vs.tagRecipesOpen ? '1' : '0'); } catch (_) {}
+    }
+  }
+
+  function favoriteTags() {
+    return (vs.availableTags || [])
+      .filter((t) => t.is_favorite)
+      .sort(sortTagsByName)
+      .slice(0, 24);
+  }
+
+  function renderFavoriteOverlay() {
+    if (!el.vFavoriteOverlay) return;
+    const it = vs.items[vs.idx];
+    const tags = favoriteTags();
+    if (!vs.open || !it || !tags.length) {
+      el.vFavoriteOverlay.classList.add('hidden');
+      el.vFavoriteOverlay.innerHTML = '';
+      return;
+    }
+    const itemId = it.rating_id || it.id;
+    const currentIds = new Set((vs.currentItemTags || []).map((t) => Number(t.id)));
+    el.vFavoriteOverlay.innerHTML = '';
+    for (const tag of tags) {
+      const tagId = Number(tag.id);
+      const active = currentIds.has(tagId);
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'vfavorite-chip' + (active ? ' active' : '');
+      chip.disabled = active;
+      chip.title = active ? 'Staat al op media' : 'Tag aan huidige media toevoegen';
+      chip.textContent = `#${safeText(tag.name)}`;
+      chip.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (chip.disabled) return;
+        try {
+          chip.disabled = true;
+          await addTagToMedia(itemId, tag);
+          if (el.vTagDialog && !el.vTagDialog.classList.contains('hidden')) renderTagDialog();
+          log(`Tag toegevoegd: ${tag.name}`);
+        } catch (err) {
+          chip.disabled = false;
+          log('Tag fout: ' + err.message);
+        }
+      });
+      el.vFavoriteOverlay.appendChild(chip);
+    }
+    el.vFavoriteOverlay.classList.remove('hidden');
   }
 
   function rememberCurrentPosition() {
@@ -381,6 +457,7 @@
     stopSlideshow();
     cleanupMedia();
     closeTagDialog({ force: true });
+    if (el.vFavoriteOverlay) el.vFavoriteOverlay.classList.add('hidden');
     if (vs.logOpen) toggleLog();
 
     el.viewer.classList.add('hidden');
@@ -651,6 +728,8 @@
     rememberCurrentPosition();
 
     // Tags prefetch
+    vs.currentItemTags = [];
+    renderFavoriteOverlay();
     loadItemTags(it.rating_id || it.id).catch(() => {});
   }
 
@@ -1253,6 +1332,7 @@
 
   function setTagTarget(target) {
     vs.tagTarget = target === 'recipe' ? 'recipe' : 'media';
+    if (vs.tagTarget === 'recipe') setTagRecipesOpen(true);
     syncTagTargetControls();
     renderTagDialog();
   }
@@ -1265,6 +1345,7 @@
     });
     await loadItemTags(itemId);
     await loadTags();
+    renderFavoriteOverlay();
   }
 
   async function applyPickedTag(itemId, tag) {
@@ -1292,6 +1373,7 @@
     try {
       const data = await api('/api/tags');
       vs.availableTags = (data.tags || []).sort(sortUserTags);
+      renderFavoriteOverlay();
       // Tag-filter select vullen
       const sel = el.vTagFilter;
       sel.innerHTML = '<option value="">Alle tags</option>';
@@ -1309,11 +1391,19 @@
   }
 
   async function loadItemTags(itemId) {
+    const key = String(itemId || '');
+    vs.currentItemTagRequestKey = key;
     try {
       const data = await api(`/api/items/${itemId}/tags`);
-      vs.currentItemTags = data.tags || [];
+      if (vs.currentItemTagRequestKey === key) {
+        vs.currentItemTags = data.tags || [];
+        renderFavoriteOverlay();
+      }
     } catch (_) {
-      vs.currentItemTags = [];
+      if (vs.currentItemTagRequestKey === key) {
+        vs.currentItemTags = [];
+        renderFavoriteOverlay();
+      }
     }
   }
 
@@ -1327,16 +1417,6 @@
     }
   }
 
-  async function loadTagSuggestions(itemId) {
-    try {
-      const data = await api(`/api/items/${itemId}/tag-suggestions`);
-      vs.tagSuggestions = data.suggestions || [];
-    } catch (e) {
-      vs.tagSuggestions = [];
-      console.warn('tag suggestions load failed', e);
-    }
-  }
-
   function allKnownTagsById() {
     const tags = new Map();
     for (const t of vs.availableTags || []) tags.set(Number(t.id), t);
@@ -1344,7 +1424,6 @@
     for (const r of vs.tagRecipes || []) {
       for (const t of r.tags || []) tags.set(Number(t.id), t);
     }
-    for (const t of vs.tagSuggestions || []) tags.set(Number(t.id), t);
     return tags;
   }
 
@@ -1435,16 +1514,12 @@
       return;
     }
     syncTagTargetControls();
-    vs.tagSuggestions = [];
     await Promise.all([
       loadTags(),
       loadItemTags(it.rating_id || it.id),
       loadTagRecipes(),
     ]);
     renderTagDialog();
-    loadTagSuggestions(it.rating_id || it.id)
-      .then(() => renderTagDialog())
-      .catch((err) => console.warn('tag suggestions load failed', err));
   }
 
   function openTagsFromEvent(e) {
@@ -1526,6 +1601,7 @@
     const it = vs.items[vs.idx];
     if (!it) return;
     syncTagTargetControls();
+    syncTagRecipeVisibility();
     const itemId = it.rating_id || it.id;
     const currentIds = new Set(vs.currentItemTags.map(t => Number(t.id)));
     const recipeDraftIds = new Set((vs.recipeDraftTagIds || []).map((id) => Number(id)));
@@ -1591,10 +1667,7 @@
     }
 
     const q = (el.vTagSearch?.value || '').trim().toLowerCase();
-    const quickTags = vs.availableTags
-      .filter(t => t.is_favorite)
-      .sort(sortTagsByName)
-      .slice(0, 24);
+    const quickTags = favoriteTags();
 
     if (el.vTagQuick) {
       el.vTagQuick.innerHTML = '';
@@ -1612,13 +1685,12 @@
 
           const chip = document.createElement('button');
           chip.type = 'button';
-          chip.className = 'tag-chip tag-chip-quick';
+          chip.className = 'tag-chip tag-chip-quick' + (selectedForTarget ? ' active' : '');
           chip.disabled = selectedForTarget;
           chip.title = selectedForTarget
             ? (vs.tagTarget === 'recipe' ? 'Staat al in recept' : 'Staat al op media')
             : (vs.tagTarget === 'recipe' ? 'Tag aan recept toevoegen' : 'Tag aan huidig item toevoegen');
           chip.textContent = `#${safeText(t.name)}`;
-          appendStateBadges(chip, state);
           chip.addEventListener('click', async (e) => {
             e.stopPropagation();
             if (chip.disabled) return;
@@ -1720,33 +1792,6 @@
           row.append(main, apply, edit, del);
           el.vTagRecipes.appendChild(row);
         }
-      }
-    }
-
-    if (el.vTagSuggestions) {
-      el.vTagSuggestions.innerHTML = '';
-      const suggestions = vs.tagSuggestions
-        .sort((a, b) => Number(b.score || 0) - Number(a.score || 0) || sortTagsByName(a, b))
-        .slice(0, 10);
-      if (suggestions.length) {
-        const label = document.createElement('div');
-        label.className = 'tag-suggestion-label';
-        label.textContent = 'Voorgestelde tags';
-        el.vTagSuggestions.appendChild(label);
-      }
-      for (const t of suggestions) {
-        const chip = document.createElement('button');
-        chip.type = 'button';
-        chip.className = 'tag-chip tag-chip-quick';
-        chip.title = `${Number(t.uses || 0)} matches via bron-graph`;
-        chip.textContent = `#${safeText(t.name)}`;
-        chip.addEventListener('click', async (e) => {
-          e.stopPropagation();
-          try {
-            await applyPickedTag(itemId, t);
-          } catch (err) { log('Tag fout: ' + err.message); }
-        });
-        el.vTagSuggestions.appendChild(chip);
       }
     }
 
@@ -2583,6 +2628,15 @@
       e.stopPropagation();
       closeTagDialog({ force: true });
     });
+    if (el.vBtnToggleRecipes) {
+      el.vBtnToggleRecipes.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setTagRecipesOpen(!vs.tagRecipesOpen);
+        if (vs.tagRecipesOpen) {
+          loadTagRecipes().then(() => renderTagDialog()).catch((err) => log('Recepten laden fout: ' + err.message));
+        }
+      });
+    }
     if (el.vTagDialogInner) {
       const tagDialogHead = el.vTagDialogInner.querySelector('.tag-dialog-head');
       if (tagDialogHead) tagDialogHead.addEventListener('pointerdown', startTagDialogDrag);
