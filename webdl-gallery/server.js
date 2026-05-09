@@ -661,6 +661,9 @@ async function filterPlayableMediaRows(rows, maxNeeded = rows.length) {
 
 function galleryDedupeKey(row) {
   if (String(row.item_kind || '') === 'download') {
+    const fileKey = String(row.filepath || '').trim();
+    if (fileKey) return `file:${fileKey.toLowerCase()}`;
+
     const sourceKey = canonicalGallerySourceUrl(row.source_url || row.url);
     if (sourceKey) return `source:${sourceKey}`;
 
