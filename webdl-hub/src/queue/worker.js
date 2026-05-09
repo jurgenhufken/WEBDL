@@ -668,7 +668,10 @@ function startWorkerPool({
       /\/@[^/]+\/?(shorts|videos|streams)?\/?$/.test(urlLower) ||
       /\/channel\//.test(urlLower) ||
       /\/c\//.test(urlLower);
-    const skipPreDownloadDedup = String(job?.options?.source_quality || '') === 'vipr_full_image';
+    const isViperThread = /https?:\/\/(?:www\.)?(?:vipergirls\.to|viper\.to)\/threads\/\d+/i.test(String(job.url || ''));
+    const skipPreDownloadDedup = String(job?.options?.source_quality || '') === 'vipr_full_image'
+      || Boolean(job?.options?.vipergirlsWholeThread)
+      || isViperThread;
     if (!isExpandable && !skipPreDownloadDedup) {
       try {
         const dupe = await checkGalleryDuplicate(job.url);
