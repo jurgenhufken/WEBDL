@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WEBDL Gallery</title>
-<link rel="stylesheet" href="/styles.css?v=20260509-70">
+<link rel="stylesheet" href="/styles.css?v=20260509-71">
 </head>
 <body>
   <header class="topbar">
@@ -209,6 +209,13 @@
           <div class="tag-label">Op dit item</div>
           <div id="vTagCurrent" class="tag-current"></div>
         </div>
+        <div class="tag-target-wrap">
+          <div class="tag-label">Waar moet een tag heen?</div>
+          <div class="tag-target-buttons">
+            <button id="vTagTargetMedia" type="button" class="tag-target active">Media</button>
+            <button id="vTagTargetRecipe" type="button" class="tag-target">Recept</button>
+          </div>
+        </div>
         <div class="tag-quick-wrap">
           <div class="tag-label">Favoriet / vaak gebruikt</div>
           <div id="vTagQuick" class="tag-quick"></div>
@@ -249,8 +256,8 @@
 
   </div><!-- /viewer -->
 
-  <script src="/app.js?v=20260509-64"></script>
-  <script src="/viewer.js?v=20260509-29"></script>
+  <script src="/app.js?v=20260509-65"></script>
+  <script src="/viewer.js?v=20260509-30"></script>
   <script>
   // ─── Thema switcher ─────────────────────────────────────────────────────
   (function() {

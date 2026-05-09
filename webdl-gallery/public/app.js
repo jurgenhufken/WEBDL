@@ -839,11 +839,12 @@
   function setViewerActive(active) {
     state.viewerActive = Boolean(active);
     if (state.viewerActive) {
-      stopAutoRefresh();
       stopActiveRefresh();
+      if (!document.hidden && state.autoRefresh) startAutoRefresh();
     } else if (!document.hidden) {
       startActiveRefresh();
       if (state.autoRefresh) startAutoRefresh();
+      pumpPendingNewItems();
     }
   }
 

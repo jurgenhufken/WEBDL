@@ -38,6 +38,7 @@
     tagSuggestions: [],
     recipeDraftTagIds: [],
     editingRecipeId: null,
+    tagTarget: 'media',
     lastTagOpenAt: 0,
 
     // Video
@@ -275,7 +276,7 @@
       'vStage','vContent','vPrev','vNext','vUp','vDown','vHudLeft','vHudRight',
       'vProgressBar','vProgressFill','vProgressHandle',
       'vBottomControls','vBtnPlayPause','vTimeLabel','vBtnRotateBottom','vBtnRotateStage',
-      'vTagDialog','vTagCurrent','vTagQuick','vTagRecipes','vTagSuggestions','vRecipeName','vRecipeDescription',
+      'vTagDialog','vTagCurrent','vTagTargetMedia','vTagTargetRecipe','vTagQuick','vTagRecipes','vTagSuggestions','vRecipeName','vRecipeDescription',
       'vRecipeDraft','vBtnRecipeFromItem','vBtnSaveRecipe','vBtnClearRecipe',
       'vTagSearch','vTagList','vNewTagInput','vBtnAddTag','vBtnCloseTagDialog',
       'vLogPanel','vLogBody',
@@ -1228,6 +1229,40 @@
     return safeText(a && a.name).localeCompare(safeText(b && b.name));
   }
 
+  function syncTagTargetControls() {
+    const target = vs.tagTarget === 'recipe' ? 'recipe' : 'media';
+    if (el.vTagTargetMedia) el.vTagTargetMedia.classList.toggle('active', target === 'media');
+    if (el.vTagTargetRecipe) el.vTagTargetRecipe.classList.toggle('active', target === 'recipe');
+    if (el.vBtnAddTag) {
+      el.vBtnAddTag.textContent = target === 'recipe' ? '+ Maak + naar recept' : '+ Maak + naar media';
+    }
+  }
+
+  function setTagTarget(target) {
+    vs.tagTarget = target === 'recipe' ? 'recipe' : 'media';
+    syncTagTargetControls();
+    renderTagDialog();
+  }
+
+  async function addTagToMedia(itemId, tag) {
+    await api(`/api/items/${itemId}/tags`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tag_id: tag.id }),
+    });
+    await loadItemTags(itemId);
+    await loadTags();
+  }
+
+  async function applyPickedTag(itemId, tag) {
+    if (vs.tagTarget === 'recipe') {
+      addTagToRecipeDraft(tag);
+      return;
+    }
+    await addTagToMedia(itemId, tag);
+    renderTagDialog();
+  }
+
   async function toggleTagFavorite(tag) {
     await api(`/api/tags/${tag.id}`, {
       method: 'PATCH',
@@ -1381,6 +1416,7 @@
       if (el.vTagCurrent) el.vTagCurrent.textContent = 'Geen item geselecteerd';
       return;
     }
+    syncTagTargetControls();
     vs.tagSuggestions = [];
     await Promise.all([
       loadTags(),
@@ -1415,6 +1451,7 @@
   function renderTagDialog() {
     const it = vs.items[vs.idx];
     if (!it) return;
+    syncTagTargetControls();
     const itemId = it.rating_id || it.id;
     const currentIds = new Set(vs.currentItemTags.map(t => Number(t.id)));
 
@@ -1438,7 +1475,8 @@
           remove.textContent = '×';
           chip.append(name, remove);
 
-          chip.addEventListener('click', async () => {
+          chip.addEventListener('click', async (e) => {
+            e.stopPropagation();
             try {
               await api(`/api/items/${itemId}/tags/${t.id}`, { method: 'DELETE' });
               await loadItemTags(itemId);
@@ -1476,16 +1514,10 @@
             useCount ? `${useCount}× door jou gebruikt` : '',
           ].filter(Boolean).join(' / ');
           chip.textContent = `${t.is_favorite ? '★ ' : ''}#${safeText(t.name)}`;
-          chip.addEventListener('click', async () => {
+          chip.addEventListener('click', async (e) => {
+            e.stopPropagation();
             try {
-              await api(`/api/items/${itemId}/tags`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ tag_id: t.id }),
-              });
-              await loadItemTags(itemId);
-              await loadTags();
-              renderTagDialog();
+              await applyPickedTag(itemId, t);
             } catch (err) { log('Tag fout: ' + err.message); }
           });
           el.vTagQuick.appendChild(chip);
@@ -1588,9 +1620,11 @@
         chip.className = 'tag-chip tag-chip-quick';
         chip.title = `${Number(t.uses || 0)} matches via bron-graph`;
         chip.textContent = `#${safeText(t.name)}`;
-        chip.addEventListener('click', (e) => {
+        chip.addEventListener('click', async (e) => {
           e.stopPropagation();
-          addTagToRecipeDraft(t);
+          try {
+            await applyPickedTag(itemId, t);
+          } catch (err) { log('Tag fout: ' + err.message); }
         });
         el.vTagSuggestions.appendChild(chip);
       }
@@ -1633,14 +1667,8 @@
       const add = document.createElement('button');
       add.className = 'tag-toggle';
       add.type = 'button';
-      add.title = 'Tag aan huidig item toevoegen';
-      add.textContent = 'Media +';
-
-      const addRecipe = document.createElement('button');
-      addRecipe.className = 'tag-recipe-add';
-      addRecipe.type = 'button';
-      addRecipe.title = 'Tag aan recept-editor toevoegen';
-      addRecipe.textContent = 'Recept +';
+      add.title = vs.tagTarget === 'recipe' ? 'Tag aan recept toevoegen' : 'Tag aan huidig item toevoegen';
+      add.textContent = 'Toevoegen';
 
       const del = document.createElement('button');
       del.className = 'tag-del';
@@ -1648,7 +1676,7 @@
       del.title = 'Tag globaal verwijderen';
       del.textContent = '🗑';
 
-      row.append(fav, name, uses, add, addRecipe, del);
+      row.append(fav, name, uses, add, del);
 
       fav.addEventListener('click', async (e) => {
         e.stopPropagation();
@@ -1662,20 +1690,8 @@
       add.addEventListener('click', async (e) => {
         e.stopPropagation();
         try {
-          await api(`/api/items/${itemId}/tags`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ tag_id: t.id }),
-          });
-          await loadItemTags(itemId);
-          await loadTags();
-          renderTagDialog();
+          await applyPickedTag(itemId, t);
         } catch (err) { log('Tag fout: ' + err.message); }
-      });
-
-      addRecipe.addEventListener('click', (e) => {
-        e.stopPropagation();
-        addTagToRecipeDraft(t);
       });
 
       del.addEventListener('click', async (e) => {
@@ -2449,6 +2465,18 @@
       });
     }
     if (el.vTagSearch) el.vTagSearch.addEventListener('input', renderTagDialog);
+    if (el.vTagTargetMedia) {
+      el.vTagTargetMedia.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setTagTarget('media');
+      });
+    }
+    if (el.vTagTargetRecipe) {
+      el.vTagTargetRecipe.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setTagTarget('recipe');
+      });
+    }
 
     if (el.vBtnRecipeFromItem) {
       el.vBtnRecipeFromItem.addEventListener('click', () => {
@@ -2478,16 +2506,16 @@
           body: JSON.stringify({ name }),
         });
         const itemId = it.rating_id || it.id;
-        await api(`/api/items/${itemId}/tags`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ tag_id: result.tag.id }),
-        });
+        if (vs.tagTarget === 'recipe') {
+          addTagToRecipeDraft(result.tag);
+        } else {
+          await addTagToMedia(itemId, result.tag);
+        }
         el.vNewTagInput.value = '';
         await loadTags();
         await loadItemTags(itemId);
         renderTagDialog();
-        log(`Tag toegevoegd: ${name}`);
+        log(vs.tagTarget === 'recipe' ? `Tag naar recept: ${name}` : `Tag toegevoegd: ${name}`);
       } catch (e) { log('Tag add fout: ' + e.message); }
     });
 
