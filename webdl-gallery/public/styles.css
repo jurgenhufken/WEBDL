@@ -404,9 +404,9 @@ input[type="range"]:disabled { opacity: 0.35; cursor: default; }
   min-height: 44px; transition: opacity .25s ease, transform .25s ease;
 }
 .viewer.viewer--hud-hidden .viewer-topbar {
-  opacity: 1;
-  transform: translateY(0);
-  pointer-events: auto;
+  opacity: 0;
+  transform: translateY(-105%);
+  pointer-events: none;
 }
 .viewer.viewer--hud-hidden .viewer-topbar:hover,
 .viewer.viewer--hud-hidden .viewer-topbar:focus-within {
