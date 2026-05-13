@@ -16831,7 +16831,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
       // from dominating the entire page. Items stay in timestamp order,
       // but once a platform has enough representation, its remaining items are skipped.
       const platformCount = new Map();
-      const SOFT_CAP = fastPathPlatforms ? Infinity : Math.max(30, Math.ceil(limit * 0.3));
+      const SOFT_CAP = fastPathPlatforms ? Infinity : Math.max(6, Math.ceil(limit * 0.3));
       for (const row of pgResult.rows) {
         if (items.length >= limit) break;
         if (!row || !row.id) continue;

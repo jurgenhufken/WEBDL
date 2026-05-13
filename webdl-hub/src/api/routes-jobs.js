@@ -169,6 +169,9 @@ function isRefreshableCollectionUrl(url, adapterName = '') {
     if (host === 'vipergirls.to' || host.endsWith('.vipergirls.to') || host === 'viper.to' || host.endsWith('.viper.to')) {
       return /^\/threads\/\d+(?:-[^/?#]+)?$/i.test(pathname);
     }
+    if (host === 'x.com' || host.endsWith('.x.com') || host === 'twitter.com' || host.endsWith('.twitter.com')) {
+      return /^\/(?!i\/|home$|explore$|search$|settings$|messages$|notifications$)[A-Za-z0-9_]{1,20}$/i.test(pathname);
+    }
     return false;
   } catch (_) {
     return false;

@@ -119,3 +119,25 @@ test('Vipergirls host-media redirect dedupet alleen actieve hele-thread jobs', a
   assert.equal(enqueueCall.job.adapter, 'gallerydl');
   assert.equal(enqueueCall.job.options.contextUrl, 'https://vipergirls.to/threads/67890-big-thread');
 });
+
+test('X/Twitter profielen worden niet geblokkeerd door eerder gesyncte media', async (t) => {
+  const calls = [];
+  const repo = createTestRepo(calls);
+  const queue = createTestQueue(calls);
+  const { server, base } = await startTestServer({ repo, queue });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+
+  const result = await postJSON(base, '/api/jobs', {
+    url: 'https://x.com/solesjoi',
+  });
+
+  assert.equal(result.status, 201);
+  assert.equal(result.data.id, 'new-job');
+  assert.equal(result.data.url, 'https://x.com/solesjoi');
+
+  const recentCall = calls.find((call) => call.method === 'findRecentJobByUrl');
+  const downloadCall = calls.find((call) => call.method === 'findGalleryDownloadByUrl');
+  assert.deepEqual(recentCall.options, { statuses: ['queued', 'running'] });
+  assert.deepEqual(downloadCall.options, { statuses: ['queued', 'running'] });
+  assert.ok(calls.some((call) => call.method === 'enqueue'));
+});
