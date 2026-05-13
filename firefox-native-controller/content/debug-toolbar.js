@@ -5,7 +5,7 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-fff-background-immediate-run';
+  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-fff-giga-button';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
@@ -3989,6 +3989,9 @@
       if (threadBatchDownloadBtn) {
         setButtonAvailable(threadBatchDownloadBtn, threadHere);
       }
+      if (gigaDownloadBtn) {
+        setButtonAvailable(gigaDownloadBtn, threadHere);
+      }
       if (keep2ShareBatchBtn) {
         setButtonAvailable(keep2ShareBatchBtn, k2sHere);
         try { keep2ShareBatchBtn.title = 'Klik: Keep2Share-links op deze pagina. Shift/Alt: hele thread. Cmd/Ctrl: limieten.'; } catch (e) {}
@@ -4058,6 +4061,7 @@
   const mediaDownloadBtn = makeBtnIn(extraBtnContainer, '🖼 Media zichtbaar', '#6d28d9');
   const forceBatchDownloadBtn = makeBtnIn(extraBtnContainer, '🔥 Forceer opnieuw', '#b91c1c');
   const threadBatchDownloadBtn = makeBtnIn(extraBtnContainer, '🧵 Hele thread', '#0ea5e9');
+  const gigaDownloadBtn = makeBtnIn(extraBtnContainer, '⚡ Giga', '#7c2d12');
   const keep2ShareBatchBtn = makeBtnIn(extraBtnContainer, '🔐 K2S links', '#0891b2');
   const vdhHintBtn = makeBtnIn(extraBtnContainer, '🧩 VDH kanaal', '#2e7d32');
   const redditPostBtn = makeCompactBtnIn(redditBtnContainer, 'Post', '#ff4500');
@@ -4078,6 +4082,7 @@
     mediaDownloadBtn.title = 'Download direct zichtbare video/foto-bronnen op deze pagina';
     forceBatchDownloadBtn.title = 'Queue dezelfde gevonden links opnieuw, ook als ze al bestaan';
     threadBatchDownloadBtn.title = 'Scan de hele forumthread over alle pagina\'s';
+    gigaDownloadBtn.title = 'Start direct als gigadownload: geen browser-drempel, meteen achtergrond/server-scan';
     keep2ShareBatchBtn.title = 'ViperGirls: download Keep2Share-links. Klik = huidige pagina, Shift/Alt = hele thread, Cmd/Ctrl = limieten.';
     vdhHintBtn.title = 'Geef Video DownloadHelper een kanaal/context hint';
     redditPostBtn.title = 'Reddit: download alleen deze post via BDFR';
@@ -6654,6 +6659,37 @@
       let maxItems = WEBDL_UNLIMITED;
       let maxForumPages = WEBDL_UNLIMITED;
 
+      if (options.forceGiga === true && (isForumPage || isThreadPage)) {
+        const startUrl = String(window.location.href || '').replace(/#.*$/, '');
+        const scanPayload = {
+          url: startUrl,
+          metadata: {
+            ...meta,
+            webdl_batch_kind: 'footfetishforum_direct_gigadownload',
+          },
+          force,
+          initialUrls: [],
+          initialThreadLinks: [],
+          maxForumPages,
+          maxThreadPages: maxPages,
+          maxItems,
+          sourceContexts: null,
+          directHints: null,
+        };
+        addLog('FFF gigadownload direct: worker-tab start zonder browser-voor-scan');
+        showNotification('FFF gigadownload: worker-tab start direct', false);
+        const result = await startFffBackgroundScanRequest(scanPayload);
+        if (result && result.success) {
+          const scanId = result.scanId ? ` #${result.scanId}` : '';
+          showNotification(`FFF gigadownload draait${scanId}`);
+          addLog(`FFF gigadownload gestart${scanId}: worker-tab #${result.tabId || '?'}`);
+        } else {
+          showNotification(`FFF gigadownload start fout: ${(result && result.error) ? result.error : 'unknown'}`, true);
+          addLog(`FFF gigadownload start fout: ${(result && result.error) ? result.error : 'unknown'}`, 'error');
+        }
+        return;
+      }
+
       const wantsSettings = !!(clickEvent && (clickEvent.metaKey || clickEvent.ctrlKey));
       if (wantsSettings) {
         if (isAnyForumPage) {
@@ -6822,6 +6858,11 @@
   threadBatchDownloadBtn.addEventListener('click', async function(e) {
     const force = !!(e && (e.shiftKey || e.altKey));
     await runBatchFromWholeThread(threadBatchDownloadBtn, { force }, e);
+  });
+
+  gigaDownloadBtn.addEventListener('click', async function(e) {
+    const force = !!(e && (e.shiftKey || e.altKey));
+    await runBatchFromWholeThread(gigaDownloadBtn, { force, forceGiga: true }, e);
   });
 
   async function runVipergirlsKeep2ShareBatch(triggerBtn, clickEvent) {
