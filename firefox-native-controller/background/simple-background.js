@@ -12,8 +12,9 @@ const HTTP_TIMEOUT_MS = 6000;
 const PROBE_FAILURES_BEFORE_DISCONNECT = 2; // Reduced so it detects faster
 const PROBE_DISCONNECT_GRACE_MS = 12000; // Drop after 12s of no heartbeat
 const SOCKET_ENABLED = false;
-const BACKGROUND_BUILD = 'simple-background-v5-context-menu-restore';
+const BACKGROUND_BUILD = 'simple-background-v6-hub-health-fallback';
 const HUB_URL = 'http://localhost:35730';
+const HUB_URL_FALLBACK = 'http://127.0.0.1:35730';
 
 
 console.log(`[WEBDL] background loaded ${BACKGROUND_BUILD} socket=${SOCKET_ENABLED ? 'on' : 'off-http-only'}`);
@@ -41,6 +42,46 @@ function getServerCandidates() {
     out.push(b.replace(/\/+$/, ''));
   }
   return out;
+}
+
+function getHubCandidates() {
+  const seen = new Set();
+  const out = [];
+  for (const base of [HUB_URL, HUB_URL_FALLBACK]) {
+    const b = String(base || '').trim();
+    if (!b || seen.has(b)) continue;
+    seen.add(b);
+    out.push(b.replace(/\/+$/, ''));
+  }
+  return out;
+}
+
+async function getHubJson(endpoint) {
+  const cleanEndpoint = String(endpoint || '').replace(/^\/+/, '');
+  let lastError = null;
+  for (const base of getHubCandidates()) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
+      const response = await fetch(`${base}/${cleanEndpoint}`, {
+        method: 'GET',
+        mode: 'cors',
+        headers: { 'Accept': 'application/json' },
+        signal: controller.signal,
+        cache: 'no-store'
+      });
+      clearTimeout(timeout);
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        lastError = data.error || `Hub fout: ${response.status}`;
+        continue;
+      }
+      return data;
+    } catch (e) {
+      lastError = e && e.message ? e.message : String(e);
+    }
+  }
+  return { success: false, error: lastError || 'Hub niet bereikbaar' };
 }
 
 async function postJson(endpoint, body) {
@@ -75,10 +116,12 @@ async function postHubJob(url, metadata = {}) {
   if (!url || typeof url !== 'string') {
     return { success: false, error: 'Geen URL om naar WebDL-Hub te sturen' };
   }
+  let lastError = null;
+  for (const base of getHubCandidates()) {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
-    const response = await fetch(`${HUB_URL}/api/jobs`, {
+    const response = await fetch(`${base}/api/jobs`, {
       method: 'POST',
       mode: 'cors',
       headers: { 'Content-Type': 'application/json' },
@@ -96,7 +139,8 @@ async function postHubJob(url, metadata = {}) {
     clearTimeout(timeout);
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      return { success: false, error: data.error || `Hub fout: HTTP ${response.status}` };
+      lastError = data.error || `Hub fout: HTTP ${response.status}`;
+      continue;
     }
     return {
       success: true,
@@ -117,8 +161,10 @@ async function postHubJob(url, metadata = {}) {
       raw: data,
     };
   } catch (e) {
-    return { success: false, error: e && e.message ? e.message : String(e) };
+    lastError = e && e.message ? e.message : String(e);
   }
+  }
+  return { success: false, error: lastError || 'Hub niet bereikbaar' };
 }
 
 async function postHubBatch(urls, metadata = {}, force = false) {
@@ -126,10 +172,12 @@ async function postHubBatch(urls, metadata = {}, force = false) {
     ? urls.map((url) => String(url || '').trim()).filter(Boolean)
     : [];
   if (!cleanUrls.length) return { success: false, error: 'Geen URLs om naar WebDL-Hub te sturen' };
+  let lastError = null;
+  for (const base of getHubCandidates()) {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), Math.max(HTTP_TIMEOUT_MS, 60000));
-    const response = await fetch(`${HUB_URL}/api/jobs/batch`, {
+    const response = await fetch(`${base}/api/jobs/batch`, {
       method: 'POST',
       mode: 'cors',
       headers: { 'Content-Type': 'application/json' },
@@ -146,7 +194,8 @@ async function postHubBatch(urls, metadata = {}, force = false) {
     clearTimeout(timeout);
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      return { success: false, error: data.error || `Hub batch fout: HTTP ${response.status}` };
+      lastError = data.error || `Hub batch fout: HTTP ${response.status}`;
+      continue;
     }
     return {
       success: true,
@@ -167,8 +216,10 @@ async function postHubBatch(urls, metadata = {}, force = false) {
       raw: data,
     };
   } catch (e) {
-    return { success: false, error: e && e.message ? e.message : String(e) };
+    lastError = e && e.message ? e.message : String(e);
   }
+  }
+  return { success: false, error: lastError || 'Hub niet bereikbaar' };
 }
 
 async function getJson(endpoint) {
@@ -615,6 +666,23 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     sendResponse({ isConnected, isRecording, activeRecordingUrls, activeRecordingKeys, activeDownloads });
     return false;
+  }
+
+  if (action === 'getHubStatus') {
+    getHubJson('api/health')
+      .then((health) => {
+        if (health && health.ok === true) {
+          sendResponse({ success: true, ok: true, db: health.db || null });
+          return;
+        }
+        sendResponse({
+          success: false,
+          ok: false,
+          error: health && health.error ? health.error : 'Hub health endpoint niet bereikbaar'
+        });
+      })
+      .catch((error) => sendResponse({ success: false, ok: false, error: error && error.message ? error.message : String(error) }));
+    return true;
   }
 
   if (action === 'queueDownload') {

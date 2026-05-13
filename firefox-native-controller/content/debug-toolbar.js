@@ -5,7 +5,7 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-thread-scan-progress';
+  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-gigabatch-guard';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
@@ -13,6 +13,9 @@
   const HUB_FALLBACK = 'http://127.0.0.1:35730';
   const REQUEST_TIMEOUT_MS = 15000;
   const WEBDL_UNLIMITED = Number.POSITIVE_INFINITY;
+  const GIGA_SCAN_MEDIA_THRESHOLD = 2000;
+  const GIGA_SCAN_THREAD_PAGE_THRESHOLD = 250;
+  const GIGA_SCAN_THREAD_THRESHOLD = 500;
 
   function parseScanLimit(value, fallback = WEBDL_UNLIMITED) {
     const raw = String(value == null ? '' : value).trim().toLowerCase();
@@ -23,6 +26,16 @@
 
   function formatScanLimit(value) {
     return Number.isFinite(Number(value)) ? String(Number(value)) : 'alles';
+  }
+
+  function isGigaScanProgress(progress) {
+    const p = progress && typeof progress === 'object' ? progress : {};
+    const items = Number(p.items) || 0;
+    const threadPages = Number(p.threadPages || p.pages) || 0;
+    const threads = Number(p.threads) || 0;
+    return items >= GIGA_SCAN_MEDIA_THRESHOLD
+      || threadPages >= GIGA_SCAN_THREAD_PAGE_THRESHOLD
+      || (threads >= GIGA_SCAN_THREAD_THRESHOLD && items >= 200);
   }
 
   function normalizeTranslatedProxyUrl(rawUrl) {
@@ -1063,6 +1076,18 @@
     const delayMs = Math.max(0, Math.min(3000, parseInt(opt.delayMs || '250', 10) || 250));
     const timeoutMs = Math.max(3000, Math.min(60000, parseInt(opt.timeoutMs || '20000', 10) || 20000));
     const onProgress = typeof opt.onProgress === 'function' ? opt.onProgress : null;
+    const shouldStop = typeof opt.shouldStop === 'function' ? opt.shouldStop : null;
+    let stoppedByGiga = false;
+    const report = (progress) => {
+      try { if (onProgress) onProgress(progress); } catch (e) {}
+      try {
+        if (shouldStop && shouldStop(progress)) {
+          stoppedByGiga = true;
+          return true;
+        }
+      } catch (e) {}
+      return false;
+    };
 
     const threadLinks = [];
     const seenThreads = new Set();
@@ -1077,7 +1102,7 @@
     let forumPages = 0;
     while (forumUrl && forumPages < maxForumPages && threadLinks.length < maxThreads) {
       forumPages++;
-      try { if (onProgress) onProgress({ phase: 'forum-load', forumPages, threads: threadLinks.length, items: 0, url: forumUrl }); } catch (e) {}
+      if (report({ phase: 'forum-load', forumPages, threads: threadLinks.length, items: 0, url: forumUrl })) break;
       let doc = null;
       try {
         doc = await loadFootFetishForumDocument(forumUrl, {
@@ -1088,7 +1113,7 @@
         break;
       }
       if (!doc) {
-        try { if (onProgress) onProgress({ phase: 'forum-blocked', forumPages, threads: threadLinks.length, items: 0, url: forumUrl }); } catch (e) {}
+        report({ phase: 'forum-blocked', forumPages, threads: threadLinks.length, items: 0, url: forumUrl });
         break;
       }
 
@@ -1110,20 +1135,16 @@
           threadLinks.push(link);
         } catch (e) {}
       }
-      try {
-        if (onProgress) {
-          const lastDiag = diagnostics.length ? diagnostics[diagnostics.length - 1] : null;
-          onProgress({
-            phase: 'forum-index',
-            forumPages,
-            links: Array.isArray(links) ? links.length : 0,
-            refs: lastDiag ? lastDiag.refs : 0,
-            threads: threadLinks.length,
-            items: 0,
-            url: forumUrl
-          });
-        }
-      } catch (e) {}
+      const lastDiag = diagnostics.length ? diagnostics[diagnostics.length - 1] : null;
+      if (report({
+        phase: 'forum-index',
+        forumPages,
+        links: Array.isArray(links) ? links.length : 0,
+        refs: lastDiag ? lastDiag.refs : 0,
+        threads: threadLinks.length,
+        items: 0,
+        url: forumUrl
+      })) break;
 
       const nextUrl = findNextFootFetishForumForumPageUrl(doc, forumUrl);
       if (!nextUrl || nextUrl === forumUrl) break;
@@ -1138,10 +1159,11 @@
     let threadPages = 0;
     let threadIndex = 0;
     for (const threadUrl of threadLinks) {
+      if (stoppedByGiga) break;
       if (out.length >= maxItems) break;
       threadIndex++;
       const remaining = Math.max(0, maxItems - out.length);
-      try { if (onProgress) onProgress({ phase: 'thread-start', threadIndex, threads: threadLinks.length, threadPages, items: out.length, url: threadUrl }); } catch (e) {}
+      if (report({ phase: 'thread-start', threadIndex, threads: threadLinks.length, threadPages, items: out.length, url: threadUrl })) break;
       const res = await fetchFootFetishForumThreadCandidates(threadUrl, {
         maxPages: maxThreadPages,
         maxItems: remaining,
@@ -1149,8 +1171,7 @@
         timeoutMs,
         onProgress: (p) => {
           try {
-            if (!onProgress) return;
-            onProgress({
+            report({
               ...(p || {}),
               phase: (p && p.phase) || 'thread-page',
               threadIndex,
@@ -1161,6 +1182,7 @@
             });
           } catch (e) {}
         },
+        shouldStop: () => stoppedByGiga,
       });
       threadPages += Number(res && res.pages) || 0;
       for (const c of (res && Array.isArray(res.candidates) ? res.candidates : [])) {
@@ -1171,13 +1193,14 @@
         out.push(c);
         if (out.length >= maxItems) break;
       }
-      try { if (onProgress) onProgress({ phase: 'thread-done', threadIndex, threads: threadLinks.length, threadPages, items: out.length, url: threadUrl }); } catch (e) {}
+      if (res && res.stoppedByGiga) stoppedByGiga = true;
+      if (report({ phase: 'thread-done', threadIndex, threads: threadLinks.length, threadPages, items: out.length, url: threadUrl })) break;
       if (delayMs > 0) {
         try { await delay(delayMs); } catch (e) {}
       }
     }
 
-    return { candidates: out, threadLinks: threadLinks.slice(), pages: threadPages, forumPages, threads: threadLinks.length, diagnostics };
+    return { candidates: out, threadLinks: threadLinks.slice(), pages: threadPages, forumPages, threads: threadLinks.length, diagnostics, stoppedByGiga };
   }
 
   async function fetchFootFetishForumThreadCandidates(startUrl, options = {}) {
@@ -1187,6 +1210,18 @@
     const delayMs = Math.max(0, Math.min(3000, parseInt(opt.delayMs || '250', 10) || 250));
     const timeoutMs = Math.max(3000, Math.min(60000, parseInt(opt.timeoutMs || '20000', 10) || 20000));
     const onProgress = typeof opt.onProgress === 'function' ? opt.onProgress : null;
+    const shouldStop = typeof opt.shouldStop === 'function' ? opt.shouldStop : null;
+    let stoppedByGiga = false;
+    const report = (progress) => {
+      try { if (onProgress) onProgress(progress); } catch (e) {}
+      try {
+        if (shouldStop && shouldStop(progress)) {
+          stoppedByGiga = true;
+          return true;
+        }
+      } catch (e) {}
+      return false;
+    };
 
     const seen = new Set();
     const out = [];
@@ -1203,7 +1238,7 @@
     let pages = 0;
     while (url && pages < maxPages && out.length < maxItems) {
       pages++;
-      try { if (onProgress) onProgress({ phase: 'thread-load', pages, items: out.length, url }); } catch (e) {}
+      if (report({ phase: 'thread-load', pages, items: out.length, url })) break;
       let doc = null;
       try {
         doc = await loadFootFetishForumDocument(url, {
@@ -1214,7 +1249,7 @@
         break;
       }
       if (!doc) {
-        try { if (onProgress) onProgress({ phase: 'thread-blocked', pages, items: out.length, url }); } catch (e) {}
+        report({ phase: 'thread-blocked', pages, items: out.length, url });
         break;
       }
 
@@ -1229,7 +1264,7 @@
         out.push({ url: s, el: c.el || null, kind: c.kind || '', sourceContext });
         if (out.length >= maxItems) break;
       }
-      try { if (onProgress) onProgress({ phase: 'thread-page', pages, pageItems: Array.isArray(candidates) ? candidates.length : 0, items: out.length, url }); } catch (e) {}
+      if (report({ phase: 'thread-page', pages, pageItems: Array.isArray(candidates) ? candidates.length : 0, items: out.length, url })) break;
 
       const nextUrl = findNextFootFetishForumThreadPageUrl(doc, url);
       if (!nextUrl || nextUrl === url) break;
@@ -1240,7 +1275,7 @@
       }
     }
 
-    return { candidates: out, pages };
+    return { candidates: out, pages, stoppedByGiga };
   }
 
   function getAmateurVoyeurForumPageInfo(inputUrl) {
@@ -3752,11 +3787,15 @@
         const sourceContexts = {};
         for (const r of selectedRows) {
           try {
-            const key = normalizeUrl(r && r.c && r.c.url ? r.c.url : '');
+            const rawKey = String(r && r.c && r.c.url ? r.c.url : '').trim();
+            const key = normalizeUrl(rawKey);
             const hint = getDirectHintForCandidate(r && r.c ? r.c : null);
             if (key && hint && hint !== key) directHints[key] = hint;
             const ctx = r && r.c && r.c.sourceContext && typeof r.c.sourceContext === 'object' ? r.c.sourceContext : null;
-            if (key && ctx && ctx.url) sourceContexts[key] = ctx;
+            if (ctx && ctx.url) {
+              if (key) sourceContexts[key] = ctx;
+              if (rawKey && rawKey !== key) sourceContexts[rawKey] = ctx;
+            }
           } catch (e) {}
         }
         finish({ urls: selected, directHints, sourceContexts });
@@ -4785,13 +4824,17 @@
   }
 
   async function ensureHubReachable(showError = false) {
+    const bg = await sendBackgroundAction('getHubStatus', {}, 7000);
+    if (bg && bg.success && bg.ok === true) return true;
     try {
       const health = await getHubJson('api/health', 5000);
       if (health && health.ok === true) return true;
       if (health && health.success !== false && health.db === 'up') return true;
       throw new Error((health && health.error) ? health.error : 'Hub health endpoint niet bereikbaar');
     } catch (e) {
-      const msg = e && e.message ? e.message : String(e);
+      const directMsg = e && e.message ? e.message : String(e);
+      const bgMsg = bg && bg.error ? String(bg.error) : '';
+      const msg = bgMsg && directMsg && bgMsg !== directMsg ? `${directMsg}; background: ${bgMsg}` : (directMsg || bgMsg);
       if (showError) {
         showNotification(`WebDL-Hub niet bereikbaar: ${msg}`, true);
         addLog(`Hub-check mislukt: ${msg}`, 'error');
@@ -6138,6 +6181,42 @@
     const meta = scrapeMetadata();
     const oldLabel = String((triggerBtn && triggerBtn.textContent) || '').trim();
     let lastScanProgressAt = 0;
+    let gigaScanDecision = null;
+    const shouldStopForGigaBatch = (progress) => {
+      try {
+        if (gigaScanDecision !== null) return gigaScanDecision === 'stop';
+        if (!isGigaScanProgress(progress)) return false;
+        const p = progress && typeof progress === 'object' ? progress : {};
+        const items = Number(p.items) || 0;
+        const threadIndex = Number(p.threadIndex) || 0;
+        const threads = Number(p.threads) || 0;
+        const threadPages = Number(p.threadPages || p.pages) || 0;
+        const msg = [
+          'Deze scan is een giga batch.',
+          '',
+          `${items} media gevonden`,
+          `${threadIndex || '?'}${threads ? `/${threads}` : ''} threads gescand`,
+          `${threadPages} threadpagina's gescand`,
+          '',
+          'Wil je nu stoppen met scannen en de gevonden media als gigabatch opnemen?',
+          '',
+          'OK = nu opnemen',
+          'Annuleren = verder scannen'
+        ].join('\n');
+        const stopNow = window.confirm(msg);
+        gigaScanDecision = stopNow ? 'stop' : 'continue';
+        if (stopNow) {
+          try { addLog(`Gigabatch bevestigd: scan stopt bij ${items} media, ${threadPages} pagina's`); } catch (e) {}
+          try { showNotification(`Gigabatch: scan gestopt bij ${items} media`, false); } catch (e) {}
+        } else {
+          try { addLog(`Gigabatch waarschuwing genegeerd: doorgaan met scan`); } catch (e) {}
+          try { showNotification('Gigabatch: scan gaat verder', false); } catch (e) {}
+        }
+        return stopNow;
+      } catch (e) {
+        return false;
+      }
+    };
     const updateWholeThreadProgress = (progress) => {
       try {
         const p = progress && typeof progress === 'object' ? progress : {};
@@ -6275,8 +6354,8 @@
         : (isVipergirlsThread
           ? await fetchVipergirlsMixedThreadCandidates(startUrl, { maxPages, maxItems })
           : (isForumPage
-          ? await fetchFootFetishForumForumCandidates(startUrl, { maxForumPages, maxThreadPages: maxPages, maxItems, onProgress: updateWholeThreadProgress })
-          : await fetchFootFetishForumThreadCandidates(startUrl, { maxPages, maxItems, onProgress: updateWholeThreadProgress })));
+          ? await fetchFootFetishForumForumCandidates(startUrl, { maxForumPages, maxThreadPages: maxPages, maxItems, onProgress: updateWholeThreadProgress, shouldStop: shouldStopForGigaBatch })
+          : await fetchFootFetishForumThreadCandidates(startUrl, { maxPages, maxItems, onProgress: updateWholeThreadProgress, shouldStop: shouldStopForGigaBatch })));
       const candidates = uniqueCandidates(res && res.candidates ? res.candidates : []);
 
       try {
@@ -6296,9 +6375,12 @@
 
       try {
         const extra = isAnyForumPage ? ` | forum=${res && res.forumPages ? res.forumPages : '?'} | threads=${res && res.threads ? res.threads : '?'}` : '';
-        addLog(`${isAnyForumPage ? 'Forum' : 'Thread'} pages: ${res && Number.isFinite(Number(res.pages)) ? res.pages : '?'}${extra} | items: ${candidates.length}`);
+        addLog(`${isAnyForumPage ? 'Forum' : 'Thread'} pages: ${res && Number.isFinite(Number(res.pages)) ? res.pages : '?'}${extra} | items: ${candidates.length}${res && res.stoppedByGiga ? ' | gigabatch stop' : ''}`);
       } catch (e) {}
-      try { showNotification(`${isAnyForumPage ? 'Forum' : 'Thread'}: ${candidates.length} items (${res && Number.isFinite(Number(res.pages)) ? res.pages : '?'} threadpagina's)`, false); } catch (e) {}
+      try {
+        const prefix = res && res.stoppedByGiga ? 'Gigabatch' : (isAnyForumPage ? 'Forum' : 'Thread');
+        showNotification(`${prefix}: ${candidates.length} items (${res && Number.isFinite(Number(res.pages)) ? res.pages : '?'} threadpagina's)`, false);
+      } catch (e) {}
 
       let selected = null;
       let selectedDirectHints = null;

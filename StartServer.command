@@ -105,6 +105,37 @@ function ensure_postgres_running() {
     exit 1
 }
 
+function url_ok() {
+    local URL="$1"
+    curl -fsS --max-time 3 "$URL" >/dev/null 2>&1
+}
+
+function show_running_status_and_exit() {
+    echo "WEBDL draait al; geen tweede server starten."
+    echo ""
+    echo "Status:"
+    echo "  simple-server: http://localhost:35729/health"
+    echo "  webdl-hub    : http://localhost:35730/api/health"
+    if url_ok "http://localhost:35731/"; then
+        echo "  gallery      : http://localhost:35731/"
+    fi
+    echo ""
+    echo "Open:"
+    echo "  Dashboard: http://localhost:35729/dashboard"
+    echo "  Hub      : http://localhost:35730/"
+    echo ""
+    echo "Dit venster mag dicht. De services draaien via LaunchAgent."
+    echo "Wil je echt handmatig starten, stop dan eerst com.webdl.simple-server en com.webdl.hub."
+    echo ""
+    echo "Druk op een toets om dit venster te sluiten"
+    read -n 1
+    exit 0
+}
+
+if url_ok "http://localhost:35729/health" && url_ok "http://localhost:35730/api/health"; then
+    show_running_status_and_exit
+fi
+
 check_port_and_kill 35729
 check_port_and_kill 35730
 check_port_and_kill 35731

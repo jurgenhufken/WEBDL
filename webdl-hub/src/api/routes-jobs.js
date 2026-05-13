@@ -294,6 +294,39 @@ function uniqueUrls(values) {
   return out;
 }
 
+function sourceContextLookupKey(value) {
+  try {
+    const normalized = normalizeTranslatedProxyUrl(value);
+    const u = new URL(String(normalized || '').trim());
+    u.hash = '';
+    return u.toString();
+  } catch (_) {
+    return String(value || '').trim();
+  }
+}
+
+function pickSourceContextForUrl(options, url) {
+  const map = options && options.webdl_source_contexts && typeof options.webdl_source_contexts === 'object'
+    ? options.webdl_source_contexts
+    : null;
+  const fallback = options && options.sourceContext && typeof options.sourceContext === 'object'
+    ? options.sourceContext
+    : null;
+  if (!map) return fallback;
+
+  const raw = String(url || '').trim();
+  const normalized = sourceContextLookupKey(raw);
+  for (const key of [raw, normalized]) {
+    if (key && map[key] && typeof map[key] === 'object') return map[key];
+  }
+
+  for (const [key, ctx] of Object.entries(map)) {
+    if (!ctx || typeof ctx !== 'object') continue;
+    if (sourceContextLookupKey(key) === normalized) return ctx;
+  }
+  return fallback;
+}
+
 const K2S_AUTH_KEYS = [
   'WEBDL_KEEP2SHARE_AUTH_TOKEN',
   'KEEP2SHARE_AUTH_TOKEN',
@@ -353,7 +386,7 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
   const r = express.Router();
 
   async function enqueueOneUrl({ url, hint = null, options = {}, maxAttempts = 3, force = false, requestedPriority = null, lockHeld = false }) {
-    const sourceContext = options.webdl_source_contexts?.[url] || options.sourceContext || null;
+    const sourceContext = pickSourceContextForUrl(options, url);
     const contextUrl = sourceContext?.url || options.contextUrl || options.pageUrl || '';
     const sourcePlatform = String(sourceContext?.platform || options.platform || '').toLowerCase();
     const vipergirlsWholeThread = options.vipergirlsWholeThread !== false;

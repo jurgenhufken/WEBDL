@@ -157,22 +157,31 @@ async function delegateToSlave(pool, { url, platform, metadata = {}, priority = 
         ? metadata.source_context
         : null)
     : null;
+  const originalPlatform = String(metadata.original_platform || metadata.source_site || metadata.original_site || '').trim().toLowerCase();
+  const originalChannel = String(metadata.original_channel || '').trim();
+  const originalTitle = String(metadata.original_title || '').trim();
   const sourceUrl = sourceContext && sourceContext.url ? String(sourceContext.url) : url;
-  const storagePlatform = platform;
-  const storageChannel = sourceContext && sourceContext.channel ? String(sourceContext.channel) : 'unknown';
-  const storageTitle = sourceContext && sourceContext.title ? String(sourceContext.title) : 'untitled';
+  const sourceSite = sourceContext && sourceContext.url ? normalizeSourceSite(sourceContext) : '';
+  const storagePlatform = sourceSite || originalPlatform || platform;
+  const storageChannel = sourceContext && sourceContext.channel ? String(sourceContext.channel) : originalChannel || 'unknown';
+  const storageTitle = sourceContext && sourceContext.title ? String(sourceContext.title) : originalTitle || 'untitled';
   const storedMetadata = {
     ...metadata,
     origin: 'webdl-hub',
   };
   if (sourceContext && sourceContext.url) {
-    const sourceSite = normalizeSourceSite(sourceContext);
     storedMetadata.webdl_pin_context = true;
     storedMetadata.origin_thread = sourceContext;
     storedMetadata.source_context = sourceContext;
     storedMetadata.source_site = sourceSite || '';
     storedMetadata.source_sites = Array.from(new Set([sourceSite, ...(Array.isArray(metadata.source_sites) ? metadata.source_sites : [])].filter(Boolean)));
     storedMetadata.source_graph = buildSourceGraph({ mediaUrl: url, storagePlatform, sourceContext });
+    storedMetadata.webdl_media_url = url;
+    storedMetadata.webdl_detected_platform = platform;
+  } else if (originalPlatform && originalPlatform !== platform) {
+    storedMetadata.webdl_pin_context = true;
+    storedMetadata.source_site = originalPlatform;
+    storedMetadata.source_sites = Array.from(new Set([originalPlatform, ...(Array.isArray(metadata.source_sites) ? metadata.source_sites : [])].filter(Boolean)));
     storedMetadata.webdl_media_url = url;
     storedMetadata.webdl_detected_platform = platform;
   }
