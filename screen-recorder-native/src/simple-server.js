@@ -228,6 +228,22 @@ function isImageUrlLike(input) {
   }
 }
 
+function isImageHostPageUrlLike(input) {
+  try {
+    const u = new URL(String(input || ''));
+    const host = String(u.hostname || '').toLowerCase().replace(/^www\./, '');
+    const p = String(u.pathname || '').toLowerCase();
+    if (/^(?:imx\.to|vipr\.im|pixhost\.to|postimg\.cc|postimages\.org|imagebam\.com|imgbox\.com|imagevenue\.com|imgchest\.com|imgvb\.com|imagetwist\.com|turboimagehost\.com|img\.kiwi|ibb\.co|jpg\.(?:church|fish|pet|fishing))$/.test(host)) {
+      return true;
+    }
+    if (host.endsWith('.imx.to') || host.endsWith('.vipr.im') || host.endsWith('.pixhost.to') || host.endsWith('.imagebam.com') || host.endsWith('.imgbox.com') || host.endsWith('.imagevenue.com') || host.endsWith('.imgchest.com')) {
+      return true;
+    }
+    if (host === 'flc.nyc3.digitaloceanspaces.com' && /^\/data\/(?:attachments|video)\//i.test(p)) return true;
+  } catch (e) {}
+  return false;
+}
+
 // Auto-import settings en Startup rehydrate settings worden nu beheerd in src/config.js.
 // De variabelen zijn bovenaan via destructuring beschikbaar.
 
@@ -5237,7 +5253,7 @@ function detectLane(platform, url = '') {
   const u = String(url || '').toLowerCase();
 
   // Images are cheap direct transfers and must never sit behind video jobs.
-  if (isImageUrlLike(u)) return 'light';
+  if (isImageUrlLike(u) || isImageHostPageUrlLike(u)) return 'light';
 
   // If this is a live stream or explicitly a video, definitely heavy
   if (u.includes('is_live=true') || u.includes('/live/') || u.includes('tiktok.com/@') && !u.includes('/photo/')) {
@@ -5246,7 +5262,8 @@ function detectLane(platform, url = '') {
 
   // Only pure image/direct link platforms get the fast lane
   const lightPlatforms = [
-    'footfetishforum', 'forum-area', 'imagetwist', 'pixhost', 'postimg', 'bunkr', 'jpg', 'aznudefeet', 'pornpics',
+    'footfetishforum', 'forum-area', 'imagetwist', 'imagebam', 'imgbox', 'imagevenue', 'imgchest', 'imgvb',
+    'imx', 'vipr', 'turboimagehost', 'imgkiwi', 'pixhost', 'postimg', 'bunkr', 'jpg', 'aznudefeet', 'pornpics',
     'kinky', 'wikifeet', 'wikifeetx', 'elitebabes', 'erome', 'keep2share'
   ];
 
@@ -9147,11 +9164,13 @@ expressApp.get('/status', async (req, res) => {
     queues: {
       heavy: { active: heavyActive, limit: heavyLimit, queued: queuedHeavy.length },
       light: { active: lightActive, limit: lightLimit, queued: queuedLight.length },
+      fastlane: { active: lightActive, limit: lightLimit, queued: queuedLight.length },
       batch: { active: activeLaneCount('batch'), limit: BATCH_DOWNLOAD_CONCURRENCY, queued: queuedBatch.length }
     },
     queue_ids: {
       heavy: queuedHeavy.slice(0, 80),
-      light: queuedLight.slice(0, 80)
+      light: queuedLight.slice(0, 80),
+      fastlane: queuedLight.slice(0, 80)
     },
     processes: {
       active: activeProcesses.size,
@@ -9207,10 +9226,13 @@ expressApp.get('/api/settings/lanes', (req, res) => {
     success: true,
     heavy: HEAVY_DOWNLOAD_CONCURRENCY,
     light: LIGHT_DOWNLOAD_CONCURRENCY,
+    fastlane: LIGHT_DOWNLOAD_CONCURRENCY,
     active_heavy: activeLaneCount('heavy'),
     active_light: activeLaneCount('light'),
+    active_fastlane: activeLaneCount('light'),
     queued_heavy: queuedHeavy.length,
     queued_light: queuedLight.length,
+    queued_fastlane: queuedLight.length,
   });
 });
 
