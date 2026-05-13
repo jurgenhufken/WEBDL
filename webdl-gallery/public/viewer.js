@@ -157,6 +157,26 @@
     return String(it.source_post_num || it.source_post_id || it.source_post_url || it.source_post_title || '').trim().toLowerCase();
   }
 
+  function itemMetadata(it) {
+    if (!it || !it.metadata) return null;
+    if (it._parsedMetadata !== undefined) return it._parsedMetadata;
+    try {
+      it._parsedMetadata = typeof it.metadata === 'string' ? JSON.parse(it.metadata) : it.metadata;
+    } catch (_) {
+      it._parsedMetadata = null;
+    }
+    return it._parsedMetadata;
+  }
+
+  function sourcePlatformGroupKey(it, platform) {
+    const meta = itemMetadata(it);
+    if (platform === 'youtube') {
+      const channelKey = String(meta?.youtube_channel_id || meta?.youtube_channel_url || '').trim().toLowerCase();
+      if (channelKey) return ['youtube-channel', channelKey].join('\u0001');
+    }
+    return '';
+  }
+
   function sourceModelTitleFromText(value) {
     let title = String(value || '').trim();
     if (!title) return '';
@@ -201,23 +221,23 @@
 
   function sourceNavigationModelKey(it) {
     if (!it) return '';
-    const postKey = sourcePostKey(it);
-    if (postKey) return postKey;
+    const platform = String(it.platform || '').trim().toLowerCase();
     const title = String(it.source_model_title || '').trim();
     const key = String(it.source_model_key || '').trim().toLowerCase();
     if (!title || !key) return '';
+    if (platform === 'youtube') return '';
     const filename = String(it.filename || '').trim();
     const displayTitle = String(it.title || '').trim();
     const derivedFromFile = title === sourceModelTitleFromText(filename) || title === sourceModelTitleFromText(displayTitle);
-    const hasReadableName = /[a-z]{2,}/i.test(title);
-    const mostlyNumericOrHash = /^[0-9a-f._ -]{6,}$/i.test(title);
-    if (derivedFromFile && (!hasReadableName || mostlyNumericOrHash)) return '';
+    if (derivedFromFile) return '';
     return key;
   }
 
   function sourceNavigationGroupKey(it) {
     if (!it) return '';
     const platform = String(it.platform || '').trim().toLowerCase();
+    const platformGroupKey = sourcePlatformGroupKey(it, platform);
+    if (platformGroupKey) return ['platform-group', platform, platformGroupKey].join('\u0001');
     const threadKey = sourceThreadKey(it);
     const modelKey = sourceNavigationModelKey(it);
     if (modelKey) return ['model', platform, threadKey || String(it.channel || '').trim().toLowerCase(), modelKey].join('\u0001');
