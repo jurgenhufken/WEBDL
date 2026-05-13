@@ -1,6 +1,7 @@
 // src/adapters/gallerydl.js — gallery-dl adapter (imgur, twitter, pixiv, danbooru, etc.).
 'use strict';
 
+const fs = require('node:fs');
 const { defineAdapter } = require('./base');
 const { collectOutputsRecursive } = require('./_fs');
 
@@ -14,6 +15,14 @@ const HOSTS = [
   'pinterest.com', 'bsky.app', 'twitter.com', 'x.com', 'mastodon.social',
   'instagram.com', 'vipergirls.to', 'viper.to',
 ];
+
+function galleryDlCommand() {
+  const configured = String(process.env.WEBDL_GALLERYDL || '').trim();
+  if (configured) return configured;
+  const userLocal = '/Users/jurgen/.local/bin/gallery-dl';
+  if (fs.existsSync(userLocal)) return userLocal;
+  return 'gallery-dl';
+}
 
 function hostMatches(hostname) {
   const h = hostname.toLowerCase();
@@ -81,7 +90,7 @@ function plan(url, opts = {}) {
   }
   args.push(targetUrl);
   return {
-    cmd: 'gallery-dl',
+    cmd: galleryDlCommand(),
     args,
     cwd: opts.cwd,
     env: {},
