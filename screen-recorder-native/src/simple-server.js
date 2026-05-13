@@ -11347,13 +11347,15 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
           metadata && typeof metadata === 'object' && metadata.url && metadata.url !== url ? metadata.url :
             ''
       ).trim();
-      const resolved = await resolveHtmlWrapperToDirectMediaUrl(url, 15000, wrapperReferer);
-      if (resolved && resolved !== url) {
-        try { await updateDownloadUrl.run(resolved, downloadId); } catch (e) { }
+      const resolved = await resolveHtmlWrapperToDirectMedia(url, 15000, wrapperReferer);
+      const resolvedUrl = resolvedMediaUrl(resolved);
+      if (resolvedUrl && resolvedUrl !== url) {
+        try { await updateDownloadUrl.run(resolvedUrl, downloadId); } catch (e) { }
         const nextMeta = metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? { ...metadata } : {};
         if (!nextMeta.webdl_input_url) nextMeta.webdl_input_url = url;
-        nextMeta.webdl_resolved_url = resolved;
-        return startDirectFileDownload(downloadId, resolved, platform, channel, title, nextMeta);
+        nextMeta.webdl_resolved_url = resolvedUrl;
+        const metaWithExternal = mergeExternalMetadataIntoMetadata(nextMeta, resolvedExternalMetadata(resolved));
+        return startDirectFileDownload(downloadId, resolvedUrl, platform, channel, title, metaWithExternal);
       }
     } catch (e) { }
     return startDirectFileDownload(downloadId, url, platform, channel, title, metadata);
@@ -11785,6 +11787,235 @@ function normalizeHtmlExtractedUrl(raw, baseUrl) {
   }
 }
 
+function decodeHtmlText(raw) {
+  try {
+    let out = htmlDecodeAttribute(decodeHtmlEscapedUrlText(raw));
+    out = out.replace(/&#(\d+);/g, (_m, code) => {
+      const n = Number(code);
+      return Number.isFinite(n) && n > 0 ? String.fromCharCode(n) : '';
+    });
+    out = out.replace(/&#x([0-9a-f]+);/ig, (_m, code) => {
+      const n = parseInt(code, 16);
+      return Number.isFinite(n) && n > 0 ? String.fromCharCode(n) : '';
+    });
+    return out;
+  } catch (e) {
+    return String(raw || '');
+  }
+}
+
+function cleanExternalMetadataText(raw, maxLen = 300) {
+  try {
+    let s = decodeHtmlText(raw)
+      .replace(/<script\b[\s\S]*?<\/script>/ig, ' ')
+      .replace(/<style\b[\s\S]*?<\/style>/ig, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    s = s
+      .replace(/\s+[-|:]\s+(?:IMX\.to|VIPR\.im|ImageBam|Pixhost|Imgbox|ImageVenue|Postimages|ImgBB|ImgChest)\s*$/i, '')
+      .replace(/^(?:image|view image|continue to your image)\s*[-:|]\s*/i, '')
+      .trim();
+    if (s.length > maxLen) s = `${s.slice(0, Math.max(0, maxLen - 1)).trim()}...`;
+    return s;
+  } catch (e) {
+    return '';
+  }
+}
+
+function extractHtmlAttribute(tag, attrName) {
+  try {
+    const re = new RegExp(`${attrName}\\s*=\\s*(["'])([\\s\\S]*?)\\1`, 'i');
+    const m = String(tag || '').match(re);
+    return m && m[2] ? cleanExternalMetadataText(m[2], 1000) : '';
+  } catch (e) {
+    return '';
+  }
+}
+
+function firstMetaContent(html, names) {
+  try {
+    const wanted = new Set((names || []).map((v) => String(v || '').toLowerCase()));
+    for (const m of String(html || '').matchAll(/<meta\b[^>]*>/ig)) {
+      const tag = m && m[0] ? m[0] : '';
+      const key = (extractHtmlAttribute(tag, 'property') || extractHtmlAttribute(tag, 'name')).toLowerCase();
+      if (!key || !wanted.has(key)) continue;
+      const content = extractHtmlAttribute(tag, 'content');
+      if (content) return content;
+    }
+    return '';
+  } catch (e) {
+    return '';
+  }
+}
+
+function firstTagText(html, tagName) {
+  try {
+    const re = new RegExp(`<${tagName}\\b[^>]*>([\\s\\S]*?)<\\/${tagName}>`, 'i');
+    const m = String(html || '').match(re);
+    return m && m[1] ? cleanExternalMetadataText(m[1]) : '';
+  } catch (e) {
+    return '';
+  }
+}
+
+function firstImageAttributeText(html, attrName) {
+  try {
+    for (const m of String(html || '').matchAll(/<img\b[^>]*>/ig)) {
+      const value = extractHtmlAttribute(m && m[0] ? m[0] : '', attrName);
+      if (value && !/^(?:image|photo|thumbnail|preview)$/i.test(value)) return value;
+    }
+    return '';
+  } catch (e) {
+    return '';
+  }
+}
+
+function externalModelCandidatesFromText(parts, host = '') {
+  try {
+    const ignored = new Set([
+      'imx', 'imx.to', 'vipr', 'vipr.im', 'imagebam', 'pixhost', 'imgbox', 'imagevenue',
+      'postimages', 'imgbb', 'imgchest', 'image', 'view image', 'continue to your image'
+    ]);
+    const hostParts = String(host || '').toLowerCase().split('.').filter(Boolean);
+    for (const hp of hostParts) ignored.add(hp);
+    const out = [];
+    const seen = new Set();
+    const push = (value) => {
+      let s = cleanExternalMetadataText(value, 120)
+        .replace(/\.(?:jpe?g|png|gif|webp|bmp|mp4|mov|webm|mkv)$/i, '')
+        .replace(/[_]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      s = s.replace(/^(?:model|models|name|performer|actress)\s*[:=-]\s*/i, '').trim();
+      const key = s.toLowerCase();
+      if (!s || s.length < 2 || s.length > 80) return;
+      if (!/[a-z]/i.test(s) || /^https?:\/\//i.test(s)) return;
+      if (ignored.has(key) || /^(?:img|image|photo|pic|file|download|view|untitled)(?:\s+\d+)?$/i.test(s)) return;
+      if (/^\d+$/.test(s)) return;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push(s);
+    };
+    for (const raw of parts || []) {
+      const text = cleanExternalMetadataText(raw, 500);
+      if (!text) continue;
+      for (const m of text.matchAll(/\b(?:model|models|name|performer|actress)\s*[:=-]\s*([a-z0-9][^|,;()[\]{}<>]{1,80})/ig)) {
+        if (m && m[1]) push(m[1]);
+      }
+      for (const piece of text.split(/\s+-\s+|\s+\|\s+|[,;\n\r]+/g)) push(piece);
+    }
+    return out.slice(0, 8);
+  } catch (e) {
+    return [];
+  }
+}
+
+function extractExternalWrapperMetadata(html, pageUrl, directUrl = '', finalUrl = '') {
+  try {
+    const h = String(html || '');
+    let host = '';
+    let finalHost = '';
+    try { host = new URL(String(pageUrl || finalUrl || '')).hostname.toLowerCase(); } catch (e) { }
+    try { finalHost = new URL(String(directUrl || finalUrl || '')).hostname.toLowerCase(); } catch (e) { }
+    const title = firstMetaContent(h, ['og:title', 'twitter:title']) || firstTagText(h, 'title');
+    const description = firstMetaContent(h, ['og:description', 'description', 'twitter:description']);
+    const siteName = firstMetaContent(h, ['og:site_name']);
+    const previewImage = normalizeHtmlExtractedUrl(firstMetaContent(h, ['og:image', 'twitter:image']), pageUrl) || '';
+    const caption = firstTagText(h, 'figcaption');
+    const imageAlt = firstImageAttributeText(h, 'alt');
+    const imageTitle = firstImageAttributeText(h, 'title');
+    const modelCandidates = externalModelCandidatesFromText([title, description, caption, imageAlt, imageTitle], host);
+    const out = {
+      host,
+      source_url: String(pageUrl || '').trim(),
+      scraped_at: new Date().toISOString()
+    };
+    if (finalUrl && finalUrl !== pageUrl) out.final_url = String(finalUrl);
+    if (finalHost && finalHost !== host) out.final_host = finalHost;
+    if (directUrl) out.resolved_url = String(directUrl);
+    if (title) out.title = title;
+    if (description) out.description = description;
+    if (siteName) out.site_name = siteName;
+    if (previewImage && !isSiteInfrastructureUrl(previewImage)) out.preview_image = previewImage;
+    if (caption) out.caption = caption;
+    if (imageAlt) out.image_alt = imageAlt;
+    if (imageTitle) out.image_title = imageTitle;
+    if (modelCandidates.length) out.model_candidates = modelCandidates;
+    return Object.keys(out).length > 3 || out.resolved_url ? out : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function resolvedMediaUrl(result) {
+  try {
+    if (!result) return '';
+    if (typeof result === 'string') return result.trim();
+    if (typeof result === 'object' && result.url) return String(result.url || '').trim();
+    return '';
+  } catch (e) {
+    return '';
+  }
+}
+
+function resolvedExternalMetadata(result) {
+  try {
+    return result && typeof result === 'object' && result.externalMetadata && typeof result.externalMetadata === 'object'
+      ? result.externalMetadata
+      : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function mergeExternalMetadataIntoMetadata(metadata, externalMetadata) {
+  const next = metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? { ...metadata } : {};
+  if (!externalMetadata || typeof externalMetadata !== 'object') return next;
+  const previous = next.webdl_external_metadata && typeof next.webdl_external_metadata === 'object'
+    ? next.webdl_external_metadata
+    : next.external_metadata && typeof next.external_metadata === 'object'
+      ? next.external_metadata
+      : null;
+  const merged = previous ? { ...previous, ...externalMetadata } : { ...externalMetadata };
+  next.webdl_external_metadata = merged;
+  next.external_metadata = merged;
+  if (!next.webdl_wrapper_url && merged.source_url) next.webdl_wrapper_url = merged.source_url;
+  if (!next.webdl_source_host && merged.host) next.webdl_source_host = merged.host;
+  return next;
+}
+
+function externalMetadataFromDownloadMetadata(metadata) {
+  try {
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null;
+    if (metadata.webdl_external_metadata && typeof metadata.webdl_external_metadata === 'object') return metadata.webdl_external_metadata;
+    if (metadata.external_metadata && typeof metadata.external_metadata === 'object') return metadata.external_metadata;
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function mergeWrapperMetadataIntoFullMeta(fullMeta, metadata) {
+  try {
+    const out = fullMeta && typeof fullMeta === 'object' && !Array.isArray(fullMeta) ? { ...fullMeta } : {};
+    const external = externalMetadataFromDownloadMetadata(metadata);
+    if (external) {
+      out.external_metadata = external;
+      out.webdl_external_metadata = external;
+    }
+    if (metadata && typeof metadata === 'object' && !Array.isArray(metadata)) {
+      if (metadata.webdl_input_url) out.webdl_input_url = metadata.webdl_input_url;
+      if (metadata.webdl_resolved_url) out.webdl_resolved_url = metadata.webdl_resolved_url;
+      if (metadata.webdl_wrapper_url) out.webdl_wrapper_url = metadata.webdl_wrapper_url;
+      if (metadata.webdl_source_host) out.webdl_source_host = metadata.webdl_source_host;
+    }
+    return out;
+  } catch (e) {
+    return fullMeta && typeof fullMeta === 'object' ? fullMeta : {};
+  }
+}
+
 function extractOpenGraphMediaUrl(html, baseUrl) {
   try {
     const h = String(html || '');
@@ -12049,10 +12280,10 @@ function isImxWrapperUrl(rawUrl) {
   }
 }
 
-async function resolveImxDirectMediaUrl(pageUrl, timeoutMs = 15000, referer = '', initialResponse = null) {
+async function resolveImxDirectMedia(pageUrl, timeoutMs = 15000, referer = '', initialResponse = null) {
   try {
     const input = String(pageUrl || '').trim();
-    if (!input || !isImxWrapperUrl(input)) return '';
+    if (!input || !isImxWrapperUrl(input)) return { url: '', externalMetadata: null };
     const page = new URL(input);
     const headers = {
       'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -12069,7 +12300,10 @@ async function resolveImxDirectMediaUrl(pageUrl, timeoutMs = 15000, referer = ''
       }, Math.max(1000, timeoutMs));
       try {
         first = await fetch(input, { method: 'GET', headers, signal: ctrl.signal });
-        if (String(first.headers.get('content-type') || '').toLowerCase().startsWith('image/')) return upgradeKnownLowQualityMediaUrl(String(first.url || input));
+        if (String(first.headers.get('content-type') || '').toLowerCase().startsWith('image/')) {
+          const direct = upgradeKnownLowQualityMediaUrl(String(first.url || input));
+          return { url: direct, externalMetadata: extractExternalWrapperMetadata('', input, direct, String(first.url || input)) };
+        }
         cookie = cookieHeaderFromSetCookie(first.headers);
         firstText = await first.text();
       } finally {
@@ -12077,7 +12311,12 @@ async function resolveImxDirectMediaUrl(pageUrl, timeoutMs = 15000, referer = ''
       }
     }
     const firstCandidates = extractDirectMediaCandidates(firstText, input).filter((u) => /(?:^|\.)image\.imx\.to\//i.test(u) || !/imx\.to\/(?:apple-touch-icon|favicon|css\/img)/i.test(u));
-    if (firstCandidates.length) return firstCandidates[0];
+    if (firstCandidates.length) {
+      return {
+        url: firstCandidates[0],
+        externalMetadata: extractExternalWrapperMetadata(firstText, input, firstCandidates[0], first && first.url ? String(first.url) : input)
+      };
+    }
 
     const ctrl = new AbortController();
     const timer = setTimeout(() => {
@@ -12098,7 +12337,10 @@ async function resolveImxDirectMediaUrl(pageUrl, timeoutMs = 15000, referer = ''
         signal: ctrl.signal
       });
       const ct = String(resp.headers.get('content-type') || '').toLowerCase();
-      if (ct.startsWith('image/')) return upgradeKnownLowQualityMediaUrl(String(resp.url || input));
+      if (ct.startsWith('image/')) {
+        const direct = upgradeKnownLowQualityMediaUrl(String(resp.url || input));
+        return { url: direct, externalMetadata: extractExternalWrapperMetadata(firstText, input, direct, String(resp.url || input)) };
+      }
       const html = await resp.text();
       const candidates = extractDirectMediaCandidates(html, String(resp.url || input))
         .filter((u) => {
@@ -12109,14 +12351,24 @@ async function resolveImxDirectMediaUrl(pageUrl, timeoutMs = 15000, referer = ''
             return false;
           }
         });
-      if (candidates.length) return candidates[0];
-      return '';
+      if (candidates.length) {
+        return {
+          url: candidates[0],
+          externalMetadata: extractExternalWrapperMetadata(html || firstText, input, candidates[0], String(resp.url || input))
+        };
+      }
+      return { url: '', externalMetadata: extractExternalWrapperMetadata(html || firstText, input, '', String(resp.url || input)) };
     } finally {
       clearTimeout(timer);
     }
   } catch (e) {
-    return '';
+    return { url: '', externalMetadata: null };
   }
+}
+
+async function resolveImxDirectMediaUrl(pageUrl, timeoutMs = 15000, referer = '', initialResponse = null) {
+  const result = await resolveImxDirectMedia(pageUrl, timeoutMs, referer, initialResponse);
+  return resolvedMediaUrl(result);
 }
 
 function decryptBunkrVideoUrl(payload) {
@@ -12192,30 +12444,48 @@ async function resolveBunkrDirectMediaUrl(pageUrl, html, timeoutMs = 15000, refe
   }
 }
 
-async function resolveHtmlWrapperToDirectMediaUrl(url, timeoutMs = 15000, referer = '') {
+async function resolveHtmlWrapperToDirectMedia(url, timeoutMs = 15000, referer = '') {
   try {
     const u0 = String(url || '').trim();
-    if (!u0) return '';
+    if (!u0) return { url: '', externalMetadata: null };
     const r = await fetchTextWithTimeout(u0, timeoutMs, referer);
-    if (!r) return '';
-    if (r.contentType && r.contentType.toLowerCase().startsWith('image/')) return upgradeKnownLowQualityMediaUrl(String(r.finalUrl || u0));
-    if (r.contentType && r.contentType.toLowerCase().startsWith('video/')) return upgradeKnownLowQualityMediaUrl(String(r.finalUrl || u0));
-    if (!r.text) return '';
+    if (!r) return { url: '', externalMetadata: null };
+    if (r.contentType && r.contentType.toLowerCase().startsWith('image/')) {
+      const direct = upgradeKnownLowQualityMediaUrl(String(r.finalUrl || u0));
+      return { url: direct, externalMetadata: extractExternalWrapperMetadata('', u0, direct, String(r.finalUrl || u0)) };
+    }
+    if (r.contentType && r.contentType.toLowerCase().startsWith('video/')) {
+      const direct = upgradeKnownLowQualityMediaUrl(String(r.finalUrl || u0));
+      return { url: direct, externalMetadata: extractExternalWrapperMetadata('', u0, direct, String(r.finalUrl || u0)) };
+    }
+    if (!r.text) return { url: '', externalMetadata: null };
+    const externalMetadata = extractExternalWrapperMetadata(r.text, u0, '', String(r.finalUrl || u0));
     if (isImxWrapperUrl(u0)) {
-      const imx = await resolveImxDirectMediaUrl(u0, timeoutMs, referer, r);
-      if (imx) return imx;
+      const imx = await resolveImxDirectMedia(u0, timeoutMs, referer, r);
+      const imxUrl = resolvedMediaUrl(imx);
+      if (imxUrl) {
+        return {
+          url: imxUrl,
+          externalMetadata: resolvedExternalMetadata(imx) || (externalMetadata ? { ...externalMetadata, resolved_url: imxUrl } : null)
+        };
+      }
     }
     const bunkr = await resolveBunkrDirectMediaUrl(r.finalUrl || u0, r.text, timeoutMs, referer);
-    if (bunkr) return bunkr;
+    if (bunkr) return { url: bunkr, externalMetadata: externalMetadata ? { ...externalMetadata, resolved_url: bunkr } : null };
     const candidates = extractDirectMediaCandidates(r.text, u0);
-    if (candidates && candidates.length) return candidates[0];
+    if (candidates && candidates.length) return { url: candidates[0], externalMetadata: externalMetadata ? { ...externalMetadata, resolved_url: candidates[0] } : null };
     const og = upgradeKnownLowQualityMediaUrl(extractOpenGraphMediaUrl(r.text, u0));
-    if (!og) return '';
-    if (!looksLikeDirectFileUrl(og)) return '';
-    return og;
+    if (!og) return { url: '', externalMetadata };
+    if (!looksLikeDirectFileUrl(og)) return { url: '', externalMetadata };
+    return { url: og, externalMetadata: externalMetadata ? { ...externalMetadata, resolved_url: og } : null };
   } catch (e) {
-    return '';
+    return { url: '', externalMetadata: null };
   }
+}
+
+async function resolveHtmlWrapperToDirectMediaUrl(url, timeoutMs = 15000, referer = '') {
+  const result = await resolveHtmlWrapperToDirectMedia(url, timeoutMs, referer);
+  return resolvedMediaUrl(result);
 }
 
 function uniqueFilePath(filepath, suffix) {
@@ -12444,10 +12714,15 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
             ''
       ).trim();
       try {
-        const resolved = await resolveHtmlWrapperToDirectMediaUrl(url, 15000, wrapperReferer);
-        if (resolved && resolved !== url) {
-          try { await updateDownloadUrl.run(resolved, downloadId); } catch (e) { }
-          url = upgradeKnownLowQualityMediaUrl(resolved);
+        const resolved = await resolveHtmlWrapperToDirectMedia(url, 15000, wrapperReferer);
+        const resolvedUrl = resolvedMediaUrl(resolved);
+        if (resolvedUrl && resolvedUrl !== url) {
+          try { await updateDownloadUrl.run(resolvedUrl, downloadId); } catch (e) { }
+          const nextMeta = mergeExternalMetadataIntoMetadata(metadata, resolvedExternalMetadata(resolved));
+          if (!nextMeta.webdl_input_url) nextMeta.webdl_input_url = url;
+          nextMeta.webdl_resolved_url = resolvedUrl;
+          metadata = nextMeta;
+          url = upgradeKnownLowQualityMediaUrl(resolvedUrl);
         }
       } catch (e) { }
       if (isKnownHtmlWrapperUrl(url)) {
@@ -12473,7 +12748,8 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
       // garbage for CDN image URLs (e.g., 'cdn.elitebabes.com' or empty)
       const metaChannel = meta.channel && meta.channel !== 'unknown' && !meta.channel.includes('cdn.') ? meta.channel : null;
       const finalChannel = pinContext ? channel : (channel && channel !== 'unknown' ? channel : metaChannel || channel);
-      await updateDownloadMeta.run(finalTitle, finalChannel, meta.description, meta.duration, meta.thumbnail, JSON.stringify(meta.fullMeta), downloadId);
+      const fullMetaWithWrapper = mergeWrapperMetadataIntoFullMeta(meta.fullMeta, metadata);
+      await updateDownloadMeta.run(finalTitle, finalChannel, meta.description, meta.duration, meta.thumbnail, JSON.stringify(fullMetaWithWrapper), downloadId);
       title = finalTitle;
       channel = finalChannel;
       console.log(`   [#${downloadId}] ✅ Metadata: "${title}" door ${channel} (${meta.duration})`);
@@ -12500,6 +12776,10 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
       source_site: originThread && originThread.platform ? originThread.platform : null,
       source_sites: Array.isArray(metadata && metadata.source_sites) ? metadata.source_sites : (originThread && originThread.platform ? [originThread.platform] : []),
       source_graph: metadata && metadata.source_graph ? metadata.source_graph : null,
+      external_metadata: externalMetadataFromDownloadMetadata(metadata),
+      webdl_external_metadata: externalMetadataFromDownloadMetadata(metadata),
+      webdl_wrapper_url: metadata && metadata.webdl_wrapper_url ? metadata.webdl_wrapper_url : null,
+      webdl_resolved_url: metadata && metadata.webdl_resolved_url ? metadata.webdl_resolved_url : null,
       webdl_pin_context: pinContext,
       webdl_media_url: metadata && metadata.webdl_media_url ? metadata.webdl_media_url : url,
       webdl_detected_platform: metadata && metadata.webdl_detected_platform ? metadata.webdl_detected_platform : detectPlatform(url),
@@ -12600,6 +12880,15 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
           }
           const size = fs.existsSync(filepath) ? fs.statSync(filepath).size : 0;
           const metaObj = { tool: 'curl', platform, channel, title, url, outputDir: dir };
+          const externalMetadata = externalMetadataFromDownloadMetadata(metadata);
+          if (externalMetadata) {
+            metaObj.external_metadata = externalMetadata;
+            metaObj.webdl_external_metadata = externalMetadata;
+          }
+          if (metadata && metadata.webdl_wrapper_url) metaObj.webdl_wrapper_url = metadata.webdl_wrapper_url;
+          if (metadata && metadata.webdl_input_url) metaObj.webdl_input_url = metadata.webdl_input_url;
+          if (metadata && metadata.webdl_resolved_url) metaObj.webdl_resolved_url = metadata.webdl_resolved_url;
+          if (metadata && metadata.webdl_source_host) metaObj.webdl_source_host = metadata.webdl_source_host;
           metaObj.webdl_image_quality = fullscaleCheck.quality;
           metaObj.webdl_was_thumbnail_url = fullscaleCheck.wasThumbnail === true;
           if (pinContext) {
