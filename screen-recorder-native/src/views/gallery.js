@@ -28,6 +28,7 @@ function getGalleryHTML() {
     .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
     .card { border: 1px solid #1f2a52; background: #050816; border-radius: 12px; overflow: hidden; cursor: pointer; position: relative; }
     .card:hover { border-color: #00d4ff; }
+    .card.gallery-located { border-color: #00d4ff; box-shadow: 0 0 0 2px rgba(0,212,255,0.55), 0 0 24px rgba(0,212,255,0.35); }
     .thumb { width: 100%; height: 140px; background: #000; object-fit: cover; display: block; }
     .meta { padding: 8px 10px 10px; }
     .line1 { font-size: 11px; color: #9aa7d1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -152,6 +153,7 @@ function getGalleryHTML() {
     <div class="panel" id="mPanel">
       <header>
         <button id="btnClose" class="btn">✕</button>
+        <button id="btnLocateGallery" class="btn" title="Ga naar deze plek in de gallery">Gallery</button>
         <div class="h">
           <div class="t" id="mTitle">-</div>
           <div class="s" id="mSub">-</div>
@@ -239,6 +241,7 @@ function getGalleryHTML() {
     const elBtnOpen = document.getElementById('btnOpen');
     const elBtnFinder = document.getElementById('btnFinder');
     const elBtnSource = document.getElementById('btnSource');
+    const elBtnLocateGallery = document.getElementById('btnLocateGallery');
     const elBtnRotate = document.getElementById('btnRotate');
     const elZoomRange = document.getElementById('zoomRange');
     const elBtnZoomReset = document.getElementById('btnZoomReset');
@@ -1017,6 +1020,32 @@ function getGalleryHTML() {
       } catch (e) {}
     }
 
+    function findGalleryCardByKey(key) {
+      if (!key) return null;
+      try {
+        return elGrid.querySelector('.card[data-key="' + CSS.escape(String(key)) + '"]');
+      } catch (e) {
+        try {
+          for (const c of Array.from(elGrid.querySelectorAll('.card'))) {
+            if (String(c.dataset && c.dataset.key || '') === String(key)) return c;
+          }
+        } catch (e2) {}
+      }
+      return null;
+    }
+
+    function flashGalleryCard(card) {
+      if (!card) return;
+      try {
+        card.classList.remove('gallery-located');
+        void card.offsetWidth;
+        card.classList.add('gallery-located');
+        setTimeout(() => {
+          try { card.classList.remove('gallery-located'); } catch (e) {}
+        }, 2800);
+      } catch (e) {}
+    }
+
     function addCards(items) {
       const frag = document.createDocumentFragment();
       for (let i = 0; i < items.length; i++) {
@@ -1375,11 +1404,12 @@ function getGalleryHTML() {
     }
 
     function closeModal(fromHistory = false) {
+      const skipHistory = fromHistory === true;
       if (fromHistory !== true && window.history.state && window.history.state.page === 'viewer') {
         window.history.back();
         return;
       }
-      try { history.replaceState({ page: 'gallery' }, '', '/gallery'); } catch(e) {}
+      try { saveStateToUrl(); } catch(e) {}
     
       stopSlideshow();
       if (state.reverseInterval) {
@@ -1410,6 +1440,51 @@ function getGalleryHTML() {
       if (!skipHistory && window.location.hash === '#viewer') {
         history.back();
       }
+    }
+
+    async function locateCurrentInGallery() {
+      const it = state.current;
+      const key = itemKey(it);
+      if (!key) return;
+
+      stopSlideshow();
+      if (state.reverseInterval) {
+        clearInterval(state.reverseInterval);
+        state.reverseInterval = null;
+      }
+      state.reversePlayback = false;
+
+      if (state.currentMediaEl) {
+        try {
+          if (state.currentMediaEl.tagName === 'VIDEO') {
+            state.currentMediaEl.pause();
+            state.currentMediaEl.src = '';
+            state.currentMediaEl.load();
+          }
+        } catch (e) {}
+      }
+
+      elModal.classList.remove('open');
+      elMBody.innerHTML = '';
+      state.current = null;
+      state.currentIndex = -1;
+      state.currentMediaEl = null;
+      resetZoom();
+      resetRotation();
+      try { saveStateToUrl(); } catch (e) {}
+
+      let card = findGalleryCardByKey(key);
+      for (let tries = 0; !card && tries < 8 && !state.done; tries++) {
+        await loadNext();
+        card = findGalleryCardByKey(key);
+      }
+      if (!card) return;
+      try {
+        card.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+      } catch (e) {
+        try { card.scrollIntoView(); } catch (e2) {}
+      }
+      flashGalleryCard(card);
     }
 
     async function openCurrent(action) {
@@ -2153,6 +2228,7 @@ function getGalleryHTML() {
     elBtnClose.addEventListener('click', closeModal);
     elModal.addEventListener('click', (e) => { if (e.target === elModal) closeModal(); });
     elModal.addEventListener('dblclick', (e) => { e.preventDefault(); e.stopPropagation(); }, { passive: false });
+    if (elBtnLocateGallery) elBtnLocateGallery.addEventListener('click', () => { locateCurrentInGallery().catch(() => {}); });
     elBtnOpen.addEventListener('click', () => openCurrent('open'));
     elBtnFinder.addEventListener('click', () => openCurrent('finder'));
 
