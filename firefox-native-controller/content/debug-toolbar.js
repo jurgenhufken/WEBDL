@@ -5,7 +5,7 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-fff-background-gigascan';
+  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-fff-background-continuation';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
@@ -4854,16 +4854,29 @@
       if (!url || seen.has(url)) continue;
       seen.add(url);
       urls.push(url);
-      const ctx = c && c.sourceContext && typeof c.sourceContext === 'object' ? c.sourceContext : null;
+      const normKey = normalizeBatchUrl(url);
+      const knownContexts = st.sourceContexts && typeof st.sourceContexts === 'object' ? st.sourceContexts : {};
+      const ctx = (c && c.sourceContext && typeof c.sourceContext === 'object' ? c.sourceContext : null)
+        || knownContexts[url]
+        || (normKey ? knownContexts[normKey] : null);
       if (ctx && ctx.url) {
         sourceContexts[url] = ctx;
-        const key = normalizeBatchUrl(url);
-        if (key) sourceContexts[key] = ctx;
+        if (normKey) sourceContexts[normKey] = ctx;
       }
     }
     if (!urls.length) {
       st.skippedWrappers = (Number(st.skippedWrappers) || 0) + skippedWrappers;
       return { queued: 0, duplicates: 0, errors: 0, skippedWrappers };
+    }
+    const directHints = {};
+    const knownHints = st.directHints && typeof st.directHints === 'object' ? st.directHints : {};
+    for (const url of urls) {
+      const normKey = normalizeBatchUrl(url);
+      const hint = knownHints[url] || (normKey ? knownHints[normKey] : '');
+      if (hint) {
+        directHints[url] = hint;
+        if (normKey) directHints[normKey] = hint;
+      }
     }
     const result = await queueBatchDownloadRequest(urls, {
       ...(meta && typeof meta === 'object' ? meta : {}),
@@ -4873,6 +4886,7 @@
     }, {
       force,
       sourceContexts,
+      directHints,
     });
     st.queued = (Number(st.queued) || 0) + (Number(result && (result.queued || result.total)) || 0);
     st.duplicates = (Number(st.duplicates) || 0) + (Number(result && result.duplicates) || 0);
@@ -4890,7 +4904,37 @@
     const maxItems = parseScanLimit(body.maxItems);
     const meta = body.metadata && typeof body.metadata === 'object' ? { ...body.metadata } : scrapeMetadata();
     const stats = { queued: 0, duplicates: 0, errors: 0, skippedWrappers: 0, threads: 0, forumPages: 0, threadPages: 0, media: 0 };
-    const state = { seenUrls: new Set() };
+    const state = {
+      seenUrls: new Set(),
+      sourceContexts: body.sourceContexts && typeof body.sourceContexts === 'object' ? body.sourceContexts : {},
+      directHints: body.directHints && typeof body.directHints === 'object' ? body.directHints : {},
+    };
+    const reportProgress = (phase, extra) => {
+      try {
+        browser.runtime.sendMessage({
+          action: 'fffBackgroundScanProgress',
+          payload: {
+            scanId: body.scanId || '',
+            phase,
+            stats,
+            ...(extra && typeof extra === 'object' ? extra : {})
+          }
+        }).catch(() => {});
+      } catch (e) {}
+    };
+    const sourceContextForUrl = (url) => {
+      const s = String(url || '').trim();
+      const norm = normalizeBatchUrl(s);
+      return state.sourceContexts[s] || (norm ? state.sourceContexts[norm] : null) || null;
+    };
+    const threadKeyForUrl = (url) => {
+      const normalized = normalizeBatchUrl(url, startUrl);
+      try {
+        const parts = footFetishForumThreadPartsFromUrl(normalized, startUrl);
+        if (parts && parts.id) return String(parts.id);
+      } catch (e) {}
+      return normalized || String(url || '');
+    };
     const finish = async (success, error) => {
       try {
         await browser.runtime.sendMessage({
@@ -4901,6 +4945,20 @@
     };
     try {
       addLog(`FFF achtergrondscan gestart: ${startUrl}`);
+      const initialUrls = Array.isArray(body.initialUrls)
+        ? body.initialUrls.map((url) => String(url || '').trim()).filter(Boolean)
+        : [];
+      if (initialUrls.length) {
+        const initialCandidates = initialUrls.map((url) => ({ url, sourceContext: sourceContextForUrl(url) })).filter((c) => c.url);
+        await queueFffBackgroundCandidates(initialCandidates, meta, force, state);
+        stats.media += initialCandidates.length;
+        stats.queued = Number(state.queued) || 0;
+        stats.duplicates = Number(state.duplicates) || 0;
+        stats.errors = Number(state.errors) || 0;
+        stats.skippedWrappers = Number(state.skippedWrappers) || 0;
+        addLog(`FFF achtergrondscan: ${initialCandidates.length} initiele items verwerkt, ${stats.queued} queued, ${stats.duplicates} duplicaten`);
+        reportProgress('initial-queued', { url: startUrl });
+      }
       if (footFetishForumThreadPartsFromUrl(startUrl, window.location.href)) {
         const res = await fetchFootFetishForumThreadCandidates(startUrl, { maxPages: maxThreadPages, maxItems });
         const candidates = uniqueCandidates(res && res.candidates ? res.candidates : []);
@@ -4917,22 +4975,26 @@
 
       let forumUrl = startUrl;
       const seenThreads = new Set();
+      if (Array.isArray(body.initialThreadLinks)) {
+        for (const link of body.initialThreadLinks) {
+          const key = threadKeyForUrl(link);
+          if (key) seenThreads.add(key);
+        }
+      }
       let totalItems = 0;
       while (forumUrl && stats.forumPages < maxForumPages && totalItems < maxItems) {
         stats.forumPages++;
         const doc = await loadFootFetishForumDocument(forumUrl, { timeoutMs: 30000, useCurrent: stats.forumPages === 1 });
         if (!doc) throw new Error(`Forum kon niet geladen worden: ${forumUrl}`);
         const links = collectFootFetishForumThreadLinksFromForumDocument(doc, forumUrl, WEBDL_UNLIMITED);
+        reportProgress('forum-index', { url: forumUrl, links: Array.isArray(links) ? links.length : 0 });
         for (const link of links) {
           const normalized = normalizeBatchUrl(link, forumUrl);
-          let key = normalized;
-          try {
-            const parts = footFetishForumThreadPartsFromUrl(normalized, forumUrl);
-            if (parts && parts.id) key = parts.id;
-          } catch (e) {}
+          let key = threadKeyForUrl(normalized);
           if (!normalized || seenThreads.has(key)) continue;
           seenThreads.add(key);
           stats.threads++;
+          reportProgress('thread-start', { url: normalized });
           const remaining = Math.max(0, Number.isFinite(maxItems) ? maxItems - totalItems : WEBDL_UNLIMITED);
           const res = await fetchFootFetishForumThreadCandidates(normalized, { maxPages: maxThreadPages, maxItems: remaining });
           const candidates = uniqueCandidates(res && res.candidates ? res.candidates : []);
@@ -4945,6 +5007,7 @@
           stats.errors = Number(state.errors) || 0;
           stats.skippedWrappers = Number(state.skippedWrappers) || 0;
           addLog(`FFF achtergrondscan: ${stats.threads} threads, ${stats.media} media, ${stats.queued} queued`);
+          reportProgress('thread-done', { url: normalized });
           if (totalItems >= maxItems) break;
         }
         const nextUrl = findNextFootFetishForumForumPageUrl(doc, forumUrl);

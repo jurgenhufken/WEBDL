@@ -12,7 +12,7 @@ const HTTP_TIMEOUT_MS = 6000;
 const PROBE_FAILURES_BEFORE_DISCONNECT = 2; // Reduced so it detects faster
 const PROBE_DISCONNECT_GRACE_MS = 12000; // Drop after 12s of no heartbeat
 const SOCKET_ENABLED = false;
-const BACKGROUND_BUILD = 'simple-background-v8-fff-background-handshake';
+const BACKGROUND_BUILD = 'simple-background-v9-fff-background-continuation';
 const HUB_URL = 'http://localhost:35730';
 const HUB_URL_FALLBACK = 'http://127.0.0.1:35730';
 
@@ -788,6 +788,24 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (action === 'fffBackgroundScanStatus') {
     sendResponse({ success: true, scans: Array.from(activeFffBackgroundScans.values()) });
+    return false;
+  }
+
+  if (action === 'fffBackgroundScanProgress') {
+    const payload = (message && message.payload) || {};
+    const scanId = String(payload.scanId || '').trim();
+    const tabId = sender && sender.tab && sender.tab.id ? sender.tab.id : Number(payload.tabId) || null;
+    if (scanId) {
+      activeFffBackgroundScans.set(scanId, {
+        ...(activeFffBackgroundScans.get(scanId) || { scanId, tabId }),
+        status: 'running',
+        phase: payload.phase || '',
+        stats: payload.stats || null,
+        lastUrl: payload.url || '',
+        updatedAt: Date.now(),
+      });
+    }
+    sendResponse({ success: true });
     return false;
   }
 
