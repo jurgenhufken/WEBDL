@@ -47,6 +47,20 @@ function isRefreshableCollectionUrl(url, adapterName = '') {
   }
 }
 
+function redditFallbackCommentsUrl(sourceUrl, submissionId) {
+  const id = String(submissionId || '').trim();
+  if (!id) return '';
+  try {
+    const u = new URL(String(sourceUrl || ''));
+    const pathname = String(u.pathname || '');
+    const sub = pathname.match(/^\/r\/([^/?#]+)/i);
+    if (sub && sub[1]) {
+      return `https://www.reddit.com/r/${encodeURIComponent(decodeURIComponent(sub[1]))}/comments/${id}/`;
+    }
+  } catch (_) {}
+  return `https://www.reddit.com/comments/${id}/`;
+}
+
 function intEnv(name, fallback) {
   const raw = process.env[name];
   if (raw === undefined || raw === '') return fallback;
@@ -830,6 +844,8 @@ function startWorkerPool({
     let lastLoggedTitle = '';
     let rateLimited = false;
     let rateLimitMessage = '';
+    const redditFallbackLimit = intEnv('WEBDL_REDDIT_VREDDIT_FALLBACK_LIMIT', 80);
+    const redditFallbackQueued = new Set();
     const proc = runProcess(planned);
     const heartbeatTimer = setInterval(() => {
       repo.heartbeatJob(job.id, workerId).catch((e) => {
@@ -871,6 +887,47 @@ function startWorkerPool({
         rateLimited = true;
         rateLimitMessage = String(line || '').trim();
         job._rateLimited = true;
+      }
+      if (job.adapter === 'reddit' && redditFallbackQueued.size < redditFallbackLimit) {
+        const fallbackMatch = String(line || '').match(/Site\s+VReddit\s+failed\s+to\s+download\s+submission\s+([a-z0-9]+):.*https?:\/\/v\.redd\.it\/([a-z0-9]+)/i);
+        if (fallbackMatch) {
+          const submissionId = fallbackMatch[1];
+          const mediaId = fallbackMatch[2];
+          const fallbackUrl = redditFallbackCommentsUrl(job.url, submissionId);
+          if (fallbackUrl && !redditFallbackQueued.has(fallbackUrl)) {
+            redditFallbackQueued.add(fallbackUrl);
+            try {
+              const existing = await repo.findRecentJobByUrl(fallbackUrl);
+              if (!existing) {
+                const child = await queue.enqueue({
+                  url: fallbackUrl,
+                  adapter: 'ytdlp',
+                  priority: Math.max(Number(job.priority || 0), 10),
+                  options: {
+                    ...(job.options || {}),
+                    platform: 'reddit',
+                    channel: job?.options?.channel || '',
+                    title: job?.options?.title || '',
+                    reddit_vreddit_fallback: true,
+                    reddit_parent_job_id: job.id,
+                    reddit_submission_id: submissionId,
+                    reddit_media_id: mediaId,
+                    sourceContext: {
+                      url: job.url,
+                      platform: 'reddit',
+                      channel: job?.options?.channel || '',
+                      title: job?.options?.title || '',
+                    },
+                  },
+                  maxAttempts: 2,
+                });
+                await repo.appendLog(job.id, 'info', `↪️  v.redd.it fallback gequeued als ytdlp job #${child.id}: ${fallbackUrl}`);
+              }
+            } catch (e) {
+              logger.warn('reddit.vreddit_fallback.error', { job: job.id, url: fallbackUrl, err: String(e.message || e) });
+            }
+          }
+        }
       }
       const prog = adapter.parseProgress(line);
       if (prog && typeof prog.pct === 'number') {
