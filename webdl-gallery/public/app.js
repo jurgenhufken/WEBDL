@@ -231,6 +231,10 @@
     if (!it) return '';
     const explicit = String(it.source_model_title || '').trim();
     if (explicit) return explicit;
+    const site = String(it.source_site || it.platform || '').toLowerCase();
+    if (site === 'twitter' || site === 'x' || site.includes('twitter')) {
+      return sourceModelTitleFromText(it.source_post_title || '');
+    }
     return sourceModelTitleFromText(it.source_post_title || it.title || it.filename || '');
   }
 

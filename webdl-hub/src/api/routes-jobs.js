@@ -24,7 +24,7 @@ function isMultiItemUrl(url) {
     const host = u.hostname.replace(/^www\./, '').toLowerCase();
     const pathname = u.pathname.toLowerCase();
     const isYoutubeHost = host === 'youtube.com' || host === 'youtu.be' || host.endsWith('.youtube.com');
-    const isXvideosHost = host === 'xvideos.com' || host.endsWith('.xvideos.com');
+    const isXvideosHost = host === 'xvideos.com' || host.endsWith('.xvideos.com') || host === 'xvideos.red' || host.endsWith('.xvideos.red');
     const isXhomealoneHost = host === 'xhomealone.com' || host.endsWith('.xhomealone.com');
     const isRedgifsHost = host === 'redgifs.com' || host.endsWith('.redgifs.com');
     if (isXvideosHost) {
@@ -559,7 +559,17 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
         };
       }
     }
-    return queue.enqueue({ url: jobUrl, adapter: adapter.name, priority, options, maxAttempts });
+    const jobOptions = sourceContext
+      ? {
+          ...options,
+          sourceContext,
+          contextUrl: options.contextUrl || sourceContext.url || '',
+          platform: options.platform || sourceContext.platform || '',
+          channel: options.channel || sourceContext.channel || '',
+          title: options.title || sourceContext.title || '',
+        }
+      : options;
+    return queue.enqueue({ url: jobUrl, adapter: adapter.name, priority, options: jobOptions, maxAttempts });
   }
 
   // ─── Enqueue single URL ─────────────────────────────────────────────────────

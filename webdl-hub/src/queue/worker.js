@@ -197,15 +197,19 @@ async function readInfoJson(workdir) {
       if (e.endsWith('.info.json')) {
         const raw = await fs.readFile(path.join(workdir, e), 'utf8');
         const data = JSON.parse(raw);
+        data.__webdl_raw_tweet_id = rawJsonScalar(raw, 'tweet_id');
+        data.__webdl_raw_conversation_id = rawJsonScalar(raw, 'conversation_id');
+        const sourceInfo = galleryDlSourceInfo(data);
         return {
-          channel: data.channel || data.uploader || data.uploader_id || data.playlist_title || '',
+          channel: sourceInfo.channel || data.channel || data.uploader || data.uploader_id || data.playlist_title || '',
           channelId: data.channel_id || data.uploader_id || '',
           channelUrl: data.channel_url || data.uploader_url || '',
-          title: data.fulltitle || data.title || '',
-          sourceUrl: data.webpage_url || data.original_url || data.url || '',
-          platform: data.extractor_key ? data.extractor_key.toLowerCase() : '',
+          title: sourceInfo.title || data.fulltitle || data.title || '',
+          sourceUrl: sourceInfo.sourcePostUrl || data.webpage_url || data.original_url || data.url || '',
+          platform: sourceInfo.sourceSite || (data.extractor_key ? data.extractor_key.toLowerCase() : ''),
           duration: data.duration_string || (Number.isFinite(Number(data.duration)) ? String(Math.round(Number(data.duration))) : null),
-          sourcePublishedAt: getYtdlpSourceTimestamp(data),
+          sourcePublishedAt: sourceInfo.sourcePublishedAt || getYtdlpSourceTimestamp(data),
+          ...sourceInfo,
           ...galleryDlForumInfo(data),
         };
       }
@@ -228,22 +232,27 @@ async function readInfoJsonForMedia(mediaPath, fallbackInfo = null) {
       if (!fsSync.existsSync(exact)) continue;
       const raw = await fs.readFile(exact, 'utf8');
       const data = JSON.parse(raw);
+      data.__webdl_raw_tweet_id = rawJsonScalar(raw, 'tweet_id');
+      data.__webdl_raw_conversation_id = rawJsonScalar(raw, 'conversation_id');
+      const sourceInfo = galleryDlSourceInfo(data);
       return {
-        channel: data.channel || data.uploader || data.uploader_id || data.playlist_title || '',
+        channel: sourceInfo.channel || data.channel || data.uploader || data.uploader_id || data.playlist_title || '',
         channelId: data.channel_id || data.uploader_id || '',
         channelUrl: data.channel_url || data.uploader_url || '',
-        title: data.fulltitle || data.title || data.filename || '',
-        sourceUrl: data.webpage_url || data.original_url || data.url || '',
-        platform: data.extractor_key ? data.extractor_key.toLowerCase() : '',
+        title: sourceInfo.title || data.fulltitle || data.title || data.filename || '',
+        sourceUrl: sourceInfo.sourcePostUrl || data.webpage_url || data.original_url || data.url || '',
+        platform: sourceInfo.sourceSite || (data.extractor_key ? data.extractor_key.toLowerCase() : ''),
         telegramMessageId: data.telegram_message_id || null,
         telegramChatTitle: data.telegram_chat_title || null,
         telegramTopicTitle: data.telegram_topic_title || null,
         telegramTopicId: data.telegram_topic_id || null,
-        sourcePostTitle: data.source_post_title || null,
-        sourcePostId: data.source_post_id || null,
-        sourceThreadTitle: data.source_thread_title || null,
+        sourcePostTitle: sourceInfo.sourcePostTitle || data.source_post_title || null,
+        sourcePostId: sourceInfo.sourcePostId || data.source_post_id || null,
+        sourcePostUrl: sourceInfo.sourcePostUrl || data.source_post_url || null,
+        sourceThreadTitle: sourceInfo.sourceThreadTitle || data.source_thread_title || null,
         duration: data.duration_string || (Number.isFinite(Number(data.duration)) ? String(Math.round(Number(data.duration))) : null),
-        sourcePublishedAt: getYtdlpSourceTimestamp(data),
+        sourcePublishedAt: sourceInfo.sourcePublishedAt || getYtdlpSourceTimestamp(data),
+        ...sourceInfo,
         ...galleryDlForumInfo(data),
       };
     }
@@ -267,6 +276,62 @@ function getYtdlpSourceTimestamp(info) {
     }
   } catch {}
   return null;
+}
+
+function parseGalleryDlDate(value) {
+  try {
+    const raw = String(value || '').trim();
+    if (!raw) return null;
+    const normalized = raw.includes('T') ? raw : raw.replace(' ', 'T') + 'Z';
+    const dt = new Date(normalized);
+    return Number.isFinite(dt.getTime()) ? dt.toISOString() : null;
+  } catch {}
+  return null;
+}
+
+function rawJsonScalar(raw, key) {
+  try {
+    const re = new RegExp(`\"${String(key).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\"\\\\s*:\\\\s*(?:\"([^\"]+)\"|(\\d+))`);
+    const m = re.exec(String(raw || ''));
+    return m ? String(m[1] || m[2] || '') : '';
+  } catch {}
+  return '';
+}
+
+function galleryDlAuthor(data) {
+  const author = data && typeof data.author === 'object' ? data.author : null;
+  const user = data && typeof data.user === 'object' ? data.user : null;
+  return author || user || null;
+}
+
+function galleryDlSourceInfo(data) {
+  if (!data || typeof data !== 'object') return {};
+  const category = String(data.category || data.source_site || '').trim().toLowerCase();
+  const subcategory = String(data.subcategory || '').trim().toLowerCase();
+  const author = galleryDlAuthor(data);
+  if (category !== 'twitter' && subcategory !== 'twitter' && !data.tweet_id) return {};
+
+  const handle = String(data.username || author?.name || '').trim().replace(/^@+/, '');
+  const display = String(data.fullname || author?.nick || author?.name || handle || '').trim();
+  const tweetId = data.__webdl_raw_tweet_id || data.__webdl_raw_conversation_id || data.source_post_id || data.tweet_id || data.conversation_id || '';
+  const postTitle = String(data.content || data.text || data.description || data.source_post_title || '').replace(/\s+/g, ' ').trim();
+  const profileUrl = handle ? `https://x.com/${encodeURIComponent(handle)}` : '';
+  const postUrl = handle && tweetId ? `https://x.com/${encodeURIComponent(handle)}/status/${encodeURIComponent(String(tweetId))}` : '';
+  const threadTitle = handle
+    ? `${display || handle} (@${handle})`
+    : (display || 'Twitter/X');
+  return {
+    channel: handle ? `@${handle}` : display,
+    title: postTitle,
+    sourceSite: 'twitter',
+    sourceThreadTitle: threadTitle,
+    sourceThreadId: author?.id ? String(author.id) : '',
+    sourceThreadUrl: profileUrl,
+    sourcePostTitle: postTitle,
+    sourcePostId: tweetId ? String(tweetId) : '',
+    sourcePostUrl: postUrl || profileUrl,
+    sourcePublishedAt: parseGalleryDlDate(data.date),
+  };
 }
 
 function sanitizeFilePart(value, fallback = 'download') {
@@ -299,15 +364,19 @@ function galleryDlForumInfo(data) {
   const postTitle = data.post_title || data.source_post_title || '';
   const postNum = data.post_num || data.source_post_num || '';
   const postId = data.post_id || data.source_post_id || '';
+  const postUrl = data.post_url || data.source_post_url || '';
+  const threadUrl = data.thread_url || data.source_thread_url || '';
   const forumTitle = data.forum_title || data.source_forum_title || '';
   const category = data.category || data.source_site || '';
-  if (!threadTitle && !threadId && !postTitle && !postNum && !postId && !forumTitle) return {};
+  if (!threadTitle && !threadId && !postTitle && !postNum && !postId && !postUrl && !threadUrl && !forumTitle) return {};
   return {
     sourceThreadTitle: threadTitle ? String(threadTitle) : '',
     sourceThreadId: threadId ? String(threadId) : '',
+    sourceThreadUrl: threadUrl ? String(threadUrl) : '',
     sourcePostTitle: postTitle ? String(postTitle) : '',
     sourcePostNum: postNum ? String(postNum) : '',
     sourcePostId: postId ? String(postId) : '',
+    sourcePostUrl: postUrl ? String(postUrl) : '',
     sourceForumTitle: forumTitle ? String(forumTitle) : '',
     sourceSite: category ? String(category).toLowerCase() : '',
   };
@@ -327,6 +396,21 @@ function forumInfoFromJob(job) {
   const options = job?.options || {};
   const sourceUrl = options.contextUrl || options.url || job?.url || '';
   const pinnedVipergirls = isPinnedVipergirlsJob(job);
+  const sourceContext = options.sourceContext && typeof options.sourceContext === 'object' ? options.sourceContext : null;
+  const contextPlatform = String(sourceContext?.platform || options.platform || '').toLowerCase();
+  if (contextPlatform === 'xvideos') {
+    return {
+      sourceThreadTitle: String(sourceContext?.listingTitle || options.playlistTitle || titleFromThreadUrl(sourceUrl) || 'xvideos listing').trim(),
+      sourceThreadId: '',
+      sourceThreadUrl: sourceUrl || '',
+      sourcePostTitle: String(sourceContext?.title || options.videoTitle || options.title || '').trim(),
+      sourcePostNum: '',
+      sourcePostId: '',
+      sourcePostUrl: job?.url || '',
+      sourceForumTitle: '',
+      sourceSite: 'xvideos',
+    };
+  }
   const sourceThreadTitle = String(options.title || options.channel || titleFromThreadUrl(sourceUrl)).replace(/^thread_\d+$/i, '').trim();
   const sourceThreadId = forumThreadIdFromUrl(sourceUrl);
   if (!pinnedVipergirls && !sourceThreadTitle && !sourceThreadId) return null;
@@ -351,6 +435,8 @@ function mergeForumInfo(primary, fallback) {
     'sourcePostTitle',
     'sourcePostNum',
     'sourcePostId',
+    'sourcePostUrl',
+    'sourceThreadUrl',
     'sourceForumTitle',
     'sourceSite',
   ]) {
@@ -368,14 +454,14 @@ function sourceGraphFromForumInfo(info, sourceUrl, platform) {
     type: 'thread',
     id: info.sourceThreadId || null,
     title: info.sourceThreadTitle || '',
-    url: sourceUrl || null,
+    url: info.sourceThreadUrl || sourceUrl || null,
   });
   nodes.push({
     type: 'post',
     id: info.sourcePostId || null,
     num: info.sourcePostNum || null,
     title: info.sourcePostTitle || '',
-    url: sourceUrl || null,
+    url: info.sourcePostUrl || sourceUrl || null,
   });
   return { nodes };
 }
@@ -633,10 +719,12 @@ async function syncToGallery(job, outputFiles, logger, repo) {
                 source_site: forumInfo?.sourceSite || null,
                 source_thread_title: forumInfo?.sourceThreadTitle || null,
                 source_thread_id: forumInfo?.sourceThreadId || null,
+                source_thread_url: forumInfo?.sourceThreadUrl || null,
                 source_forum_title: forumInfo?.sourceForumTitle || null,
                 source_post_title: forumInfo?.sourcePostTitle || null,
                 source_post_num: forumInfo?.sourcePostNum || null,
                 source_post_id: forumInfo?.sourcePostId || null,
+                source_post_url: forumInfo?.sourcePostUrl || null,
                 source_graph: telegramSourceGraph || sourceGraphFromForumInfo(forumInfo, job.options?.contextUrl || job.url, realPlatform),
                 telegram_message_id: fileInfo?.telegramMessageId || null,
                 telegram_chat_title: fileInfo?.telegramChatTitle || null,

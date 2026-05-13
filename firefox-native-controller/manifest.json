@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Screen Recorder Controller",
-  "version": "1.0.44",
+  "version": "1.0.45",
   "description": "Besturingsinterface voor de native Screen Recorder applicatie",
   "browser_specific_settings": {
     "gecko": {

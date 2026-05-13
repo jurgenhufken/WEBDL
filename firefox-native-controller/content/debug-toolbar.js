@@ -5,7 +5,7 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-fff-giga-thread-trace';
+  const WEBDL_BUILD = 'debug-toolbar-2026-05-14-xvideos-twitter-metadata';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
@@ -1342,7 +1342,9 @@
     'xxxi.porn',
     'cums.net',
     'gig.sex',
-    'aznudefeet.com'
+    'aznudefeet.com',
+    'xvideos.com',
+    'xvideos.red'
   ];
 
   function hostMatchesAnySuffix(host, suffixes) {
@@ -1542,6 +1544,17 @@
       if (um && um[1]) meta.channel = um[1];
       const titleEl = document.querySelector('h1, [data-testid*="title"], [class*="title"]');
       if (titleEl && titleEl.textContent && titleEl.textContent.trim()) meta.title = titleEl.textContent.trim();
+    }
+
+    else if (/(?:^|\/\/)(?:www\.)?xvideos\.(?:com|red)\//i.test(url)) {
+      meta.platform = 'xvideos';
+      meta.channel = 'xvideos';
+      const titleEl = document.querySelector('h1, h2, .video-title, .page-title, [class*="title"]');
+      const rawTitle = (titleEl && titleEl.textContent ? titleEl.textContent : document.title || '')
+        .replace(/\s*[-–—|]\s*XVIDEOS.*$/i, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (rawTitle) meta.title = rawTitle;
     }
 
     else if (/facebook\.com|fb\.watch/i.test(url)) {
@@ -3176,7 +3189,152 @@
     };
   }
 
+  function isXvideosHostName(hostname) {
+    const host = String(hostname || '').replace(/^www\./i, '').toLowerCase();
+    return host === 'xvideos.com' || host.endsWith('.xvideos.com') || host === 'xvideos.red' || host.endsWith('.xvideos.red');
+  }
+
+  function isXvideosListingPage(rawUrl) {
+    try {
+      const u = new URL(String(rawUrl || window.location.href), window.location.href);
+      if (!isXvideosHostName(u.hostname)) return false;
+      return !/^\/video[./]/i.test(String(u.pathname || ''));
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function cleanXvideosTitle(value, fallbackUrl) {
+    const text = String(value || '')
+      .replace(/\s+/g, ' ')
+      .replace(/\b(?:\d{2,4}p|HD|Premium)\b/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (text && text.length > 2) return text.slice(0, 180);
+    try {
+      const slug = new URL(String(fallbackUrl || ''), window.location.href).pathname.split('/').filter(Boolean).pop() || '';
+      return decodeURIComponent(slug).replace(/[_-]+/g, ' ').trim().slice(0, 180);
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function collectXvideosCandidatesFromDocument(doc, baseHref, maxItems = 250) {
+    const rootDoc = doc || document;
+    const pageHref = String(baseHref || window.location.href);
+    const pageTitle = cleanXvideosTitle(rootDoc.title || document.title || '', pageHref) || 'xvideos listing';
+    const out = [];
+    const seen = new Set();
+    const push = (raw, el) => {
+      try {
+        if (out.length >= maxItems) return;
+        const u = new URL(String(raw || ''), pageHref);
+        u.hash = '';
+        if (!isXvideosHostName(u.hostname)) return;
+        if (!/^\/video[./]/i.test(String(u.pathname || ''))) return;
+        const final = u.toString();
+        if (seen.has(final)) return;
+        seen.add(final);
+        const title = cleanXvideosTitle(
+          (el && (el.getAttribute('title') || el.getAttribute('aria-label') || el.textContent)) || '',
+          final,
+        );
+        out.push({
+          url: final,
+          el: el || null,
+          kind: 'xvideos_video',
+          sourceContext: {
+            url: pageHref,
+            platform: 'xvideos',
+            channel: 'xvideos',
+            title: title || pageTitle,
+          },
+        });
+      } catch (e) {}
+    };
+
+    for (const a of Array.from(rootDoc.querySelectorAll('a[href]'))) {
+      try {
+        push(a.getAttribute('href'), a);
+        if (out.length >= maxItems) break;
+      } catch (e) {}
+    }
+    return uniqueCandidates(out);
+  }
+
+  function nextXvideosListingUrlFromDocument(doc, baseHref, visited) {
+    try {
+      const pageHref = String(baseHref || window.location.href);
+      const seen = visited || new Set();
+      const links = [];
+      for (const a of Array.from((doc || document).querySelectorAll('a[href]'))) {
+        try {
+          const u = new URL(a.getAttribute('href'), pageHref);
+          u.hash = '';
+          const final = u.toString();
+          if (!isXvideosHostName(u.hostname) || seen.has(final)) continue;
+          const txt = String(a.textContent || a.getAttribute('aria-label') || '').trim().toLowerCase();
+          const rel = String(a.getAttribute('rel') || '').toLowerCase();
+          const pageNo = Number.parseInt(u.searchParams.get('p') || '', 10);
+          const isNext = rel.includes('next') || /\b(next|volgende)\b|›|»/.test(txt);
+          if (isNext || Number.isFinite(pageNo)) links.push({ url: final, pageNo: Number.isFinite(pageNo) ? pageNo : Number.MAX_SAFE_INTEGER, isNext });
+        } catch (e) {}
+      }
+      const explicit = links.find((entry) => entry.isNext);
+      if (explicit) return explicit.url;
+      links.sort((a, b) => a.pageNo - b.pageNo);
+      return links.length ? links[0].url : '';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  async function fetchXvideosListingCandidates(startUrl, opts) {
+    const options = opts && typeof opts === 'object' ? opts : {};
+    const maxPages = Math.max(1, Number(options.maxPages) || 1);
+    const maxItems = Math.max(1, Number(options.maxItems) || 1000);
+    const out = [];
+    const seenUrls = new Set();
+    const visited = new Set();
+    let pageUrl = normalizeBatchUrl(startUrl || window.location.href);
+    for (let page = 0; page < maxPages && pageUrl && out.length < maxItems; page += 1) {
+      if (visited.has(pageUrl)) break;
+      visited.add(pageUrl);
+      let doc = null;
+      if (page === 0 && normalizeBatchUrl(window.location.href) === pageUrl) {
+        doc = document;
+      } else {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => { try { ctrl.abort(); } catch (e) {} }, 20000);
+        try {
+          const resp = await fetch(pageUrl, { credentials: 'include', cache: 'no-store', signal: ctrl.signal });
+          clearTimeout(t);
+          if (!resp.ok) break;
+          const html = await resp.text();
+          doc = new DOMParser().parseFromString(html, 'text/html');
+        } catch (e) {
+          clearTimeout(t);
+          break;
+        }
+      }
+      const remaining = Math.max(0, maxItems - out.length);
+      const candidates = collectXvideosCandidatesFromDocument(doc, pageUrl, remaining);
+      for (const c of candidates) {
+        if (!c || !c.url || seenUrls.has(c.url)) continue;
+        seenUrls.add(c.url);
+        out.push(c);
+      }
+      pageUrl = nextXvideosListingUrlFromDocument(doc, pageUrl, visited);
+      if (pageUrl) await delay(250);
+    }
+    return { candidates: uniqueCandidates(out), pages: visited.size };
+  }
+
   function collectBatchCandidates(meta) {
+    if (meta && meta.platform === 'xvideos' && isXvideosListingPage()) {
+      const candidates = collectXvideosCandidatesFromDocument(document, effectivePageUrl(), 500);
+      return { candidates, urls: candidates.map((c) => c.url) };
+    }
     if (isFootFetishClubThreadPage()) {
       const candidates = collectFootFetishClubAttachmentCandidatesFromDocument(document, effectivePageUrl());
       return { candidates, urls: candidates.map((c) => c.url) };
@@ -3963,7 +4121,8 @@
       const redditPostHere = redditTargets.some((opt) => opt.mode === 'post');
       const redditUserHere = redditTargets.some((opt) => opt.mode === 'user');
       const redditSubredditHere = redditTargets.some((opt) => opt.mode === 'subreddit');
-      const threadHere = isFootFetishForumThreadPage() || isFootFetishForumForumPage() || isFootFetishClubThreadPage() || isVipergirlsThreadPage() || isVipergirlsForumPage();
+      const xvideosListingHere = m.platform === 'xvideos' && isXvideosListingPage(m.url);
+      const threadHere = isFootFetishForumThreadPage() || isFootFetishForumForumPage() || isFootFetishClubThreadPage() || isVipergirlsThreadPage() || isVipergirlsForumPage() || xvideosListingHere;
       const k2sHere = isVipergirlsThreadPage();
       const visibleMediaHere = collectVisibleMediaUrls(1).length > 0;
       const batchHere = hasUsableLinksOnPage(m);
@@ -3988,9 +4147,11 @@
 
       if (threadBatchDownloadBtn) {
         setButtonAvailable(threadBatchDownloadBtn, threadHere);
+        try { threadBatchDownloadBtn.title = xvideosListingHere ? 'XVideos: meerdere resultaatpagina’s scannen met je browser-login' : 'Hele thread/forum scannen'; } catch (e) {}
       }
       if (gigaDownloadBtn) {
         setButtonAvailable(gigaDownloadBtn, threadHere);
+        try { gigaDownloadBtn.title = xvideosListingHere ? 'XVideos: direct meerdere resultaatpagina’s als grote batch starten' : 'Start direct als gigadownload: geen browser-drempel, meteen achtergrond/server-scan'; } catch (e) {}
       }
       if (keep2ShareBatchBtn) {
         setButtonAvailable(keep2ShareBatchBtn, k2sHere);
@@ -6519,14 +6680,79 @@
     const isFootFetishClubThread = isFootFetishClubThreadPage();
     const isVipergirlsThread = isVipergirlsThreadPage();
     const isVipergirlsForum = isVipergirlsForumPage();
+    const isXvideosListing = isXvideosListingPage();
     const isAnyForumPage = isForumPage || isVipergirlsForum;
-    if (!isThreadPage && !isForumPage && !isFootFetishClubThread && !isVipergirlsThread && !isVipergirlsForum) {
-      showNotification('Hele thread: alleen voor FootFetishForum, Foot-Fetish.Club of Vipergirls thread/forum pagina\'s', true);
+    if (!isThreadPage && !isForumPage && !isFootFetishClubThread && !isVipergirlsThread && !isVipergirlsForum && !isXvideosListing) {
+      showNotification('Hele thread: alleen voor FootFetishForum, Foot-Fetish.Club, Vipergirls of XVideos listing pagina\'s', true);
       return;
     }
 
     const meta = scrapeMetadata();
     const oldLabel = String((triggerBtn && triggerBtn.textContent) || '').trim();
+
+    if (isXvideosListing) {
+      const input = (clickEvent && (clickEvent.metaKey || clickEvent.ctrlKey || options.forceGiga === true))
+        ? window.prompt('XVideos hele listing: hoeveel pagina’s scannen?', options.forceGiga === true ? '20' : '5')
+        : '5';
+      if (input === null) return;
+      const maxPages = Math.max(1, Math.min(100, Number.parseInt(String(input || '5').trim(), 10) || 5));
+      const force = options.force === true || options.forceGiga === true;
+      const modeLabel = options.forceGiga === true ? 'XVideos gigabatch' : 'XVideos hele listing';
+      try {
+        if (triggerBtn) {
+          triggerBtn.textContent = '⏳ XV...';
+          triggerBtn.style.opacity = '0.6';
+        }
+        showNotification(`${modeLabel}: ${maxPages} pagina’s scannen met browser-login...`, false);
+        addLog(`${modeLabel}: browser-scan start (${maxPages} pagina's)`);
+        const scan = await fetchXvideosListingCandidates(meta.url, { maxPages, maxItems: WEBDL_UNLIMITED });
+        const candidates = uniqueCandidates(scan && Array.isArray(scan.candidates) ? scan.candidates : []);
+        if (!candidates.length) {
+          showNotification('XVideos: geen video-links gevonden', true);
+          addLog('XVideos listing: 0 links', 'warn');
+          return;
+        }
+        let selected = null;
+        try {
+          showNotification(`Preview: ${candidates.length} XVideos video’s (${scan.pages || '?'} pagina's)`, false);
+          selected = await showBatchPreviewModal(candidates, meta, force);
+        } catch (e) {
+          selected = null;
+        }
+        if (!selected || !Array.isArray(selected.urls) || !selected.urls.length) {
+          showNotification('XVideos batch geannuleerd');
+          addLog('XVideos batch geannuleerd');
+          return;
+        }
+        const result = await queueBatchDownloadRequest(selected.urls, {
+          ...meta,
+          platform: 'xvideos',
+          channel: 'xvideos',
+          webdl_batch_kind: options.forceGiga === true ? 'xvideos_listing_gigabatch' : 'xvideos_listing_thread',
+        }, {
+          force,
+          sourceContexts: selected.sourceContexts,
+        });
+        if (result && result.success) {
+          const stats = summarizeBatchResult(result);
+          showNotification(`XVideos: ${formatBatchStats(stats)}`);
+          addLog(`XVideos gestart: ${formatBatchStats(stats)}`);
+        } else {
+          showNotification(`XVideos fout: ${(result && result.error) ? result.error : 'unknown'}`, true);
+          addLog(`XVideos fout: ${(result && result.error) ? result.error : 'unknown'}`, 'error');
+        }
+      } catch (e) {
+        showNotification(`XVideos fout: ${e && e.message ? e.message : String(e)}`, true);
+        addLog(`XVideos fout: ${e && e.message ? e.message : String(e)}`, 'error');
+      } finally {
+        if (triggerBtn) {
+          triggerBtn.textContent = oldLabel || (options.forceGiga === true ? '⚡ Giga' : '🧵 Thread');
+          triggerBtn.style.opacity = '1';
+        }
+      }
+      return;
+    }
+
     let lastScanProgressAt = 0;
     let gigaStopConfirmed = false;
     let gigaNextMediaThreshold = GIGA_SCAN_MEDIA_THRESHOLD;

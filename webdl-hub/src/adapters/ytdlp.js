@@ -145,12 +145,27 @@ function isMergeVideoUrl(url) {
 function isXvideosListingUrl(url) {
   try {
     const u = new URL(String(url || ''));
-    const host = u.hostname.replace(/^www\./, '').toLowerCase();
-    if (host !== 'xvideos.com' && !host.endsWith('.xvideos.com')) return false;
+    if (!isXvideosHost(u.hostname)) return false;
     return !/^\/video[./]/i.test(u.pathname);
   } catch {
     return false;
   }
+}
+
+function isXvideosHost(hostname) {
+  const host = String(hostname || '').replace(/^www\./, '').toLowerCase();
+  return host === 'xvideos.com' || host.endsWith('.xvideos.com') || host === 'xvideos.red' || host.endsWith('.xvideos.red');
+}
+
+function normalizeXvideosUrlForYtdlp(url) {
+  try {
+    const u = new URL(String(url || ''));
+    if (isXvideosHost(u.hostname) && /\.red$/i.test(u.hostname.replace(/^www\./i, ''))) {
+      u.hostname = 'www.xvideos.com';
+      return u.toString();
+    }
+  } catch {}
+  return url;
 }
 
 function isXhomealoneListingUrl(url) {
@@ -188,31 +203,64 @@ function absoluteUrl(href, seedUrl) {
   }
 }
 
-async function expandXvideosListing(url) {
-  const res = await fetch(url, {
+function nextXvideosListingUrl(docUrl, html, visited) {
+  const links = [];
+  const re = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = re.exec(html))) {
+    const href = decodeHtml(m[1]);
+    const text = decodeHtml(String(m[2] || '').replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim().toLowerCase();
+    const abs = absoluteUrl(href, docUrl);
+    if (!abs || visited.has(abs)) continue;
+    try {
+      const u = new URL(abs);
+      if (!isXvideosHost(u.hostname)) continue;
+      const pageNo = Number.parseInt(u.searchParams.get('p') || '', 10);
+      const relNext = /\b(?:next|volgende|›|»)\b/i.test(text) || /rel=["']next["']/i.test(m[0]);
+      if (relNext || Number.isFinite(pageNo)) links.push({ url: abs, pageNo: Number.isFinite(pageNo) ? pageNo : Number.MAX_SAFE_INTEGER, relNext });
+    } catch {}
+  }
+  const explicit = links.find((entry) => entry.relNext);
+  if (explicit) return explicit.url;
+  links.sort((a, b) => a.pageNo - b.pageNo);
+  return links.length ? links[0].url : '';
+}
+
+async function expandXvideosListing(url, opts = {}) {
+  const pageLimit = Math.max(1, Number.parseInt(opts.xvideosPages || opts.pages || process.env.WEBDL_XVIDEOS_EXPAND_PAGES || '1', 10) || 1);
+  const entries = [];
+  const seen = new Set();
+  const visited = new Set();
+  let pageUrl = url;
+  for (let page = 0; page < pageLimit && pageUrl && entries.length < XVIDEOS_EXPAND_LIMIT; page += 1) {
+    if (visited.has(pageUrl)) break;
+    visited.add(pageUrl);
+    const res = await fetch(pageUrl, {
     headers: {
       'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
       'accept': 'text/html,application/xhtml+xml',
     },
-  });
-  if (!res.ok) throw new Error(`xvideos listing fetch failed: HTTP ${res.status}`);
-  const html = await res.text();
-  const entries = [];
-  const seen = new Set();
-  const re = /<a\b[^>]*href=["']([^"']*\/video[./][^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-  let m;
-  while ((m = re.exec(html)) && entries.length < XVIDEOS_EXPAND_LIMIT) {
-    const entryUrl = absoluteUrl(decodeHtml(m[1]), url);
-    if (!entryUrl || seen.has(entryUrl)) continue;
-    seen.add(entryUrl);
-    const textTitle = decodeHtml(String(m[2] || '').replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
-    const hrefTitle = titleFromXvideosHref(entryUrl);
-    entries.push({
-      id: entryUrl.split('/').filter(Boolean).slice(-2, -1)[0] || '',
-      title: textTitle && !/^\d+p$/i.test(textTitle) ? textTitle : hrefTitle,
-      url: entryUrl,
-      thumbnail: '',
     });
+    if (!res.ok) throw new Error(`xvideos listing fetch failed: HTTP ${res.status}`);
+    const html = await res.text();
+    const re = /<a\b[^>]*href=["']([^"']*\/video[./][^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+    let m;
+    while ((m = re.exec(html)) && entries.length < XVIDEOS_EXPAND_LIMIT) {
+      const entryUrl = absoluteUrl(decodeHtml(m[1]), pageUrl);
+      if (!entryUrl || seen.has(entryUrl)) continue;
+      seen.add(entryUrl);
+      const textTitle = decodeHtml(String(m[2] || '').replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+      const hrefTitle = titleFromXvideosHref(entryUrl);
+      entries.push({
+        id: entryUrl.split('/').filter(Boolean).slice(-2, -1)[0] || '',
+        title: textTitle && !/^\d+p$/i.test(textTitle) ? textTitle : hrefTitle,
+        url: normalizeXvideosUrlForYtdlp(entryUrl),
+        thumbnail: '',
+        channel: 'xvideos',
+        playlistTitle: 'xvideos listing',
+      });
+    }
+    pageUrl = nextXvideosListingUrl(pageUrl, html, visited);
   }
   return entries;
 }
@@ -265,7 +313,8 @@ async function expandXhomealoneListing(url) {
 
 function plan(url, opts = {}) {
   const cwd = opts.cwd;
-  if (isDirectMediaUrl(url)) {
+  const plannedUrl = normalizeXvideosUrlForYtdlp(url);
+  if (isDirectMediaUrl(plannedUrl)) {
     return {
       cmd: process.env.WEBDL_CURL || 'curl',
       args: [
@@ -276,8 +325,8 @@ function plan(url, opts = {}) {
         '--connect-timeout', '20',
         '--max-time', process.env.WEBDL_DIRECT_MEDIA_MAX_TIME || '180',
         '-A', process.env.WEBDL_DIRECT_MEDIA_USER_AGENT || 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
-        '-o', directMediaFileName(url, opts),
-        url,
+        '-o', directMediaFileName(plannedUrl, opts),
+        plannedUrl,
       ],
       cwd,
       env: {},
@@ -285,9 +334,9 @@ function plan(url, opts = {}) {
       idleTimeoutMs: Number.parseInt(process.env.WEBDL_DIRECT_MEDIA_IDLE_TIMEOUT_MS || String(90 * 1000), 10),
     };
   }
-  const quality = opts.quality || (isMergeVideoUrl(url) ? 'bv*+ba/best' : 'best/bv*+ba');
-  const isYoutube = /(?:youtube\.com|youtu\.be)/i.test(String(url || ''));
-  const isTikTok = isTikTokUrl(url);
+  const quality = opts.quality || (isMergeVideoUrl(plannedUrl) ? 'bv*+ba/best' : 'best/bv*+ba');
+  const isYoutube = /(?:youtube\.com|youtu\.be)/i.test(String(plannedUrl || ''));
+  const isTikTok = isTikTokUrl(plannedUrl);
   const args = [
     '--no-colors',
     '--newline',                // progress per regel i.p.v. \r-updates
@@ -315,7 +364,7 @@ function plan(url, opts = {}) {
       '--max-sleep-interval', YOUTUBE_MAX_SLEEP_INTERVAL,
     );
   }
-  args.push(url);
+  args.push(plannedUrl);
   return { cmd: YT_DLP, args, cwd, env: {}, timeoutMs: YTDLP_TIMEOUT_MS, idleTimeoutMs: YTDLP_IDLE_TIMEOUT_MS };
 }
 
@@ -362,10 +411,10 @@ async function collectOutputs(workdir) {
 // Draait `yt-dlp --flat-playlist --dump-json` en parsed elke JSON-line
 // tot een compacte entry { id, title, url }.
 // Resolvet naar een array of rejects bij fatale fouten.
-function expandPlaylist(url) {
+function expandPlaylist(url, opts = {}) {
   return new Promise((resolve, reject) => {
     if (isXvideosListingUrl(url)) {
-      expandXvideosListing(url).then(resolve, reject);
+      expandXvideosListing(url, opts).then(resolve, reject);
       return;
     }
     if (isXhomealoneListingUrl(url)) {

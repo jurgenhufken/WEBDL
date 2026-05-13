@@ -467,6 +467,22 @@ function sourceModelKeyFromTitle(value) {
     .replace(/^-+|-+$/g, '');
 }
 
+function isOpaqueMediaToken(value) {
+  const text = String(value || '').trim();
+  if (!text || /\s/.test(text)) return false;
+  if (/^\d{12,}(?:_\d+)?$/i.test(text)) return true;
+  return /^[A-Za-z0-9_-]{10,}$/.test(text) && /[A-Za-z]/.test(text) && /\d/.test(text);
+}
+
+function sourceModelTitleForRow(row, graphSummary, sourceSite, filename) {
+  const postTitle = sourceModelTitleFromText(graphSummary?.source_post_title || '');
+  if (postTitle && !isOpaqueMediaToken(postTitle)) return postTitle;
+  const site = String(sourceSite || row?.platform || '').toLowerCase();
+  if (site === 'twitter' || site === 'x' || site.includes('twitter')) return '';
+  const fallback = sourceModelTitleFromText(row?.title || filename || '');
+  return isOpaqueMediaToken(fallback) ? '' : fallback;
+}
+
 function contentSitesFromRow(row, parsedMetadata) {
   const graph = parsedMetadata && parsedMetadata.source_graph && typeof parsedMetadata.source_graph === 'object'
     ? parsedMetadata.source_graph
@@ -505,13 +521,18 @@ function mapItem(row) {
   if (sourceSite && !sourceSites.some((s) => String(s || '').toLowerCase() === sourceSite.toLowerCase())) sourceSites.unshift(sourceSite);
   const graphSummary = sourceGraphSummary(parsedMetadata);
   const sourceUrl = graphSummary.source_post_url || row.source_url || row.url || '';
-  const sourceModelTitle = sourceModelTitleFromText(graphSummary.source_post_title || row.title || filename);
+  const sourceModelTitle = sourceModelTitleForRow(row, graphSummary, sourceSite, filename);
   const sourceModelKey = sourceModelKeyFromTitle(sourceModelTitle);
+  const displayTitle = graphSummary.source_post_title
+    && (String(sourceSite || '').toLowerCase() === 'twitter' || isOpaqueMediaToken(row.title))
+    ? graphSummary.source_post_title
+    : row.title;
   return {
     ...row,
     source_url: sourceUrl,
     id: String(row.id),
     rating_id: row.rating_id || row.id,
+    title: displayTitle,
     filename,
     ext,
     type: isVideo ? 'video' : 'image',
@@ -2610,7 +2631,7 @@ function graphSignalsForRow(row) {
   const metadata = parseMetadataObject(row.metadata);
   const graph = sourceGraphSummary(metadata);
   const sourceSite = sourceSiteFromMetadata(row.metadata, row.source_url);
-  const sourceModelTitle = sourceModelTitleFromText(graph.source_post_title || row.title || row.filename || '');
+  const sourceModelTitle = sourceModelTitleForRow(row, graph, sourceSite, row.filename || '');
   const sourceModelKey = sourceModelKeyFromTitle(sourceModelTitle);
   const signals = {
     source_site: sourceSite || '',
