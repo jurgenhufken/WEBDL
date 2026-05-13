@@ -12,7 +12,7 @@ const HTTP_TIMEOUT_MS = 6000;
 const PROBE_FAILURES_BEFORE_DISCONNECT = 2; // Reduced so it detects faster
 const PROBE_DISCONNECT_GRACE_MS = 12000; // Drop after 12s of no heartbeat
 const SOCKET_ENABLED = false;
-const BACKGROUND_BUILD = 'simple-background-v15-fff-giga-thread-trace';
+const BACKGROUND_BUILD = 'simple-background-v17-xvideos-browser-batch-giga';
 const HUB_URL = 'http://localhost:35730';
 const HUB_URL_FALLBACK = 'http://127.0.0.1:35730';
 
@@ -30,6 +30,7 @@ let reconnectAttempt = 0;
 let lastHeartbeatAt = 0;
 const activeTabs = new Set();
 const activeFffBackgroundScans = new Map();
+const activeXvideosBrowserBatches = new Map();
 let probeInFlight = null;
 let consecutiveProbeFailures = 0;
 
@@ -330,6 +331,109 @@ async function startFffBackgroundScan(payload = {}) {
     traceFffBackgroundStart(scanId, 'background-error', { url, error: e && e.message ? e.message : String(e), extra: { tabId: tab && tab.id } });
     return { success: false, error: e && e.message ? e.message : String(e) };
   }
+}
+
+async function runXvideosBrowserBatch(batchId, payload = {}) {
+  const urls = Array.isArray(payload.urls)
+    ? payload.urls.map((url) => String(url || '').trim()).filter(Boolean)
+    : [];
+  const metadata = payload.metadata && typeof payload.metadata === 'object' ? payload.metadata : {};
+  const stats = { total: urls.length, done: 0, imported: 0, duplicates: 0, errors: 0 };
+  activeXvideosBrowserBatches.set(batchId, {
+    batchId,
+    status: 'running',
+    startedAt: Date.now(),
+    stats,
+    currentUrl: '',
+  });
+  for (let i = 0; i < urls.length; i++) {
+    const url = urls[i];
+    let tab = null;
+    try {
+      activeXvideosBrowserBatches.set(batchId, {
+        ...(activeXvideosBrowserBatches.get(batchId) || { batchId }),
+        status: 'loading',
+        currentUrl: url,
+        index: i + 1,
+        stats,
+        updatedAt: Date.now(),
+      });
+      tab = await browser.tabs.create({ url, active: false });
+      await waitForTabComplete(tab.id, 60000);
+      activeXvideosBrowserBatches.set(batchId, {
+        ...(activeXvideosBrowserBatches.get(batchId) || { batchId }),
+        status: 'downloading',
+        tabId: tab.id,
+        currentUrl: url,
+        index: i + 1,
+        stats,
+        updatedAt: Date.now(),
+      });
+      const result = await sendTabMessageWithRetry(tab.id, {
+        action: 'runXvideosBrowserDownload',
+        payload: {
+          batchId,
+          url,
+          index: i + 1,
+          total: urls.length,
+          metadata: {
+            ...metadata,
+            webdl_batch_kind: metadata.webdl_batch_kind || 'xvideos_browser_batch',
+          },
+        },
+      }, 60, 1000);
+      stats.done++;
+      if (result && result.duplicate) stats.duplicates++;
+      else stats.imported++;
+    } catch (e) {
+      stats.done++;
+      stats.errors++;
+      activeXvideosBrowserBatches.set(batchId, {
+        ...(activeXvideosBrowserBatches.get(batchId) || { batchId }),
+        status: 'running',
+        currentUrl: url,
+        lastError: e && e.message ? e.message : String(e),
+        stats,
+        updatedAt: Date.now(),
+      });
+    } finally {
+      if (tab && tab.id) {
+        try { await browser.tabs.remove(tab.id); } catch (_) {}
+      }
+    }
+    await sleep(500);
+  }
+  activeXvideosBrowserBatches.set(batchId, {
+    ...(activeXvideosBrowserBatches.get(batchId) || { batchId }),
+    status: stats.errors ? 'done-with-errors' : 'done',
+    stats,
+    finishedAt: Date.now(),
+    updatedAt: Date.now(),
+  });
+}
+
+async function startXvideosBrowserBatch(payload = {}) {
+  const urls = Array.isArray(payload.urls)
+    ? payload.urls.map((url) => String(url || '').trim()).filter(Boolean)
+    : [];
+  if (!urls.length) return { success: false, error: 'Geen XVideos URLs voor browser-batch' };
+  const batchId = `xv-bg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  activeXvideosBrowserBatches.set(batchId, {
+    batchId,
+    status: 'queued',
+    startedAt: Date.now(),
+    stats: { total: urls.length, done: 0, imported: 0, duplicates: 0, errors: 0 },
+  });
+  runXvideosBrowserBatch(batchId, payload).catch((e) => {
+    activeXvideosBrowserBatches.set(batchId, {
+      ...(activeXvideosBrowserBatches.get(batchId) || { batchId }),
+      status: 'error',
+      error: e && e.message ? e.message : String(e),
+      finishedAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+  });
+  return { success: true, accepted: true, batchId, total: urls.length };
 }
 
 async function getJson(endpoint) {
@@ -818,6 +922,18 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .then(sendResponse)
       .catch(e => sendResponse({ success: false, error: e && e.message ? e.message : String(e) }));
     return true;
+  }
+
+  if (action === 'startXvideosBrowserBatch') {
+    startXvideosBrowserBatch((message && message.payload) || {})
+      .then(sendResponse)
+      .catch(e => sendResponse({ success: false, error: e && e.message ? e.message : String(e) }));
+    return true;
+  }
+
+  if (action === 'xvideosBrowserBatchStatus') {
+    sendResponse({ success: true, batches: Array.from(activeXvideosBrowserBatches.values()) });
+    return false;
   }
 
   if (action === 'fffBackgroundScanStatus') {

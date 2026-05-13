@@ -19,6 +19,11 @@ test('browser-media accepteert fullscale image/video uploads', () => {
     contentType: 'video/mp4',
     size: 2048,
   }), true);
+  assert.equal(isImportableBrowserMedia({
+    filename: 'browser-download.mp4',
+    contentType: 'application/octet-stream',
+    size: 2048,
+  }), true);
 });
 
 test('browser-media weigert thumbnails, tijdelijke bestanden en niet-media', () => {

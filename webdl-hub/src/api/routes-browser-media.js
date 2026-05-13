@@ -18,8 +18,9 @@ const SAFE_EXT_BY_TYPE = new Map([
 ]);
 
 const IMAGE_VIDEO_TYPE_RE = /^(?:image|video)\//i;
+const BINARY_VIDEO_TYPE_RE = /^(?:application\/octet-stream|binary\/octet-stream)$/i;
 const THUMBNAIL_BASENAME_RE = /\.(?:md|th|thumb|thumbnail|preview|small)\.(?:jpe?g|png|gif|webp|bmp|avif)$/i;
-const PARTIAL_BASENAME_RE = /(?:^|[._-])(?:temp|partial|part|download)(?:[._-]|$)/i;
+const PARTIAL_BASENAME_RE = /(?:^|[._-])(?:temp|partial|part)(?:[._-]|$)/i;
 
 function sanitizeSegment(value, fallback = 'untitled') {
   const clean = String(value || '')
@@ -49,7 +50,8 @@ function safeFilename(filename, contentType, fallbackSeed = 'media') {
 
 function isImportableBrowserMedia({ filename, contentType, size }) {
   const type = normalizeContentType(contentType);
-  if (!IMAGE_VIDEO_TYPE_RE.test(type)) return false;
+  const ext = path.extname(String(filename || '')).toLowerCase();
+  if (!IMAGE_VIDEO_TYPE_RE.test(type) && !(BINARY_VIDEO_TYPE_RE.test(type) && /^\.(?:mp4|webm|mov)$/i.test(ext))) return false;
   if (!Number.isFinite(size) || size <= 0) return false;
   const base = path.basename(String(filename || ''));
   if (PARTIAL_BASENAME_RE.test(base)) return false;
@@ -82,7 +84,7 @@ async function uniquePath(dir, filename) {
 
 function createBrowserMediaRouter({ repo }) {
   const r = express.Router();
-  const rawLimit = process.env.WEBDL_BROWSER_MEDIA_BODY_LIMIT || '250mb';
+  const rawLimit = process.env.WEBDL_BROWSER_MEDIA_BODY_LIMIT || '2000mb';
 
   r.post('/', express.raw({ type: '*/*', limit: rawLimit }), async (req, res, next) => {
     try {
@@ -128,6 +130,18 @@ function createBrowserMediaRouter({ repo }) {
         source_site: platform,
         source_page_url: pageUrl || null,
         source_url: sourceUrl,
+        source_post_title: title || null,
+        source_post_url: pageUrl || sourceUrl || null,
+        source_graph: {
+          nodes: [
+            { type: 'host', platform },
+            {
+              type: 'post',
+              title: title || '',
+              url: pageUrl || sourceUrl || null,
+            },
+          ],
+        },
         webdl_image_quality: requestedContentType.startsWith('image/') ? 'browser_fullscale' : null,
         webdl_was_thumbnail_url: false,
       };
