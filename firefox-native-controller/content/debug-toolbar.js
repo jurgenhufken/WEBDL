@@ -5,7 +5,7 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-gigabatch-guard';
+  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-gigabatch-interleaved';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
@@ -1099,8 +1099,58 @@
       forumUrl = u0.toString();
     } catch (e) {}
 
+    const seenItems = new Set();
+    const out = [];
+    let threadPages = 0;
+    let threadIndex = 0;
+    let scannedThreadIndex = 0;
+    const scanPendingThreads = async () => {
+      while (!stoppedByGiga && scannedThreadIndex < threadLinks.length && out.length < maxItems) {
+        const threadUrl = threadLinks[scannedThreadIndex];
+        scannedThreadIndex += 1;
+        threadIndex += 1;
+        const remaining = Math.max(0, maxItems - out.length);
+        if (report({ phase: 'thread-start', threadIndex, threads: threadLinks.length, threadPages, items: out.length, url: threadUrl })) break;
+        const res = await fetchFootFetishForumThreadCandidates(threadUrl, {
+          maxPages: maxThreadPages,
+          maxItems: remaining,
+          delayMs,
+          timeoutMs,
+          onProgress: (p) => {
+            try {
+              report({
+                ...(p || {}),
+                phase: (p && p.phase) || 'thread-page',
+                threadIndex,
+                threads: threadLinks.length,
+                threadPages: threadPages + (Number(p && p.pages) || 0),
+                items: out.length + (Number(p && p.items) || 0),
+                threadUrl
+              });
+            } catch (e) {}
+          },
+          shouldStop: () => stoppedByGiga,
+        });
+        threadPages += Number(res && res.pages) || 0;
+        for (const c of (res && Array.isArray(res.candidates) ? res.candidates : [])) {
+          if (!c || !c.url) continue;
+          const s = String(c.url || '').trim();
+          if (!s || seenItems.has(s)) continue;
+          seenItems.add(s);
+          out.push(c);
+          if (out.length >= maxItems) break;
+        }
+        if (res && res.stoppedByGiga) stoppedByGiga = true;
+        if (report({ phase: 'thread-done', threadIndex, threads: threadLinks.length, threadPages, items: out.length, url: threadUrl })) break;
+        if (delayMs > 0) {
+          try { await delay(delayMs); } catch (e) {}
+        }
+      }
+      return stoppedByGiga || out.length >= maxItems;
+    };
+
     let forumPages = 0;
-    while (forumUrl && forumPages < maxForumPages && threadLinks.length < maxThreads) {
+    while (forumUrl && forumPages < maxForumPages && threadLinks.length < maxThreads && out.length < maxItems && !stoppedByGiga) {
       forumPages++;
       if (report({ phase: 'forum-load', forumPages, threads: threadLinks.length, items: 0, url: forumUrl })) break;
       let doc = null;
@@ -1145,6 +1195,7 @@
         items: 0,
         url: forumUrl
       })) break;
+      if (await scanPendingThreads()) break;
 
       const nextUrl = findNextFootFetishForumForumPageUrl(doc, forumUrl);
       if (!nextUrl || nextUrl === forumUrl) break;
@@ -1153,52 +1204,7 @@
         try { await delay(delayMs); } catch (e) {}
       }
     }
-
-    const seenItems = new Set();
-    const out = [];
-    let threadPages = 0;
-    let threadIndex = 0;
-    for (const threadUrl of threadLinks) {
-      if (stoppedByGiga) break;
-      if (out.length >= maxItems) break;
-      threadIndex++;
-      const remaining = Math.max(0, maxItems - out.length);
-      if (report({ phase: 'thread-start', threadIndex, threads: threadLinks.length, threadPages, items: out.length, url: threadUrl })) break;
-      const res = await fetchFootFetishForumThreadCandidates(threadUrl, {
-        maxPages: maxThreadPages,
-        maxItems: remaining,
-        delayMs,
-        timeoutMs,
-        onProgress: (p) => {
-          try {
-            report({
-              ...(p || {}),
-              phase: (p && p.phase) || 'thread-page',
-              threadIndex,
-              threads: threadLinks.length,
-              threadPages: threadPages + (Number(p && p.pages) || 0),
-              items: out.length + (Number(p && p.items) || 0),
-              threadUrl
-            });
-          } catch (e) {}
-        },
-        shouldStop: () => stoppedByGiga,
-      });
-      threadPages += Number(res && res.pages) || 0;
-      for (const c of (res && Array.isArray(res.candidates) ? res.candidates : [])) {
-        if (!c || !c.url) continue;
-        const s = String(c.url || '').trim();
-        if (!s || seenItems.has(s)) continue;
-        seenItems.add(s);
-        out.push(c);
-        if (out.length >= maxItems) break;
-      }
-      if (res && res.stoppedByGiga) stoppedByGiga = true;
-      if (report({ phase: 'thread-done', threadIndex, threads: threadLinks.length, threadPages, items: out.length, url: threadUrl })) break;
-      if (delayMs > 0) {
-        try { await delay(delayMs); } catch (e) {}
-      }
-    }
+    if (!stoppedByGiga && out.length < maxItems) await scanPendingThreads();
 
     return { candidates: out, threadLinks: threadLinks.slice(), pages: threadPages, forumPages, threads: threadLinks.length, diagnostics, stoppedByGiga };
   }
