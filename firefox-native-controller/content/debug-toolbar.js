@@ -5,7 +5,7 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-fff-background-continuation';
+  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-fff-background-rescan-to-continue';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
@@ -4975,12 +4975,6 @@
 
       let forumUrl = startUrl;
       const seenThreads = new Set();
-      if (Array.isArray(body.initialThreadLinks)) {
-        for (const link of body.initialThreadLinks) {
-          const key = threadKeyForUrl(link);
-          if (key) seenThreads.add(key);
-        }
-      }
       let totalItems = 0;
       while (forumUrl && stats.forumPages < maxForumPages && totalItems < maxItems) {
         stats.forumPages++;
