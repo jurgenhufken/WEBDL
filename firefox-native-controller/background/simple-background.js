@@ -12,7 +12,7 @@ const HTTP_TIMEOUT_MS = 6000;
 const PROBE_FAILURES_BEFORE_DISCONNECT = 2; // Reduced so it detects faster
 const PROBE_DISCONNECT_GRACE_MS = 12000; // Drop after 12s of no heartbeat
 const SOCKET_ENABLED = false;
-const BACKGROUND_BUILD = 'simple-background-v11-fff-background-trace';
+const BACKGROUND_BUILD = 'simple-background-v12-fff-background-start-trace';
 const HUB_URL = 'http://localhost:35730';
 const HUB_URL_FALLBACK = 'http://127.0.0.1:35730';
 
@@ -245,6 +245,28 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
 }
 
+function traceFffBackgroundStart(scanId, phase, data = {}) {
+  try {
+    fetch(`${SERVER_URL_FALLBACK}/debug/fff-background-scan`, {
+      method: 'POST',
+      mode: 'cors',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        scanId: scanId || '',
+        phase,
+        url: data.url || '',
+        stats: data.stats || null,
+        extra: {
+          ...(data.extra && typeof data.extra === 'object' ? data.extra : {}),
+          backgroundBuild: BACKGROUND_BUILD,
+        },
+        error: data.error || '',
+        build: BACKGROUND_BUILD,
+      }),
+    }).catch(() => {});
+  } catch (e) {}
+}
+
 async function sendTabMessageWithRetry(tabId, message, attempts = 30, delayMs = 500) {
   let lastError = null;
   for (let i = 0; i < attempts; i++) {
@@ -268,10 +290,20 @@ async function startFffBackgroundScan(payload = {}) {
   const scanId = `fff-bg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   let tab = null;
   try {
+    traceFffBackgroundStart(scanId, 'background-start', {
+      url,
+      extra: {
+        payloadKeys: Object.keys(payload && typeof payload === 'object' ? payload : {}),
+        initialUrls: Array.isArray(payload.initialUrls) ? payload.initialUrls.length : 0,
+        initialThreadLinks: Array.isArray(payload.initialThreadLinks) ? payload.initialThreadLinks.length : 0,
+      },
+    });
     tab = await browser.tabs.create({ url, active: false });
     activeFffBackgroundScans.set(scanId, { scanId, tabId: tab && tab.id, url, startedAt: Date.now(), status: 'loading' });
+    traceFffBackgroundStart(scanId, 'background-tab-created', { url, extra: { tabId: tab && tab.id } });
     await waitForTabComplete(tab.id, 45000);
     activeFffBackgroundScans.set(scanId, { scanId, tabId: tab.id, url, startedAt: Date.now(), status: 'dispatching' });
+    traceFffBackgroundStart(scanId, 'background-dispatch', { url, extra: { tabId: tab.id } });
     const ack = await sendTabMessageWithRetry(tab.id, {
       action: 'runFffBackgroundScan',
       payload: {
@@ -281,6 +313,7 @@ async function startFffBackgroundScan(payload = {}) {
       }
     }, 40, 500);
     activeFffBackgroundScans.set(scanId, { scanId, tabId: tab.id, url, startedAt: Date.now(), status: 'running', acceptedAt: Date.now() });
+    traceFffBackgroundStart(scanId, 'background-accepted', { url, extra: { tabId: tab.id, ack } });
     return { success: true, accepted: true, scanId, tabId: tab.id, worker: ack };
   } catch (e) {
     if (tab && tab.id) {
@@ -294,6 +327,7 @@ async function startFffBackgroundScan(payload = {}) {
       error: e && e.message ? e.message : String(e),
       finishedAt: Date.now(),
     });
+    traceFffBackgroundStart(scanId, 'background-error', { url, error: e && e.message ? e.message : String(e), extra: { tabId: tab && tab.id } });
     return { success: false, error: e && e.message ? e.message : String(e) };
   }
 }

@@ -5,7 +5,7 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-fff-background-trace';
+  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-fff-background-start-trace';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
@@ -7532,7 +7532,7 @@
           } catch (_) {}
         });
       }, 250);
-      return Promise.resolve({ success: true, accepted: true, scanId: payload.scanId || '' });
+      return Promise.resolve({ success: true, accepted: true, scanId: payload.scanId || '', build: WEBDL_BUILD });
     }
 
     if (message && message.action === 'webdlDownloadQueued') {
