@@ -5,7 +5,7 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-duplicate-notice-forum-scan';
+  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-fff-archive-scan';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
@@ -761,6 +761,24 @@
         msg.style.cssText = 'color:#fca5a5;margin-bottom:10px;';
         panel.appendChild(msg);
       }
+      const diagnostics = Array.isArray(res && res.diagnostics) ? res.diagnostics.slice(0, 20) : [];
+      if (diagnostics.length) {
+        const diagTitle = document.createElement('div');
+        diagTitle.textContent = 'Forumdiagnose';
+        diagTitle.style.cssText = 'font-weight:700;color:#bfdbfe;margin:8px 0 4px;';
+        panel.appendChild(diagTitle);
+        for (const d of diagnostics) {
+          const row = document.createElement('div');
+          const url = String(d && d.url || '');
+          const titleText = String(d && d.title || '').trim();
+          const linksCount = Number(d && d.links) || 0;
+          const refsCount = Number(d && d.refs) || 0;
+          row.textContent = `${linksCount} thread-links, ${refsCount} thread-referenties | ${titleText || url}`;
+          row.title = url;
+          row.style.cssText = 'word-break:break-word;color:#cbd5e1;padding:3px 0;border-top:1px solid rgba(255,255,255,0.06);';
+          panel.appendChild(row);
+        }
+      }
       const list = document.createElement('div');
       for (const url of links) {
         const row = document.createElement('div');
@@ -801,37 +819,75 @@
     return '';
   }
 
+  function footFetishForumThreadPartsFromUrl(raw, baseHref) {
+    try {
+      const u = normalizedUrlObject(raw, baseHref);
+      u.hash = '';
+      const host = String(u.hostname || '').toLowerCase();
+      if (!(host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com'))) return null;
+      const text = `${String(u.pathname || '')}${String(u.search || '')}`;
+      const m = text.match(/(?:^|[\/?&])threads\/([^\/\?#"'<>]+)\.(\d+)(?:[\/\?#&]|$)/i);
+      if (!m || !m[1] || !m[2]) return null;
+      return { url: u, slug: m[1], id: m[2] };
+    } catch (e) {}
+    return null;
+  }
+
+  function countFootFetishForumThreadRefsInDocument(doc) {
+    let count = 0;
+    try {
+      count += Array.from(doc.querySelectorAll(
+        'a[href*="threads/"], a[data-href*="threads/"], a[data-url*="threads/"], a[data-preview-url*="threads/"], [data-content-url*="threads/"]'
+      )).length;
+    } catch (e) {}
+    try {
+      const html = String(doc && doc.documentElement && doc.documentElement.outerHTML || '');
+      const matches = html.match(/(?:href|data-href|data-url|data-preview-url|data-content-url)=["'][^"']*threads\/[^"']+["']/ig);
+      count += matches ? matches.length : 0;
+    } catch (e) {}
+    return count;
+  }
+
   function collectFootFetishForumThreadLinksFromForumDocument(doc, baseHref, maxThreads = 200) {
     const out = [];
     const seen = new Set();
     const push = (raw, row) => {
       try {
         if (out.length >= maxThreads) return;
-        const u = normalizedUrlObject(raw, baseHref);
-        u.hash = '';
-        const host = String(u.hostname || '').toLowerCase();
-        if (!(host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com'))) return;
-        const m = String(u.pathname || '').match(/\/threads\/([^\/\?#]+)\.(\d+)(?:\/[^\/\?#]*)?\/?$/i);
-        if (!m || !m[1]) return;
+        const parts = footFetishForumThreadPartsFromUrl(raw, baseHref);
+        if (!parts || !parts.url || !parts.slug || !parts.id) return;
+        const u = parts.url;
         if (row) {
           const rowClass = String(row.className || '').toLowerCase();
           const rowText = String(row.textContent || '').toLowerCase();
           if (/\bis-redirect\b|structitem-status--redirect/.test(rowClass)) return;
           if (/\bredirect\b/.test(rowText) && !/\breplies\b|\bviews\b/.test(rowText)) return;
         }
-        u.pathname = `/threads/${m[1]}.${m[2]}/`;
+        u.pathname = `/threads/${parts.slug}.${parts.id}/`;
         u.search = '';
         const final = u.toString();
-        const key = m[2];
+        const key = parts.id;
         if (seen.has(key)) return;
         seen.add(key);
         out.push(final);
       } catch (e) {}
     };
 
+    const pushElementUrls = (el, row) => {
+      if (!el || !el.getAttribute) return;
+      const attrs = ['href', 'data-href', 'data-url', 'data-preview-url', 'data-content-url'];
+      for (const attr of attrs) {
+        try {
+          const value = el.getAttribute(attr);
+          if (value) push(value, row);
+        } catch (e) {}
+        if (out.length >= maxThreads) return;
+      }
+    };
+
     try {
       const rows = Array.from(doc.querySelectorAll(
-        '.structItem--thread, .structItemContainer .structItem, .discussionListItem, [data-author][data-content]'
+        '.structItem--thread, .structItem, .structItemContainer .structItem, .discussionListItem, [data-author][data-content]'
       )).filter(Boolean);
       if (rows.length) {
         for (const row of rows) {
@@ -839,10 +895,10 @@
           const rowClass = String(row.className || '').toLowerCase();
           if (/\bis-redirect\b|structitem-status--redirect/.test(rowClass)) continue;
           const anchors = Array.from(row.querySelectorAll(
-            '.structItem-title a[href], a[data-tp-primary="on"][href], a[href*="/threads/"]'
+            '.structItem-title a[href], a[data-tp-primary="on"][href], a[href*="threads/"], a[data-href*="threads/"], a[data-url*="threads/"], a[data-preview-url*="threads/"], [data-content-url*="threads/"]'
           ));
           for (const a of anchors) {
-            push(a.getAttribute('href'), row);
+            pushElementUrls(a, row);
             if (out.length >= maxThreads) break;
           }
           if (out.length >= maxThreads) break;
@@ -850,12 +906,24 @@
       }
       if (!out.length) {
         const titleAnchors = Array.from(doc.querySelectorAll(
-          '.structItem-title a[href], a[data-tp-primary="on"][href], .discussionListItem .title a[href], a[href*="/threads/"]'
+          '.structItem-title a[href], a[data-tp-primary="on"][href], .discussionListItem .title a[href], a[href*="threads/"], a[data-href*="threads/"], a[data-url*="threads/"], a[data-preview-url*="threads/"], [data-content-url*="threads/"]'
         ));
         for (const a of titleAnchors) {
           const row = a.closest ? a.closest('.structItem, .structItem--thread, .discussionListItem, [data-author][data-content], article, li, tr') : null;
-          push(a.getAttribute('href'), row);
+          pushElementUrls(a, row);
           if (out.length >= maxThreads) break;
+        }
+      }
+      if (!out.length) {
+        const html = String(doc && doc.documentElement && doc.documentElement.outerHTML || '');
+        const attrRe = /\b(?:href|data-href|data-url|data-preview-url|data-content-url)=["']([^"']*threads\/[^"']+)["']/ig;
+        let m;
+        while ((m = attrRe.exec(html)) && out.length < maxThreads) {
+          push(m[1], null);
+        }
+        const absRe = /https?:\/\/(?:[^\/"'\s<>]+\.)?footfetishforum\.com\/(?:index\.php\?)?threads\/[^"'\s<>]+?\.\d+[^"'\s<>]*/ig;
+        while ((m = absRe.exec(html)) && out.length < maxThreads) {
+          push(m[0], null);
         }
       }
     } catch (e) {}
@@ -998,6 +1066,7 @@
     const threadLinks = [];
     const seenThreads = new Set();
     let forumUrl = String(startUrl || '').trim();
+    const diagnostics = [];
     try {
       const u0 = new URL(forumUrl, window.location.href);
       u0.hash = '';
@@ -1019,10 +1088,18 @@
       if (!doc) break;
 
       const links = collectFootFetishForumThreadLinksFromForumDocument(doc, forumUrl, maxThreads - threadLinks.length);
+      try {
+        diagnostics.push({
+          url: forumUrl,
+          title: String(doc.title || '').trim(),
+          links: Array.isArray(links) ? links.length : 0,
+          refs: countFootFetishForumThreadRefsInDocument(doc)
+        });
+      } catch (e) {}
       for (const link of links) {
         try {
-          const m = String(link || '').match(/\/threads\/[^\/\?#]+\.(\d+)(?:\/[^\/\?#]*)?(?:\/|\?|#|$)/i);
-          const key = m && m[1] ? m[1] : link;
+          const parts = footFetishForumThreadPartsFromUrl(link, forumUrl);
+          const key = parts && parts.id ? parts.id : link;
           if (seenThreads.has(key)) continue;
           seenThreads.add(key);
           threadLinks.push(link);
@@ -1063,7 +1140,7 @@
       }
     }
 
-    return { candidates: out, threadLinks: threadLinks.slice(), pages: threadPages, forumPages, threads: threadLinks.length };
+    return { candidates: out, threadLinks: threadLinks.slice(), pages: threadPages, forumPages, threads: threadLinks.length, diagnostics };
   }
 
   async function fetchFootFetishForumThreadCandidates(startUrl, options = {}) {
