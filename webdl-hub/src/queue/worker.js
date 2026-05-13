@@ -463,6 +463,7 @@ async function syncToGallery(job, outputFiles, logger, repo) {
 
   try {
     let inserted = 0;
+    const seenOutputPaths = new Set();
     for (const f of outputFiles) {
       const ext = path.extname(f.path).toLowerCase();
       const isVideo = VIDEO_EXTS.has(ext);
@@ -473,6 +474,8 @@ async function syncToGallery(job, outputFiles, logger, repo) {
       if (YTDLP_FORMAT_FRAGMENT_RE.test(path.basename(f.path))) continue;
       if (PARTIAL_MEDIA_BASENAME_RE.test(path.basename(f.path))) continue;
       if (SKIP_EXTS.has(ext)) continue;
+      if (seenOutputPaths.has(f.path)) continue;
+      seenOutputPaths.add(f.path);
 
       const fileInfo = await readInfoJsonForMedia(f.path, info);
       const pinnedVipergirls = isPinnedVipergirlsJob(job);

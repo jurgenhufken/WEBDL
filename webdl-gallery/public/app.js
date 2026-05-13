@@ -11,13 +11,46 @@
     return fetch(url + sep + '_t=' + TAB_ID, options);
   }
 
+  const SOURCE_TREE_EXPANDED_KEY = 'webdl.gallery.sourceTree.expanded.v1';
+  function loadSourceTreeExpanded() {
+    try {
+      const raw = localStorage.getItem(SOURCE_TREE_EXPANDED_KEY);
+      if (!raw) return null;
+      const values = JSON.parse(raw);
+      return Array.isArray(values) ? new Set(values.map((v) => String(v || '').trim()).filter(Boolean)) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+  const initialSourceTreeExpanded = loadSourceTreeExpanded();
+  function saveSourceTreeExpanded(values) {
+    try {
+      localStorage.setItem(SOURCE_TREE_EXPANDED_KEY, JSON.stringify(Array.from(values || [])));
+    } catch (_) {}
+  }
+
   const state = {
     items: [],
     offset: 0,
     limit: 100,
     loading: false,
     done: false,
-    filters: { platform: '', channel: '', q: '', sort: 'recent', min_rating: '', media_type: '', channel_sort: 'count', tag_id: '' },
+    filters: {
+      platform: '',
+      channel: '',
+      q: '',
+      sort: 'recent',
+      min_rating: '',
+      media_type: '',
+      channel_sort: 'count',
+      tag_id: '',
+      source_thread_url: '',
+      source_thread_title: '',
+      source_post_url: '',
+      source_model_key: '',
+      source_model_title: '',
+      source_scope_label: '',
+    },
     // Auto-refresh
     autoRefresh: true,
     liveAllMedia: true,
@@ -31,9 +64,19 @@
     activeRefreshTimer: null,
     activeRefreshInFlight: false,
     tagFilterOptions: [],
+    platformOptions: [],
+    channelOptions: [],
+    sourceTreeExpanded: initialSourceTreeExpanded || new Set(),
+    sourceTreeHadSavedExpanded: Boolean(initialSourceTreeExpanded),
+    sourceTreeQuery: '',
+    sourceFilterBusy: false,
+    sourceTreeSuppress: false,
     newestFinishedAt: null,
     knownIds: new Set(),
     queryVersion: 0,
+    queryHistory: [],
+    queryHistoryIndex: -1,
+    applyingQueryHistory: false,
     pendingNewItems: new Map(),
     nextCursor: null,
     totalHint: null,
@@ -448,10 +491,22 @@
   }
 
   function selectedTotalHint() {
-    const channel = $('channel');
-    if (channel && channel.value) return selectedOptionCount(channel);
-    const platform = $('platform');
-    if (platform && platform.value) return selectedOptionCount(platform);
+    const selectedChannels = splitFilterList(state.filters.channel);
+    if (selectedChannels.length) {
+      const selectedSet = new Set(selectedChannels);
+      const value = (state.channelOptions || [])
+        .filter((row) => selectedSet.has(String(row.channel || '')))
+        .reduce((sum, row) => sum + countForCurrentMediaType(row), 0);
+      if (value) return value;
+    }
+    const selectedPlatforms = splitFilterList(state.filters.platform);
+    if (selectedPlatforms.length) {
+      const selectedSet = new Set(selectedPlatforms);
+      const value = (state.platformOptions || [])
+        .filter((row) => selectedSet.has(String(row.platform || '')))
+        .reduce((sum, row) => sum + countForCurrentMediaType(row), 0);
+      if (value) return value;
+    }
     const tag = $('tagFilter');
     if (tag && tag.value) {
       const value = Number(tag.dataset.count);
@@ -624,10 +679,12 @@
     state.loading = false;
   }
 
-  async function reloadGallery() {
+  async function reloadGallery({ pushHistory = true } = {}) {
+    if (pushHistory) pushQueryHistory(state.filters);
     window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
     clearGrid();
     await loadMore();
+    updateQueryHistoryControls();
   }
 
   // ─── Filters ──────────────────────────────────────────────────────────────
@@ -636,6 +693,9 @@
     if (state.filters.q) params.set('q', state.filters.q);
     if (state.filters.min_rating) params.set('min_rating', state.filters.min_rating);
     if (state.filters.tag_id) params.set('tag_id', state.filters.tag_id);
+    for (const key of ['source_thread_url', 'source_thread_title', 'source_post_url', 'source_model_key', 'source_model_title']) {
+      if (state.filters[key]) params.set(key, state.filters[key]);
+    }
     return params;
   }
 
@@ -650,80 +710,443 @@
   }
 
   function joinFilterList(values) {
-    return Array.from(new Set((values || []).map((v) => String(v || '').trim()).filter(Boolean))).join(',');
+    const list = values instanceof Set
+      ? Array.from(values)
+      : Array.isArray(values)
+        ? values
+        : splitFilterList(values);
+    return Array.from(new Set(list.map((v) => String(v || '').trim()).filter(Boolean))).join(',');
   }
 
-  function facetButtonLabel(kind, total, selected) {
-    const base = kind === 'platform' ? 'Platforms' : 'Mappen';
-    if (!selected.length) return `Alle ${base.toLowerCase()} (${total})`;
-    if (selected.length === 1) return selected[0];
-    return `${selected.length} ${base.toLowerCase()}`;
+  const QUERY_FILTER_KEYS = [
+    'platform', 'channel', 'q', 'sort', 'channel_sort', 'min_rating', 'media_type', 'tag_id',
+    'source_thread_url', 'source_thread_title', 'source_post_url',
+    'source_model_key', 'source_model_title', 'source_scope_label',
+  ];
+
+  function snapshotQueryFilters(filters = state.filters) {
+    const out = {};
+    for (const key of QUERY_FILTER_KEYS) out[key] = String(filters[key] || '');
+    if (!out.sort) out.sort = 'recent';
+    if (!out.channel_sort) out.channel_sort = 'count';
+    return out;
   }
 
-  function renderFacetPicker(kind, rows, total) {
-    const picker = $(kind === 'platform' ? 'platformPicker' : 'channelPicker');
-    if (!picker) return;
-    const selected = splitFilterList(state.filters[kind]);
-    const selectedSet = new Set(selected);
-    const options = rows.slice(0, kind === 'platform' ? 90 : 300);
-    picker.innerHTML = '';
+  function queryFiltersEqual(a, b) {
+    const left = snapshotQueryFilters(a || {});
+    const right = snapshotQueryFilters(b || {});
+    return QUERY_FILTER_KEYS.every((key) => left[key] === right[key]);
+  }
+
+  function queryHistoryLabel(filters = state.filters) {
+    const snap = snapshotQueryFilters(filters);
+    if (snap.source_scope_label) return snap.source_scope_label;
+    if (snap.source_model_title) return `Model: ${snap.source_model_title}`;
+    if (snap.source_thread_title) return `Serie: ${snap.source_thread_title}`;
+    if (snap.channel) {
+      const channels = splitFilterList(snap.channel);
+      if (channels.length === 1) return `Map: ${channels[0]}`;
+      if (channels.length > 1) return `${channels.length} mappen`;
+    }
+    if (snap.platform) {
+      const platforms = splitFilterList(snap.platform);
+      if (platforms.length === 1) return `Bron: ${platforms[0]}`;
+      if (platforms.length > 1) return `${platforms.length} bronnen`;
+    }
+    if (snap.tag_id) return `Tag #${snap.tag_id}`;
+    if (snap.q) return `Zoek: ${snap.q}`;
+    return 'Alle media';
+  }
+
+  function syncFilterControlsFromState() {
+    const map = { min_rating: 'minRating', tag_id: 'tagFilter', media_type: 'mediaType', channel_sort: 'channelSort' };
+    for (const key of ['platform', 'channel', 'q', 'sort', 'min_rating', 'media_type', 'channel_sort', 'tag_id']) {
+      const control = $(map[key] || key);
+      if (control) control.value = state.filters[key] || '';
+    }
+    syncTagFilterControl();
+    renderSourceTree();
+  }
+
+  function updateQueryHistoryControls() {
+    const back = $('queryBack');
+    const forward = $('queryForward');
+    const label = $('queryHistoryLabel');
+    if (back) back.disabled = state.queryHistoryIndex <= 0;
+    if (forward) forward.disabled = state.queryHistoryIndex < 0 || state.queryHistoryIndex >= state.queryHistory.length - 1;
+    if (label) {
+      const text = queryHistoryLabel();
+      label.textContent = text;
+      label.title = text;
+    }
+  }
+
+  function pushQueryHistory(filters = state.filters) {
+    if (state.applyingQueryHistory) return;
+    const snap = snapshotQueryFilters(filters);
+    const current = state.queryHistory[state.queryHistoryIndex];
+    if (current && queryFiltersEqual(current, snap)) {
+      updateQueryHistoryControls();
+      return;
+    }
+    state.queryHistory = state.queryHistory.slice(0, state.queryHistoryIndex + 1);
+    state.queryHistory.push(snap);
+    if (state.queryHistory.length > 80) state.queryHistory.shift();
+    state.queryHistoryIndex = state.queryHistory.length - 1;
+    updateQueryHistoryControls();
+  }
+
+  async function applyGalleryQuery(filters, { pushHistory = true } = {}) {
+    state.filters = {
+      ...state.filters,
+      ...snapshotQueryFilters({ ...state.filters, ...(filters || {}) }),
+    };
+    state.totalHint = selectedTotalHint();
+    syncFilterControlsFromState();
+    if (pushHistory) pushQueryHistory(state.filters);
+    await loadFilterDropdowns();
+    await reloadChannels();
+    await reloadGallery({ pushHistory: false });
+  }
+
+  async function moveQueryHistory(dir) {
+    const next = state.queryHistoryIndex + dir;
+    if (next < 0 || next >= state.queryHistory.length) return;
+    state.queryHistoryIndex = next;
+    state.applyingQueryHistory = true;
+    try {
+      await applyGalleryQuery(state.queryHistory[next], { pushHistory: false });
+    } finally {
+      state.applyingQueryHistory = false;
+      updateQueryHistoryControls();
+    }
+  }
+
+  function selectedSourceLabel(total) {
+    const platforms = splitFilterList(state.filters.platform);
+    const channels = splitFilterList(state.filters.channel);
+    if (!platforms.length && !channels.length) return `Alle bronnen (${total})`;
+    if (platforms.length === 1 && !channels.length) return platforms[0];
+    if (channels.length === 1) return channels[0];
+    const parts = [];
+    if (platforms.length) parts.push(`${platforms.length} bronnen`);
+    if (channels.length) parts.push(`${channels.length} mappen`);
+    return parts.join(' + ');
+  }
+
+  function channelsForPlatform(platform) {
+    return (state.channelOptions || [])
+      .filter((row) => String(row.platform || '') === String(platform || ''))
+      .filter((row) => row.channel && row.channel !== 'unknown' && !String(row.channel).startsWith('site:'))
+      .sort((a, b) => Number(b.count || 0) - Number(a.count || 0));
+  }
+
+  function sourceTreeNodeId(kind, platform = '', channel = '') {
+    const enc = (value) => encodeURIComponent(String(value || ''));
+    if (kind === 'all') return 'all';
+    if (kind === 'platform') return `platform:${enc(platform)}`;
+    return `channel:${enc(platform)}:${enc(channel)}`;
+  }
+
+  function buildSourceTreeData(total) {
+    const platforms = (state.platformOptions || []).filter((row) => row.platform && row.platform !== 'unknown');
+    const selectedPlatforms = new Set(splitFilterList(state.filters.platform));
+    const selectedChannels = new Set(splitFilterList(state.filters.channel));
+    const query = String(state.sourceTreeQuery || '').trim().toLowerCase();
+    const platformRows = query ? platforms : platforms.slice(0, 80);
+    const children = [];
+
+    for (const platformRow of platformRows) {
+      const platform = String(platformRow.platform);
+      const platformMatches = platform.toLowerCase().includes(query);
+      const childRows = channelsForPlatform(platform).slice(0, query ? 500 : 80);
+      const visibleChildren = query
+        ? childRows.filter((row) => platformMatches || String(row.channel || '').toLowerCase().includes(query))
+        : childRows;
+      if (query && !platformMatches && visibleChildren.length === 0) continue;
+
+      const childSelected = childRows.some((row) => selectedChannels.has(String(row.channel)));
+      const platformChecked = selectedPlatforms.has(platform) && !childSelected;
+      const opened = Boolean(query || state.sourceTreeExpanded.has(platform) || childSelected);
+      children.push({
+        id: sourceTreeNodeId('platform', platform),
+        text: `${platform} (${countForCurrentMediaType(platformRow)})`,
+        data: { kind: 'platform', platform },
+        state: { opened, checked: platformChecked, disabled: state.sourceFilterBusy },
+        children: visibleChildren.map((channelRow) => {
+          const channel = String(channelRow.channel);
+          return {
+            id: sourceTreeNodeId('channel', platform, channel),
+            text: `${channel} (${countForCurrentMediaType(channelRow)})`,
+            data: { kind: 'channel', platform, channel },
+            state: { checked: selectedChannels.has(channel), disabled: state.sourceFilterBusy },
+          };
+        }),
+      });
+    }
+
+    return [{
+      id: sourceTreeNodeId('all'),
+      text: `Alle bronnen (${total})`,
+      data: { kind: 'all' },
+      state: {
+        opened: true,
+        checked: selectedPlatforms.size === 0 && selectedChannels.size === 0,
+        disabled: state.sourceFilterBusy,
+      },
+      children,
+    }];
+  }
+
+  function checkedSourceTreeIds(nodes, out = []) {
+    for (const node of nodes || []) {
+      if (node && node.state && node.state.checked) out.push(node.id);
+      if (node && node.children) checkedSourceTreeIds(node.children, out);
+    }
+    return out;
+  }
+
+  async function applySourceFilters(nextPlatformValues, nextChannelValues) {
+    if (state.sourceFilterBusy) return;
+    const nextPlatformFilter = joinFilterList(nextPlatformValues);
+    const nextChannelFilter = joinFilterList(nextChannelValues);
+    const tree = $('platformPicker');
+    const keepOpen = Boolean(tree && tree.classList.contains('open'));
+    if (state.filters.platform === nextPlatformFilter && state.filters.channel === nextChannelFilter) {
+      renderSourceTree();
+      if (keepOpen) $('platformPicker')?.classList.add('open');
+      return;
+    }
+    state.sourceFilterBusy = true;
+    state.filters.platform = nextPlatformFilter;
+    state.filters.channel = nextChannelFilter;
+    const pSel = $('platform');
+    const cSel = $('channel');
+    if (pSel) pSel.value = state.filters.platform;
+    if (cSel) cSel.value = state.filters.channel;
+    state.totalHint = selectedTotalHint();
+    updateStats();
+    renderSourceTree();
+    if (keepOpen) $('platformPicker')?.classList.add('open');
+    try {
+      await reloadGallery();
+    } finally {
+      state.sourceFilterBusy = false;
+      renderSourceTree();
+      if (keepOpen) $('platformPicker')?.classList.add('open');
+    }
+  }
+
+  function commitSourceTreeSelection(kind, nextChecked, platform = '', channel = '') {
+    const nextPlatforms = new Set(splitFilterList(state.filters.platform));
+    const nextChannels = new Set(splitFilterList(state.filters.channel));
+    if (kind === 'all') {
+      nextPlatforms.clear();
+      nextChannels.clear();
+    } else if (kind === 'platform') {
+      // Platform- en mapselecties zijn bewust exclusief: de API kan geen
+      // "hele bron OF specifieke map" mix betrouwbaar uitdrukken.
+      nextChannels.clear();
+      if (nextChecked) {
+        nextPlatforms.add(platform);
+      } else {
+        nextPlatforms.delete(platform);
+      }
+    } else if (kind === 'channel') {
+      if (nextChecked) {
+        nextChannels.add(channel);
+      } else {
+        nextChannels.delete(channel);
+      }
+      nextPlatforms.clear();
+      for (const row of state.channelOptions || []) {
+        const rowChannel = String(row.channel || '');
+        const rowPlatform = String(row.platform || '');
+        if (rowChannel && rowPlatform && nextChannels.has(rowChannel)) nextPlatforms.add(rowPlatform);
+      }
+      if (nextChannels.size && nextPlatforms.size === 0 && platform) nextPlatforms.add(platform);
+    }
+    return applySourceFilters(nextPlatforms, nextChannels);
+  }
+
+  function ensureSourceTreeShell(tree) {
+    if (tree.dataset.ready === '1') return;
+    tree.innerHTML = '';
+
     const button = document.createElement('button');
     button.type = 'button';
-    button.className = 'facet-button' + (selected.length ? ' active' : '');
-    button.innerHTML = `<span>${escHtml(facetButtonLabel(kind, total, selected))}</span><span>⌄</span>`;
-    button.addEventListener('click', (e) => {
-      e.stopPropagation();
-      picker.classList.toggle('open');
+    button.className = 'source-tree-button';
+    button.dataset.testid = 'source-tree-button';
+    button.innerHTML = '<span></span><span>⌄</span>';
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      tree.classList.toggle('open');
     });
-    const menu = document.createElement('div');
-    menu.className = 'facet-menu';
 
-    const addOption = (value, label, count, checked) => {
-      const row = document.createElement('label');
-      row.className = 'facet-option';
-      const input = document.createElement('input');
-      input.type = 'checkbox';
-      input.checked = checked;
-      input.addEventListener('change', async () => {
-        const current = new Set(splitFilterList(state.filters[kind]));
-        if (!value) current.clear();
-        else if (input.checked) current.add(value);
-        else current.delete(value);
-        state.filters[kind] = joinFilterList(current);
-        const sel = $(kind);
-        if (sel) sel.value = state.filters[kind];
-        if (kind === 'platform') {
-          state.filters.channel = '';
-          const cSel = $('channel');
-          if (cSel) cSel.value = '';
-          await reloadChannels();
-        }
-        state.totalHint = selectedTotalHint();
-        updateStats();
-        await reloadGallery();
+    const menu = document.createElement('div');
+    menu.className = 'source-tree-menu';
+    menu.addEventListener('click', (event) => event.stopPropagation());
+
+    const controls = document.createElement('div');
+    controls.className = 'source-tree-controls';
+
+    const search = document.createElement('input');
+    search.type = 'search';
+    search.className = 'source-tree-search';
+    search.placeholder = 'Zoek bron of map...';
+    search.addEventListener('input', () => {
+      state.sourceTreeQuery = search.value;
+      renderSourceTree();
+      tree.classList.add('open');
+    });
+    controls.appendChild(search);
+
+    const actions = document.createElement('div');
+    actions.className = 'source-tree-actions';
+    const addAction = (name, label, title, handler) => {
+      const action = document.createElement('button');
+      action.type = 'button';
+      action.dataset.action = name;
+      action.textContent = label;
+      action.title = title;
+      action.addEventListener('click', async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!state.sourceFilterBusy) await handler();
       });
-      row.appendChild(input);
-      const text = document.createElement('span');
-      text.className = 'facet-label';
-      text.textContent = label;
-      row.appendChild(text);
-      const num = document.createElement('span');
-      num.className = 'facet-count';
-      num.textContent = count ? String(count) : '';
-      row.appendChild(num);
-      menu.appendChild(row);
+      actions.appendChild(action);
+    };
+    addAction('all', 'Alles', 'Alle bronfilters wissen', () => commitSourceTreeSelection('all', true));
+    addAction('open', 'Open', 'Alle zichtbare bronnen openklappen', () => {
+      const query = String(state.sourceTreeQuery || '').trim().toLowerCase();
+      for (const platformRow of state.platformOptions || []) {
+        const platform = String(platformRow.platform || '');
+        if (!platform || platform === 'unknown') continue;
+        if (!query || platform.toLowerCase().includes(query) || channelsForPlatform(platform).some((row) => String(row.channel || '').toLowerCase().includes(query))) {
+          state.sourceTreeExpanded.add(platform);
+        }
+      }
+      state.sourceTreeHadSavedExpanded = true;
+      saveSourceTreeExpanded(state.sourceTreeExpanded);
+      renderSourceTree();
+      tree.classList.add('open');
+    });
+    addAction('close', 'Dicht', 'Alle bronnen dichtklappen', () => {
+      state.sourceTreeExpanded.clear();
+      state.sourceTreeHadSavedExpanded = true;
+      saveSourceTreeExpanded(state.sourceTreeExpanded);
+      renderSourceTree();
+      tree.classList.add('open');
+    });
+    controls.appendChild(actions);
+    menu.appendChild(controls);
+
+    const widget = document.createElement('div');
+    widget.id = 'sourceTreeWidget';
+    widget.className = 'source-tree-widget';
+    menu.appendChild(widget);
+
+    tree.appendChild(button);
+    tree.appendChild(menu);
+    tree.dataset.ready = '1';
+  }
+
+  function syncSourceTreePlugin(data) {
+    const jq = window.jQuery;
+    const widgetEl = $('sourceTreeWidget');
+    if (!jq || !jq.fn || !jq.fn.jstree || !widgetEl) {
+      if (widgetEl) widgetEl.textContent = 'Treeview plugin niet geladen';
+      return;
+    }
+    const widget = jq(widgetEl);
+    const existing = widget.jstree(true);
+    const checkedIds = checkedSourceTreeIds(data);
+    const finishSync = () => {
+      const inst = widget.jstree(true);
+      if (inst) {
+        inst.uncheck_all();
+        for (const id of checkedIds) {
+          if (inst.get_node(id)) inst.check_node(id);
+        }
+      }
+      state.sourceTreeSuppress = false;
     };
 
-    addOption('', kind === 'platform' ? 'Alle platforms' : 'Alle mappen', total, selected.length === 0);
-    for (const row of options) {
-      const value = kind === 'platform' ? row.platform : row.channel;
-      if (!value || value === 'unknown') continue;
-      if (kind === 'channel' && String(value).startsWith('site:')) continue;
-      const label = String(value).startsWith('site:') ? String(value).slice(5) : String(value);
-      addOption(value, label, countForCurrentMediaType(row), selectedSet.has(String(value)));
+    state.sourceTreeSuppress = true;
+    if (existing) {
+      widget.jstree('destroy');
+      widget.empty();
     }
-    picker.appendChild(button);
-    picker.appendChild(menu);
+
+    widget
+      .off('.sourceTree')
+      .on('ready.jstree.sourceTree', finishSync)
+      .on('check_node.jstree.sourceTree uncheck_node.jstree.sourceTree', async (event, payload) => {
+        if (state.sourceTreeSuppress || state.sourceFilterBusy) return;
+        const meta = payload && payload.node && payload.node.data ? payload.node.data : {};
+        const checked = event.type === 'check_node';
+        window.setTimeout(() => {
+          commitSourceTreeSelection(meta.kind, checked, meta.platform || '', meta.channel || '')
+            .catch((err) => console.warn('source tree filter failed', err));
+        }, 0);
+      })
+      .on('open_node.jstree.sourceTree close_node.jstree.sourceTree', (event, payload) => {
+        if (state.sourceTreeSuppress) return;
+        const meta = payload && payload.node && payload.node.data ? payload.node.data : {};
+        if (meta.kind !== 'platform' || !meta.platform) return;
+        if (event.type === 'open_node') state.sourceTreeExpanded.add(meta.platform);
+        else state.sourceTreeExpanded.delete(meta.platform);
+        state.sourceTreeHadSavedExpanded = true;
+        saveSourceTreeExpanded(state.sourceTreeExpanded);
+      })
+      .on('select_node.jstree.sourceTree', (event, payload) => {
+        const inst = widget.jstree(true);
+        const meta = payload && payload.node && payload.node.data ? payload.node.data : {};
+        if (inst && meta.kind === 'platform') inst.toggle_node(payload.node);
+        if (inst) inst.deselect_all();
+      })
+      .jstree({
+        core: {
+          data,
+          check_callback: false,
+          themes: { name: 'default', dots: true, icons: false, stripes: false },
+        },
+        checkbox: {
+          tie_selection: false,
+          three_state: false,
+          cascade: '',
+          keep_selected_style: false,
+        },
+        plugins: ['checkbox'],
+      });
+  }
+
+  function renderSourceTree() {
+    const tree = $('platformPicker');
+    if (!tree) return;
+    ensureSourceTreeShell(tree);
+
+    const platforms = (state.platformOptions || []).filter((row) => row.platform && row.platform !== 'unknown');
+    const selectedPlatforms = new Set(splitFilterList(state.filters.platform));
+    const selectedChannels = new Set(splitFilterList(state.filters.channel));
+    const total = platforms.reduce((sum, row) => sum + countForCurrentMediaType(row), 0);
+    if (!state.sourceTreeHadSavedExpanded && platforms.length && state.sourceTreeExpanded.size === 0) {
+      state.sourceTreeExpanded.add(String(platforms[0].platform));
+    }
+
+    tree.classList.toggle('busy', state.sourceFilterBusy);
+    const button = tree.querySelector('.source-tree-button');
+    if (button) {
+      button.className = 'source-tree-button' + ((selectedPlatforms.size || selectedChannels.size) ? ' active' : '');
+      const label = button.querySelector('span:first-child');
+      if (label) label.textContent = selectedSourceLabel(total);
+    }
+    const search = tree.querySelector('.source-tree-search');
+    if (search && search !== document.activeElement) search.value = state.sourceTreeQuery || '';
+    for (const action of tree.querySelectorAll('.source-tree-actions button')) action.disabled = state.sourceFilterBusy;
+
+    syncSourceTreePlugin(buildSourceTreeData(total));
   }
 
   function countForCurrentMediaType(row) {
@@ -738,6 +1161,7 @@
       const platformsUrl = '/api/platforms' + (params.toString() ? '?' + params.toString() : '');
       const platformsResp = await apiFetch(platformsUrl).then(r => r.json());
       const platforms = Array.isArray(platformsResp.platforms) ? platformsResp.platforms : [];
+      state.platformOptions = platforms;
       const pSel = $('platform');
       const prev = state.filters.platform || pSel.value;
       const total = platforms.reduce((s, p) => s + Number(p.count), 0);
@@ -749,18 +1173,20 @@
         o.textContent = `${p.platform} (${p.count} · ${mediaSplitLabel(p)})`;
         pSel.appendChild(o);
       }
-      renderFacetPicker('platform', platforms, total);
-      if (prev && splitFilterList(prev).every((value) => [...pSel.options].some(o => o.value === value))) {
-        pSel.value = prev;
-        state.filters.platform = prev;
+      const availablePlatforms = new Set(platforms.map((p) => String(p.platform || '')).filter(Boolean));
+      const keptPlatforms = splitFilterList(prev).filter((value) => availablePlatforms.has(value));
+      if (keptPlatforms.length) {
+        state.filters.platform = joinFilterList(keptPlatforms);
+        pSel.value = '';
         await reloadChannels();
       } else {
         pSel.value = '';
         state.filters.platform = '';
         resetChannels();
-        renderFacetPicker('channel', [], 0);
+        await reloadChannels();
       }
       state.totalHint = selectedTotalHint();
+      renderSourceTree();
       updateStats();
     } catch (e) { console.warn('filters load failed', e); }
   }
@@ -837,16 +1263,18 @@
 
   async function reloadChannels() {
     try {
-      const plat = state.filters.platform;
       const params = new URLSearchParams();
-      if (plat) params.set('platform', plat);
       if (state.filters.q) params.set('q', state.filters.q);
       if (state.filters.min_rating) params.set('min_rating', state.filters.min_rating);
       if (state.filters.tag_id) params.set('tag_id', state.filters.tag_id);
+      for (const key of ['source_thread_url', 'source_thread_title', 'source_post_url', 'source_model_key', 'source_model_title']) {
+        if (state.filters[key]) params.set(key, state.filters[key]);
+      }
       params.set('channel_sort', state.filters.channel_sort || 'count');
       const url = '/api/channels' + (params.toString() ? '?' + params.toString() : '');
       const channelsResp = await apiFetch(url).then(r => r.json());
       const channels = Array.isArray(channelsResp.channels) ? channelsResp.channels : [];
+      state.channelOptions = channels;
       const cSel = $('channel');
       const prev = state.filters.channel || cSel.value;
       const total = channels.reduce((sum, c) => sum + Number(c.count || 0), 0);
@@ -861,20 +1289,27 @@
         cSel.appendChild(o);
       }
       // Herstel vorige selectie als die nog bestaat
-      if (prev && splitFilterList(prev).every((value) => [...cSel.options].some(o => o.value === value))) {
-        cSel.value = prev;
-        state.filters.channel = prev;
+      const availableChannels = new Set(channels.map((row) => String(row.channel || '')).filter(Boolean));
+      const keptChannels = splitFilterList(prev).filter((value) => availableChannels.has(value));
+      if (keptChannels.length) {
+        state.filters.channel = joinFilterList(keptChannels);
+        cSel.value = '';
       } else {
         cSel.value = '';
         state.filters.channel = '';
       }
-      renderFacetPicker('channel', channels, total);
+      renderSourceTree();
       state.channelsLoadedFor = [
-        plat || '__all__',
+        '__all__',
         state.filters.q || '',
         state.filters.media_type || '',
         state.filters.min_rating || '',
         state.filters.tag_id || '',
+        state.filters.source_thread_url || '',
+        state.filters.source_thread_title || '',
+        state.filters.source_post_url || '',
+        state.filters.source_model_key || '',
+        state.filters.source_model_title || '',
         state.filters.channel_sort || 'count',
       ].join('|');
     } catch (e) { console.warn('channels load failed', e); }
@@ -934,6 +1369,8 @@
 
   // ─── Event listeners (gallery filters) ───────────────────────────────────
   $('refresh').addEventListener('click', reloadGallery);
+  if ($('queryBack')) $('queryBack').addEventListener('click', () => moveQueryHistory(-1));
+  if ($('queryForward')) $('queryForward').addEventListener('click', () => moveQueryHistory(1));
 
   for (const id of ['channelSort', 'sort', 'minRating', 'mediaType', 'tagFilter']) {
     const control = $(id);
@@ -963,23 +1400,9 @@
     reloadGallery();
   });
   document.addEventListener('click', (e) => {
-    for (const id of ['platformPicker', 'channelPicker']) {
+    for (const id of ['platformPicker']) {
       const picker = $(id);
       if (picker && !picker.contains(e.target)) picker.classList.remove('open');
-    }
-  });
-
-  $('channelPicker')?.addEventListener('pointerenter', () => {
-    const key = [
-      state.filters.platform || '__all__',
-      state.filters.q || '',
-      state.filters.media_type || '',
-      state.filters.min_rating || '',
-      state.filters.tag_id || '',
-      state.filters.channel_sort || 'count',
-    ].join('|');
-    if (state.channelsLoadedFor !== key) {
-      reloadChannels().catch((e) => console.warn('channels load failed', e));
     }
   });
 
@@ -1129,12 +1552,14 @@
     restoreViewerAnchor,
     loadMore,
     reload: reloadGallery,
+    applyQuery: applyGalleryQuery,
     loadTagFilterDropdown,
   };
 
   // ─── Init ─────────────────────────────────────────────────────────────────
   async function init() {
     readFiltersFromControls();
+    pushQueryHistory(state.filters);
     loadTagFilterDropdown().catch((e) => console.warn('tags filter load failed', e));
     loadFilterDropdowns().catch((e) => console.warn('filters load failed', e));
     await loadMore();

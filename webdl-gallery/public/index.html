@@ -4,7 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WEBDL Gallery</title>
-<link rel="stylesheet" href="/styles.css?v=20260509-92">
+<link rel="stylesheet" href="/vendor/jstree/themes/default/style.min.css?v=3.3.17">
+<link rel="stylesheet" href="/styles.css?v=20260513-1">
 </head>
 <body>
   <header class="topbar">
@@ -12,9 +13,9 @@
     <div class="filters">
       <input id="q" type="search" placeholder="Zoeken...">
       <select id="platform" class="legacy-filter-select"><option value="">Alle platforms</option></select>
-      <div id="platformPicker" class="facet-picker"></div>
+      <div id="platformPicker" class="source-tree-filter"></div>
       <select id="channel" class="legacy-filter-select"><option value="">Alle kanalen</option></select>
-      <div id="channelPicker" class="facet-picker"></div>
+      <div id="channelPicker" class="facet-picker legacy-filter-select"></div>
       <select id="channelSort" title="Kanaalsortering">
         <option value="count">Kanalen: aantal</option>
         <option value="name">Kanalen: naam</option>
@@ -45,6 +46,9 @@
       </select>
       <input id="tagFilter" type="hidden" value="">
       <div id="tagFilterMatrix" class="tag-filter-matrix" aria-label="Tag filter"></div>
+      <button id="queryBack" class="query-nav-btn" title="Vorige gallery-query">←</button>
+      <button id="queryForward" class="query-nav-btn" title="Volgende gallery-query">→</button>
+      <span id="queryHistoryLabel" class="query-history-label"></span>
       <button id="refresh">Ververs</button>
       <button id="themeBtn" class="theme-btn" title="Thema wisselen">💎</button>
       <span id="stats" class="stats"></span>
@@ -92,7 +96,7 @@
         </select>
         <button id="vWrap" title="Aan het einde verder laden uit de database">∞ Oneindig</button>
         <button id="vRandom" title="Random aan/uit">🔀 Rand: uit</button>
-        <button id="vChannelScope" title="Als een item geen postgegevens heeft, zoekt omhoog/omlaag binnen de huidige query naar volgend kanaal/model">↕ Kanaal: query</button>
+        <button id="vChannelScope" title="Omhoog/omlaag springt naar vorige/volgende groep: model, set/thread of kanaal binnen de huidige query">↕ Kanaal: query</button>
         <button id="vVideoWait" title="Wacht op video-einde" class="active">⏳ Wacht: aan</button>
       </div>
 
@@ -142,6 +146,7 @@
           <button id="vBtnReloadMedia" class="vtop-btn" title="Alleen huidige media opnieuw laden">↻ Video</button>
           <span class="vtop-sep"></span>
           <button id="vBtnOpen" class="vtop-btn" title="Bron-URL openen in browser">🔗 Bron</button>
+          <button id="vBtnShowGroup" class="vtop-btn" title="Toon deze serie/model/kanaal als gallery-query" onclick="window.__wdShowCurrentGroupInGallery && window.__wdShowCurrentGroupInGallery(event)">↪ Groep</button>
           <button id="vBtnFinder" class="vtop-btn" title="Bestand tonen in Finder">📁 Finder</button>
           <button id="vBtnRotate" class="vtop-btn" title="Media 90° draaien" onmousedown="window.__wdRotateMedia && window.__wdRotateMedia(event)" onclick="window.__wdRotateMedia && window.__wdRotateMedia(event)">↻ +90°</button>
           <button id="vBtnTags" class="vtop-btn" type="button" title="Tags beheren">🏷 Tags</button>
@@ -163,7 +168,6 @@
           <div class="vprogressbar-fill" id="vProgressFill"></div>
           <div class="vprogressbar-handle" id="vProgressHandle"></div>
         </div>
-        <button id="vBtnMainProgress" class="vmain-progress-toggle active" title="Grote voortgangsbalk verbergen">▰</button>
         <div class="vbottom-overlay" id="vBottomOverlay">
           <div class="vbottom-meta-row">
             <div class="hud-pill hud-left" id="vHudLeft"></div>
@@ -195,6 +199,8 @@
                 </select>
                 <button id="vSpeedUp" class="vicon-btn" title="Sneller (])">+</button>
                 <button id="vBtnReverse" class="vicon-btn" title="Achteruit afspelen">↤</button>
+                <button id="vBtnMainProgress" class="vicon-btn vmain-progress-toggle active" title="Grote voortgangsbalk verbergen">▰</button>
+                <button id="vBtnCaptureStage" class="vicon-btn vcapture-float" type="button" title="Screenshot van huidige video/frame">📷</button>
                 <button id="vBtnRotateBottom" class="vicon-btn" title="Media 90° draaien">⟳</button>
                 <button id="vBtnFullscreen" class="vicon-btn" title="Volledig scherm">⛶</button>
               </div>
@@ -202,7 +208,6 @@
           </div>
         </div>
         <button id="vBtnRotateStage" class="vrotate-float" title="Media 90° draaien">↻ +90°</button>
-        <button id="vBtnCaptureStage" class="vcapture-float" type="button" title="Screenshot van huidige video/frame">📷</button>
         <button class="viewer-nav prev" id="vPrev" title="Vorige binnen huidige lijst (←)">‹</button>
         <button class="viewer-nav next" id="vNext" title="Volgende binnen huidige lijst (→)">›</button>
       </div>
@@ -275,8 +280,10 @@
 
   </div><!-- /viewer -->
 
-  <script src="/app.js?v=20260509-76"></script>
-  <script src="/viewer.js?v=20260509-59"></script>
+  <script src="/vendor/jquery-3.7.1.min.js?v=3.7.1"></script>
+  <script src="/vendor/jstree/jstree.min.js?v=3.3.17"></script>
+  <script src="/app.js?v=20260513-1"></script>
+  <script src="/viewer.js?v=20260513-5"></script>
   <script>
   // ─── Thema switcher ─────────────────────────────────────────────────────
   (function() {

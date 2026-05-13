@@ -5,7 +5,7 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-05-09-reddit-target-options';
+  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-batch-preview-selection';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
@@ -3404,6 +3404,56 @@
           }
         };
 
+        const summarizeDefaultSelectionForPreview = () => {
+          try {
+            let selected = 0;
+            let mediaUrls = 0;
+            let previewMediaSkipped = 0;
+            let wrappers = 0;
+            let other = 0;
+            for (const c of candidates) {
+              const url = c && c.url ? normalizeUrl(c.url) : '';
+              const kind = String((c && c.kind) ? c.kind : '');
+              const checked = defaultCheckedForCandidate(c);
+              if (checked) selected++;
+              if (looksLikeMediaFileUrl(url)) {
+                mediaUrls++;
+                if (!checked && /_under_link/i.test(kind)) previewMediaSkipped++;
+                continue;
+              }
+              if (looksLikeIndirectPageUrl(url) || looksLikeFffAttachmentPage(url) || keep2ShareFileId(url)) wrappers++;
+              else other++;
+            }
+            const parts = [`${selected} geselecteerd`];
+            if (mediaUrls) parts.push(`${mediaUrls} media-URLs`);
+            if (previewMediaSkipped) parts.push(`${previewMediaSkipped} previews overgeslagen`);
+            if (wrappers) parts.push(`${wrappers} full-size/wrapper links`);
+            if (other) parts.push(`${other} overige`);
+            return parts.join(' · ');
+          } catch (e) {
+            return '';
+          }
+        };
+
+        const defaultSelectionNoteForCandidate = (c) => {
+          try {
+            const url = c && c.url ? normalizeUrl(c.url) : '';
+            const kind = String((c && c.kind) ? c.kind : '');
+            if (!url || defaultCheckedForCandidate(c)) return '';
+            if (looksLikeMediaFileUrl(url) && /_under_link/i.test(kind)) {
+              return 'preview/thumbnail; full-size link wordt gebruikt';
+            }
+            if (/thumb_link/i.test(kind)) {
+              const direct = getDirectHintForCandidate(c);
+              if (direct) return 'dubbel; directe media staat al in de selectie';
+            }
+            if (/^text$/i.test(kind)) return 'tekstlink; geen duidelijke media';
+            return 'niet standaard geselecteerd';
+          } catch (e) {
+            return '';
+          }
+        };
+
         const overlay = document.createElement('div');
         overlay.id = 'webdl-batch-preview-overlay';
         try {
@@ -3455,7 +3505,7 @@
 
       const sub = document.createElement('div');
       sub.id = 'webdl-batch-preview-sub';
-      const previewSummary = summarizeBatchCandidatesForPreview(candidates);
+      const previewSummary = summarizeDefaultSelectionForPreview() || summarizeBatchCandidatesForPreview(candidates);
       sub.textContent = `${(meta && meta.platform) ? meta.platform : 'unknown'} | ${(meta && meta.channel) ? meta.channel : 'unknown'} | ${candidates.length} items${previewSummary ? ` (${previewSummary})` : ''}`;
       headLeft.appendChild(sub);
 
@@ -3534,7 +3584,9 @@
         const k = document.createElement('div');
         const k2sId = keep2ShareFileId(c.url);
         k.className = k2sId ? 'webdl-batch-kind webdl-batch-kind-priority' : 'webdl-batch-kind';
-        k.textContent = k2sId ? `K2S file · ${k2sId}` : (c.kind ? c.kind : '');
+        const note = defaultSelectionNoteForCandidate(c);
+        k.textContent = (k2sId ? `K2S file · ${k2sId}` : (c.kind ? c.kind : '')) + (note ? ` · ${note}` : '');
+        if (note) k.style.color = '#fbbf24';
         body.appendChild(k);
 
         row.addEventListener('mouseenter', () => {

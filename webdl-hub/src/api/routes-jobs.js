@@ -737,7 +737,9 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
           result = await repo.pool.query(
             `UPDATE "${schema}".jobs
                 SET lane = COALESCE(NULLIF(options->>'pauseLane', ''), lane),
-                    options = options - 'paused_at' - 'pauseLane'
+                    options = options - 'paused_at' - 'pauseLane',
+                    attempts = CASE WHEN attempts >= max_attempts THEN 0 ELSE attempts END,
+                    error = NULL
               WHERE status='queued' AND lane='paused' ${groupFilter}
               RETURNING id`);
           res.json({ action, affected: result.rows.length, ids: result.rows.map(r => r.id) });

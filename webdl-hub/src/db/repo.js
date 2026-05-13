@@ -583,7 +583,9 @@ function createRepo({ databaseUrl = config.databaseUrl, schema = config.dbSchema
     const { rows } = await query(
       `UPDATE ${T.jobs}
           SET lane = COALESCE(NULLIF(options->>'pauseLane', ''), lane),
-              options = options - 'paused_at' - 'pauseLane'
+              options = options - 'paused_at' - 'pauseLane',
+              attempts = CASE WHEN attempts >= max_attempts THEN 0 ELSE attempts END,
+              error = NULL
         WHERE id = $1 AND status = 'queued' AND lane = 'paused'
         RETURNING *`,
       [id],

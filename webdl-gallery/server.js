@@ -1422,6 +1422,12 @@ function buildItemFilters({ req, params, fileExpr, extExpr, ratingExpr, includeC
   const minRating = req.query.min_rating != null ? Number(req.query.min_rating) : null;
   const mediaType = req.query.media_type ? String(req.query.media_type) : null;
   const tagId = req.query.tag_id ? parseInt(req.query.tag_id, 10) : null;
+  const hasSourceScope = Boolean(req.query.source_thread_url || req.query.source_thread_title || req.query.source_post_url || req.query.source_model_key || req.query.source_model_title);
+  const sourceThreadUrl = req.query.source_thread_url ? String(req.query.source_thread_url).trim() : '';
+  const sourceThreadTitle = req.query.source_thread_title ? String(req.query.source_thread_title).trim() : '';
+  const sourcePostUrl = req.query.source_post_url ? String(req.query.source_post_url).trim() : '';
+  const sourceModelKey = req.query.source_model_key ? String(req.query.source_model_key).trim().toLowerCase() : '';
+  const sourceModelTitle = req.query.source_model_title ? String(req.query.source_model_title).trim() : '';
 
   const where = [`${fileExpr} IS NOT NULL`, `${fileExpr} <> ''`];
   if (platformValues.length) { params.push(platformValues); where.push(`${platformGroupSql('d')} = ANY($${params.length}::text[])`); }
@@ -1439,6 +1445,27 @@ function buildItemFilters({ req, params, fileExpr, extExpr, ratingExpr, includeC
   }
   if (q) {
     addSearchFilter(where, params, q, ['d.title', 'd.filename', 'd.channel', 'd.platform', 'd.source_url', 'd.url', fileExpr]);
+  }
+  if (sourceThreadUrl) {
+    params.push(sourceThreadUrl);
+    where.push(`(d.source_url = $${params.length} OR d.url = $${params.length})`);
+  }
+  if (sourceThreadTitle) {
+    params.push('%' + sourceThreadTitle.toLowerCase() + '%');
+    where.push(`LOWER(COALESCE(d.metadata, '') || ' ' || COALESCE(d.title, '') || ' ' || COALESCE(d.channel, '')) LIKE $${params.length}`);
+  }
+  if (sourcePostUrl) {
+    params.push(sourcePostUrl);
+    where.push(`(d.source_url = $${params.length} OR d.url = $${params.length})`);
+  }
+  if (sourceModelKey || sourceModelTitle) {
+    const modelNeedles = [sourceModelKey, sourceModelTitle].filter(Boolean);
+    const modelClauses = [];
+    for (const needle of modelNeedles) {
+      params.push('%' + String(needle).toLowerCase() + '%');
+      modelClauses.push(`LOWER(COALESCE(d.metadata, '') || ' ' || COALESCE(d.title, '') || ' ' || COALESCE(d.filename, '')) LIKE $${params.length}`);
+    }
+    if (modelClauses.length) where.push(`(${modelClauses.join(' OR ')})`);
   }
   if (Number.isFinite(minRating)) { params.push(minRating); where.push(`${ratingExpr} >= $${params.length}`); }
   if (mediaType === 'video') { where.push(`lower(${extExpr}) IN (${VIDEO_EXTS.map(e=>`'${e}'`).join(',')})`); }
@@ -1459,16 +1486,32 @@ function wantsThumbReadyOnly(req) {
 }
 
 function buildScreenshotFilters({ req, params, includeChannel = true }) {
-  const platform = req.query.platform ? String(req.query.platform) : null;
-  const channel = req.query.channel ? String(req.query.channel) : null;
+  const platformValues = splitMultiFilter(req.query.platform);
+  const channelValues = splitMultiFilter(req.query.channel);
   const q = req.query.q ? String(req.query.q).trim() : null;
   const minRating = req.query.min_rating != null ? Number(req.query.min_rating) : null;
   const mediaType = req.query.media_type ? String(req.query.media_type) : null;
   const tagId = req.query.tag_id ? parseInt(req.query.tag_id, 10) : null;
+  const hasSourceScope = Boolean(req.query.source_thread_url || req.query.source_thread_title || req.query.source_post_url || req.query.source_model_key || req.query.source_model_title);
 
   const where = [`s.filepath IS NOT NULL`, `s.filepath <> ''`];
-  if (platform) { params.push(platform); where.push(`s.platform = $${params.length}`); }
-  if (includeChannel && channel) { params.push(channel); where.push(`s.channel = $${params.length}`); }
+  if (hasSourceScope) where.push('false');
+  if (platformValues.length) {
+    params.push(platformValues);
+    where.push(`COALESCE(NULLIF(s.platform, ''), 'unknown') = ANY($${params.length}::text[])`);
+  }
+  if (includeChannel && channelValues.length) {
+    const siteChannels = channelValues.filter((value) => String(value).startsWith('site:'));
+    const plainChannels = channelValues.filter((value) => !String(value).startsWith('site:'));
+    if (plainChannels.length) {
+      params.push(plainChannels);
+      where.push(`s.channel = ANY($${params.length}::text[])`);
+    }
+    for (const channel of siteChannels) {
+      params.push('%' + String(channel).slice(5).toLowerCase() + '%');
+      where.push(`LOWER(COALESCE(s.filepath, '') || ' ' || COALESCE(s.url, '')) LIKE $${params.length}`);
+    }
+  }
   if (q) {
     addSearchFilter(where, params, q, ['s.title', 's.filename', 's.channel', 's.platform', 's.filepath']);
   }
@@ -1621,6 +1664,11 @@ app.get('/api/items', async (req, res) => {
       || req.query.media_type
       || req.query.min_rating
       || req.query.tag_id
+      || req.query.source_thread_url
+      || req.query.source_thread_title
+      || req.query.source_post_url
+      || req.query.source_model_key
+      || req.query.source_model_title
     );
     // Elke bron moet ruimer dan offset+limit leveren: infinite scroll mag niet
     // vroeg stoppen, en oude importmappen kunnen dubbele records bevatten die
@@ -1924,7 +1972,7 @@ app.get('/api/items-since', async (req, res) => {
 // ─── Platforms lijst ───────────────────────────────────────────────────────
 app.get('/api/platforms', async (req, res) => {
   try {
-    const scoped = Boolean(req.query.platform || req.query.channel || req.query.q || req.query.min_rating || req.query.media_type || req.query.tag_id);
+    const scoped = Boolean(req.query.platform || req.query.channel || req.query.q || req.query.min_rating || req.query.media_type || req.query.tag_id || req.query.source_thread_url || req.query.source_thread_title || req.query.source_post_url || req.query.source_model_key || req.query.source_model_title);
     if (!scoped) {
       const params = [];
       const where = buildItemFilters({
@@ -2037,7 +2085,7 @@ app.get('/api/channels', async (req, res) => {
       : channelSort === 'rating' || sort === 'rating'
         ? 'max_rating DESC NULLS LAST, latest_ts DESC NULLS LAST, count DESC'
         : 'latest_ts DESC NULLS LAST, count DESC';
-    const scoped = Boolean(req.query.platform || req.query.channel || req.query.q || req.query.min_rating || req.query.media_type || req.query.tag_id);
+    const scoped = Boolean(req.query.platform || req.query.channel || req.query.q || req.query.min_rating || req.query.media_type || req.query.tag_id || req.query.source_thread_url || req.query.source_thread_title || req.query.source_post_url || req.query.source_model_key || req.query.source_model_title);
     if (!scoped) {
       const params = [];
       const where = buildItemFilters({
@@ -2065,7 +2113,7 @@ app.get('/api/channels', async (req, res) => {
              GROUP BY ${channelGroupSql('d')}, ${platformGroupSql('d')}
           ) channel_items
          ORDER BY ${orderBy}
-         LIMIT 500`, params);
+         LIMIT 3000`, params);
       return res.json({ channels: rows });
     }
 
@@ -2149,7 +2197,7 @@ app.get('/api/channels', async (req, res) => {
            GROUP BY channel, platform
         ) channel_items
        ORDER BY ${orderBy}
-       LIMIT 500`, params);
+       LIMIT 3000`, params);
     res.json({ channels: rows });
   } catch (e) {
     res.status(500).json({ error: e.message });

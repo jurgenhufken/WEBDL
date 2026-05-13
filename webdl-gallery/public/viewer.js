@@ -199,6 +199,34 @@
     return sourcePostKey(it);
   }
 
+  function sourceNavigationModelKey(it) {
+    if (!it) return '';
+    const postKey = sourcePostKey(it);
+    if (postKey) return postKey;
+    const title = String(it.source_model_title || '').trim();
+    const key = String(it.source_model_key || '').trim().toLowerCase();
+    if (!title || !key) return '';
+    const filename = String(it.filename || '').trim();
+    const displayTitle = String(it.title || '').trim();
+    const derivedFromFile = title === sourceModelTitleFromText(filename) || title === sourceModelTitleFromText(displayTitle);
+    const hasReadableName = /[a-z]{2,}/i.test(title);
+    const mostlyNumericOrHash = /^[0-9a-f._ -]{6,}$/i.test(title);
+    if (derivedFromFile && (!hasReadableName || mostlyNumericOrHash)) return '';
+    return key;
+  }
+
+  function sourceNavigationGroupKey(it) {
+    if (!it) return '';
+    const platform = String(it.platform || '').trim().toLowerCase();
+    const threadKey = sourceThreadKey(it);
+    const modelKey = sourceNavigationModelKey(it);
+    if (modelKey) return ['model', platform, threadKey || String(it.channel || '').trim().toLowerCase(), modelKey].join('\u0001');
+    if (threadKey) return ['thread', platform, threadKey].join('\u0001');
+    const channel = String(it.channel || '').trim().toLowerCase();
+    if (platform || channel) return ['channel', platform, channel].join('\u0001');
+    return '';
+  }
+
   function loadMediaRotation(it) {
     try {
       const value = Number(localStorage.getItem(mediaRotationKey(it)) || 0);
@@ -267,9 +295,84 @@
     if (filters.q) params.set('q', filters.q);
     if (filters.min_rating) params.set('min_rating', filters.min_rating);
     if (filters.tag_id) params.set('tag_id', filters.tag_id);
+    for (const key of ['source_thread_url', 'source_thread_title', 'source_post_url', 'source_model_key', 'source_model_title']) {
+      if (filters[key]) params.set(key, filters[key]);
+    }
     const type = vs.typeFilter && vs.typeFilter !== 'all' ? vs.typeFilter : filters.media_type;
     if (type) params.set('media_type', type);
     return params;
+  }
+
+  function galleryGroupQueryForItem(it) {
+    if (!it) return null;
+    const base = snapshotGalleryFilters();
+    const platform = String(it.platform || base.platform || '').trim();
+    const channel = String(it.channel || base.channel || '').trim();
+    const threadUrl = String(it.source_thread_url || '').trim();
+    const threadTitle = String(it.source_thread_title || '').trim();
+    const postUrl = String(it.source_post_url || '').trim();
+    const modelKey = sourceNavigationModelKey(it);
+    const modelTitle = sourceModelTitle(it);
+    const filters = {
+      ...base,
+      platform,
+      channel: '',
+      q: '',
+      source_thread_url: '',
+      source_thread_title: '',
+      source_post_url: '',
+      source_model_key: '',
+      source_model_title: '',
+      source_scope_label: '',
+    };
+    if (modelKey && modelTitle && (threadUrl || threadTitle)) {
+      filters.source_thread_url = threadUrl;
+      filters.source_thread_title = threadTitle;
+      filters.source_model_key = modelKey;
+      filters.source_model_title = modelTitle;
+      filters.source_scope_label = `Model: ${modelTitle}`;
+      return filters;
+    }
+    if (postUrl) {
+      filters.source_post_url = postUrl;
+      filters.source_scope_label = threadTitle ? `Post in ${threadTitle}` : 'Huidige post';
+      return filters;
+    }
+    if (threadUrl || threadTitle) {
+      filters.source_thread_url = threadUrl;
+      filters.source_thread_title = threadTitle;
+      filters.source_scope_label = threadTitle ? `Serie: ${threadTitle}` : 'Huidige serie';
+      return filters;
+    }
+    if (channel) {
+      filters.channel = channel;
+      filters.source_scope_label = `Map: ${channel}`;
+      return filters;
+    }
+    if (platform) {
+      filters.source_scope_label = `Bron: ${platform}`;
+      return filters;
+    }
+    return null;
+  }
+
+  async function showCurrentGroupInGallery() {
+    const it = vs.items[vs.idx];
+    const filters = galleryGroupQueryForItem(it);
+    const gallery = gal();
+    if (!filters || !gallery || typeof gallery.applyQuery !== 'function') {
+      showHudMessage('Geen serie/model/kanaal gevonden');
+      return;
+    }
+    try {
+      const applied = gallery.applyQuery(filters);
+      showHudMessage(filters.source_scope_label || 'Query toegepast');
+      close();
+      applied.catch((e) => log('Groep-query fout: ' + e.message));
+    } catch (e) {
+      showHudMessage('Query toepassen mislukt');
+      log('Groep-query fout: ' + e.message);
+    }
   }
 
   // ─── Init ──────────────────────────────────────────────────────────────────
@@ -280,7 +383,7 @@
       'vSlideshow','vSlideshowSec','vWrap','vRandom','vVideoWait','vChannelScope',
       'vNowTitle','vNowSub','vNowRating',
       'vRatingSelect',
-      'vBtnSidebar','vBtnOpen','vBtnFinder','vBtnRotate',
+      'vBtnSidebar','vBtnOpen','vBtnShowGroup','vBtnFinder','vBtnRotate',
       'vZoomRange','vZoomReset',
       'vVol','vBtnMute','vBtnReloadMedia','vSeek',
       'vBtnReverse','vSpeedSelect','vSpeedDown','vSpeedUp',
@@ -299,6 +402,13 @@
       el[id] = $(id);
       if (!el[id]) console.warn(`viewer: element #${id} niet gevonden`);
     }
+    window.__wdShowCurrentGroupInGallery = (event) => {
+      if (event) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      showCurrentGroupInGallery();
+    };
     window.__wdOpenTags = openTagsFromEvent;
     bindControls();
     bindKeyboard();
@@ -380,7 +490,7 @@
   function favoriteTags() {
     return (vs.availableTags || [])
       .filter((t) => t.is_favorite)
-      .sort(sortUserTags);
+      .sort(sortTagsByName);
   }
 
   function renderFavoriteOverlay() {
@@ -436,7 +546,13 @@
       chip.title = vs.quickTagMode === 'filter'
         ? (filterActive ? 'Tagfilter wissen' : 'Filter viewer op deze tag')
         : (active ? 'Tag van huidige media verwijderen' : 'Tag aan huidige media toevoegen');
-      chip.textContent = `#${safeText(tag.name)}`;
+      const name = document.createElement('span');
+      name.className = 'vfavorite-chip-name';
+      name.textContent = `#${safeText(tag.name)}`;
+      const count = document.createElement('span');
+      count.className = 'vfavorite-chip-count';
+      count.textContent = String(userTagUses(tag));
+      chip.append(name, count);
       chip.addEventListener('click', async (e) => {
         e.stopPropagation();
         if (vs.quickTagMode === 'filter') {
@@ -518,8 +634,8 @@
       const all = vs.channelScope === 'all';
       el.vChannelScope.textContent = all ? '↕ Kanaal: alles' : '↕ Kanaal: query';
       el.vChannelScope.title = all
-        ? 'Als een item geen postgegevens heeft, zoekt omhoog/omlaag buiten de huidige query naar volgend kanaal/model'
-        : 'Als een item geen postgegevens heeft, zoekt omhoog/omlaag binnen de huidige query naar volgend kanaal/model';
+        ? 'Omhoog/omlaag springt naar vorige/volgende groep buiten de huidige query als dat nodig is'
+        : 'Omhoog/omlaag springt naar vorige/volgende groep: model, set/thread of kanaal binnen de huidige query';
       el.vChannelScope.classList.toggle('active', all);
     }
   }
@@ -910,24 +1026,20 @@
   async function navPost(dir) {
     return enqueueNavigation(async () => {
       const currentItem = vs.items[vs.idx] || null;
-      const currentThreadKey = sourceThreadKey(currentItem);
-      const currentModelKey = sourceModelKey(currentItem);
-      if (!currentThreadKey || !currentModelKey) {
+      const currentGroupKey = sourceNavigationGroupKey(currentItem);
+      if (!currentGroupKey) {
         await navChannel(dir);
         return;
       }
 
-      async function findLoadedModel(startIdx) {
+      async function findLoadedGroup(startIdx) {
         for (let i = startIdx; i >= 0 && i < vs.items.length; i += dir) {
-          const it = vs.items[i];
-          if (sourceThreadKey(it) !== currentThreadKey) continue;
-          const modelKey = sourceModelKey(it);
-          if (modelKey && modelKey !== currentModelKey) return i;
+          if (sourceNavigationGroupKey(vs.items[i]) !== currentGroupKey) return i;
         }
         return -1;
       }
 
-      let nextIdx = await findLoadedModel(vs.idx + dir);
+      let nextIdx = await findLoadedGroup(vs.idx + dir);
       if (nextIdx >= 0) {
         await navTo(nextIdx);
         return;
@@ -938,7 +1050,7 @@
           const beforeLen = vs.items.length;
           const loaded = await loadMoreViewerItems();
           if (!loaded && vs.items.length === beforeLen) break;
-          nextIdx = await findLoadedModel(Math.max(beforeLen, vs.idx + 1));
+          nextIdx = await findLoadedGroup(Math.max(beforeLen, vs.idx + 1));
           if (nextIdx >= 0) {
             await navTo(nextIdx);
             return;
@@ -946,7 +1058,7 @@
         }
       }
 
-      showHudMessage(dir > 0 ? 'Geen volgend model/set in thread' : 'Geen vorig model/set in thread');
+      showHudMessage(dir > 0 ? 'Geen volgende groep/model/kanaal' : 'Geen vorige groep/model/kanaal');
     });
   }
 
@@ -1454,7 +1566,7 @@
   }
 
   function sortTagsByName(a, b) {
-    return safeText(a && a.name).localeCompare(safeText(b && b.name));
+    return safeText(a && a.name).localeCompare(safeText(b && b.name), undefined, { numeric: true, sensitivity: 'base' });
   }
 
   function normalizeTagList(tags) {
@@ -2422,6 +2534,10 @@
           break;
         case 't': case 'T':
           openTagsFromEvent(e);
+          break;
+        case 'g': case 'G':
+          await showCurrentGroupInGallery();
+          e.preventDefault();
           break;
         case '[': changeSpeed(-1); e.preventDefault(); break;
         case ']': changeSpeed(1);  e.preventDefault(); break;
