@@ -12,7 +12,7 @@ const HTTP_TIMEOUT_MS = 6000;
 const PROBE_FAILURES_BEFORE_DISCONNECT = 2; // Reduced so it detects faster
 const PROBE_DISCONNECT_GRACE_MS = 12000; // Drop after 12s of no heartbeat
 const SOCKET_ENABLED = false;
-const BACKGROUND_BUILD = 'simple-background-v6-hub-health-fallback';
+const BACKGROUND_BUILD = 'simple-background-v7-fff-background-scan';
 const HUB_URL = 'http://localhost:35730';
 const HUB_URL_FALLBACK = 'http://127.0.0.1:35730';
 
@@ -29,6 +29,7 @@ let reconnectTimer = null;
 let reconnectAttempt = 0;
 let lastHeartbeatAt = 0;
 const activeTabs = new Set();
+const activeFffBackgroundScans = new Map();
 let probeInFlight = null;
 let consecutiveProbeFailures = 0;
 
@@ -220,6 +221,70 @@ async function postHubBatch(urls, metadata = {}, force = false) {
   }
   }
   return { success: false, error: lastError || 'Hub niet bereikbaar' };
+}
+
+function waitForTabComplete(tabId, timeoutMs = 45000) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (ok) => {
+      if (done) return;
+      done = true;
+      try { clearTimeout(timer); } catch (e) {}
+      try { browser.tabs.onUpdated.removeListener(listener); } catch (e) {}
+      resolve(!!ok);
+    };
+    const listener = (updatedTabId, changeInfo) => {
+      if (updatedTabId === tabId && changeInfo && changeInfo.status === 'complete') finish(true);
+    };
+    const timer = setTimeout(() => finish(false), Math.max(3000, Number(timeoutMs) || 45000));
+    try { browser.tabs.onUpdated.addListener(listener); } catch (e) { finish(false); }
+  });
+}
+
+async function startFffBackgroundScan(payload = {}) {
+  const url = String(payload.url || '').trim();
+  if (!url) return { success: false, error: 'Geen FootFetishForum URL voor achtergrondscan' };
+  const scanId = `fff-bg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  let tab = null;
+  try {
+    tab = await browser.tabs.create({ url, active: false });
+    activeFffBackgroundScans.set(scanId, { scanId, tabId: tab && tab.id, url, startedAt: Date.now(), status: 'loading' });
+    await waitForTabComplete(tab.id, 45000);
+    activeFffBackgroundScans.set(scanId, { scanId, tabId: tab.id, url, startedAt: Date.now(), status: 'running' });
+    setTimeout(() => {
+      browser.tabs.sendMessage(tab.id, {
+        action: 'runFffBackgroundScan',
+        payload: {
+          ...(payload && typeof payload === 'object' ? payload : {}),
+          scanId,
+          workerTabId: tab.id,
+        }
+      }).catch((e) => {
+        activeFffBackgroundScans.set(scanId, {
+          scanId,
+          tabId: tab.id,
+          url,
+          status: 'error',
+          error: e && e.message ? e.message : String(e),
+          finishedAt: Date.now(),
+        });
+      });
+    }, 500);
+    return { success: true, accepted: true, scanId, tabId: tab.id };
+  } catch (e) {
+    if (tab && tab.id) {
+      try { await browser.tabs.remove(tab.id); } catch (_) {}
+    }
+    activeFffBackgroundScans.set(scanId, {
+      scanId,
+      tabId: tab && tab.id,
+      url,
+      status: 'error',
+      error: e && e.message ? e.message : String(e),
+      finishedAt: Date.now(),
+    });
+    return { success: false, error: e && e.message ? e.message : String(e) };
+  }
 }
 
 async function getJson(endpoint) {
@@ -701,6 +766,40 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .then(sendResponse)
       .catch(e => sendResponse({ success: false, error: e.message }));
     return true;
+  }
+
+  if (action === 'startFffBackgroundScan') {
+    startFffBackgroundScan((message && message.payload) || {})
+      .then(sendResponse)
+      .catch(e => sendResponse({ success: false, error: e && e.message ? e.message : String(e) }));
+    return true;
+  }
+
+  if (action === 'fffBackgroundScanStatus') {
+    sendResponse({ success: true, scans: Array.from(activeFffBackgroundScans.values()) });
+    return false;
+  }
+
+  if (action === 'fffBackgroundScanFinished') {
+    const payload = (message && message.payload) || {};
+    const scanId = String(payload.scanId || '').trim();
+    const tabId = sender && sender.tab && sender.tab.id ? sender.tab.id : Number(payload.tabId) || null;
+    if (scanId) {
+      activeFffBackgroundScans.set(scanId, {
+        ...(activeFffBackgroundScans.get(scanId) || { scanId, tabId }),
+        status: payload.success === false ? 'error' : 'done',
+        stats: payload.stats || null,
+        error: payload.error || '',
+        finishedAt: Date.now(),
+      });
+    }
+    sendResponse({ success: true });
+    if (tabId && payload.closeTab !== false) {
+      setTimeout(() => {
+        browser.tabs.remove(tabId).catch(() => {});
+      }, 1200);
+    }
+    return false;
   }
 
   if (action === 'redditIndex') {

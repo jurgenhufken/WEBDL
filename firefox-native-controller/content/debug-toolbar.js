@@ -5,7 +5,7 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-generic-server-gigascan';
+  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-fff-background-gigascan';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
@@ -4768,6 +4768,201 @@
     return viaHttp && typeof viaHttp === 'object' ? viaHttp : { success: false, error: 'Server gigascan start mislukt' };
   }
 
+  async function startFffBackgroundScanRequest(payload) {
+    const viaBg = await sendBackgroundAction('startFffBackgroundScan', payload && typeof payload === 'object' ? payload : {}, 20000);
+    if (viaBg && viaBg.success) return viaBg;
+    return viaBg && typeof viaBg === 'object' ? viaBg : { success: false, error: 'Achtergrondscan start mislukt' };
+  }
+
+  function normalizeBatchUrl(rawUrl, baseHref = '') {
+    try {
+      const u = normalizedUrlObject(rawUrl, baseHref || window.location.href);
+      u.hash = '';
+      return u.toString();
+    } catch (e) {
+      return String(rawUrl || '').trim();
+    }
+  }
+
+  function isFootFetishForumUploadWrapperUrl(rawUrl) {
+    try {
+      const u = normalizedUrlObject(rawUrl, window.location.href);
+      const host = String(u.hostname || '').toLowerCase();
+      return (host === 'upload.footfetishforum.com' || host.endsWith('.upload.footfetishforum.com')) && /^\/image\//i.test(String(u.pathname || ''));
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function looksLikeDirectMediaFileUrl(rawUrl) {
+    try {
+      const u = normalizedUrlObject(rawUrl, window.location.href);
+      const host = String(u.hostname || '').toLowerCase();
+      const p = String(u.pathname || '').toLowerCase();
+      if ((host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) && /\/data\/(?:attachments|video)\//i.test(p)) return true;
+      if (host === 'flc.nyc3.digitaloceanspaces.com' && /\/data\/(?:attachments|video)\//i.test(p)) return true;
+      if ((host === 'upload.footfetishforum.com' || host.endsWith('.upload.footfetishforum.com')) && /\/images\//i.test(p)) return true;
+      return /\.(jpe?g|png|gif|webp|bmp|avif|heic|heif|mp4|mov|m4v|webm|mkv)(?:$|[?#])/i.test(p);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  async function resolveFootFetishForumUploadWrapperForQueue(wrapperUrl, timeoutMs = 12000) {
+    if (!isFootFetishForumUploadWrapperUrl(wrapperUrl)) return '';
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => {
+      try { ctrl.abort(); } catch (e) {}
+    }, Math.max(3000, Number(timeoutMs) || 12000));
+    try {
+      const resp = await fetch(wrapperUrl, { credentials: 'include', cache: 'no-store', redirect: 'follow', signal: ctrl.signal });
+      const html = await resp.text();
+      if (!resp.ok || !html) return '';
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      if (!doc || isCloudflareChallengeDocument(doc)) return '';
+      const candidates = collectFootFetishForumCandidatesFromDocument(doc, wrapperUrl, 40);
+      for (const c of (Array.isArray(candidates) ? candidates : [])) {
+        const direct = normalizeBatchUrl(c && c.url ? c.url : '', wrapperUrl);
+        if (direct && direct !== wrapperUrl && looksLikeDirectMediaFileUrl(direct) && !isFootFetishForumUploadWrapperUrl(direct)) return direct;
+      }
+    } catch (e) {
+    } finally {
+      clearTimeout(timer);
+    }
+    return '';
+  }
+
+  async function queueFffBackgroundCandidates(candidates, meta, force, state) {
+    const st = state && typeof state === 'object' ? state : {};
+    const seen = st.seenUrls || new Set();
+    st.seenUrls = seen;
+    const unique = uniqueCandidates(candidates || []);
+    const urls = [];
+    const sourceContexts = {};
+    let skippedWrappers = 0;
+    for (const c of unique) {
+      let url = normalizeBatchUrl(c && c.url ? c.url : '');
+      if (!url) continue;
+      if (isFootFetishForumUploadWrapperUrl(url)) {
+        const resolved = await resolveFootFetishForumUploadWrapperForQueue(url);
+        if (resolved) url = resolved;
+        else {
+          skippedWrappers++;
+          continue;
+        }
+      }
+      if (!url || seen.has(url)) continue;
+      seen.add(url);
+      urls.push(url);
+      const ctx = c && c.sourceContext && typeof c.sourceContext === 'object' ? c.sourceContext : null;
+      if (ctx && ctx.url) {
+        sourceContexts[url] = ctx;
+        const key = normalizeBatchUrl(url);
+        if (key) sourceContexts[key] = ctx;
+      }
+    }
+    if (!urls.length) {
+      st.skippedWrappers = (Number(st.skippedWrappers) || 0) + skippedWrappers;
+      return { queued: 0, duplicates: 0, errors: 0, skippedWrappers };
+    }
+    const result = await queueBatchDownloadRequest(urls, {
+      ...(meta && typeof meta === 'object' ? meta : {}),
+      platform: 'footfetishforum',
+      webdl_batch_kind: 'footfetishforum_background_gigascan',
+      webdl_pin_context: true,
+    }, {
+      force,
+      sourceContexts,
+    });
+    st.queued = (Number(st.queued) || 0) + (Number(result && (result.queued || result.total)) || 0);
+    st.duplicates = (Number(st.duplicates) || 0) + (Number(result && result.duplicates) || 0);
+    st.errors = (Number(st.errors) || 0) + (Number(result && result.errors) || 0);
+    st.skippedWrappers = (Number(st.skippedWrappers) || 0) + skippedWrappers;
+    return result;
+  }
+
+  async function runFffBackgroundScan(payload) {
+    const body = payload && typeof payload === 'object' ? payload : {};
+    const startUrl = String(body.url || window.location.href || '').replace(/#.*$/, '');
+    const force = body.force === true;
+    const maxForumPages = parseScanLimit(body.maxForumPages);
+    const maxThreadPages = parseScanLimit(body.maxThreadPages || body.maxPages);
+    const maxItems = parseScanLimit(body.maxItems);
+    const meta = body.metadata && typeof body.metadata === 'object' ? { ...body.metadata } : scrapeMetadata();
+    const stats = { queued: 0, duplicates: 0, errors: 0, skippedWrappers: 0, threads: 0, forumPages: 0, threadPages: 0, media: 0 };
+    const state = { seenUrls: new Set() };
+    const finish = async (success, error) => {
+      try {
+        await browser.runtime.sendMessage({
+          action: 'fffBackgroundScanFinished',
+          payload: { scanId: body.scanId || '', success, error: error || '', stats, closeTab: body.closeTab !== false }
+        });
+      } catch (e) {}
+    };
+    try {
+      addLog(`FFF achtergrondscan gestart: ${startUrl}`);
+      if (footFetishForumThreadPartsFromUrl(startUrl, window.location.href)) {
+        const res = await fetchFootFetishForumThreadCandidates(startUrl, { maxPages: maxThreadPages, maxItems });
+        const candidates = uniqueCandidates(res && res.candidates ? res.candidates : []);
+        stats.threadPages += Number(res && res.pages) || 0;
+        stats.media += candidates.length;
+        await queueFffBackgroundCandidates(candidates, meta, force, state);
+        stats.queued = Number(state.queued) || 0;
+        stats.duplicates = Number(state.duplicates) || 0;
+        stats.errors = Number(state.errors) || 0;
+        stats.skippedWrappers = Number(state.skippedWrappers) || 0;
+        await finish(true, '');
+        return stats;
+      }
+
+      let forumUrl = startUrl;
+      const seenThreads = new Set();
+      let totalItems = 0;
+      while (forumUrl && stats.forumPages < maxForumPages && totalItems < maxItems) {
+        stats.forumPages++;
+        const doc = await loadFootFetishForumDocument(forumUrl, { timeoutMs: 30000, useCurrent: stats.forumPages === 1 });
+        if (!doc) throw new Error(`Forum kon niet geladen worden: ${forumUrl}`);
+        const links = collectFootFetishForumThreadLinksFromForumDocument(doc, forumUrl, WEBDL_UNLIMITED);
+        for (const link of links) {
+          const normalized = normalizeBatchUrl(link, forumUrl);
+          let key = normalized;
+          try {
+            const parts = footFetishForumThreadPartsFromUrl(normalized, forumUrl);
+            if (parts && parts.id) key = parts.id;
+          } catch (e) {}
+          if (!normalized || seenThreads.has(key)) continue;
+          seenThreads.add(key);
+          stats.threads++;
+          const remaining = Math.max(0, Number.isFinite(maxItems) ? maxItems - totalItems : WEBDL_UNLIMITED);
+          const res = await fetchFootFetishForumThreadCandidates(normalized, { maxPages: maxThreadPages, maxItems: remaining });
+          const candidates = uniqueCandidates(res && res.candidates ? res.candidates : []);
+          stats.threadPages += Number(res && res.pages) || 0;
+          stats.media += candidates.length;
+          totalItems += candidates.length;
+          await queueFffBackgroundCandidates(candidates, meta, force, state);
+          stats.queued = Number(state.queued) || 0;
+          stats.duplicates = Number(state.duplicates) || 0;
+          stats.errors = Number(state.errors) || 0;
+          stats.skippedWrappers = Number(state.skippedWrappers) || 0;
+          addLog(`FFF achtergrondscan: ${stats.threads} threads, ${stats.media} media, ${stats.queued} queued`);
+          if (totalItems >= maxItems) break;
+        }
+        const nextUrl = findNextFootFetishForumForumPageUrl(doc, forumUrl);
+        if (!nextUrl || nextUrl === forumUrl) break;
+        forumUrl = nextUrl;
+        await delay(250);
+      }
+      await finish(true, '');
+      return stats;
+    } catch (e) {
+      stats.errors++;
+      const msg = e && e.message ? e.message : String(e);
+      addLog(`FFF achtergrondscan fout: ${msg}`, 'error');
+      await finish(false, msg);
+      return stats;
+    }
+  }
+
   function confirmBatchStart({ count, force, label, redditHint }) {
     const total = Math.max(0, parseInt(count || 0, 10) || 0);
     const title = String(label || 'Batch download');
@@ -6220,23 +6415,27 @@
           `${threadIndex || '?'}${threads ? `/${threads}` : ''} threads gescand`,
           `${threadPages} threadpagina's gescand`,
           '',
-          'Wil je de scan nu overdragen aan de server?',
-          'De server neemt de gevonden media mee en scant/downloadt daarna verder.',
+          isForumPage || isThreadPage
+            ? 'Wil je de scan nu op de achtergrond laten doorlopen?'
+            : 'Wil je de scan nu overdragen aan de server?',
+          isForumPage || isThreadPage
+            ? 'De extensie opent een eigen worker-tab en blijft chunks naar WebDL sturen.'
+            : 'De server neemt de gevonden media mee en scant/downloadt daarna verder.',
           '',
-          'OK = server-gigascan starten',
+          isForumPage || isThreadPage ? 'OK = achtergrondscan starten' : 'OK = server-gigascan starten',
           'Annuleren = verder scannen'
         ].join('\n');
         const stopNow = window.confirm(msg);
         if (stopNow) {
           gigaStopConfirmed = true;
-          try { addLog(`Server-gigascan bevestigd: browser draagt over bij ${items} media, ${threadPages} pagina's`); } catch (e) {}
-          try { showNotification(`Server-gigascan starten: ${items} media meegegeven`, false); } catch (e) {}
+          try { addLog(`${isForumPage || isThreadPage ? 'Achtergrondscan' : 'Server-gigascan'} bevestigd: overdracht bij ${items} media, ${threadPages} pagina's`); } catch (e) {}
+          try { showNotification(`${isForumPage || isThreadPage ? 'Achtergrondscan' : 'Server-gigascan'} starten: ${items} media meegegeven`, false); } catch (e) {}
         } else {
           gigaNextMediaThreshold = Math.max(items + GIGA_SCAN_MEDIA_REPEAT_STEP, gigaNextMediaThreshold + GIGA_SCAN_MEDIA_REPEAT_STEP);
           gigaNextThreadPageThreshold = Math.max(threadPages + GIGA_SCAN_THREAD_PAGE_REPEAT_STEP, gigaNextThreadPageThreshold + GIGA_SCAN_THREAD_PAGE_REPEAT_STEP);
           gigaNextThreadThreshold = Math.max(threads + GIGA_SCAN_THREAD_REPEAT_STEP, gigaNextThreadThreshold + GIGA_SCAN_THREAD_REPEAT_STEP);
-          try { addLog(`Server-gigascan uitgesteld: doorgaan tot volgende drempel (${gigaNextMediaThreshold} media / ${gigaNextThreadPageThreshold} pagina's)`); } catch (e) {}
-          try { showNotification('Server-gigascan uitgesteld: browser scant verder', false); } catch (e) {}
+          try { addLog(`Gigascan uitgesteld: doorgaan tot volgende drempel (${gigaNextMediaThreshold} media / ${gigaNextThreadPageThreshold} pagina's)`); } catch (e) {}
+          try { showNotification('Gigascan uitgesteld: browser scant verder', false); } catch (e) {}
         }
         return stopNow;
       } catch (e) {
@@ -6426,26 +6625,31 @@
             }
           } catch (e) {}
         }
-        addLog(force ? `Force gigascan naar server: ${urls.length} reeds gevonden items` : `Gigascan naar server: ${urls.length} reeds gevonden items`);
-        showNotification(`Gigascan naar server: ${urls.length} gevonden items + verder scannen`, false);
-        const result = await startServerGigaScanRequest({
+        const useFffBackground = isForumPage || isThreadPage;
+        addLog(force ? `Force ${useFffBackground ? 'FFF achtergrondscan' : 'gigascan naar server'}: ${urls.length} reeds gevonden items` : `${useFffBackground ? 'FFF achtergrondscan' : 'Gigascan naar server'}: ${urls.length} reeds gevonden items`);
+        showNotification(useFffBackground ? `FFF achtergrondscan: worker-tab start en scant verder` : `Gigascan naar server: ${urls.length} gevonden items + verder scannen`, false);
+        const scanPayload = {
           url: startUrl,
           metadata: meta,
           force,
           initialUrls: urls,
+          initialThreadLinks: Array.isArray(res && res.threadLinks) ? res.threadLinks : [],
           maxForumPages,
           maxThreadPages: maxPages,
           maxItems,
           sourceContexts: Object.keys(sourceContexts).length ? sourceContexts : null,
           directHints: Object.keys(directHints).length ? directHints : null
-        });
+        };
+        const result = useFffBackground
+          ? await startFffBackgroundScanRequest(scanPayload)
+          : await startServerGigaScanRequest(scanPayload);
         if (result && result.success) {
           const scanId = result.scanId ? ` #${result.scanId}` : '';
-          showNotification(`Gigascan draait op server${scanId}`);
-          addLog(`Gigascan server gestart${scanId}: ${urls.length} initiele items`);
+          showNotification(useFffBackground ? `FFF achtergrondscan draait${scanId}` : `Gigascan draait op server${scanId}`);
+          addLog(useFffBackground ? `FFF achtergrondscan gestart${scanId}: worker-tab #${result.tabId || '?'}` : `Gigascan server gestart${scanId}: ${urls.length} initiele items`);
         } else {
-          showNotification(`Gigascan server fout: ${(result && result.error) ? result.error : 'unknown'}`, true);
-          addLog(`Gigascan server fout: ${(result && result.error) ? result.error : 'unknown'}`, 'error');
+          showNotification(`Gigascan start fout: ${(result && result.error) ? result.error : 'unknown'}`, true);
+          addLog(`Gigascan start fout: ${(result && result.error) ? result.error : 'unknown'}`, 'error');
         }
         return;
       }
@@ -7197,6 +7401,26 @@
       } catch (e) {
         return Promise.resolve({ url: window.location.href, platform: 'unknown', channel: 'unknown', title: document.title, description: '' });
       }
+    }
+
+    if (message && message.action === 'runFffBackgroundScan') {
+      const payload = message.payload && typeof message.payload === 'object' ? message.payload : {};
+      setTimeout(() => {
+        runFffBackgroundScan(payload).catch((e) => {
+          try {
+            browser.runtime.sendMessage({
+              action: 'fffBackgroundScanFinished',
+              payload: {
+                scanId: payload.scanId || '',
+                success: false,
+                error: e && e.message ? e.message : String(e),
+                closeTab: payload.closeTab !== false
+              }
+            }).catch(() => {});
+          } catch (_) {}
+        });
+      }, 250);
+      return Promise.resolve({ success: true, accepted: true, scanId: payload.scanId || '' });
     }
 
     if (message && message.action === 'webdlDownloadQueued') {

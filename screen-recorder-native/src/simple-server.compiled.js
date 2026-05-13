@@ -6271,6 +6271,7 @@ async function startServerGigaScanFromBody(body) {
   if (!metadata.platform || metadata.platform === 'unknown') metadata.platform = kind;
   const force = body.force === true;
   const initialUrls = Array.isArray(body.initialUrls) ? body.initialUrls : [];
+  const initialThreadLinks = Array.isArray(body.initialThreadLinks || body.threadLinks) ? (body.initialThreadLinks || body.threadLinks) : [];
   const initialSourceContexts = body.sourceContexts && typeof body.sourceContexts === 'object' && !Array.isArray(body.sourceContexts)
     ? body.sourceContexts
     : {};
@@ -6297,6 +6298,7 @@ async function startServerGigaScanFromBody(body) {
         metadata,
         force,
         initialUrls,
+        initialThreadLinks,
         initialSourceContexts,
         maxForumPages,
         maxThreadPages,
@@ -6321,7 +6323,7 @@ async function startServerGigaScanFromBody(body) {
 
   run().then((stats) => {
     const row = activeFootFetishForumGigaScans.get(scanId) || { id: scanId, seedUrl, kind };
-    row.status = 'done';
+    row.status = stats && stats.incomplete ? 'partial' : 'done';
     row.updatedAt = new Date().toISOString();
     row.finishedAt = row.updatedAt;
     row.stats = stats;
@@ -6331,6 +6333,7 @@ async function startServerGigaScanFromBody(body) {
     const row = activeFootFetishForumGigaScans.get(scanId) || { id: scanId, seedUrl, kind };
     row.status = 'error';
     row.error = e && e.message ? e.message : String(e);
+    if (e && e.stats && typeof e.stats === 'object') row.stats = e.stats;
     row.updatedAt = new Date().toISOString();
     row.finishedAt = row.updatedAt;
     setGigaScanState(scanId, row);
@@ -8632,11 +8635,15 @@ function parseServerScanLimit(value, fallback) {
 
 async function fetchFootFetishForumHtml(url, timeoutMs = 20000) {
   const headers = {
-    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
+    'User-Agent': FOOTFETISHFORUM_FIREFOX_UA,
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9,nl;q=0.8',
+    'Cache-Control': 'no-cache',
+    'Pragma': 'no-cache',
   };
   try {
-    const cookieStr = await loadCookiesForDomain('footfetishforum.com');
+    const host = new URL(String(url || '')).hostname || 'footfetishforum.com';
+    const cookieStr = await loadCookiesForDomain(host);
     if (cookieStr) headers.Cookie = cookieStr;
   } catch (e) {}
   const controller = new AbortController();
@@ -8863,7 +8870,7 @@ async function postHubGigaScanJob(seedUrl, metadata, force, body = {}) {
   return { kind, adapter: adapter || data.adapter || null, hub: data };
 }
 
-async function runFootFetishForumGigaScan({ seedUrl, metadata = {}, force = false, initialUrls = [], initialSourceContexts = {}, maxForumPages = 1000, maxThreadPages = 1000, maxItems = 0 }) {
+async function runFootFetishForumGigaScan({ seedUrl, metadata = {}, force = false, initialUrls = [], initialThreadLinks = [], initialSourceContexts = {}, maxForumPages = 1000, maxThreadPages = 1000, maxItems = 0 }) {
   const seenMedia = new Set();
   const seenThreads = new Set();
   const sourceContexts = {};
@@ -8910,6 +8917,8 @@ async function runFootFetishForumGigaScan({ seedUrl, metadata = {}, force = fals
       try {
         html = await fetchFootFetishForumHtml(pageUrl);
       } catch (e) {
+        stats.errors++;
+        stats.incomplete = true;
         console.log(`[GIGASCAN] thread fetch fout ${pageUrl}: ${e.message}`);
         break;
       }
@@ -8927,10 +8936,23 @@ async function runFootFetishForumGigaScan({ seedUrl, metadata = {}, force = fals
   const normalizedSeed = String(seedUrl || '').trim();
   if (isFootFetishForumThreadPageUrl(normalizedSeed)) {
     await scanThread(normalizedSeed);
+    if (stats.threadPages === 0) {
+      const err = new Error('FootFetishForum thread kon niet door de server worden geladen');
+      err.stats = stats;
+      throw err;
+    }
     return stats;
   }
 
   if (!isFootFetishForumForumUrl(normalizedSeed)) throw new Error('Geen FootFetishForum forum/thread URL');
+  const providedThreadLinks = Array.from(new Set((Array.isArray(initialThreadLinks) ? initialThreadLinks : [])
+    .map((link) => normalizeFootFetishForumThreadUrl(link, normalizedSeed))
+    .filter(Boolean)));
+  for (const link of providedThreadLinks) {
+    await scanThread(link);
+    if (maxItems > 0 && stats.media >= maxItems) break;
+  }
+
   let forumUrl = normalizedSeed;
   let forumPage = 0;
   while (forumUrl && forumPage < maxForumPages) {
@@ -8940,6 +8962,8 @@ async function runFootFetishForumGigaScan({ seedUrl, metadata = {}, force = fals
     try {
       html = await fetchFootFetishForumHtml(forumUrl);
     } catch (e) {
+      stats.errors++;
+      stats.incomplete = true;
       console.log(`[GIGASCAN] forum fetch fout ${forumUrl}: ${e.message}`);
       break;
     }
@@ -8953,6 +8977,11 @@ async function runFootFetishForumGigaScan({ seedUrl, metadata = {}, force = fals
     if (!nextUrl || nextUrl === forumUrl) break;
     forumUrl = nextUrl;
     await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  if (stats.threadPages === 0 && stats.errors > 0) {
+    const err = new Error('FootFetishForum forum kon niet door de server worden geladen');
+    err.stats = stats;
+    throw err;
   }
   return stats;
 }
@@ -11321,7 +11350,7 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
             platform === 'aznudefeet' && !looksLikeDirectFileUrl(url) ||
             platform === 'tiktok' && isTikTokPhotoUrl(url)
           ) driver = 'gallery-dl'; else
-            if (platform !== 'footfetishforum' && (isKnownHtmlWrapperUrl(url) || looksLikeDirectFileUrl(url))) driver = 'direct';
+            if (isKnownHtmlWrapperUrl(url) || looksLikeDirectFileUrl(url)) driver = 'direct';
   setDownloadActivityContext(downloadId, { url, platform, channel, title, lane: jobLane.get(downloadId) || '', driver });
   emitDownloadEventActivity('dispatch', downloadId, { url, platform, channel, title, lane: jobLane.get(downloadId) || '', driver }).catch(() => { });
 
@@ -11390,7 +11419,7 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
     return startGalleryDlDownload(downloadId, url, platform, channel, title, metadata);
   }
 
-  if (platform !== 'footfetishforum' && isKnownHtmlWrapperUrl(url)) {
+  if (isKnownHtmlWrapperUrl(url)) {
     try {
       const wrapperReferer = String(
         metadata && typeof metadata === 'object' && metadata.origin_thread && metadata.origin_thread.url ? metadata.origin_thread.url :
@@ -11411,7 +11440,7 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
     return startDirectFileDownload(downloadId, url, platform, channel, title, metadata);
   }
 
-  if (platform !== 'footfetishforum' && looksLikeDirectFileUrl(url)) {
+  if (looksLikeDirectFileUrl(url)) {
     return startDirectFileDownload(downloadId, url, platform, channel, title, metadata);
   }
 
