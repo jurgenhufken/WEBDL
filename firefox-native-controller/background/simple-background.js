@@ -12,7 +12,7 @@ const HTTP_TIMEOUT_MS = 6000;
 const PROBE_FAILURES_BEFORE_DISCONNECT = 2; // Reduced so it detects faster
 const PROBE_DISCONNECT_GRACE_MS = 12000; // Drop after 12s of no heartbeat
 const SOCKET_ENABLED = false;
-const BACKGROUND_BUILD = 'simple-background-v7-fff-background-scan';
+const BACKGROUND_BUILD = 'simple-background-v8-fff-background-handshake';
 const HUB_URL = 'http://localhost:35730';
 const HUB_URL_FALLBACK = 'http://127.0.0.1:35730';
 
@@ -241,6 +241,27 @@ function waitForTabComplete(tabId, timeoutMs = 45000) {
   });
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
+async function sendTabMessageWithRetry(tabId, message, attempts = 30, delayMs = 500) {
+  let lastError = null;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const response = await browser.tabs.sendMessage(tabId, message);
+      if (response && response.success === false) {
+        throw new Error(response.error || 'Worker-tab weigerde de achtergrondscan');
+      }
+      return response || { success: true };
+    } catch (e) {
+      lastError = e;
+      await sleep(delayMs);
+    }
+  }
+  throw new Error(lastError && lastError.message ? lastError.message : 'Content-script niet bereikbaar in worker-tab');
+}
+
 async function startFffBackgroundScan(payload = {}) {
   const url = String(payload.url || '').trim();
   if (!url) return { success: false, error: 'Geen FootFetishForum URL voor achtergrondscan' };
@@ -250,27 +271,17 @@ async function startFffBackgroundScan(payload = {}) {
     tab = await browser.tabs.create({ url, active: false });
     activeFffBackgroundScans.set(scanId, { scanId, tabId: tab && tab.id, url, startedAt: Date.now(), status: 'loading' });
     await waitForTabComplete(tab.id, 45000);
-    activeFffBackgroundScans.set(scanId, { scanId, tabId: tab.id, url, startedAt: Date.now(), status: 'running' });
-    setTimeout(() => {
-      browser.tabs.sendMessage(tab.id, {
-        action: 'runFffBackgroundScan',
-        payload: {
-          ...(payload && typeof payload === 'object' ? payload : {}),
-          scanId,
-          workerTabId: tab.id,
-        }
-      }).catch((e) => {
-        activeFffBackgroundScans.set(scanId, {
-          scanId,
-          tabId: tab.id,
-          url,
-          status: 'error',
-          error: e && e.message ? e.message : String(e),
-          finishedAt: Date.now(),
-        });
-      });
-    }, 500);
-    return { success: true, accepted: true, scanId, tabId: tab.id };
+    activeFffBackgroundScans.set(scanId, { scanId, tabId: tab.id, url, startedAt: Date.now(), status: 'dispatching' });
+    const ack = await sendTabMessageWithRetry(tab.id, {
+      action: 'runFffBackgroundScan',
+      payload: {
+        ...(payload && typeof payload === 'object' ? payload : {}),
+        scanId,
+        workerTabId: tab.id,
+      }
+    }, 40, 500);
+    activeFffBackgroundScans.set(scanId, { scanId, tabId: tab.id, url, startedAt: Date.now(), status: 'running', acceptedAt: Date.now() });
+    return { success: true, accepted: true, scanId, tabId: tab.id, worker: ack };
   } catch (e) {
     if (tab && tab.id) {
       try { await browser.tabs.remove(tab.id); } catch (_) {}

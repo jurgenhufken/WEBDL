@@ -4769,7 +4769,7 @@
   }
 
   async function startFffBackgroundScanRequest(payload) {
-    const viaBg = await sendBackgroundAction('startFffBackgroundScan', payload && typeof payload === 'object' ? payload : {}, 20000);
+    const viaBg = await sendBackgroundAction('startFffBackgroundScan', payload && typeof payload === 'object' ? payload : {}, 75000);
     if (viaBg && viaBg.success) return viaBg;
     return viaBg && typeof viaBg === 'object' ? viaBg : { success: false, error: 'Achtergrondscan start mislukt' };
   }
