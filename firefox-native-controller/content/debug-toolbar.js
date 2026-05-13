@@ -5,7 +5,7 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-fff-background-start-trace';
+  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-fff-background-immediate-run';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
@@ -7517,21 +7517,33 @@
 
     if (message && message.action === 'runFffBackgroundScan') {
       const payload = message.payload && typeof message.payload === 'object' ? message.payload : {};
-      setTimeout(() => {
-        runFffBackgroundScan(payload).catch((e) => {
-          try {
-            browser.runtime.sendMessage({
-              action: 'fffBackgroundScanFinished',
-              payload: {
-                scanId: payload.scanId || '',
-                success: false,
-                error: e && e.message ? e.message : String(e),
-                closeTab: payload.closeTab !== false
-              }
-            }).catch(() => {});
-          } catch (_) {}
+      traceFffBackgroundScan(payload.scanId || '', 'content-message-accepted', {
+        url: payload.url || window.location.href,
+        extra: {
+          initialUrls: Array.isArray(payload.initialUrls) ? payload.initialUrls.length : 0,
+          initialThreadLinks: Array.isArray(payload.initialThreadLinks) ? payload.initialThreadLinks.length : 0,
+        },
+      });
+      Promise.resolve().then(() => {
+        traceFffBackgroundScan(payload.scanId || '', 'content-run-enter', { url: payload.url || window.location.href });
+        return runFffBackgroundScan(payload);
+      }).catch((e) => {
+        traceFffBackgroundScan(payload.scanId || '', 'content-run-error', {
+          url: payload.url || window.location.href,
+          error: e && e.message ? e.message : String(e),
         });
-      }, 250);
+        try {
+          browser.runtime.sendMessage({
+            action: 'fffBackgroundScanFinished',
+            payload: {
+              scanId: payload.scanId || '',
+              success: false,
+              error: e && e.message ? e.message : String(e),
+              closeTab: payload.closeTab !== false
+            }
+          }).catch(() => {});
+        } catch (_) {}
+      });
       return Promise.resolve({ success: true, accepted: true, scanId: payload.scanId || '', build: WEBDL_BUILD });
     }
 
