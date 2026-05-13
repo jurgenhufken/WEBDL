@@ -6214,28 +6214,29 @@
           || (threads >= gigaNextThreadThreshold && items >= 200);
         if (!reachedThreshold) return false;
         const msg = [
-          'Deze scan is een giga batch.',
+          'Deze scan is groot genoeg voor server-gigascan.',
           '',
           `${items} media gevonden`,
           `${threadIndex || '?'}${threads ? `/${threads}` : ''} threads gescand`,
           `${threadPages} threadpagina's gescand`,
           '',
-          'Wil je nu stoppen met scannen en de gevonden media als gigabatch opnemen?',
+          'Wil je de scan nu overdragen aan de server?',
+          'De server neemt de gevonden media mee en scant/downloadt daarna verder.',
           '',
-          'OK = nu opnemen',
+          'OK = server-gigascan starten',
           'Annuleren = verder scannen'
         ].join('\n');
         const stopNow = window.confirm(msg);
         if (stopNow) {
           gigaStopConfirmed = true;
-          try { addLog(`Gigabatch bevestigd: scan stopt bij ${items} media, ${threadPages} pagina's`); } catch (e) {}
-          try { showNotification(`Gigabatch: scan gestopt bij ${items} media`, false); } catch (e) {}
+          try { addLog(`Server-gigascan bevestigd: browser draagt over bij ${items} media, ${threadPages} pagina's`); } catch (e) {}
+          try { showNotification(`Server-gigascan starten: ${items} media meegegeven`, false); } catch (e) {}
         } else {
           gigaNextMediaThreshold = Math.max(items + GIGA_SCAN_MEDIA_REPEAT_STEP, gigaNextMediaThreshold + GIGA_SCAN_MEDIA_REPEAT_STEP);
           gigaNextThreadPageThreshold = Math.max(threadPages + GIGA_SCAN_THREAD_PAGE_REPEAT_STEP, gigaNextThreadPageThreshold + GIGA_SCAN_THREAD_PAGE_REPEAT_STEP);
           gigaNextThreadThreshold = Math.max(threads + GIGA_SCAN_THREAD_REPEAT_STEP, gigaNextThreadThreshold + GIGA_SCAN_THREAD_REPEAT_STEP);
-          try { addLog(`Gigabatch waarschuwing genegeerd: doorgaan tot volgende drempel (${gigaNextMediaThreshold} media / ${gigaNextThreadPageThreshold} pagina's)`); } catch (e) {}
-          try { showNotification('Gigabatch: scan gaat verder', false); } catch (e) {}
+          try { addLog(`Server-gigascan uitgesteld: doorgaan tot volgende drempel (${gigaNextMediaThreshold} media / ${gigaNextThreadPageThreshold} pagina's)`); } catch (e) {}
+          try { showNotification('Server-gigascan uitgesteld: browser scant verder', false); } catch (e) {}
         }
         return stopNow;
       } catch (e) {
