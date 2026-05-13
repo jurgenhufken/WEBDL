@@ -30,6 +30,20 @@ function isAuxiliaryImageBasename(name) {
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
+function isRefreshableCollectionUrl(url, adapterName = '') {
+  try {
+    const u = new URL(String(url || '').trim());
+    const host = u.hostname.replace(/^www\./i, '').toLowerCase();
+    const pathname = u.pathname.replace(/\/+$/, '') || '/';
+    if (adapterName === 'reddit' || host === 'reddit.com' || host.endsWith('.reddit.com')) {
+      return /^\/(?:r|user)\/[^/]+$/i.test(pathname);
+    }
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
+
 function intEnv(name, fallback) {
   const raw = process.env[name];
   if (raw === undefined || raw === '') return fallback;
@@ -780,9 +794,11 @@ function startWorkerPool({
       /\/channel\//.test(urlLower) ||
       /\/c\//.test(urlLower);
     const isViperThread = /https?:\/\/(?:www\.)?(?:vipergirls\.to|viper\.to)\/threads\/\d+/i.test(String(job.url || ''));
+    const isRefreshableCollection = isRefreshableCollectionUrl(job.url, job.adapter);
     const skipPreDownloadDedup = String(job?.options?.source_quality || '') === 'vipr_full_image'
       || Boolean(job?.options?.vipergirlsWholeThread)
-      || isViperThread;
+      || isViperThread
+      || isRefreshableCollection;
     if (!isExpandable && !skipPreDownloadDedup) {
       try {
         const dupe = await checkGalleryDuplicate(job.url);

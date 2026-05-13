@@ -158,6 +158,20 @@ function isFootFetishClubBrowserOnlyUrl(url) {
   }
 }
 
+function isRefreshableCollectionUrl(url, adapterName = '') {
+  try {
+    const u = new URL(String(url || '').trim());
+    const host = u.hostname.replace(/^www\./i, '').toLowerCase();
+    const pathname = u.pathname.replace(/\/+$/, '') || '/';
+    if (adapterName === 'reddit' || host === 'reddit.com' || host.endsWith('.reddit.com')) {
+      return /^\/(?:r|user)\/[^/]+$/i.test(pathname);
+    }
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
+
 async function withUrlDedupeLock(repo, url, fn) {
   const key = canonicalDedupeUrl(url);
   const client = await repo.pool.connect();
@@ -523,9 +537,11 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
     }
     const priority = requestedPriority ?? defaultJobPriority(jobUrl, adapter.name);
     if (!force) {
-      const existing = await repo.findRecentJobByUrl(jobUrl);
+      const refreshable = isRefreshableCollectionUrl(jobUrl, adapter.name);
+      const activeStatuses = ['queued', 'running'];
+      const existing = await repo.findRecentJobByUrl(jobUrl, refreshable ? { statuses: activeStatuses } : {});
       if (existing) return { ...existing, duplicate: true };
-      const existingDownload = await repo.findGalleryDownloadByUrl(jobUrl);
+      const existingDownload = await repo.findGalleryDownloadByUrl(jobUrl, refreshable ? { statuses: activeStatuses } : {});
       if (existingDownload) {
         return {
           id: existingDownload.id,
