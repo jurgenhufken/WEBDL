@@ -5,7 +5,7 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-fff-giga-button';
+  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-fff-giga-thread-trace';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
@@ -5042,9 +5042,28 @@
           if (!normalized || seenThreads.has(key)) continue;
           seenThreads.add(key);
           stats.threads++;
+          traceFffBackgroundScan(body.scanId || '', 'thread-start', {
+            url: normalized,
+            stats,
+            extra: { key, forumUrl },
+          });
           reportProgress('thread-start', { url: normalized });
           const remaining = Math.max(0, Number.isFinite(maxItems) ? maxItems - totalItems : WEBDL_UNLIMITED);
-          const res = await fetchFootFetishForumThreadCandidates(normalized, { maxPages: maxThreadPages, maxItems: remaining });
+          const res = await fetchFootFetishForumThreadCandidates(normalized, {
+            maxPages: maxThreadPages,
+            maxItems: remaining,
+            timeoutMs: 15000,
+            onProgress: (p) => {
+              try {
+                const phase = p && p.phase ? `thread-${p.phase}` : 'thread-progress';
+                traceFffBackgroundScan(body.scanId || '', phase, {
+                  url: normalized,
+                  stats,
+                  extra: p && typeof p === 'object' ? p : null,
+                });
+              } catch (e) {}
+            },
+          });
           const candidates = uniqueCandidates(res && res.candidates ? res.candidates : []);
           stats.threadPages += Number(res && res.pages) || 0;
           stats.media += candidates.length;
