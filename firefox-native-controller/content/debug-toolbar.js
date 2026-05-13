@@ -5,7 +5,7 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-gigabatch-interleaved';
+  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-gigabatch-early-repeat';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
@@ -13,9 +13,12 @@
   const HUB_FALLBACK = 'http://127.0.0.1:35730';
   const REQUEST_TIMEOUT_MS = 15000;
   const WEBDL_UNLIMITED = Number.POSITIVE_INFINITY;
-  const GIGA_SCAN_MEDIA_THRESHOLD = 2000;
-  const GIGA_SCAN_THREAD_PAGE_THRESHOLD = 250;
-  const GIGA_SCAN_THREAD_THRESHOLD = 500;
+  const GIGA_SCAN_MEDIA_THRESHOLD = 1000;
+  const GIGA_SCAN_THREAD_PAGE_THRESHOLD = 50;
+  const GIGA_SCAN_THREAD_THRESHOLD = 75;
+  const GIGA_SCAN_MEDIA_REPEAT_STEP = 1000;
+  const GIGA_SCAN_THREAD_PAGE_REPEAT_STEP = 50;
+  const GIGA_SCAN_THREAD_REPEAT_STEP = 75;
 
   function parseScanLimit(value, fallback = WEBDL_UNLIMITED) {
     const raw = String(value == null ? '' : value).trim().toLowerCase();
@@ -6187,16 +6190,22 @@
     const meta = scrapeMetadata();
     const oldLabel = String((triggerBtn && triggerBtn.textContent) || '').trim();
     let lastScanProgressAt = 0;
-    let gigaScanDecision = null;
+    let gigaStopConfirmed = false;
+    let gigaNextMediaThreshold = GIGA_SCAN_MEDIA_THRESHOLD;
+    let gigaNextThreadPageThreshold = GIGA_SCAN_THREAD_PAGE_THRESHOLD;
+    let gigaNextThreadThreshold = GIGA_SCAN_THREAD_THRESHOLD;
     const shouldStopForGigaBatch = (progress) => {
       try {
-        if (gigaScanDecision !== null) return gigaScanDecision === 'stop';
-        if (!isGigaScanProgress(progress)) return false;
         const p = progress && typeof progress === 'object' ? progress : {};
         const items = Number(p.items) || 0;
         const threadIndex = Number(p.threadIndex) || 0;
         const threads = Number(p.threads) || 0;
         const threadPages = Number(p.threadPages || p.pages) || 0;
+        if (gigaStopConfirmed) return true;
+        const reachedThreshold = items >= gigaNextMediaThreshold
+          || threadPages >= gigaNextThreadPageThreshold
+          || (threads >= gigaNextThreadThreshold && items >= 200);
+        if (!reachedThreshold) return false;
         const msg = [
           'Deze scan is een giga batch.',
           '',
@@ -6210,12 +6219,15 @@
           'Annuleren = verder scannen'
         ].join('\n');
         const stopNow = window.confirm(msg);
-        gigaScanDecision = stopNow ? 'stop' : 'continue';
         if (stopNow) {
+          gigaStopConfirmed = true;
           try { addLog(`Gigabatch bevestigd: scan stopt bij ${items} media, ${threadPages} pagina's`); } catch (e) {}
           try { showNotification(`Gigabatch: scan gestopt bij ${items} media`, false); } catch (e) {}
         } else {
-          try { addLog(`Gigabatch waarschuwing genegeerd: doorgaan met scan`); } catch (e) {}
+          gigaNextMediaThreshold = Math.max(items + GIGA_SCAN_MEDIA_REPEAT_STEP, gigaNextMediaThreshold + GIGA_SCAN_MEDIA_REPEAT_STEP);
+          gigaNextThreadPageThreshold = Math.max(threadPages + GIGA_SCAN_THREAD_PAGE_REPEAT_STEP, gigaNextThreadPageThreshold + GIGA_SCAN_THREAD_PAGE_REPEAT_STEP);
+          gigaNextThreadThreshold = Math.max(threads + GIGA_SCAN_THREAD_REPEAT_STEP, gigaNextThreadThreshold + GIGA_SCAN_THREAD_REPEAT_STEP);
+          try { addLog(`Gigabatch waarschuwing genegeerd: doorgaan tot volgende drempel (${gigaNextMediaThreshold} media / ${gigaNextThreadPageThreshold} pagina's)`); } catch (e) {}
           try { showNotification('Gigabatch: scan gaat verder', false); } catch (e) {}
         }
         return stopNow;
