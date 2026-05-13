@@ -5,7 +5,7 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-gigabatch-early-repeat';
+  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-gigabatch-no-preview';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
@@ -6399,6 +6399,42 @@
         const prefix = res && res.stoppedByGiga ? 'Gigabatch' : (isAnyForumPage ? 'Forum' : 'Thread');
         showNotification(`${prefix}: ${candidates.length} items (${res && Number.isFinite(Number(res.pages)) ? res.pages : '?'} threadpagina's)`, false);
       } catch (e) {}
+
+      if (res && res.stoppedByGiga) {
+        const urls = candidates.map((c) => c && c.url).filter(Boolean);
+        const directHints = {};
+        const sourceContexts = {};
+        for (const c of candidates) {
+          try {
+            const rawKey = String(c && c.url ? c.url : '').trim();
+            if (!rawKey) continue;
+            const key = normalizeUrl(rawKey);
+            const hint = getDirectHintForCandidate(c);
+            if (key && hint && hint !== key) directHints[key] = hint;
+            const ctx = c && c.sourceContext && typeof c.sourceContext === 'object' ? c.sourceContext : null;
+            if (ctx && ctx.url) {
+              if (rawKey) sourceContexts[rawKey] = ctx;
+              if (key) sourceContexts[key] = ctx;
+            }
+          } catch (e) {}
+        }
+        addLog(force ? `Force gigabatch direct: ${urls.length} items` : `Gigabatch direct: ${urls.length} items`);
+        showNotification(`Gigabatch opnemen: ${urls.length} items`, false);
+        const result = await queueBatchDownloadRequest(urls, meta, {
+          force,
+          directHints: Object.keys(directHints).length ? directHints : null,
+          sourceContexts: Object.keys(sourceContexts).length ? sourceContexts : null
+        });
+        if (result && result.success) {
+          const stats = summarizeBatchResult(result);
+          showNotification(`Gigabatch gestart: ${formatBatchStats(stats)}`);
+          addLog(`Gigabatch gestart: ${formatBatchStats(stats)}`);
+        } else {
+          showNotification(`Gigabatch fout: ${(result && result.error) ? result.error : 'unknown'}`, true);
+          addLog(`Gigabatch fout: ${(result && result.error) ? result.error : 'unknown'}`, 'error');
+        }
+        return;
+      }
 
       let selected = null;
       let selectedDirectHints = null;
