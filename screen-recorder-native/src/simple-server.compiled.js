@@ -5,6 +5,7 @@ const http = require('http');
 const socketIO = require('socket.io');
 const os = require('os');
 const util = require('util');
+const crypto = require('crypto');
 const { exec, spawn } = require('child_process');
 
 // ═══ Event Loop Yield — prevents sync I/O from starving Express ═══
@@ -6234,6 +6235,126 @@ expressApp.post('/api/settings/priority', (req, res) => {
   res.json({ success: true, priority: globalPriorityMode });
 });
 
+async function startServerGigaScanFromBody(body) {
+  const seedUrl = String(body.url || body.seedUrl || '').trim();
+  if (!seedUrl) throw Object.assign(new Error('url is vereist'), { httpStatus: 400 });
+  const kind = classifyServerGigaScanSeed(seedUrl);
+  const metadata = body.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata) ? { ...body.metadata } : {};
+  if (body.directHints && typeof body.directHints === 'object' && !Array.isArray(body.directHints)) {
+    metadata.webdl_direct_hints = body.directHints;
+  }
+  if (body.sourceContexts && typeof body.sourceContexts === 'object' && !Array.isArray(body.sourceContexts)) {
+    metadata.webdl_source_contexts = body.sourceContexts;
+  }
+  metadata.webdl_gigascan = true;
+  metadata.webdl_gigascan_seed = seedUrl;
+  if (!metadata.url) metadata.url = seedUrl;
+  if (!metadata.platform || metadata.platform === 'unknown') metadata.platform = kind;
+  const force = body.force === true;
+  const initialUrls = Array.isArray(body.initialUrls) ? body.initialUrls : [];
+  const initialSourceContexts = body.sourceContexts && typeof body.sourceContexts === 'object' && !Array.isArray(body.sourceContexts)
+    ? body.sourceContexts
+    : {};
+  const maxForumPages = parseServerScanLimit(body.maxForumPages, 1000);
+  const maxThreadPages = parseServerScanLimit(body.maxThreadPages || body.maxPages, 1000);
+  const maxItems = Number.isFinite(Number(body.maxItems)) && Number(body.maxItems) > 0 ? Number(body.maxItems) : 0;
+  const scanId = crypto.randomBytes(6).toString('hex');
+  const startedAt = new Date().toISOString();
+  activeFootFetishForumGigaScans.set(scanId, {
+    id: scanId,
+    kind,
+    seedUrl,
+    status: 'running',
+    startedAt,
+    updatedAt: startedAt,
+    stats: { queued: 0, duplicates: 0, errors: 0, media: 0, threads: 0, forumPages: 0, threadPages: 0 },
+  });
+  console.log(`[GIGASCAN] gestart ${scanId}: kind=${kind} seed=${seedUrl} initial=${initialUrls.length}`);
+
+  const run = async () => {
+    if (kind === 'footfetishforum') {
+      return await runFootFetishForumGigaScan({
+        seedUrl,
+        metadata,
+        force,
+        initialUrls,
+        initialSourceContexts,
+        maxForumPages,
+        maxThreadPages,
+        maxItems,
+      });
+    }
+    const initial = await queueGenericGigaInitialChunk(initialUrls, initialSourceContexts, metadata, force);
+    const hubResult = await postHubGigaScanJob(seedUrl, metadata, force, body);
+    return {
+      queued: initial.queued || 0,
+      duplicates: initial.duplicates || 0,
+      errors: initial.errors || 0,
+      media: initialUrls.length,
+      threads: 0,
+      forumPages: 0,
+      threadPages: 0,
+      hubKind: hubResult.kind,
+      hubJobId: hubResult.hub && hubResult.hub.id || null,
+      hubExpanded: !!(hubResult.hub && hubResult.hub.expanded),
+    };
+  };
+
+  run().then((stats) => {
+    const row = activeFootFetishForumGigaScans.get(scanId) || { id: scanId, seedUrl, kind };
+    row.status = 'done';
+    row.updatedAt = new Date().toISOString();
+    row.finishedAt = row.updatedAt;
+    row.stats = stats;
+    activeFootFetishForumGigaScans.set(scanId, row);
+    console.log(`[GIGASCAN] klaar ${scanId}: kind=${kind} ${JSON.stringify(stats)}`);
+  }).catch((e) => {
+    const row = activeFootFetishForumGigaScans.get(scanId) || { id: scanId, seedUrl, kind };
+    row.status = 'error';
+    row.error = e && e.message ? e.message : String(e);
+    row.updatedAt = new Date().toISOString();
+    row.finishedAt = row.updatedAt;
+    activeFootFetishForumGigaScans.set(scanId, row);
+    console.log(`[GIGASCAN] fout ${scanId}: ${row.error}`);
+  });
+  return { success: true, scanId, kind, accepted: true, initialUrls: initialUrls.length };
+}
+
+expressApp.post('/gigascan', async (req, res) => {
+  try {
+    res.json(await startServerGigaScanFromBody(req.body || {}));
+  } catch (e) {
+    res.status(e && e.httpStatus ? e.httpStatus : 500).json({ success: false, error: e && e.message ? e.message : String(e) });
+  }
+});
+
+expressApp.post('/gigascan/footfetishforum', async (req, res) => {
+  try {
+    const body = { ...(req.body || {}) };
+    const seedUrl = String(body.url || body.seedUrl || '').trim();
+    if (!isFootFetishForumForumUrl(seedUrl) && !isFootFetishForumThreadPageUrl(seedUrl)) {
+      return res.status(400).json({ success: false, error: 'Geen FootFetishForum forum/thread URL' });
+    }
+    res.json(await startServerGigaScanFromBody(body));
+  } catch (e) {
+    res.status(e && e.httpStatus ? e.httpStatus : 500).json({ success: false, error: e && e.message ? e.message : String(e) });
+  }
+});
+
+expressApp.get('/gigascan/:id', (req, res) => {
+  const id = String(req.params && req.params.id || '').trim();
+  const row = activeFootFetishForumGigaScans.get(id);
+  if (!row) return res.status(404).json({ success: false, error: 'niet gevonden' });
+  res.json({ success: true, scan: row });
+});
+
+expressApp.get('/gigascan/footfetishforum/:id', (req, res) => {
+  const id = String(req.params && req.params.id || '').trim();
+  const row = activeFootFetishForumGigaScans.get(id);
+  if (!row) return res.status(404).json({ success: false, error: 'niet gevonden' });
+  res.json({ success: true, scan: row });
+});
+
 async function relaySocketCommandToHttp(endpoint, payload) {
   const target = `http://127.0.0.1:${PORT}${endpoint}`;
   try {
@@ -8428,6 +8549,389 @@ function normalizeOriginThreadContext(ctx, fallbackPlatform, fallbackUrl, fallba
     return null;
   }
 }
+
+function parseFootFetishForumThreadParts(rawUrl, baseHref = '') {
+  try {
+    const u = new URL(String(rawUrl || ''), baseHref || undefined);
+    u.hash = '';
+    const host = String(u.hostname || '').toLowerCase();
+    if (!(host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com'))) return null;
+    const m = String(u.pathname || '').match(/^\/threads\/([^\/\?#]+)\.(\d+)(?:\/|$)/i);
+    if (!m || !m[1] || !m[2]) return null;
+    return { url: u, slug: m[1], id: String(m[2]) };
+  } catch (e) {
+    return null;
+  }
+}
+
+function normalizeFootFetishForumThreadUrl(rawUrl, baseHref = '') {
+  const parts = parseFootFetishForumThreadParts(rawUrl, baseHref);
+  if (!parts) return '';
+  parts.url.pathname = `/threads/${parts.slug}.${parts.id}/`;
+  parts.url.search = '';
+  parts.url.hash = '';
+  return parts.url.toString();
+}
+
+function isFootFetishForumForumUrl(input) {
+  try {
+    const u = new URL(String(input || ''));
+    const host = String(u.hostname || '').toLowerCase();
+    if (!(host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com'))) return false;
+    return /^\/forums\/[^\/\?#]*\.\d+(?:\/|$)/i.test(String(u.pathname || ''));
+  } catch (e) {
+    return false;
+  }
+}
+
+function isFootFetishForumThreadPageUrl(input) {
+  return !!parseFootFetishForumThreadParts(input);
+}
+
+function htmlDecodeAttribute(value) {
+  return String(value || '')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+}
+
+function parseServerScanLimit(value, fallback) {
+  const raw = String(value == null ? '' : value).trim().toLowerCase();
+  if (!raw || raw === '0' || raw === 'all' || raw === 'alles' || raw === 'unlimited' || raw === 'onbeperkt') return fallback;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+async function fetchFootFetishForumHtml(url, timeoutMs = 20000) {
+  const headers = {
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  };
+  try {
+    const cookieStr = await loadCookiesForDomain('footfetishforum.com');
+    if (cookieStr) headers.Cookie = cookieStr;
+  } catch (e) {}
+  const controller = new AbortController();
+  const t = setTimeout(() => {
+    try { controller.abort(); } catch (e) {}
+  }, Math.max(3000, Number(timeoutMs) || 20000));
+  try {
+    const resp = await fetch(String(url || ''), { headers, redirect: 'follow', signal: controller.signal });
+    const text = await resp.text();
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    if (/just a moment|enable javascript and cookies|cloudflare/i.test(text)) {
+      throw new Error('Cloudflare/login challenge');
+    }
+    return text;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+function absoluteFootFetishForumUrl(raw, baseHref) {
+  try {
+    const u = new URL(htmlDecodeAttribute(raw), baseHref);
+    u.hash = '';
+    return u.toString();
+  } catch (e) {
+    return '';
+  }
+}
+
+function collectFootFetishForumThreadLinksFromHtml(html, baseHref, maxThreads = 1000) {
+  const out = [];
+  const seen = new Set();
+  const push = (raw) => {
+    if (out.length >= maxThreads) return;
+    const final = normalizeFootFetishForumThreadUrl(raw, baseHref);
+    if (!final) return;
+    const parts = parseFootFetishForumThreadParts(final);
+    const key = parts && parts.id ? parts.id : final;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(final);
+  };
+  const text = String(html || '');
+  let m;
+  const attrRe = /\b(?:href|data-href|data-url|data-preview-url|data-content-url)=["']([^"']*\/threads\/[^"']+\.\d+[^"']*)["']/ig;
+  while ((m = attrRe.exec(text)) && out.length < maxThreads) push(m[1]);
+  const absRe = /https?:\/\/(?:[^\/"'\s<>]+\.)?footfetishforum\.com\/(?:index\.php\?)?threads\/[^"'\s<>]+?\.\d+[^"'\s<>]*/ig;
+  while ((m = absRe.exec(text)) && out.length < maxThreads) push(m[0]);
+  return out;
+}
+
+function findFootFetishForumNextPageFromHtml(html, baseHref) {
+  const text = String(html || '');
+  const patterns = [
+    /<link\b[^>]*rel=["']next["'][^>]*href=["']([^"']+)["']/i,
+    /<a\b[^>]*rel=["']next["'][^>]*href=["']([^"']+)["']/i,
+    /<a\b[^>]*class=["'][^"']*pageNav-jump--next[^"']*["'][^>]*href=["']([^"']+)["']/i,
+    /<a\b[^>]*href=["']([^"']+)["'][^>]*class=["'][^"']*pageNav-jump--next[^"']*["']/i,
+  ];
+  for (const re of patterns) {
+    const m = text.match(re);
+    if (m && m[1]) return absoluteFootFetishForumUrl(m[1], baseHref);
+  }
+  return '';
+}
+
+function isFootFetishForumMediaCandidateUrl(rawUrl, baseHref = '') {
+  try {
+    const u = new URL(String(rawUrl || ''), baseHref || undefined);
+    const host = String(u.hostname || '').toLowerCase();
+    const pathName = String(u.pathname || '').toLowerCase();
+    if (/\/data\/avatars\//i.test(pathName)) return false;
+    if (/\b(?:avatar|emoji|smilie|reaction|logo|favicon)\b/i.test(pathName)) return false;
+    if ((host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) && /^\/attachments\//i.test(pathName)) return true;
+    if ((host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) && /\/data\/attachments\//i.test(pathName)) return true;
+    if (host === 'upload.footfetishforum.com' || host.endsWith('.upload.footfetishforum.com')) return true;
+    if (/\.(?:jpe?g|png|gif|webp|bmp|avif|heic|heif|mp4|mov|m4v|webm|mkv)(?:$|\?)/i.test(u.toString())) return true;
+    if (/^(?:pixhost\.to|postimg\.cc|imgur\.com|redgifs\.com|gfycat\.com)$/i.test(host)) return true;
+    if (host.endsWith('.pixhost.to') || host.endsWith('.postimg.cc') || host.endsWith('.imgur.com') || host.endsWith('.redgifs.com')) return true;
+  } catch (e) {}
+  return false;
+}
+
+function collectFootFetishForumMediaFromHtml(html, baseHref, maxItems = 1000) {
+  const out = [];
+  const seen = new Set();
+  const push = (raw) => {
+    if (out.length >= maxItems) return;
+    const final = absoluteFootFetishForumUrl(raw, baseHref);
+    if (!final || seen.has(final)) return;
+    if (!isFootFetishForumMediaCandidateUrl(final, baseHref)) return;
+    seen.add(final);
+    out.push(final);
+  };
+  const text = String(html || '');
+  let m;
+  const attrRe = /\b(?:href|src|data-src|data-lazy-src|data-url|data-href)=["']([^"']+)["']/ig;
+  while ((m = attrRe.exec(text)) && out.length < maxItems) push(m[1]);
+  const rawRe = /(https?:\/\/[^\s"'<>)]+)/g;
+  while ((m = rawRe.exec(text)) && out.length < maxItems) {
+    push(String(m[1] || '').replace(/[),\]."']+$/g, ''));
+  }
+  return out;
+}
+
+function footFetishForumContextFromThreadUrl(threadUrl, fallbackTitle = '') {
+  const info = parseFootFetishForumThreadInfo(threadUrl);
+  const title = String(info && info.name || fallbackTitle || deriveTitleFromUrl(threadUrl)).trim();
+  return {
+    url: threadUrl,
+    platform: 'footfetishforum',
+    channel: info && info.name ? info.name : deriveChannelFromUrl('footfetishforum', threadUrl) || 'unknown',
+    title: title || 'untitled',
+    thread_id: info && info.id ? String(info.id) : undefined,
+  };
+}
+
+async function queueFootFetishForumGigaChunk(urls, sourceContexts, metadata, force) {
+  const clean = Array.from(new Set((Array.isArray(urls) ? urls : []).map((u) => String(u || '').trim()).filter(Boolean)));
+  if (!clean.length) return { queued: 0, duplicates: 0, errors: 0 };
+  const chunkMeta = {
+    ...(metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {}),
+    platform: 'footfetishforum',
+    webdl_pin_context: true,
+    webdl_gigascan: true,
+    webdl_source_contexts: sourceContexts && typeof sourceContexts === 'object' ? sourceContexts : {},
+  };
+  try {
+    const response = await fetch(`http://127.0.0.1:${PORT}/download/batch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ urls: clean, metadata: chunkMeta, force: force === true, priority: 1 }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data && data.error ? data.error : `HTTP ${response.status}`);
+    return {
+      queued: Array.isArray(data.downloads) ? data.downloads.filter((d) => !d.duplicate).length : 0,
+      duplicates: Array.isArray(data.downloads) ? data.downloads.filter((d) => d.duplicate).length : 0,
+      errors: 0,
+    };
+  } catch (e) {
+    console.log(`[GIGASCAN] queue chunk fout: ${e.message}`);
+    return { queued: 0, duplicates: 0, errors: clean.length };
+  }
+}
+
+async function queueGenericGigaInitialChunk(urls, sourceContexts, metadata, force) {
+  const clean = Array.from(new Set((Array.isArray(urls) ? urls : []).map((u) => String(u || '').trim()).filter(Boolean)));
+  if (!clean.length) return { queued: 0, duplicates: 0, errors: 0 };
+  const chunkMeta = {
+    ...(metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {}),
+    webdl_pin_context: true,
+    webdl_gigascan: true,
+    webdl_source_contexts: sourceContexts && typeof sourceContexts === 'object' ? sourceContexts : {},
+  };
+  try {
+    const response = await fetch(`http://127.0.0.1:${PORT}/download/batch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ urls: clean, metadata: chunkMeta, force: force === true, priority: 1 }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data && data.error ? data.error : `HTTP ${response.status}`);
+    return {
+      queued: Array.isArray(data.downloads) ? data.downloads.filter((d) => !d.duplicate).length : 0,
+      duplicates: Array.isArray(data.downloads) ? data.downloads.filter((d) => d.duplicate).length : 0,
+      errors: 0,
+    };
+  } catch (e) {
+    console.log(`[GIGASCAN] initial chunk fout: ${e.message}`);
+    return { queued: 0, duplicates: 0, errors: clean.length };
+  }
+}
+
+function classifyServerGigaScanSeed(seedUrl) {
+  try {
+    const u = new URL(String(seedUrl || '').trim());
+    const host = String(u.hostname || '').toLowerCase().replace(/^www\./, '');
+    if (host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) return 'footfetishforum';
+    if (host === 'vipergirls.to' || host.endsWith('.vipergirls.to') || host === 'viper.to' || host.endsWith('.viper.to')) return 'vipergirls';
+    if (host === 'amateurvoyeurforum.com' || host.endsWith('.amateurvoyeurforum.com')) return 'amateurvoyeurforum';
+    if (host === 'foot-fetish.club' || host.endsWith('.foot-fetish.club')) return 'foot-fetish.club';
+    if (/forum|xenforo|vbulletin|threads?|showthread|forumdisplay/i.test(`${host}${u.pathname}`)) return 'generic-forum';
+  } catch (e) {}
+  return 'generic';
+}
+
+async function postHubGigaScanJob(seedUrl, metadata, force, body = {}) {
+  const kind = classifyServerGigaScanSeed(seedUrl);
+  const adapter =
+    kind === 'vipergirls' ? 'gallerydl' :
+    kind === 'amateurvoyeurforum' ? 'vbulletin' :
+    kind === 'foot-fetish.club' ? 'xenforo' :
+    null;
+  const options = {
+    ...(metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {}),
+    queued_from: 'simple-server-gigascan',
+    webdl_gigascan: true,
+    webdl_gigascan_seed: seedUrl,
+    contextUrl: seedUrl,
+    pageUrl: seedUrl,
+    vipergirlsWholeThread: true,
+  };
+  if (body.sourceContexts && typeof body.sourceContexts === 'object' && !Array.isArray(body.sourceContexts)) {
+    options.webdl_source_contexts = body.sourceContexts;
+  }
+  if (body.directHints && typeof body.directHints === 'object' && !Array.isArray(body.directHints)) {
+    options.webdl_direct_hints = body.directHints;
+  }
+  if (kind !== 'generic' && !options.platform) options.platform = kind;
+  const response = await fetch('http://127.0.0.1:35730/api/jobs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      url: seedUrl,
+      ...(adapter ? { adapter } : {}),
+      force: force === true,
+      priority: 80,
+      options,
+    }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data && data.error ? data.error : `Hub HTTP ${response.status}`);
+  return { kind, adapter: adapter || data.adapter || null, hub: data };
+}
+
+async function runFootFetishForumGigaScan({ seedUrl, metadata = {}, force = false, initialUrls = [], initialSourceContexts = {}, maxForumPages = 1000, maxThreadPages = 1000, maxItems = 0 }) {
+  const seenMedia = new Set();
+  const seenThreads = new Set();
+  const sourceContexts = {};
+  const stats = { queued: 0, duplicates: 0, errors: 0, media: 0, threads: 0, forumPages: 0, threadPages: 0 };
+  const flush = async (items) => {
+    const urls = [];
+    const ctx = {};
+    for (const item of items) {
+      const url = String(item && item.url || item || '').trim();
+      if (!url || seenMedia.has(url)) continue;
+      seenMedia.add(url);
+      urls.push(url);
+      const sourceContext = item && item.sourceContext || sourceContexts[url] || initialSourceContexts[url] || null;
+      if (sourceContext && sourceContext.url) {
+        ctx[url] = sourceContext;
+        try {
+          const normalized = sourceContextLookupKey ? sourceContextLookupKey(url) : url;
+          if (normalized) ctx[normalized] = sourceContext;
+        } catch (e) {}
+      }
+    }
+    if (!urls.length) return;
+    stats.media += urls.length;
+    const res = await queueFootFetishForumGigaChunk(urls, ctx, metadata, force);
+    stats.queued += res.queued || 0;
+    stats.duplicates += res.duplicates || 0;
+    stats.errors += res.errors || 0;
+  };
+
+  await flush((Array.isArray(initialUrls) ? initialUrls : []).map((url) => ({ url, sourceContext: initialSourceContexts[url] })));
+
+  const scanThread = async (threadUrl) => {
+    const normalizedThreadUrl = normalizeFootFetishForumThreadUrl(threadUrl) || threadUrl;
+    if (!normalizedThreadUrl || seenThreads.has(normalizedThreadUrl)) return;
+    seenThreads.add(normalizedThreadUrl);
+    stats.threads++;
+    const threadContext = footFetishForumContextFromThreadUrl(normalizedThreadUrl, metadata && metadata.title);
+    let pageUrl = normalizedThreadUrl;
+    let page = 0;
+    while (pageUrl && page < maxThreadPages) {
+      page++;
+      stats.threadPages++;
+      let html = '';
+      try {
+        html = await fetchFootFetishForumHtml(pageUrl);
+      } catch (e) {
+        console.log(`[GIGASCAN] thread fetch fout ${pageUrl}: ${e.message}`);
+        break;
+      }
+      const media = collectFootFetishForumMediaFromHtml(html, pageUrl, 5000)
+        .map((url) => ({ url, sourceContext: threadContext }));
+      await flush(media);
+      if (maxItems > 0 && stats.media >= maxItems) break;
+      const nextUrl = findFootFetishForumNextPageFromHtml(html, pageUrl);
+      if (!nextUrl || nextUrl === pageUrl) break;
+      pageUrl = nextUrl;
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+  };
+
+  const normalizedSeed = String(seedUrl || '').trim();
+  if (isFootFetishForumThreadPageUrl(normalizedSeed)) {
+    await scanThread(normalizedSeed);
+    return stats;
+  }
+
+  if (!isFootFetishForumForumUrl(normalizedSeed)) throw new Error('Geen FootFetishForum forum/thread URL');
+  let forumUrl = normalizedSeed;
+  let forumPage = 0;
+  while (forumUrl && forumPage < maxForumPages) {
+    forumPage++;
+    stats.forumPages++;
+    let html = '';
+    try {
+      html = await fetchFootFetishForumHtml(forumUrl);
+    } catch (e) {
+      console.log(`[GIGASCAN] forum fetch fout ${forumUrl}: ${e.message}`);
+      break;
+    }
+    const links = collectFootFetishForumThreadLinksFromHtml(html, forumUrl, 2000);
+    for (const link of links) {
+      await scanThread(link);
+      if (maxItems > 0 && stats.media >= maxItems) break;
+    }
+    if (maxItems > 0 && stats.media >= maxItems) break;
+    const nextUrl = findFootFetishForumNextPageFromHtml(html, forumUrl);
+    if (!nextUrl || nextUrl === forumUrl) break;
+    forumUrl = nextUrl;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return stats;
+}
+
+const activeFootFetishForumGigaScans = new Map();
 
 function isAznudefeetViewUrl(input) {
   try {

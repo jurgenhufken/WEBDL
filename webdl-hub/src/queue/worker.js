@@ -7,6 +7,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { execFile } = require('node:child_process');
 const { runProcess } = require('../util/process-runner');
+const { isSlaveUrl, delegateToSlave } = require('./slave-router');
 
 const FFMPEG = process.env.WEBDL_FFMPEG || '/opt/homebrew/bin/ffmpeg';
 const DATABASE_URL = process.env.DATABASE_URL || 'postgres://jurgen@localhost:5432/webdl';
@@ -710,6 +711,57 @@ function startWorkerPool({
   async function runOne(job) {
     const workdir = path.join(downloadRoot, String(job.id));
     await fs.mkdir(workdir, { recursive: true });
+
+    if (job.adapter === 'slave-delegate') {
+      const slave = isSlaveUrl(job.url) || { platform: job?.options?.slave_platform || 'unknown' };
+      try {
+        const result = await delegateToSlave(repo.pool, {
+          url: job.url,
+          platform: slave.platform || job?.options?.slave_platform || 'unknown',
+          metadata: {
+            ...(job.options || {}),
+            delegated_from_hub: true,
+            hub_job_id: job.id,
+            source_context: job?.options?.source_context || job?.options?.origin_thread || (
+              job?.options?.contextUrl
+                ? {
+                    url: job.options.contextUrl,
+                    platform: job.options.platform || job.options.source_site || null,
+                    channel: job.options.channel || null,
+                    title: job.options.title || null,
+                  }
+                : null
+            ),
+            source_site: job?.options?.source_site || job?.options?.platform || null,
+            original_site: job?.options?.source_site || job?.options?.platform || null,
+            original_platform: job?.options?.platform || job?.options?.source_site || null,
+            original_channel: job?.options?.channel || null,
+            original_title: job?.options?.title || null,
+            original_url: job?.options?.contextUrl || job?.options?.pageUrl || null,
+          },
+          priority: job.priority || 70,
+        });
+        await repo.pool.query(
+          `UPDATE ${repo.schema}.jobs
+              SET status = 'running',
+                  started_at = COALESCE(started_at, now()),
+                  locked_by = 'slave-' || $1::text,
+                  locked_at = now(),
+                  options = COALESCE(options, '{}'::jsonb) || jsonb_build_object(
+                    'simple_server_download_id', $1::text,
+                    'was_duplicate', $2::boolean
+                  )
+            WHERE id = $3`,
+          [String(result.downloadId), !!result.duplicate, job.id],
+        );
+        await repo.appendLog(job.id, 'info', `↪️  fastlane gedelegeerd naar simple-server (${slave.platform}, download #${result.downloadId}${result.duplicate ? `, dupe status=${result.existingStatus}` : ''})`);
+        logger.info('slave.delegated.by_worker', { job: job.id, downloadId: result.downloadId, platform: slave.platform, duplicate: !!result.duplicate });
+      } catch (e) {
+        await repo.appendLog(job.id, 'error', `slave delegate fout: ${e.message}`);
+        await queue.fail(job.id, e.message, { retry: true });
+      }
+      return;
+    }
 
     const adapter = byName.get(job.adapter);
     if (!adapter) {

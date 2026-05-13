@@ -5,7 +5,7 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-gigabatch-no-preview';
+  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-generic-server-gigascan';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
@@ -4761,6 +4761,13 @@
     return viaBg && viaBg.error ? viaBg : viaHub;
   }
 
+  async function startServerGigaScanRequest(payload) {
+    const body = payload && typeof payload === 'object' ? payload : {};
+    const viaHttp = await postServerJson('gigascan', body, 15000);
+    if (viaHttp && viaHttp.success) return viaHttp;
+    return viaHttp && typeof viaHttp === 'object' ? viaHttp : { success: false, error: 'Server gigascan start mislukt' };
+  }
+
   function confirmBatchStart({ count, force, label, redditHint }) {
     const total = Math.max(0, parseInt(count || 0, 10) || 0);
     const title = String(label || 'Batch download');
@@ -6418,20 +6425,26 @@
             }
           } catch (e) {}
         }
-        addLog(force ? `Force gigabatch direct: ${urls.length} items` : `Gigabatch direct: ${urls.length} items`);
-        showNotification(`Gigabatch opnemen: ${urls.length} items`, false);
-        const result = await queueBatchDownloadRequest(urls, meta, {
+        addLog(force ? `Force gigascan naar server: ${urls.length} reeds gevonden items` : `Gigascan naar server: ${urls.length} reeds gevonden items`);
+        showNotification(`Gigascan naar server: ${urls.length} gevonden items + verder scannen`, false);
+        const result = await startServerGigaScanRequest({
+          url: startUrl,
+          metadata: meta,
           force,
-          directHints: Object.keys(directHints).length ? directHints : null,
-          sourceContexts: Object.keys(sourceContexts).length ? sourceContexts : null
+          initialUrls: urls,
+          maxForumPages,
+          maxThreadPages: maxPages,
+          maxItems,
+          sourceContexts: Object.keys(sourceContexts).length ? sourceContexts : null,
+          directHints: Object.keys(directHints).length ? directHints : null
         });
         if (result && result.success) {
-          const stats = summarizeBatchResult(result);
-          showNotification(`Gigabatch gestart: ${formatBatchStats(stats)}`);
-          addLog(`Gigabatch gestart: ${formatBatchStats(stats)}`);
+          const scanId = result.scanId ? ` #${result.scanId}` : '';
+          showNotification(`Gigascan draait op server${scanId}`);
+          addLog(`Gigascan server gestart${scanId}: ${urls.length} initiele items`);
         } else {
-          showNotification(`Gigabatch fout: ${(result && result.error) ? result.error : 'unknown'}`, true);
-          addLog(`Gigabatch fout: ${(result && result.error) ? result.error : 'unknown'}`, 'error');
+          showNotification(`Gigascan server fout: ${(result && result.error) ? result.error : 'unknown'}`, true);
+          addLog(`Gigascan server fout: ${(result && result.error) ? result.error : 'unknown'}`, 'error');
         }
         return;
       }

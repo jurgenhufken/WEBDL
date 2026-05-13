@@ -499,7 +499,6 @@ function createRepo({ databaseUrl = config.databaseUrl, schema = config.dbSchema
            WHERE status = 'queued' ${laneFilter}
              AND attempts < max_attempts
              AND lane <> 'paused'
-             AND adapter <> 'slave-delegate'
            ORDER BY priority DESC, created_at ASC
            FOR UPDATE SKIP LOCKED
            LIMIT 1
