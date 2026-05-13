@@ -5,7 +5,7 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-batch-preview-selection';
+  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-duplicate-notice-forum-scan';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
@@ -850,10 +850,10 @@
       }
       if (!out.length) {
         const titleAnchors = Array.from(doc.querySelectorAll(
-          '.structItem-title a[href], a[data-tp-primary="on"][href], .discussionListItem .title a[href]'
+          '.structItem-title a[href], a[data-tp-primary="on"][href], .discussionListItem .title a[href], a[href*="/threads/"]'
         ));
         for (const a of titleAnchors) {
-          const row = a.closest ? a.closest('.structItem, .structItem--thread, .discussionListItem, [data-author][data-content]') : null;
+          const row = a.closest ? a.closest('.structItem, .structItem--thread, .discussionListItem, [data-author][data-content], article, li, tr') : null;
           push(a.getAttribute('href'), row);
           if (out.length >= maxThreads) break;
         }
@@ -6128,6 +6128,9 @@
       } catch (e2) {}
 
       if (!candidates.length) {
+        if (isForumPage) {
+          try { showFootFetishForumScanReport({ isForumPage: true, res, candidates }); } catch (e) {}
+        }
         const detail = isForumPage && res && Number(res.threads) > 0 ? ` (${res.threads} threads gevonden, 0 media; geen thread-URLs als download gestart)` : '';
         showNotification(`${isAnyForumPage ? 'Forum' : 'Hele thread'}: geen URLs gevonden${detail}`, true);
         return;
@@ -6890,14 +6893,8 @@
 
     if (message && message.action === 'webdlDownloadQueued') {
       if (message.success && message.duplicate) {
-        showNotification(`Download geskipt: bestand bestaat al (#${message.downloadId})`, true);
-        if (confirm(`${message.serverMessage || 'Dit bestand is al gedownload.'}\n\nWil je dit bestand geforceerd opnieuw downloaden?`)) {
-          showNotification('Geforceerde download in wachtrij gezet...');
-          addLog(`Geforceerde rechtsklik download: ${message.url}`);
-          const meta = scrapeMetadata();
-          meta.url = message.url;
-          browser.runtime.sendMessage({ action: 'queueDownload', payload: { url: message.url, force: true, metadata: meta } });
-        }
+        showNotification(`Bestaat al in WebDL${message.downloadId ? ` (#${message.downloadId})` : ''}`);
+        try { addLog(`Rechtsklik download overgeslagen, bestaat al: ${message.url}`); } catch (e) {}
       } else if (message.success && message.downloadId) {
         showNotification(`Download #${message.downloadId} in wachtrij`);
         try { addLog(`Rechtsklik download gestart #${message.downloadId}`); } catch (e) {}
