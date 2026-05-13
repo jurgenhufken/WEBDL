@@ -77,6 +77,7 @@
     queryHistory: [],
     queryHistoryIndex: -1,
     applyingQueryHistory: false,
+    lastMouseHistoryAt: 0,
     pendingNewItems: new Map(),
     nextCursor: null,
     totalHint: null,
@@ -822,6 +823,26 @@
     }
   }
 
+  function shouldHandleMouseHistory(event) {
+    if (!event || state.viewerActive) return false;
+    const button = Number(event.button);
+    if (button !== 3 && button !== 4) return false;
+    const target = event.target;
+    if (target && target.closest && target.closest('input, textarea, select, [contenteditable="true"]')) return false;
+    return true;
+  }
+
+  function handleMouseHistory(event) {
+    if (!shouldHandleMouseHistory(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.type === 'mousedown') return;
+    const now = Date.now();
+    if (event.type === 'auxclick' && now - state.lastMouseHistoryAt < 300) return;
+    state.lastMouseHistoryAt = now;
+    moveQueryHistory(event.button === 3 ? -1 : 1);
+  }
+
   function selectedSourceLabel(total) {
     const platforms = splitFilterList(state.filters.platform);
     const channels = splitFilterList(state.filters.channel);
@@ -1371,6 +1392,9 @@
   $('refresh').addEventListener('click', reloadGallery);
   if ($('queryBack')) $('queryBack').addEventListener('click', () => moveQueryHistory(-1));
   if ($('queryForward')) $('queryForward').addEventListener('click', () => moveQueryHistory(1));
+  window.addEventListener('mousedown', handleMouseHistory, { capture: true });
+  window.addEventListener('mouseup', handleMouseHistory, { capture: true });
+  window.addEventListener('auxclick', handleMouseHistory, { capture: true });
 
   for (const id of ['channelSort', 'sort', 'minRating', 'mediaType', 'tagFilter']) {
     const control = $(id);
