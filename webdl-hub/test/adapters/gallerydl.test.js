@@ -21,12 +21,19 @@ test('matcht youtube/reddit NIET', () => {
 });
 
 test('plan zet -D naar cwd en url als laatste', () => {
-  const p = a.plan('https://imgur.com/a/abc', { cwd: '/tmp/j1' });
-  assert.equal(p.cmd, 'gallery-dl');
-  assert.equal(p.cwd, '/tmp/j1');
-  const i = p.args.indexOf('-D');
-  assert.equal(p.args[i + 1], '/tmp/j1');
-  assert.equal(p.args.at(-1), 'https://imgur.com/a/abc');
+  const previous = process.env.WEBDL_GALLERYDL;
+  process.env.WEBDL_GALLERYDL = 'gallery-dl';
+  try {
+    const p = a.plan('https://imgur.com/a/abc', { cwd: '/tmp/j1' });
+    assert.equal(p.cmd, 'gallery-dl');
+    assert.equal(p.cwd, '/tmp/j1');
+    const i = p.args.indexOf('-D');
+    assert.equal(p.args[i + 1], '/tmp/j1');
+    assert.equal(p.args.at(-1), 'https://imgur.com/a/abc');
+  } finally {
+    if (previous === undefined) delete process.env.WEBDL_GALLERYDL;
+    else process.env.WEBDL_GALLERYDL = previous;
+  }
 });
 
 test('plan normaliseert Viper thread page-url naar hele thread', () => {

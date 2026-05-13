@@ -46,6 +46,8 @@ const {
   METADATA_BLOCKED_DOMAIN_SUFFIXES, getAutoImportMaxDepth
 } = config;
 
+const GIGASCAN_STATE_FILE = path.join(os.tmpdir(), `webdl-gigascan-state-${PORT}.json`);
+
 function tailTextFile(filePath, maxLines, maxBytes) {
   try {
     const lines = Math.max(1, Math.min(10000, parseInt(String(maxLines || '400'), 10) || 400));
@@ -6277,7 +6279,7 @@ async function startServerGigaScanFromBody(body) {
   const maxItems = Number.isFinite(Number(body.maxItems)) && Number(body.maxItems) > 0 ? Number(body.maxItems) : 0;
   const scanId = crypto.randomBytes(6).toString('hex');
   const startedAt = new Date().toISOString();
-  activeFootFetishForumGigaScans.set(scanId, {
+  setGigaScanState(scanId, {
     id: scanId,
     kind,
     seedUrl,
@@ -6323,7 +6325,7 @@ async function startServerGigaScanFromBody(body) {
     row.updatedAt = new Date().toISOString();
     row.finishedAt = row.updatedAt;
     row.stats = stats;
-    activeFootFetishForumGigaScans.set(scanId, row);
+    setGigaScanState(scanId, row);
     console.log(`[GIGASCAN] klaar ${scanId}: kind=${kind} ${JSON.stringify(stats)}`);
   }).catch((e) => {
     const row = activeFootFetishForumGigaScans.get(scanId) || { id: scanId, seedUrl, kind };
@@ -6331,7 +6333,7 @@ async function startServerGigaScanFromBody(body) {
     row.error = e && e.message ? e.message : String(e);
     row.updatedAt = new Date().toISOString();
     row.finishedAt = row.updatedAt;
-    activeFootFetishForumGigaScans.set(scanId, row);
+    setGigaScanState(scanId, row);
     console.log(`[GIGASCAN] fout ${scanId}: ${row.error}`);
   });
   return { success: true, scanId, kind, accepted: true, initialUrls: initialUrls.length };
@@ -6356,6 +6358,13 @@ expressApp.post('/gigascan/footfetishforum', async (req, res) => {
   } catch (e) {
     res.status(e && e.httpStatus ? e.httpStatus : 500).json({ success: false, error: e && e.message ? e.message : String(e) });
   }
+});
+
+expressApp.get('/gigascan', (req, res) => {
+  const scans = Array.from(activeFootFetishForumGigaScans.values())
+    .sort((a, b) => String(b.updatedAt || b.startedAt || '').localeCompare(String(a.updatedAt || a.startedAt || '')))
+    .slice(0, 100);
+  res.json({ success: true, scans });
 });
 
 expressApp.get('/gigascan/:id', (req, res) => {
@@ -8948,7 +8957,48 @@ async function runFootFetishForumGigaScan({ seedUrl, metadata = {}, force = fals
   return stats;
 }
 
-const activeFootFetishForumGigaScans = new Map();
+function loadGigaScanState() {
+  const map = new Map();
+  try {
+    if (!fs.existsSync(GIGASCAN_STATE_FILE)) return map;
+    const raw = fs.readFileSync(GIGASCAN_STATE_FILE, 'utf8');
+    const rows = JSON.parse(raw);
+    if (!Array.isArray(rows)) return map;
+    const now = new Date().toISOString();
+    for (const row of rows) {
+      if (!row || !row.id) continue;
+      const copy = { ...row };
+      if (copy.status === 'running') {
+        copy.status = 'interrupted';
+        copy.error = copy.error || 'server herstart tijdens gigascan';
+        copy.finishedAt = copy.finishedAt || now;
+        copy.updatedAt = now;
+      }
+      map.set(String(copy.id), copy);
+    }
+  } catch (e) {
+    console.log(`[GIGASCAN] status laden mislukt: ${e.message}`);
+  }
+  return map;
+}
+
+function persistGigaScanState() {
+  try {
+    const rows = Array.from(activeFootFetishForumGigaScans.values())
+      .sort((a, b) => String(b.updatedAt || b.startedAt || '').localeCompare(String(a.updatedAt || a.startedAt || '')))
+      .slice(0, 200);
+    fs.writeFileSync(GIGASCAN_STATE_FILE, JSON.stringify(rows, null, 2));
+  } catch (e) {
+    console.log(`[GIGASCAN] status bewaren mislukt: ${e.message}`);
+  }
+}
+
+function setGigaScanState(scanId, row) {
+  activeFootFetishForumGigaScans.set(scanId, row);
+  persistGigaScanState();
+}
+
+const activeFootFetishForumGigaScans = loadGigaScanState();
 
 function isAznudefeetViewUrl(input) {
   try {

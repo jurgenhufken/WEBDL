@@ -166,6 +166,9 @@ function isRefreshableCollectionUrl(url, adapterName = '') {
     if (adapterName === 'reddit' || host === 'reddit.com' || host.endsWith('.reddit.com')) {
       return /^\/(?:r|user)\/[^/]+$/i.test(pathname);
     }
+    if (host === 'vipergirls.to' || host.endsWith('.vipergirls.to') || host === 'viper.to' || host.endsWith('.viper.to')) {
+      return /^\/threads\/\d+(?:-[^/?#]+)?$/i.test(pathname);
+    }
     return false;
   } catch (_) {
     return false;
@@ -429,7 +432,7 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
     if (!hint && isVipergirlsContext && contextUrl && !isThreadUrl) {
       const threadUrl = normalizeVipergirlsThreadUrl(contextUrl, { wholeThread: vipergirlsWholeThread });
       if (!force) {
-        const existing = await repo.findRecentJobByUrl(threadUrl);
+        const existing = await repo.findRecentJobByUrl(threadUrl, { statuses: ['queued', 'running'] });
         if (existing) return { ...existing, duplicate: true, redirected_from: url };
       }
       const priority = requestedPriority ?? defaultJobPriority(threadUrl, 'gallerydl');
