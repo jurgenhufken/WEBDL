@@ -6232,6 +6232,27 @@ expressApp.use((req, res, next) => {
   next();
 });
 
+expressApp.post('/debug/fff-background-scan', (req, res) => {
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const entry = {
+      at: new Date().toISOString(),
+      tag: 'FFF_BACKGROUND_SCAN',
+      scanId: String(body.scanId || ''),
+      phase: String(body.phase || ''),
+      url: String(body.url || '').slice(0, 500),
+      stats: body.stats && typeof body.stats === 'object' ? body.stats : null,
+      extra: body.extra && typeof body.extra === 'object' ? body.extra : null,
+      error: body.error ? String(body.error).slice(0, 1000) : '',
+      build: body.build ? String(body.build).slice(0, 120) : '',
+    };
+    fs.appendFileSync(LOG_FILE, `${JSON.stringify(entry)}\n`);
+    return res.json({ success: true });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e && e.message ? e.message : String(e) });
+  }
+});
+
 expressApp.post('/api/queue/resume', async (req, res) => {
   const mode = String(req.body && req.body.mode ? req.body.mode : 'all');
   const max = Number.isFinite(Number(req.body && req.body.max)) ? Number(req.body.max) : 500;

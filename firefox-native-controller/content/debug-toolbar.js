@@ -5,7 +5,7 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-fff-background-rescan-to-continue';
+  const WEBDL_BUILD = 'debug-toolbar-2026-05-13-fff-background-trace';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
@@ -4774,6 +4774,21 @@
     return viaBg && typeof viaBg === 'object' ? viaBg : { success: false, error: 'Achtergrondscan start mislukt' };
   }
 
+  function traceFffBackgroundScan(scanId, phase, data) {
+    try {
+      const payload = {
+        scanId: scanId || '',
+        phase,
+        url: data && data.url ? data.url : window.location.href,
+        stats: data && data.stats ? data.stats : null,
+        extra: data && data.extra ? data.extra : null,
+        error: data && data.error ? data.error : '',
+        build: WEBDL_BUILD,
+      };
+      postServerJson('debug/fff-background-scan', payload, 3000).catch(() => {});
+    } catch (e) {}
+  }
+
   function normalizeBatchUrl(rawUrl, baseHref = '') {
     try {
       const u = normalizedUrlObject(rawUrl, baseHref || window.location.href);
@@ -4936,6 +4951,11 @@
       return normalized || String(url || '');
     };
     const finish = async (success, error) => {
+      traceFffBackgroundScan(body.scanId || '', success ? 'finish' : 'finish-error', {
+        url: startUrl,
+        stats,
+        error: error || '',
+      });
       try {
         await browser.runtime.sendMessage({
           action: 'fffBackgroundScanFinished',
@@ -4945,18 +4965,37 @@
     };
     try {
       addLog(`FFF achtergrondscan gestart: ${startUrl}`);
+      traceFffBackgroundScan(body.scanId || '', 'start', {
+        url: startUrl,
+        stats,
+        extra: {
+          maxForumPages: formatScanLimit(maxForumPages),
+          maxThreadPages: formatScanLimit(maxThreadPages),
+          maxItems: formatScanLimit(maxItems),
+          initialUrls: Array.isArray(body.initialUrls) ? body.initialUrls.length : 0,
+          initialThreadLinks: Array.isArray(body.initialThreadLinks) ? body.initialThreadLinks.length : 0,
+        },
+      });
       const initialUrls = Array.isArray(body.initialUrls)
         ? body.initialUrls.map((url) => String(url || '').trim()).filter(Boolean)
         : [];
       if (initialUrls.length) {
         const initialCandidates = initialUrls.map((url) => ({ url, sourceContext: sourceContextForUrl(url) })).filter((c) => c.url);
-        await queueFffBackgroundCandidates(initialCandidates, meta, force, state);
+        const initialResult = await queueFffBackgroundCandidates(initialCandidates, meta, force, state);
         stats.media += initialCandidates.length;
         stats.queued = Number(state.queued) || 0;
         stats.duplicates = Number(state.duplicates) || 0;
         stats.errors = Number(state.errors) || 0;
         stats.skippedWrappers = Number(state.skippedWrappers) || 0;
         addLog(`FFF achtergrondscan: ${initialCandidates.length} initiele items verwerkt, ${stats.queued} queued, ${stats.duplicates} duplicaten`);
+        traceFffBackgroundScan(body.scanId || '', 'initial-queued', {
+          url: startUrl,
+          stats,
+          extra: {
+            result: initialResult || null,
+            initialCandidates: initialCandidates.length,
+          },
+        });
         reportProgress('initial-queued', { url: startUrl });
       }
       if (footFetishForumThreadPartsFromUrl(startUrl, window.location.href)) {
@@ -4969,6 +5008,11 @@
         stats.duplicates = Number(state.duplicates) || 0;
         stats.errors = Number(state.errors) || 0;
         stats.skippedWrappers = Number(state.skippedWrappers) || 0;
+        traceFffBackgroundScan(body.scanId || '', 'thread-url-finished', {
+          url: startUrl,
+          stats,
+          extra: { candidates: candidates.length, pages: Number(res && res.pages) || 0 },
+        });
         await finish(true, '');
         return stats;
       }
@@ -4981,6 +5025,11 @@
         const doc = await loadFootFetishForumDocument(forumUrl, { timeoutMs: 30000, useCurrent: stats.forumPages === 1 });
         if (!doc) throw new Error(`Forum kon niet geladen worden: ${forumUrl}`);
         const links = collectFootFetishForumThreadLinksFromForumDocument(doc, forumUrl, WEBDL_UNLIMITED);
+        traceFffBackgroundScan(body.scanId || '', 'forum-index', {
+          url: forumUrl,
+          stats,
+          extra: { links: Array.isArray(links) ? links.length : 0, title: String(doc.title || '').slice(0, 200) },
+        });
         reportProgress('forum-index', { url: forumUrl, links: Array.isArray(links) ? links.length : 0 });
         for (const link of links) {
           const normalized = normalizeBatchUrl(link, forumUrl);
@@ -5001,6 +5050,11 @@
           stats.errors = Number(state.errors) || 0;
           stats.skippedWrappers = Number(state.skippedWrappers) || 0;
           addLog(`FFF achtergrondscan: ${stats.threads} threads, ${stats.media} media, ${stats.queued} queued`);
+          traceFffBackgroundScan(body.scanId || '', 'thread-done', {
+            url: normalized,
+            stats,
+            extra: { candidates: candidates.length, pages: Number(res && res.pages) || 0 },
+          });
           reportProgress('thread-done', { url: normalized });
           if (totalItems >= maxItems) break;
         }
@@ -5015,6 +5069,7 @@
       stats.errors++;
       const msg = e && e.message ? e.message : String(e);
       addLog(`FFF achtergrondscan fout: ${msg}`, 'error');
+      traceFffBackgroundScan(body.scanId || '', 'error', { url: startUrl, stats, error: msg });
       await finish(false, msg);
       return stats;
     }
