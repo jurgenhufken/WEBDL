@@ -388,7 +388,7 @@
       'vVol','vBtnMute','vBtnReloadMedia','vSeek',
       'vBtnReverse','vSpeedSelect','vSpeedDown','vSpeedUp',
       'vBtnMuteBottom','vBottomVol','vBtnMainProgress','vBtnFullscreen',
-      'vBtnTags','vBtnLog','vClose',
+      'vBtnTags','vBtnLog','vBtnLocateGallery','vClose',
       'vSlideshow2','vRandom2',
       'vStage','vContent','vPrev','vNext','vHudLeft','vHudRight',
       'vProgressBar','vProgressFill','vProgressHandle',
@@ -2781,6 +2781,13 @@
     el.vPrev.addEventListener('click', (e) => { e.stopPropagation(); navPrev(); });
     el.vNext.addEventListener('click', (e) => { e.stopPropagation(); navNext(); });
     el.vBtnSidebar.addEventListener('click', () => toggleSidebar());
+    if (el.vBtnLocateGallery) {
+      el.vBtnLocateGallery.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        close();
+      });
+    }
     el.vNowRating.addEventListener('click', (e) => {
       const btn = e.target && e.target.closest ? e.target.closest('.rating-star-btn') : null;
       if (!btn || !el.vNowRating.contains(btn)) return;
