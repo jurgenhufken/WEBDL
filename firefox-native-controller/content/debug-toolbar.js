@@ -657,6 +657,40 @@
           }
         }
 
+        // Imagebam: convert thumbnail URLs to full-size wrapper pages
+        // thumbs2.imagebam.com/xx/yy/zz/HASH.jpg → imagebam.com/view/HASH
+        if (/^thumbs?\d*\.imagebam\.com$/i.test(host)) {
+          try {
+            const rawPath = String(u.pathname || '');
+            const m = rawPath.match(/\/([a-f0-9]+)\.[a-z]+$/i);
+            if (m && m[1]) {
+              const u2 = new URL(`https://www.imagebam.com/view/${m[1]}`);
+              u2.hash = '';
+              u = u2;
+              host = 'www.imagebam.com';
+              p = u2.pathname.toLowerCase();
+            } else {
+              return;
+            }
+          } catch (e) {
+            return;
+          }
+        }
+
+        // Imagevenue: convert thumbnail direct URLs to wrapper pages
+        // img*.imagevenue.com/loc=xxx/yyy.jpg → img*.imagevenue.com/img.php?image=yyy.jpg
+        if (/^img\d*\.imagevenue\.com$/i.test(host) && /\.(jpe?g|png|gif|webp)$/i.test(p) && !/\/img\.php/i.test(p)) {
+          try {
+            const basename = p.split('/').pop();
+            if (basename) {
+              const u2 = new URL(`http://${host}/img.php?image=${encodeURIComponent(basename)}`);
+              u2.hash = '';
+              u = u2;
+              p = u2.pathname.toLowerCase();
+            }
+          } catch (e) {}
+        }
+
         const final = u.toString();
         if (!isFootFetishForumMediaCandidateUrl(final, baseHref, kind)) return;
         if (seen.has(final)) return;
@@ -696,7 +730,11 @@
                   const isUploadSite = linkHost === 'upload.footfetishforum.com' || linkHost.endsWith('.upload.footfetishforum.com') || isKnownExternalMediaWrapperHost(linkHost) || /pixhost|postimg|imgur|redgifs|gfycat/i.test(linkHost);
                   if (isFffAttachment || isGenericForumMedia || isFile || isExternalMedia || isUploadSite) {
                     const imgSrc = img.currentSrc || img.src || img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-lazy-src') || '';
-                    if (imgSrc) push(imgSrc, 'img_under_link', img);
+                    // Skip pushing thumbnail image URLs for imagebam/imagevenue — the wrapper link (href) is pushed instead
+                    const imgSrcIsThumb = /^https?:\/\/thumbs?\d*\.imagebam\.com\b/i.test(imgSrc)
+                      || /^https?:\/\/thumbnails?\d*\.imagebam\.com\b/i.test(imgSrc)
+                      || (/^https?:\/\/img\d*\.imagevenue\.com\b/i.test(imgSrc) && /th_[^/]*\.(jpe?g|png|gif|webp)/i.test(imgSrc));
+                    if (imgSrc && !imgSrcIsThumb) push(imgSrc, 'img_under_link', img);
                     push(href, 'thumb_link', parentLink);
                     hadParentLink = true;
                   }
@@ -3007,7 +3045,11 @@
 
                   if (isFffAttachment || isFile || isExternalMedia || isUploadSite) {
                     const imgSrc = img.currentSrc || img.src || img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-lazy-src') || '';
-                    if (imgSrc) {
+                    // Skip pushing thumbnail image URLs for imagebam/imagevenue — the wrapper link (href) is pushed instead
+                    const imgSrcIsThumb = /^https?:\/\/thumbs?\d*\.imagebam\.com\b/i.test(imgSrc)
+                      || /^https?:\/\/thumbnails?\d*\.imagebam\.com\b/i.test(imgSrc)
+                      || (/^https?:\/\/img\d*\.imagevenue\.com\b/i.test(imgSrc) && /th_[^/]*\.(jpe?g|png|gif|webp)/i.test(imgSrc));
+                    if (imgSrc && !imgSrcIsThumb) {
                       push(imgSrc, img, 'img_under_link');
                     }
                     push(href, parentLink, 'thumb_link');
