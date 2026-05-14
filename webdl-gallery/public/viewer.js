@@ -656,6 +656,20 @@
       el.vFavoriteOverlay.appendChild(chip);
     }
     el.vFavoriteOverlay.classList.remove('hidden');
+
+    // Auto-scale: shrink chips if they overflow so all tags stay visible
+    requestAnimationFrame(() => {
+      const container = el.vFavoriteOverlay;
+      if (!container || !container.children.length) return;
+      const chips = container.querySelectorAll('.vfavorite-chip, .vfavorite-mode-btn, .vfavorite-clear');
+      const totalTags = chips.length;
+      // Pick font-size based on tag count
+      let fontSize = 10;
+      if (totalTags > 30) fontSize = 7;
+      else if (totalTags > 20) fontSize = 8;
+      else if (totalTags > 14) fontSize = 9;
+      chips.forEach(c => { c.style.fontSize = fontSize + 'px'; c.style.padding = fontSize <= 8 ? '0px 4px' : '1px 6px'; c.style.minHeight = fontSize <= 8 ? '16px' : '19px'; });
+    });
   }
 
   async function applyQuickTagFilter(tag) {

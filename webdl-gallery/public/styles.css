@@ -737,22 +737,19 @@ input[type="range"]:disabled { opacity: 0.35; cursor: default; }
   align-items: center;
   flex-wrap: wrap;
   justify-content: center;
-  gap: 3px 4px;
+  gap: 2px 3px;
   min-width: 0;
   width: min(900px, 100%);
   max-width: calc(100vw - 96px);
-  max-height: 96px;
   align-self: center;
   margin: 10px auto -7px;
-  overflow-x: hidden;
-  overflow-y: auto;
+  overflow: visible;
   padding: 0;
   border: 0;
   border-radius: 0;
   background: transparent;
   box-shadow: none;
   backdrop-filter: none;
-  scrollbar-width: thin;
 }
 .vfavorite-overlay.hidden { display: none; }
 .vfavorite-overlay button { pointer-events: auto; }
@@ -1139,7 +1136,6 @@ input[type="range"]:disabled { opacity: 0.35; cursor: default; }
   .vfavorite-overlay {
     width: min(900px, 100%);
     max-width: calc(100vw - 24px);
-    max-height: 63px;
   }
   .vbottom-controls {
     width: auto;
