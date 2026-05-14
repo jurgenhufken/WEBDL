@@ -2492,16 +2492,43 @@
   const SPEED_STEPS = FORWARD_SPEED_STEPS;
 
   function changeSpeed(dir) {
-    const cur = vs.playbackRate > 0 ? vs.playbackRate : 1;
+    const cur = vs.playbackRate;
+    if (cur === 0) {
+      // Paused: slower → slowest reverse, faster → slowest forward
+      if (dir < 0) { setSpeed(-FORWARD_SPEED_STEPS[0]); return; }
+      setSpeed(FORWARD_SPEED_STEPS[0]);
+      return;
+    }
+    if (cur < 0) {
+      // Reverse: find current position in reverse steps
+      const absCur = Math.abs(cur);
+      let idx = FORWARD_SPEED_STEPS.indexOf(absCur);
+      if (idx === -1) {
+        idx = FORWARD_SPEED_STEPS.findIndex(s => s >= absCur);
+        if (idx === -1) idx = FORWARD_SPEED_STEPS.length - 1;
+      }
+      if (dir < 0) {
+        // Slower in reverse = faster reverse speed
+        idx = Math.min(FORWARD_SPEED_STEPS.length - 1, idx + 1);
+        setSpeed(-FORWARD_SPEED_STEPS[idx]);
+      } else {
+        // Faster = towards pause: decrease reverse speed
+        if (idx <= 0) { setSpeed(0); return; }
+        setSpeed(-FORWARD_SPEED_STEPS[idx - 1]);
+      }
+      return;
+    }
+    // Forward
     let idx = FORWARD_SPEED_STEPS.indexOf(cur);
     if (idx === -1) {
       idx = FORWARD_SPEED_STEPS.findIndex(s => s >= cur);
       if (idx === -1) idx = FORWARD_SPEED_STEPS.length - 1;
     }
     if (dir < 0 && idx <= 0) {
-      setSpeed(-1);
+      setSpeed(0); // pause before reverse
       return;
     }
+    if (dir > 0 && idx >= FORWARD_SPEED_STEPS.length - 1) return;
     idx = Math.max(0, Math.min(FORWARD_SPEED_STEPS.length - 1, idx + dir));
     setSpeed(FORWARD_SPEED_STEPS[idx]);
   }
@@ -2510,14 +2537,18 @@
 
   function setSpeed(rate) {
     rate = Number(rate);
-    if (!Number.isFinite(rate) || rate === 0) rate = 1;
+    if (!Number.isFinite(rate)) rate = 1;
     vs.playbackRate = rate;
     if (rate > 0) {
       try { localStorage.setItem(VIEWER_SPEED_KEY, String(rate)); } catch (_) {}
     }
     const v = el.vContent.querySelector('video');
 
-    if (rate <= 0) {
+    if (rate === 0) {
+      // Freeze frame: pause at current position
+      stopReverse();
+      if (v) { v.pause(); }
+    } else if (rate < 0) {
       if (v) {
         if (v.currentTime <= 0.15 && Number.isFinite(v.duration) && v.duration > 0) {
           v.currentTime = Math.max(0, v.duration - 0.05);
@@ -2538,8 +2569,9 @@
     }
     updateSpeedIndicator();
     syncVideoProgress(v);
-    showHudMessage(rate > 0 ? `Snelheid ${rate}x` : `Achteruit ${Math.abs(rate)}x`, 1100);
-    log(`Snelheid: ${rate > 0 ? rate + '×' : rate + '× (achteruit)'}`);
+    const label = rate === 0 ? 'Pauze (freeze)' : rate > 0 ? `Snelheid ${rate}x` : `Achteruit ${Math.abs(rate)}x`;
+    showHudMessage(label, 1100);
+    log(`Snelheid: ${rate === 0 ? 'pauze' : rate > 0 ? rate + '×' : rate + '× (achteruit)'}`);
   }
 
   function startReverse(speed) {
@@ -2820,7 +2852,8 @@
       }
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (['INPUT', 'TEXTAREA'].includes(tag)) return;
-      const numericRating = ratingFromNumberKey(e);
+      const isNumpad = (e.code || '').startsWith('Numpad') && e.code !== 'Numpad0';
+      const numericRating = !isNumpad ? ratingFromNumberKey(e) : null;
       if (numericRating != null) {
         await setRating(numericRating);
         e.preventDefault();
@@ -2829,17 +2862,14 @@
       }
       if (tag === 'SELECT') return;
 
-      // Numpad detection: e.code starts with 'Numpad'
-      const isNumpad = (e.code || '').startsWith('Numpad');
-
       if (isNumpad) {
         const v = el.vContent.querySelector('video');
         switch (e.code) {
           case 'Numpad4': // seek left (small step)
-            if (v) seekRelative(-2);
+            if (v) seekRelative(-0.5);
             e.preventDefault(); break;
           case 'Numpad6': // seek right (small step)
-            if (v) seekRelative(2);
+            if (v) seekRelative(0.5);
             e.preventDefault(); break;
           case 'Numpad8': // volume up
             if (v) { v.volume = Math.min(1, v.volume + 0.05); vs.vol = v.volume; showHudMessage(`Volume ${Math.round(v.volume * 100)}%`, 800); }
@@ -2853,14 +2883,11 @@
           case 'Numpad3': // faster
             changeSpeed(1);
             e.preventDefault(); break;
-          case 'Numpad7': // big jump back
-            if (v) seekRelative(-15);
+          case 'Numpad7': // jump back (tap multiple times for more)
+            if (v) seekRelative(-1);
             e.preventDefault(); break;
-          case 'Numpad9': // big jump forward
-            if (v) seekRelative(15);
-            e.preventDefault(); break;
-          case 'Numpad0': // toggle play/pause
-            if (v) { v.paused ? v.play() : v.pause(); }
+          case 'Numpad9': // jump forward (tap multiple times for more)
+            if (v) seekRelative(1);
             e.preventDefault(); break;
           case 'NumpadDecimal': // add/close segment marker
             addSegmentMarker();
