@@ -1571,7 +1571,7 @@
   async function captureCurrentVideoFrame(options = {}) {
     const quiet = !!(options && options.quiet);
     if (vs.screenshotRunning) {
-      if (!quiet) showHudMessage('Screenshot bezig');
+      if (!quiet) showHudMessage('Screenshot bezig', 1800, { skipOverlay: true });
       return;
     }
     const it = vs.items[vs.idx];
@@ -1579,7 +1579,7 @@
       ? vs.currentMediaEl
       : el.vContent.querySelector('video');
     if (!it || !videoEl) {
-      if (!quiet) showHudMessage('Geen video actief');
+      if (!quiet) showHudMessage('Geen video actief', 1800, { skipOverlay: true });
       return;
     }
     vs.screenshotRunning = true;
@@ -1604,10 +1604,10 @@
         gallery.prependItems([data.screenshot]);
       }
       flashScreenshotDot(true);
-      if (!quiet) showHudMessage('Screenshot opgeslagen', 2200);
+      if (!quiet) showHudMessage('Screenshot opgeslagen', 2200, { skipOverlay: true });
       if (!quiet) log('Screenshot opgeslagen bij huidige video');
     } catch (e) {
-      if (!quiet) showHudMessage('Screenshot fout');
+      if (!quiet) showHudMessage('Screenshot fout', 1800, { skipOverlay: true });
       if (!quiet) log('Screenshot fout: ' + (e && e.message ? e.message : String(e)));
     } finally {
       vs.screenshotRunning = false;
