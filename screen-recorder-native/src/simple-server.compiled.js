@@ -8560,6 +8560,7 @@ function detectPlatform(url) {
   if (/pornpics\.com/i.test(u)) return 'pornpics';
   if (/elitebabes\.com/i.test(u)) return 'elitebabes';
   if (/erome\.com/i.test(u)) return 'erome';
+  if (/imagefap\.com/i.test(u)) return 'imagefap';
   if (/keep2share\.cc|k2s\.cc/i.test(u)) return 'keep2share';
 
   try {
@@ -8610,6 +8611,7 @@ const KNOWN_PLATFORMS = new Set([
   'pornpics',
   'elitebabes',
   'erome',
+  'imagefap',
   'keep2share',
   '4kdownloader',
   'other']
@@ -11962,7 +11964,7 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
 
   let driver = 'yt-dlp';
   if (platform === 'onlyfans') driver = 'ofscraper'; else
-    if (platform === 'instagram') driver = 'instaloader'; else
+    if (platform === 'instagram') driver = 'gallery-dl'; else
       if (platform === 'reddit') driver = 'reddit-dl'; else
         if (platform === 'telegram') driver = 'tdl'; else
           if (
@@ -11971,6 +11973,7 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
             platform === 'kinky' ||
             platform === 'pornpics' ||
             platform === 'erome' ||
+            platform === 'imagefap' ||
             platform === 'twitter' ||
             platform === 'aznudefeet' && !looksLikeDirectFileUrl(url) ||
             platform === 'tiktok' && isTikTokPhotoUrl(url)
@@ -12024,7 +12027,7 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
   // YouTube is handled by the default fallback (yt-dlp) at the bottom.
 
   if (platform === 'instagram') {
-    return startInstaloaderDownload(downloadId, url, platform, channel, title, metadata);
+    return startGalleryDlDownload(downloadId, url, platform, channel, title, metadata);
   }
 
   if (platform === 'reddit') {
@@ -12044,6 +12047,7 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
     platform === 'wikifeet' ||
     platform === 'wikifeetx' ||
     platform === 'pornpics' ||
+    platform === 'imagefap' ||
     (platform === 'aznudefeet' && !looksLikeDirectFileUrl(url)) ||
     platform === 'tiktok' && isTikTokPhotoUrl(url)
   ) {
