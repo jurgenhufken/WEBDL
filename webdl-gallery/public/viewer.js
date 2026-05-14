@@ -79,6 +79,13 @@
     segments: [],
     segmentSkipEnabled: true,
 
+    // Speed automation lane (Bitwig-style)
+    // Points: [{pct: 0-1 (time position), rate: 0.1-4 (speed), curve: 0 (linear) to ±1 (bezier)}]
+    autoPoints: [],
+    autoEnabled: false,
+    autoLaneVisible: false,
+    autoDragIdx: -1,
+
     // Zoom (exact als oude viewer)
     zoomed: false,
     scale: 1,
@@ -1062,6 +1069,7 @@
     vs.loopStart = null;
     vs.loopEnd = null;
     vs.segments = [];
+    vs.autoPoints = [];
     const v = el.vContent.querySelector('video');
     if (v) { v.pause(); v.src = ''; v.load(); }
     el.vContent.innerHTML = '';
@@ -1486,6 +1494,8 @@
     }
     // Segment skip: auto-jump past skip zones during playback
     checkSegmentSkip(v);
+    // Speed automation: follow the automation lane curve
+    applyAutoSpeed(v);
     if (!vs.seekDragging && Number.isFinite(v.duration) && v.duration > 0) {
       const pct = Math.max(0, Math.min(100, (v.currentTime / v.duration) * 100));
       el.vSeek.value = String(Math.round(pct * 10));
@@ -2877,6 +2887,274 @@
       bar.appendChild(marker);
     }
   }
+  // ─── Speed Automation Lane (Bitwig-style) ────────────────────────────────
+  const AUTO_LANE_HEIGHT = 60;
+  const AUTO_MIN_RATE = 0.1;
+  const AUTO_MAX_RATE = 4;
+
+  function ensureAutoLaneCanvas() {
+    let canvas = document.getElementById('vAutoLaneCanvas');
+    if (canvas) return canvas;
+    const bar = el.vProgressBar;
+    if (!bar) return null;
+
+    // Container for the lane
+    const container = document.createElement('div');
+    container.id = 'vAutoLaneContainer';
+    container.style.cssText = `position:absolute; bottom:100%; left:0; right:0; height:${AUTO_LANE_HEIGHT}px; background:rgba(0,0,0,.55); border-top:1px solid rgba(255,255,255,.15); border-bottom:1px solid rgba(80,200,255,.3); z-index:10; display:none; cursor:crosshair;`;
+
+    canvas = document.createElement('canvas');
+    canvas.id = 'vAutoLaneCanvas';
+    canvas.style.cssText = 'width:100%; height:100%; display:block;';
+    container.appendChild(canvas);
+
+    // Speed labels
+    const labelTop = document.createElement('span');
+    labelTop.style.cssText = 'position:absolute; top:1px; left:3px; font-size:9px; color:rgba(255,255,255,.4); pointer-events:none;';
+    labelTop.textContent = `${AUTO_MAX_RATE}×`;
+    const labelBot = document.createElement('span');
+    labelBot.style.cssText = 'position:absolute; bottom:1px; left:3px; font-size:9px; color:rgba(255,255,255,.4); pointer-events:none;';
+    labelBot.textContent = `${AUTO_MIN_RATE}×`;
+    const label1x = document.createElement('span');
+    const pct1x = 1 - ((1 - AUTO_MIN_RATE) / (AUTO_MAX_RATE - AUTO_MIN_RATE));
+    label1x.style.cssText = `position:absolute; top:${pct1x * 100}%; left:3px; font-size:9px; color:rgba(80,200,255,.5); pointer-events:none; transform:translateY(-50%);`;
+    label1x.textContent = '1×';
+    container.append(labelTop, labelBot, label1x);
+
+    bar.style.position = 'relative';
+    bar.appendChild(container);
+    bindAutoLaneMouse(container, canvas);
+    return canvas;
+  }
+
+  function rateToY(rate, h) {
+    return h - ((rate - AUTO_MIN_RATE) / (AUTO_MAX_RATE - AUTO_MIN_RATE)) * h;
+  }
+  function yToRate(y, h) {
+    return AUTO_MIN_RATE + ((h - y) / h) * (AUTO_MAX_RATE - AUTO_MIN_RATE);
+  }
+
+  function lerpAutoRate(pct) {
+    const pts = vs.autoPoints;
+    if (!pts.length) return 1;
+    if (pts.length === 1) return pts[0].rate;
+    if (pct <= pts[0].pct) return pts[0].rate;
+    if (pct >= pts[pts.length - 1].pct) return pts[pts.length - 1].rate;
+
+    for (let i = 0; i < pts.length - 1; i++) {
+      if (pct >= pts[i].pct && pct <= pts[i + 1].pct) {
+        const t = (pct - pts[i].pct) / (pts[i + 1].pct - pts[i].pct);
+        const curve = pts[i].curve || 0;
+        // Apply curve: 0=linear, >0=ease-in, <0=ease-out
+        let ct;
+        if (curve === 0) ct = t;
+        else if (curve > 0) ct = Math.pow(t, 1 + curve * 2);
+        else ct = 1 - Math.pow(1 - t, 1 + Math.abs(curve) * 2);
+        return pts[i].rate + (pts[i + 1].rate - pts[i].rate) * ct;
+      }
+    }
+    return 1;
+  }
+
+  function renderAutoLane() {
+    const canvas = document.getElementById('vAutoLaneCanvas');
+    if (!canvas) return;
+    const container = canvas.parentElement;
+    if (!vs.autoLaneVisible) {
+      if (container) container.style.display = 'none';
+      return;
+    }
+    container.style.display = '';
+
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+    const w = rect.width, h = rect.height;
+
+    ctx.clearRect(0, 0, w, h);
+
+    // 1x reference line
+    const y1x = rateToY(1, h);
+    ctx.strokeStyle = 'rgba(80,200,255,.2)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(0, y1x); ctx.lineTo(w, y1x); ctx.stroke();
+    ctx.setLineDash([]);
+
+    const pts = vs.autoPoints;
+    if (!pts.length) return;
+
+    // Draw curve
+    ctx.strokeStyle = 'rgba(80,200,255,.7)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+
+    // Draw segment by segment with curves
+    const firstX = pts[0].pct * w;
+    const firstY = rateToY(pts[0].rate, h);
+    // Extend to left edge
+    ctx.moveTo(0, firstY);
+    ctx.lineTo(firstX, firstY);
+
+    for (let i = 0; i < pts.length - 1; i++) {
+      const x1 = pts[i].pct * w, y1 = rateToY(pts[i].rate, h);
+      const x2 = pts[i + 1].pct * w, y2 = rateToY(pts[i + 1].rate, h);
+      const curve = pts[i].curve || 0;
+
+      if (curve === 0) {
+        ctx.lineTo(x2, y2);
+      } else {
+        // Bezier curve
+        const midX = (x1 + x2) / 2;
+        if (curve > 0) {
+          ctx.bezierCurveTo(midX, y1, x2, y1 + (y2 - y1) * (1 - curve * 0.5), x2, y2);
+        } else {
+          ctx.bezierCurveTo(x1, y1 + (y2 - y1) * (1 + curve * 0.5), midX, y2, x2, y2);
+        }
+      }
+    }
+
+    // Extend to right edge
+    const lastY = rateToY(pts[pts.length - 1].rate, h);
+    ctx.lineTo(w, lastY);
+    ctx.stroke();
+
+    // Fill under curve
+    ctx.lineTo(w, h);
+    ctx.lineTo(0, h);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(80,200,255,.08)';
+    ctx.fill();
+
+    // Draw points
+    for (let i = 0; i < pts.length; i++) {
+      const x = pts[i].pct * w, y = rateToY(pts[i].rate, h);
+      const isDragging = vs.autoDragIdx === i;
+      ctx.beginPath();
+      ctx.arc(x, y, isDragging ? 7 : 5, 0, Math.PI * 2);
+      ctx.fillStyle = isDragging ? '#fff' : 'rgba(80,200,255,.9)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,.5)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      // Rate label
+      ctx.fillStyle = 'rgba(255,255,255,.7)';
+      ctx.font = '9px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(`${pts[i].rate.toFixed(1)}×`, x, y - 9);
+    }
+  }
+
+  function bindAutoLaneMouse(container, canvas) {
+    function getPctAndRate(e) {
+      const rect = canvas.getBoundingClientRect();
+      const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      const rate = Math.max(AUTO_MIN_RATE, Math.min(AUTO_MAX_RATE, yToRate(e.clientY - rect.top, rect.height)));
+      return { pct, rate };
+    }
+
+    function findNearestPoint(e, threshold = 12) {
+      const rect = canvas.getBoundingClientRect();
+      let best = -1, bestDist = Infinity;
+      for (let i = 0; i < vs.autoPoints.length; i++) {
+        const px = vs.autoPoints[i].pct * rect.width;
+        const py = rateToY(vs.autoPoints[i].rate, rect.height);
+        const dx = (e.clientX - rect.left) - px;
+        const dy = (e.clientY - rect.top) - py;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < threshold && dist < bestDist) { best = i; bestDist = dist; }
+      }
+      return best;
+    }
+
+    // Right-click = add point
+    container.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const { pct, rate } = getPctAndRate(e);
+      vs.autoPoints.push({ pct, rate: Math.round(rate * 10) / 10, curve: 0 });
+      vs.autoPoints.sort((a, b) => a.pct - b.pct);
+      renderAutoLane();
+      showHudMessage(`Auto punt: ${(Math.round(rate * 10) / 10)}× @ ${Math.round(pct * 100)}%`, 1000);
+    });
+
+    // Click = delete point
+    container.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const idx = findNearestPoint(e);
+      if (idx >= 0) {
+        vs.autoPoints.splice(idx, 1);
+        renderAutoLane();
+        showHudMessage(`Auto punt verwijderd (${vs.autoPoints.length} over)`, 800);
+      }
+    });
+
+    // Mousedown = start drag
+    container.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      const idx = findNearestPoint(e);
+      if (idx < 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      vs.autoDragIdx = idx;
+      renderAutoLane();
+
+      function onMove(ev) {
+        if (vs.autoDragIdx < 0) return;
+        const { pct, rate } = getPctAndRate(ev);
+        vs.autoPoints[vs.autoDragIdx].pct = pct;
+        vs.autoPoints[vs.autoDragIdx].rate = Math.round(rate * 10) / 10;
+        renderAutoLane();
+      }
+
+      function onUp() {
+        vs.autoDragIdx = -1;
+        vs.autoPoints.sort((a, b) => a.pct - b.pct);
+        renderAutoLane();
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+      }
+
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    });
+
+    // Scroll on point = adjust curve
+    container.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const idx = findNearestPoint(e, 20);
+      if (idx < 0) return;
+      const delta = e.deltaY > 0 ? -0.1 : 0.1;
+      vs.autoPoints[idx].curve = Math.max(-1, Math.min(1, (vs.autoPoints[idx].curve || 0) + delta));
+      renderAutoLane();
+      showHudMessage(`Curve: ${vs.autoPoints[idx].curve.toFixed(1)}`, 600);
+    }, { passive: false });
+  }
+
+  function applyAutoSpeed(video) {
+    if (!vs.autoEnabled || !vs.autoPoints.length || !video || !Number.isFinite(video.duration)) return;
+    if (video.paused) return;
+    const pct = video.currentTime / video.duration;
+    const targetRate = lerpAutoRate(pct);
+    // Only update if rate changed meaningfully (avoid constant updates)
+    const roundedRate = Math.round(targetRate * 20) / 20; // 0.05 precision
+    if (Math.abs(vs.playbackRate - roundedRate) >= 0.04) {
+      setSpeed(roundedRate);
+    }
+  }
+
+  function toggleAutoLane() {
+    vs.autoLaneVisible = !vs.autoLaneVisible;
+    vs.autoEnabled = vs.autoLaneVisible;
+    if (vs.autoLaneVisible) ensureAutoLaneCanvas();
+    renderAutoLane();
+    showHudMessage(vs.autoLaneVisible ? 'Snelheid automation: aan' : 'Snelheid automation: uit', 1200);
+    log(vs.autoLaneVisible ? 'Speed automation lane geopend' : 'Speed automation lane gesloten');
+  }
 
   function toggleLog() {
     vs.logOpen = !vs.logOpen;
@@ -2971,6 +3249,9 @@
               showHudMessage(`Laatste marker verwijderd (${vs.segments.length} over)`, 1000);
               log(`Marker verwijderd, ${vs.segments.length} markers over`);
             }
+            e.preventDefault(); break;
+          case 'NumpadMultiply': // toggle speed automation lane
+            toggleAutoLane();
             e.preventDefault(); break;
         }
         return;
