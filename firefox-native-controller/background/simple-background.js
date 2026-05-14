@@ -994,9 +994,7 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (action === 'queueBatchDownload') {
     const payload = (message && message.payload) || {};
-    const urls = payload.urls || [];
-    const metadata = payload.metadata || {};
-    postHubBatch(urls, metadata, payload.force === true)
+    postJson('download/batch', payload)
       .then(sendResponse)
       .catch(e => sendResponse({ success: false, error: e.message }));
     return true;

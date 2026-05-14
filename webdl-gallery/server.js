@@ -500,6 +500,19 @@ function isOpaqueMediaToken(value) {
   return /^[A-Za-z0-9_-]{10,}$/.test(text) && /[A-Za-z]/.test(text) && /\d/.test(text);
 }
 
+function titleFromVipergirlsThreadUrl(value) {
+  try {
+    const u = new URL(String(value || ''));
+    const host = u.hostname.replace(/^www\./i, '').toLowerCase();
+    if (host !== 'vipergirls.to') return '';
+    const m = u.pathname.match(/\/threads\/\d+-([^/?#]+)/i);
+    if (!m || !m[1]) return '';
+    return decodeURIComponent(m[1]).replace(/[-_]+/g, ' ').trim();
+  } catch (_) {
+    return '';
+  }
+}
+
 function sourceModelTitleForRow(row, graphSummary, sourceSite, filename) {
   const postTitle = sourceModelTitleFromText(graphSummary?.source_post_title || '');
   if (postTitle && !isOpaqueMediaToken(postTitle)) return postTitle;
@@ -555,10 +568,17 @@ function mapItem(row) {
   const sourceUrl = graphSummary.source_post_url || row.source_url || row.url || '';
   const sourceModelTitle = sourceModelTitleForRow(row, graphSummary, sourceSite, filename);
   const sourceModelKey = sourceModelKeyFromTitle(sourceModelTitle);
+  const threadTitle = graphSummary.source_thread_title
+    || parsedMetadata?.origin_thread?.title
+    || parsedMetadata?.source_context?.title
+    || titleFromVipergirlsThreadUrl(row.source_url || row.url);
+  const rowTitle = String(row.title || '').trim();
   const displayTitle = graphSummary.source_post_title
-    && (String(sourceSite || '').toLowerCase() === 'twitter' || isOpaqueMediaToken(row.title))
+    && (String(sourceSite || '').toLowerCase() === 'twitter' || isOpaqueMediaToken(rowTitle))
     ? graphSummary.source_post_title
-    : row.title;
+    : String(row.platform || '').toLowerCase() === 'vipergirls' && threadTitle && (isOpaqueMediaToken(rowTitle) || /^[0-9_]+$/.test(rowTitle) || isKnownGalleryJunkRow(row))
+      ? threadTitle
+      : row.title;
   return {
     ...row,
     source_url: sourceUrl,
@@ -632,6 +652,91 @@ function hasNonEmptyMedia(row) {
   return !Number.isFinite(size) || size > 0;
 }
 
+const KNOWN_BAD_IMAGE_HASHES = new Set([
+  // Imagetwist hotlink placeholder: "Hotlinking is disabled. Use forum/html code..."
+  '95e05a93e49bf6684bb61d893653b12a',
+]);
+
+function isKnownGalleryJunkRow(row) {
+  const text = [
+    row && row.title,
+    row && row.filename,
+    row && row.filepath,
+    row && row.url,
+  ].map((v) => String(v || '').toLowerCase()).join(' ');
+  if (/(^|[\/_.-])(?:user-online|user-offline|statusicon|reputation(?:_pos)?|spacer|blank|button)(?:[\/_.-]|$)/i.test(text)) return true;
+  return false;
+}
+
+function parsedRowMetadata(row) {
+  try {
+    const meta = row && row.metadata;
+    if (!meta) return null;
+    return typeof meta === 'string' ? JSON.parse(meta) : meta;
+  } catch (_) {
+    return null;
+  }
+}
+
+function rowReferencesImxThumbnail(row) {
+  const meta = parsedRowMetadata(row);
+  const values = [
+    row && row.url,
+    row && row.source_url,
+    meta && meta.webdl_input_url,
+    meta && meta.webdl_media_url,
+    meta && meta.webdl_direct_hint,
+    meta && meta.url,
+    meta && meta.source_url,
+    meta && meta.final_url,
+    meta && meta.resolved_url,
+    meta && meta.external_metadata && meta.external_metadata.source_url,
+    meta && meta.external_metadata && meta.external_metadata.url,
+    meta && meta.external_metadata && meta.external_metadata.final_url,
+    meta && meta.external_metadata && meta.external_metadata.resolved_url,
+    meta && meta.webdl_external_metadata && meta.webdl_external_metadata.source_url,
+    meta && meta.webdl_external_metadata && meta.webdl_external_metadata.url,
+    meta && meta.webdl_external_metadata && meta.webdl_external_metadata.final_url,
+    meta && meta.webdl_external_metadata && meta.webdl_external_metadata.resolved_url,
+  ];
+  try {
+    if (/https?:\/\/(?:[^/]+\.)?image\.imx\.to\/u\/t\//i.test(JSON.stringify(meta || {}))) return true;
+  } catch (_) {}
+  return values.some((value) => /https?:\/\/(?:[^/]+\.)?image\.imx\.to\/u\/t\//i.test(String(value || '')));
+}
+
+function rowReferencesViprLowQualityImage(row) {
+  const meta = parsedRowMetadata(row);
+  const values = [
+    row && row.url,
+    row && row.source_url,
+    meta && meta.webdl_input_url,
+    meta && meta.webdl_media_url,
+    meta && meta.webdl_direct_hint,
+    meta && meta.url,
+    meta && meta.source_url,
+    meta && meta.final_url,
+    meta && meta.resolved_url,
+  ];
+  try {
+    if (/https?:\/\/(?:[^/]+\.)?vipr\.im\/i\/[^/]+\/[^/?#]+\.jpe?g\/\d{1,3}\.jpe?g/i.test(JSON.stringify(meta || {}))) return true;
+  } catch (_) {}
+  return values.some((value) => /https?:\/\/(?:[^/]+\.)?vipr\.im\/i\/[^/]+\/[^/?#]+\.jpe?g\/\d{1,3}\.jpe?g/i.test(String(value || '')));
+}
+
+function mediaFileLooksLikeHotlinkPlaceholder(filePath, row) {
+  try {
+    const ext = fileExt(filePath, row && row.format, row);
+    if (!IMAGE_EXTS.includes(ext)) return false;
+    const st = fs.statSync(filePath);
+    if (!st.isFile() || st.size <= 0 || st.size > 32 * 1024) return false;
+    const hash = crypto.createHash('md5').update(fs.readFileSync(filePath)).digest('hex');
+    return KNOWN_BAD_IMAGE_HASHES.has(hash);
+  } catch (_) {
+    return false;
+  }
+}
+
 function isAuxMediaPath(value) {
   return AUX_RELPATH_PATTERN.test(String(value || ''));
 }
@@ -643,6 +748,7 @@ function isTempMediaPath(value) {
 function isGalleryMediaCandidate(row, { requireThumbReady = false } = {}) {
   const ext = fileExt(row.filepath, row.format, row);
   if (!DOWNLOAD_EXTS.includes(ext)) return false;
+  if (isKnownGalleryJunkRow(row)) return false;
   if (isTempMediaPath(row.filepath) || isAuxMediaPath(row.filepath)) return false;
   if (ARCHIVE_EXTS.includes(ext)) return false;
   if (requireThumbReady && row.is_thumb_ready !== true && !IMAGE_EXTS.includes(ext)) return false;
@@ -714,6 +820,9 @@ async function rowHasPlayableMedia(row) {
   const fp = mediaPathForRow(row);
   if (!fp) return false;
   if (!fs.existsSync(fp)) return false;
+  if (isKnownGalleryJunkRow(row) || mediaFileLooksLikeHotlinkPlaceholder(fp, row)) return false;
+  if (rowReferencesImxThumbnail(row)) return false;
+  if (rowReferencesViprLowQualityImage(row)) return false;
   if (!VIDEO_EXTS.includes(ext)) return true;
   if (row.is_thumb_ready === true) return true;
   return hasVideoStream(fp);
@@ -737,6 +846,12 @@ function galleryDedupeKey(row) {
   if (String(row.item_kind || '') === 'download') {
     const ext = fileExt(row.filepath, row.format);
     const isVideo = VIDEO_EXTS.includes(ext);
+    const exactUrlKey = canonicalGallerySourceUrl(row.url);
+    if (exactUrlKey) return `url:${exactUrlKey}`;
+
+    const fileKey = String(row.filepath || '').trim();
+    if (fileKey) return `file:${fileKey.toLowerCase()}`;
+
     if (isVideo) {
       const titleKey = String(row.title || row.filename || '')
         .trim()

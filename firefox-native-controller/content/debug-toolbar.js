@@ -5,7 +5,7 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-05-14-rightctrl-screenshot-dot';
+  const WEBDL_BUILD = 'debug-toolbar-2026-05-14-giga-restore-xvideos-fallback';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
@@ -3540,8 +3540,31 @@
           addLog(`XVideos downloadlink mislukt: ${lastError}`, 'warn');
         }
       }
-      showNotification(`XVideos download fout: ${lastError || 'geen werkende downloadlink'}`, true);
-      return { success: false, error: lastError || 'geen werkende downloadlink' };
+      try {
+        const pageUrl = pageCanonicalXvideosUrl(meta.url || window.location.href) || meta.url || window.location.href;
+        addLog(`XVideos browser-fetch mislukt; fallback naar server-queue: ${lastError || 'geen werkende downloadlink'}`, 'warn');
+        showNotification('XVideos: browser-fetch mislukt; server-queue probeert dezelfde video...', false);
+        const queued = await queueBatchDownloadRequest([pageUrl], {
+          ...meta,
+          url: pageUrl,
+          platform: 'xvideos',
+          channel: meta.channel || 'xvideos',
+          adapter: 'yt-dlp',
+          webdl_browser_fetch_error: lastError || 'geen werkende downloadlink',
+        }, { force: false, preferHub: true });
+        if (queued && queued.success) {
+          showNotification(`XVideos naar server-queue: ${queued.count || queued.total || 1} item(s)`);
+          addLog(`XVideos server-queue fallback gestart: ${queued.count || queued.total || 1} item(s)`);
+          return queued;
+        }
+        const queueError = queued && queued.error ? queued.error : 'server-queue fallback mislukt';
+        showNotification(`XVideos download fout: ${queueError}`, true);
+        return { success: false, error: queueError };
+      } catch (fallbackError) {
+        const fallbackMessage = fallbackError && fallbackError.message ? fallbackError.message : String(fallbackError);
+        showNotification(`XVideos download fout: ${lastError || fallbackMessage || 'geen werkende downloadlink'}`, true);
+        return { success: false, error: lastError || fallbackMessage || 'geen werkende downloadlink' };
+      }
     } finally {
       if (triggerBtn) {
         triggerBtn.textContent = oldLabel || '⬇️ Huidige media';

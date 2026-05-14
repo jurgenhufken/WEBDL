@@ -218,6 +218,9 @@ const IMPORTABLE_VIDEO_EXTS = new Set([
 const IMPORTABLE_IMAGE_EXTS = new Set([
   '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.avif', '.heic', '.heif']
 );
+const IMPORTABLE_ARCHIVE_EXTS = new Set([
+  '.zip', '.rar', '.7z', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.cbz', '.cbr'
+]);
 
 function isImageUrlLike(input) {
   try {
@@ -239,6 +242,58 @@ function isDirectVideoUrlLike(input) {
     const ext = String(path.extname(String(input || '').split(/[?#]/)[0]).toLowerCase() || '');
     return IMPORTABLE_VIDEO_EXTS.has(ext);
   }
+}
+
+function archiveExtFromUrlLike(input) {
+  const raw = String(input || '').trim();
+  if (!raw) return '';
+  const extFromName = (value) => {
+    const ext = String(path.extname(String(value || '').split(/[?#]/)[0]).toLowerCase() || '');
+    return IMPORTABLE_ARCHIVE_EXTS.has(ext) ? ext : '';
+  };
+  try {
+    const u = new URL(raw);
+    const pathExt = extFromName(decodeURIComponent(String(u.pathname || '')));
+    if (pathExt) return pathExt;
+    const filename = u.searchParams.get('filename') || u.searchParams.get('file') || '';
+    const queryExt = extFromName(filename);
+    if (queryExt) return queryExt;
+    const contentType = String(u.searchParams.get('content_type') || '').toLowerCase();
+    if (/rar|zip|7z|x-tar|gzip|bzip2|xz/.test(contentType)) return '.archive';
+  } catch (e) {
+    const rawExt = extFromName(raw);
+    if (rawExt) return rawExt;
+    const m = raw.match(/[?&](?:filename|file)=([^&#]+)/i);
+    if (m && m[1]) {
+      const queryExt = extFromName(decodeURIComponent(m[1]));
+      if (queryExt) return queryExt;
+    }
+  }
+  return '';
+}
+
+function archiveExtFromMetadata(metadata) {
+  let meta = metadata;
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch (e) { meta = null; }
+  }
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return '';
+  const keys = [
+    'filename', 'file_name', 'name', 'title',
+    'url', 'webdl_input_url', 'webdl_media_url', 'webdl_resolved_url',
+    'source_url', 'webdl_direct_hint'
+  ];
+  for (const key of keys) {
+    const ext = archiveExtFromUrlLike(meta[key]);
+    if (ext) return ext;
+  }
+  const contentType = String(meta.content_type || meta.contentType || meta.mime || meta.mime_type || '').toLowerCase();
+  if (/rar|zip|7z|x-tar|gzip|bzip2|xz/.test(contentType)) return '.archive';
+  return '';
+}
+
+function isArchiveDownloadLike(url, metadata) {
+  return !!(archiveExtFromUrlLike(url) || archiveExtFromMetadata(metadata));
 }
 
 function isImageHostPageUrlLike(input) {
@@ -2722,10 +2777,15 @@ function metadataReferencesInputUrl(metadata, inputUrl) {
 async function findReusableDownloadForUrl(inputUrl, options = {}) {
   const excludeId = Number(options && options.excludeId);
   const shouldExclude = Number.isFinite(excludeId) && excludeId > 0;
+  const includeMetadata = options && options.includeMetadata === false ? false : true;
   const direct = shouldExclude ?
     await findReusableDownloadByUrlExcludingId.get(inputUrl, excludeId) :
     await findReusableDownloadByUrl.get(inputUrl);
   if (direct && direct.id) return direct;
+
+  const raw = String(inputUrl || '').trim();
+  const sourceRef = await findReusableDownloadBySourceRef.get(raw, raw);
+  if (sourceRef && sourceRef.id && (!shouldExclude || Number(sourceRef.id) !== excludeId)) return sourceRef;
 
   const k2sId = keep2ShareFileIdFromUrl(inputUrl);
   if (k2sId) {
@@ -2736,8 +2796,7 @@ async function findReusableDownloadForUrl(inputUrl, options = {}) {
     if (existingK2s && existingK2s.id) return existingK2s;
   }
 
-  const raw = String(inputUrl || '').trim();
-  if (raw.length >= 12) {
+  if (includeMetadata && raw.length >= 12) {
     const candidates = shouldExclude ?
       await findReusableDownloadMetadataCandidatesExcludingId.all(excludeId, `%${raw.toLowerCase()}%`) :
       await findReusableDownloadMetadataCandidates.all(`%${raw.toLowerCase()}%`);
@@ -2783,7 +2842,7 @@ async function ensureExistingArchivePostprocessed(row, reason = 'duplicate') {
     console.log(`[archive] bestaande archive postprocess #${id} (${reason}): ${filepath}`);
     await updateDownloadStatus.run('postprocessing', 95, null, id);
     const extracted = await extractArchiveDownloadFiles(id, filepath, path.dirname(filepath));
-    try { await db.prepare("UPDATE downloads SET status = 'completed', progress = 100, is_thumb_ready = true, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(id); } catch (e) { }
+    try { await db.prepare("UPDATE downloads SET status = 'completed', progress = 100, is_thumb_ready = false, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(id); } catch (e) { }
     console.log(`[archive] bestaande archive #${id}: ${extracted.mediaCount || 0} media geindexeerd`);
   } catch (e) {
     console.log(`[archive] bestaande archive postprocess fout #${id}: ${e && e.message ? e.message : String(e)}`);
@@ -5669,9 +5728,11 @@ function activeLaneCount(lane) {
   return n;
 }
 
-function detectLane(platform, url = '') {
+function detectLane(platform, url = '', metadata = null) {
   const p = String(platform || '').toLowerCase();
   const u = String(url || '').toLowerCase();
+
+  if (isArchiveDownloadLike(url, metadata)) return 'heavy';
 
   // Direct transfers without postprocessing must never sit behind video jobs.
   if (isImageUrlLike(u) || isDirectVideoUrlLike(u) || isImageHostPageUrlLike(u)) return 'light';
@@ -5719,7 +5780,7 @@ function deriveEarlyThumbnail(url, platform) {
 }
 
 async function enqueueDownloadJob(downloadId, url, platform, channel, title, metadata, laneOverride) {
-  const lane = laneOverride || detectLane(platform, url);
+  const lane = laneOverride || detectLane(platform, url, metadata);
   const earlyThumb = deriveEarlyThumbnail(url, platform);
   setDownloadActivityContext(downloadId, { url, platform, channel, title, lane, thumbnail: earlyThumb });
   jobLane.set(downloadId, lane);
@@ -6037,7 +6098,7 @@ function scheduleAutoRehydrate() {
         const channel = ctx.channel;
         const title = ctx.title;
         const metadata = ctx.metadata;
-        const lane = detectLane(platform, url);
+        const lane = detectLane(platform, url, metadata);
         if (lane === 'heavy' && !needHeavy) continue;
         if (lane === 'light' && !needLight) continue;
         if (lane === 'batch' && !needBatch) continue;
@@ -6281,7 +6342,7 @@ async function rehydrateDownloadQueueWithMode(modeRaw, maxRowsRaw) {
         if (dbProg != null) initialProgress = dbProg;
       }
 
-      const lane = detectLane(platform, url);
+      const lane = detectLane(platform, url, metadata);
       queuedJobs.set(id, { downloadId: id, url, platform, channel, title, metadata, progress: initialProgress });
       jobLane.set(id, lane);
       jobPlatform.set(id, platform);
@@ -6371,7 +6432,7 @@ async function rehydrateDownloadQueue() {
         } catch (e) { /* ignore */ }
       }
 
-      const lane = detectLane(platform, url);
+      const lane = detectLane(platform, url, metadata);
       queuedJobs.set(id, { downloadId: id, url, platform, channel, title, metadata, progress: initialProgress });
       jobLane.set(id, lane);
       jobPlatform.set(id, platform);
@@ -9630,13 +9691,13 @@ expressApp.get('/status', async (req, res) => {
   // Pad with queued AND pending downloads if we have room (skip recordings)
   try {
     if (activeDownloadsList.length < 24 && (dbQueuedCount > 0 || dbPendingCount > 0)) {
-      const qrows = await db.prepare("SELECT id, url, thumbnail, platform, channel, title, status FROM downloads WHERE status IN ('queued', 'pending') AND url NOT LIKE 'recording:%' ORDER BY CASE status WHEN 'queued' THEN 0 WHEN 'pending' THEN 1 END, created_at ASC LIMIT 100").all();
+      const qrows = await db.prepare("SELECT id, url, thumbnail, platform, channel, title, status, metadata FROM downloads WHERE status IN ('queued', 'pending') AND url NOT LIKE 'recording:%' ORDER BY CASE status WHEN 'queued' THEN 0 WHEN 'pending' THEN 1 END, created_at ASC LIMIT 100").all();
       const existingIds = new Set(activeDownloadsList.map(a => Number(a.id)));
       let heavyPad = 0, lightPad = 0;
       for (const qr of qrows || []) {
         if (heavyPad >= 12 && lightPad >= 12) break;
         if (!existingIds.has(Number(qr.id)) && !activeProcIds.has(qr.id) && !startingJobs.has(qr.id)) {
-          const lane = detectLane(qr.platform, qr.url);
+          const lane = detectLane(qr.platform, qr.url, qr.metadata);
           if (lane === 'heavy' && heavyPad >= 12) continue;
           if (lane === 'light' && lightPad >= 12) continue;
           if (lane === 'heavy') heavyPad++; else lightPad++;
@@ -11859,7 +11920,7 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
     const allowRedditRerun = platform === 'reddit' && isRedditRollingTargetUrl(url);
     const allowPatreonRerun = platform === 'patreon' && (url.includes('/posts') || url.includes('patreon.com/c/'));
     const allowRerun = allowRedditRerun || allowPatreonRerun;
-    const reusable = await findReusableDownloadForUrl(url, { excludeId: downloadId });
+    const reusable = await findReusableDownloadForUrl(url, { excludeId: downloadId, includeMetadata: false });
     if (!forceDuplicates && reusable && reusable.id) {
       if (allowRerun && String(reusable.status || '') === 'completed') {
 
@@ -12670,6 +12731,12 @@ function upgradeKnownLowQualityMediaUrl(rawUrl) {
         u.pathname = p.replace(/\/thumbs\//i, '/images/');
         out = u.toString();
       }
+      if ((host === 'image.imx.to' || host.endsWith('.image.imx.to')) && /^\/u\/t\//i.test(p)) {
+        u.pathname = p.replace(/^\/u\/t\//i, '/u/i/');
+        out = u.toString();
+      }
+      const viprWrapper = viprWrapperUrlFromLowQualityImageUrl(u.toString());
+      if (viprWrapper) return viprWrapper;
       if ((host === 'vipr.im' || host.endsWith('.vipr.im')) && /^\/th\//i.test(p)) {
         const m = String(u.pathname || '').match(/^\/th\/([^/]+)\/([^/?#]+\.jpe?g)$/i);
         if (m && m[1] && m[2]) {
@@ -12684,6 +12751,23 @@ function upgradeKnownLowQualityMediaUrl(rawUrl) {
   }
 }
 
+function viprWrapperUrlFromLowQualityImageUrl(rawUrl) {
+  try {
+    const u = new URL(String(rawUrl || ''));
+    const host = String(u.hostname || '').toLowerCase().replace(/^www\./, '');
+    if (host !== 'vipr.im' && !host.endsWith('.vipr.im')) return '';
+    const m = String(u.pathname || '').match(/^\/i\/[^/]+\/([^/?#]+)\.jpe?g\/\d{1,3}\.jpe?g$/i);
+    if (!m || !m[1]) return '';
+    return `https://vipr.im/${encodeURIComponent(m[1])}`;
+  } catch (e) {
+    return '';
+  }
+}
+
+function isViprLowQualityImageUrl(rawUrl) {
+  return !!viprWrapperUrlFromLowQualityImageUrl(rawUrl);
+}
+
 function isLikelyThumbnailImageUrl(rawUrl) {
   try {
     const input = String(rawUrl || '').trim();
@@ -12692,6 +12776,8 @@ function isLikelyThumbnailImageUrl(rawUrl) {
     const host = String(u.hostname || '').toLowerCase();
     const p = String(u.pathname || '').toLowerCase();
     if (/^(?:thumbs?|thumbnails?)\d*\./i.test(host)) return true;
+    if ((host === 'image.imx.to' || host.endsWith('.image.imx.to')) && /^\/u\/t\//i.test(p)) return true;
+    if (isViprLowQualityImageUrl(input)) return true;
     if ((host === 'vipr.im' || host.endsWith('.vipr.im')) && /^\/th\//i.test(p)) return true;
     if ((host === 'pixhost.to' || host.endsWith('.pixhost.to')) && /\/thumbs\//i.test(p)) return true;
     if (/\/(?:thumb|thumbs|thumbnail|thumbnails|preview|previews|small|mini|square)\//i.test(p)) return true;
@@ -12856,6 +12942,7 @@ function isViprFullImageUrl(rawUrl) {
     const p = String(u.pathname || '');
     if (!(host === 'vipr.im' || host.endsWith('.vipr.im'))) return false;
     if (/^\/th\//i.test(p)) return false;
+    if (isViprLowQualityImageUrl(rawUrl)) return false;
     return /^\/i\/[^/]+\/[^/]+/i.test(p) && /\.(?:jpe?g|png|gif|webp|bmp)(?:$|[/?#])/i.test(p);
   } catch (e) {
     return false;
@@ -13152,6 +13239,11 @@ function uniqueFilePath(filepath, suffix) {
 function filenameFromUrl(url, fallback = 'download.bin') {
   try {
     const u = new URL(String(url || ''));
+    const queryName = String(u.searchParams.get('filename') || '').trim();
+    if (queryName) {
+      const safeQueryName = sanitizeName(path.basename(queryName));
+      if (safeQueryName) return safeQueryName;
+    }
     if (String(u.pathname || '').toLowerCase() === '/attachment.php') {
       const attachmentId = String(u.searchParams.get('attachmentid') || '').trim();
       if (attachmentId) {
@@ -13243,7 +13335,13 @@ function resolveDirectDownloadFilename(url, fallback, rawHeaders) {
   const hinted = filenameFromContentDisposition(headers['content-disposition']);
   let filename = hinted || filenameFromUrl(url, fallback);
   const ext = String(path.extname(filename || '') || '').replace('.', '').toLowerCase();
-  const contentExt = extensionFromContentType(headers['content-type']);
+  let contentExt = extensionFromContentType(headers['content-type']);
+  if (!contentExt) {
+    try {
+      const u = new URL(String(url || ''));
+      contentExt = extensionFromContentType(u.searchParams.get('content_type') || '');
+    } catch (e) { }
+  }
   if ((!ext || ext === 'php' || ext === 'bin') && contentExt) {
     const stem = sanitizeName(path.basename(filename || fallback, path.extname(filename || fallback)) || `download_${Date.now()}`);
     filename = `${stem}.${contentExt}`;
@@ -13284,11 +13382,23 @@ function rejectInvalidDirectDownload(url, filepath, filename, rawHeaders) {
   return '';
 }
 
-const DIRECT_ARCHIVE_EXTS = new Set(['.zip', '.rar', '.7z', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.cbz', '.cbr']);
-
 function isArchiveFilePath(inputPath) {
   const ext = String(path.extname(String(inputPath || '')).toLowerCase() || '');
-  return DIRECT_ARCHIVE_EXTS.has(ext);
+  if (IMPORTABLE_ARCHIVE_EXTS.has(ext)) return true;
+  try {
+    if (!inputPath || !fs.existsSync(inputPath)) return false;
+    const fd = fs.openSync(inputPath, 'r');
+    try {
+      const buf = Buffer.alloc(8);
+      const n = fs.readSync(fd, buf, 0, buf.length, 0);
+      if (n >= 4 && buf[0] === 0x50 && buf[1] === 0x4b && [0x03, 0x05, 0x07].includes(buf[2]) && [0x04, 0x06, 0x08].includes(buf[3])) return true;
+      if (n >= 7 && buf[0] === 0x52 && buf[1] === 0x61 && buf[2] === 0x72 && buf[3] === 0x21 && buf[4] === 0x1a && buf[5] === 0x07 && (buf[6] === 0x00 || buf[6] === 0x01)) return true;
+      if (n >= 6 && buf[0] === 0x37 && buf[1] === 0x7a && buf[2] === 0xbc && buf[3] === 0xaf && buf[4] === 0x27 && buf[5] === 0x1c) return true;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (e) { }
+  return false;
 }
 
 function archiveEntryLooksUnsafe(entry) {
@@ -13659,7 +13769,7 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
               metaObj.archive_media_count = archiveExtract.mediaCount || 0;
               metaObj.archive_media_bytes = archiveExtract.mediaBytes || 0;
               try {
-                await db.prepare("UPDATE downloads SET is_thumb_ready = true WHERE id = ?").run(downloadId);
+                await db.prepare("UPDATE downloads SET is_thumb_ready = false WHERE id = ?").run(downloadId);
               } catch (e) { }
             } catch (e) {
               await updateDownloadStatus.run('error', 0, `Archive uitpakken faalde: ${e && e.message ? e.message : String(e)}`, downloadId);
@@ -19007,37 +19117,42 @@ async function startServer() {
         console.warn(`⚠️ [4K-Watcher] Watch mislukt: ${watchDir}: ${e.message}`);
       }
     }
-    // Startup scan: index any existing unindexed files retroactively
-    setTimeout(async () => {
-      let startupIndexed = 0;
-      for (const watchDir of _4K_WATCH_DIRS) {
-        if (!fs.existsSync(watchDir)) continue;
-        try {
-          const scanDir = (dir, depth = 0) => {
-            if (depth > 4) return [];
-            const results = [];
-            const entries = fs.readdirSync(dir, { withFileTypes: true });
-            for (const e of entries) {
-              if (e.name.startsWith('.')) continue;
-              const full = path.join(dir, e.name);
-              if (e.isDirectory()) results.push(...scanDir(full, depth + 1));
-              else if (e.isFile()
-                       && _4K_MEDIA_EXTS.has(path.extname(e.name).toLowerCase())
-                       && !_4K_SKIP_BASENAME_RE.test(e.name)) {
-                results.push(full);
+    // Startup scan is opt-in: a recursive scan over external volumes can block
+    // the simple-server event loop and make the Firefox extension look offline.
+    if (/^(1|true|yes|on)$/i.test(String(process.env.WEBDL_4K_WATCH_STARTUP_SCAN || '0'))) {
+      setTimeout(async () => {
+        let startupIndexed = 0;
+        for (const watchDir of _4K_WATCH_DIRS) {
+          if (!fs.existsSync(watchDir)) continue;
+          try {
+            const scanDir = (dir, depth = 0) => {
+              if (depth > 4) return [];
+              const results = [];
+              const entries = fs.readdirSync(dir, { withFileTypes: true });
+              for (const e of entries) {
+                if (e.name.startsWith('.')) continue;
+                const full = path.join(dir, e.name);
+                if (e.isDirectory()) results.push(...scanDir(full, depth + 1));
+                else if (e.isFile()
+                         && _4K_MEDIA_EXTS.has(path.extname(e.name).toLowerCase())
+                         && !_4K_SKIP_BASENAME_RE.test(e.name)) {
+                  results.push(full);
+                }
               }
+              return results;
+            };
+            const allFiles = scanDir(watchDir);
+            for (const fp of allFiles) {
+              await index4kFile(fp);
+              startupIndexed++;
             }
-            return results;
-          };
-          const allFiles = scanDir(watchDir);
-          for (const fp of allFiles) {
-            await index4kFile(fp);
-            startupIndexed++;
-          }
-        } catch (e) { }
-      }
-      if (startupIndexed > 0) console.log(`📥 [4K-Watcher] Startup scan: ${startupIndexed} bestanden gecontroleerd`);
-    }, 3000);
+          } catch (e) { }
+        }
+        if (startupIndexed > 0) console.log(`📥 [4K-Watcher] Startup scan: ${startupIndexed} bestanden gecontroleerd`);
+      }, 3000);
+    } else {
+      console.log('📥 [4K-Watcher] Startup scan overgeslagen (WEBDL_4K_WATCH_STARTUP_SCAN=0)');
+    }
     // ── einde 4K Downloader watcher ───────────────────────────────────
 
   });

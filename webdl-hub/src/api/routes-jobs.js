@@ -95,8 +95,8 @@ function normalizeVipergirlsThreadUrl(url, { wholeThread = true } = {}) {
       u.hostname = 'vipergirls.to';
     }
     if (u.hostname.toLowerCase().replace(/^www\./, '') === 'vipergirls.to') {
-      u.pathname = String(u.pathname || '').replace(/^\/threads\/threads\//i, '/threads/');
-      const m = u.pathname.match(/^\/threads\/(\d+)(-[^/?#]+)?(?:\/page\d+)?\/?$/i);
+      const m = String(u.pathname || '').match(/\/threads\/(?:threads\/)*(\d+)(-[^/?#]+)?(?:\/(?:threads\/(?:threads\/)*)?\d+(?:-[^/?#]+)?)*?(?:\/page\d+)?\/?$/i)
+        || String(u.pathname || '').match(/\/threads\/(?:threads\/)*(\d+)(-[^/?#]+)?/i);
       if (m && wholeThread) {
         u.pathname = `/threads/${m[1]}${m[2] || ''}`;
         u.search = '';
@@ -106,6 +106,15 @@ function normalizeVipergirlsThreadUrl(url, { wholeThread = true } = {}) {
     return u.toString();
   } catch {}
   return String(url || '');
+}
+
+function normalizeSourceContext(ctx) {
+  if (!ctx || typeof ctx !== 'object') return null;
+  const out = { ...ctx };
+  if (out.url && /(?:vipergirls\.to|viper\.to)\/threads\//i.test(String(out.url))) {
+    out.url = normalizeVipergirlsThreadUrl(out.url, { wholeThread: true });
+  }
+  return out;
 }
 
 function normalizeTranslatedProxyUrl(url) {
@@ -187,18 +196,59 @@ function isRefreshableCollectionUrl(url, adapterName = '') {
   }
 }
 
+function isArchiveDownloadUrl(url) {
+  try {
+    const u = new URL(String(url || '').trim());
+    return /\.(?:zip|rar|7z|tar|gz|tgz|bz2|xz|cbz|cbr)(?:$|[?#])/i.test(u.pathname || '');
+  } catch (_) {
+    return false;
+  }
+}
+
+function isFileLockerUrl(url) {
+  try {
+    const host = new URL(String(url || '').trim()).hostname.replace(/^www\./i, '').toLowerCase();
+    return [
+      'filejoker.net',
+      'fileboom.me',
+      'fboom.me',
+      'rapidgator.net',
+      'katfile.com',
+      'tezfiles.com',
+      'filespace.com',
+      'uploadgig.com',
+      'uploaded.net',
+      'nitroflare.com',
+    ].some((domain) => host === domain || host.endsWith(`.${domain}`));
+  } catch (_) {
+    return false;
+  }
+}
+
 async function withUrlDedupeLock(repo, url, fn) {
   const key = canonicalDedupeUrl(url);
-  const client = await repo.pool.connect();
-  try {
-    await client.query('SELECT pg_advisory_lock(hashtextextended($1, 0))', [key]);
-    return await fn();
-  } finally {
+  const deadline = Date.now() + 8000;
+  for (;;) {
+    const client = await repo.pool.connect();
+    let locked = false;
     try {
-      await client.query('SELECT pg_advisory_unlock(hashtextextended($1, 0))', [key]);
+      const result = await client.query('SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS locked', [key]);
+      const lockValue = result && result.rows && result.rows[0] ? result.rows[0].locked : undefined;
+      locked = lockValue === undefined ? true : lockValue === true || lockValue === 't';
+      if (locked) {
+        try {
+          return await fn();
+        } finally {
+          await client.query('SELECT pg_advisory_unlock(hashtextextended($1, 0))', [key]);
+        }
+      }
     } finally {
       client.release();
     }
+    if (Date.now() >= deadline) {
+      throw Object.assign(new Error('Dedupe-lock is nog bezet; probeer dezelfde URL zo opnieuw'), { httpStatus: 409 });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100 + Math.floor(Math.random() * 150)));
   }
 }
 
@@ -339,19 +389,19 @@ function pickSourceContextForUrl(options, url) {
     ? options.webdl_source_contexts
     : null;
   const fallback = options && options.sourceContext && typeof options.sourceContext === 'object'
-    ? options.sourceContext
+    ? normalizeSourceContext(options.sourceContext)
     : null;
   if (!map) return fallback;
 
   const raw = String(url || '').trim();
   const normalized = sourceContextLookupKey(raw);
   for (const key of [raw, normalized]) {
-    if (key && map[key] && typeof map[key] === 'object') return map[key];
+    if (key && map[key] && typeof map[key] === 'object') return normalizeSourceContext(map[key]);
   }
 
   for (const [key, ctx] of Object.entries(map)) {
     if (!ctx || typeof ctx !== 'object') continue;
-    if (sourceContextLookupKey(key) === normalized) return ctx;
+    if (sourceContextLookupKey(key) === normalized) return normalizeSourceContext(ctx);
   }
   return fallback;
 }
@@ -488,6 +538,386 @@ function hasKeep2ShareApiAuthConfigured() {
   return getKeep2ShareAuthPreflight().configured;
 }
 
+function simpleServerBaseUrl() {
+  return String(
+    process.env.WEBDL_SIMPLE_SERVER_URL ||
+    process.env.SIMPLE_SERVER_URL ||
+    'http://127.0.0.1:35729'
+  ).trim().replace(/\/+$/, '');
+}
+
+function keep2ShareRemotePreflightFailure(preflight) {
+  const checks = Array.isArray(preflight && preflight.checks) ? preflight.checks : [];
+  const fileResolve = checks.find((check) => check && check.name === 'file_resolve');
+  const reason = fileResolve && fileResolve.reason
+    ? String(fileResolve.reason)
+    : preflight && preflight.remoteAcceptance && preflight.remoteAcceptance.status
+      ? `remote status ${preflight.remoteAcceptance.status}`
+      : 'K2S file preflight rejected';
+  return redactSecretText(reason);
+}
+
+async function assertKeep2ShareRemotePreflight(url, { timeoutMs = 15000 } = {}) {
+  const endpoint = `${simpleServerBaseUrl()}/api/keep2share/preflight?url=${encodeURIComponent(url)}`;
+  let res;
+  try {
+    const signal = typeof AbortSignal !== 'undefined' && AbortSignal.timeout
+      ? AbortSignal.timeout(Math.max(1000, timeoutMs))
+      : undefined;
+    res = await fetch(endpoint, { signal });
+  } catch (e) {
+    throw Object.assign(
+      new Error(`Keep2Share preflight kon simple-server niet bereiken: ${e && e.message ? e.message : String(e)}`),
+      { httpStatus: 503 },
+    );
+  }
+  let data = null;
+  try { data = await res.json(); } catch (_) {}
+  if (!res.ok) {
+    throw Object.assign(
+      new Error(`Keep2Share preflight faalde via simple-server: HTTP ${res.status}`),
+      { httpStatus: 503 },
+    );
+  }
+  if (!data || !data.remoteAcceptance || data.remoteAcceptance.accepted !== true) {
+    throw Object.assign(
+      new Error(`Keep2Share file is niet resolvebaar met huidige auth: ${keep2ShareRemotePreflightFailure(data)}`),
+      { httpStatus: 409, preflight: data },
+    );
+  }
+  return data;
+}
+
+function parsePositiveInt(value, fallback = null) {
+  const n = Number.parseInt(String(value || ''), 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function keep2ShareFileIdFromUrl(url) {
+  try {
+    const u = new URL(String(url || ''));
+    const host = String(u.hostname || '').toLowerCase().replace(/^www\./, '');
+    if (!(host === 'keep2share.cc' || host === 'k2s.cc' || host === 'k2s.io' || host.endsWith('.keep2share.cc') || host.endsWith('.k2s.cc') || host.endsWith('.k2s.io'))) {
+      return '';
+    }
+    const m = String(u.pathname || '').match(/^\/file\/([^/?#]+)/i);
+    return m && m[1] ? decodeURIComponent(m[1]).trim().toLowerCase() : '';
+  } catch (_) {
+    return '';
+  }
+}
+
+function redactSecretText(value) {
+  return String(value || '')
+    .replace(/((?:auth|token|cookie|password|secret|x[_-]?bc)[^=&\s:]{0,32}\s*[=:]\s*)[^\s&,"'}]+/ig, '$1[redacted]')
+    .replace(/(bearer\s+)[a-z0-9._~+/=-]+/ig, '$1[redacted]');
+}
+
+function redactSecrets(value, depth = 0) {
+  if (value === null || value === undefined) return value;
+  if (depth > 8) return '[redacted-depth]';
+  if (typeof value === 'string') return redactSecretText(value);
+  if (typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map((item) => redactSecrets(item, depth + 1));
+  const out = {};
+  for (const [key, val] of Object.entries(value)) {
+    if (/(auth|token|cookie|password|secret|x[_-]?bc)/i.test(key)) {
+      out[key] = '[redacted]';
+    } else {
+      out[key] = redactSecrets(val, depth + 1);
+    }
+  }
+  return out;
+}
+
+function parseJsonField(value) {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(String(value));
+  } catch (_) {
+    return null;
+  }
+}
+
+function hubJobIdFromMetadata(metadata) {
+  const parsed = parseJsonField(metadata);
+  const direct = parsed && parsePositiveInt(parsed.hub_job_id);
+  if (direct) return direct;
+  const m = String(metadata || '').match(/"hub_job_id"\s*:\s*"?([0-9]+)"?/);
+  return m ? parsePositiveInt(m[1]) : null;
+}
+
+function mediaExtFromPath(value) {
+  const m = String(value || '').toLowerCase().match(/\.([a-z0-9]{2,5})(?:$|[?#])/);
+  return m ? m[1] : '';
+}
+
+function isImageExt(ext) {
+  return /^(jpe?g|png|webp|gif|avif|bmp|tiff?)$/i.test(String(ext || ''));
+}
+
+function isMediaExt(ext) {
+  return /^(jpe?g|png|webp|gif|avif|bmp|tiff?|mp4|webm|mkv|mov|m4v|avi|wmv|flv|ts|m2ts|mpg|mpeg|ogv|3gp|3g2)$/i.test(String(ext || ''));
+}
+
+function uniqNumbers(values) {
+  return Array.from(new Set((values || []).map((value) => Number(value)).filter((value) => Number.isFinite(value) && value > 0)));
+}
+
+function sanitizeJob(row) {
+  if (!row) return null;
+  return {
+    ...row,
+    options: redactSecrets(parseJsonField(row.options) || row.options || {}),
+    error: row.error ? redactSecretText(row.error) : row.error,
+  };
+}
+
+function sanitizeDownload(row) {
+  if (!row) return null;
+  return {
+    ...row,
+    metadata: redactSecrets(parseJsonField(row.metadata) || row.metadata || null),
+    error: row.error ? redactSecretText(row.error) : row.error,
+  };
+}
+
+function galleryVisibilityForDownload(download, files) {
+  const relatedFiles = (files || []).filter((file) => Number(file.download_id) === Number(download.id));
+  const directExt = mediaExtFromPath(download.filepath || download.filename || download.url);
+  const hasDirectMedia = Boolean(download.filepath && isMediaExt(directExt));
+  const directReady = hasDirectMedia && (download.is_thumb_ready === true || isImageExt(directExt));
+  const visibleFiles = relatedFiles.filter((file) => {
+    const ext = mediaExtFromPath(file.relpath);
+    return isMediaExt(ext) && (file.is_thumb_ready === true || download.is_thumb_ready === true || isImageExt(ext));
+  });
+  const importableFiles = relatedFiles.filter((file) => {
+    const ext = mediaExtFromPath(file.relpath);
+    return file.relpath && isMediaExt(ext) && (file.filesize === null || file.filesize === undefined || Number(file.filesize) > 0);
+  });
+  const reasons = [];
+  if (download.status !== 'completed') reasons.push(`download_status_${download.status || 'unknown'}`);
+  if (!hasDirectMedia && !importableFiles.length) reasons.push('no_importable_media_path');
+  if (download.status === 'completed' && hasDirectMedia && !directReady && !visibleFiles.length) reasons.push('thumb_not_ready_for_default_gallery_filter');
+  if (download.status === 'completed' && relatedFiles.length && !visibleFiles.length && !directReady) reasons.push('download_files_not_thumb_ready');
+  if (download.status === 'completed' && !relatedFiles.length && !hasDirectMedia) reasons.push('no_download_files_indexed');
+  return {
+    downloadId: download.id,
+    defaultGalleryVisible: download.status === 'completed' && (directReady || visibleFiles.length > 0),
+    hasDirectMedia,
+    directThumbReady: directReady,
+    indexedFiles: relatedFiles.length,
+    importableFiles: importableFiles.length,
+    visibleFiles: visibleFiles.length,
+    reasons,
+  };
+}
+
+function lifecycleSummary({ jobs, downloads, visibility, mismatches }) {
+  if (!jobs.length && !downloads.length) {
+    return { state: 'not_found', reason: 'Geen hub-job of simple-server download gevonden voor deze invoer.' };
+  }
+  if (mismatches.length) {
+    return { state: 'mismatch', reason: mismatches[0].message };
+  }
+  if (jobs.some((job) => job.status === 'running') || downloads.some((download) => ['pending', 'queued', 'downloading', 'postprocessing'].includes(download.status))) {
+    return { state: 'active', reason: 'Er is nog actieve hub- of simple-server lifecycle-status.' };
+  }
+  if (jobs.some((job) => job.status === 'failed') || downloads.some((download) => download.status === 'error')) {
+    return { state: 'failed', reason: 'De lifecycle eindigt in een foutstatus; zie hub logs of download.error.' };
+  }
+  if (visibility.some((item) => item.defaultGalleryVisible)) {
+    return { state: 'visible', reason: 'Minstens een gekoppelde completed download is zichtbaar onder de standaard galleryfilters.' };
+  }
+  if (downloads.some((download) => download.status === 'completed')) {
+    return { state: 'completed_hidden', reason: 'Er is een completed download, maar de standaard galleryfilter toont hem waarschijnlijk niet.' };
+  }
+  return { state: 'known', reason: 'Er is lifecycle-context gevonden, zonder actieve, failed of zichtbaar-completed conclusie.' };
+}
+
+async function diagnoseLifecycle(repo, { jobId = null, downloadId = null, url = '', limit = 8 } = {}) {
+  const schema = repo.schema;
+  const jobsTable = `"${schema}".jobs`;
+  const logsTable = `"${schema}".logs`;
+  const filesTable = `"${schema}".files`;
+  const safeLimit = Math.max(1, Math.min(50, Number(limit) || 8));
+  const k2sId = keep2ShareFileIdFromUrl(url);
+
+  const jobWhere = [];
+  const jobParams = [];
+  if (jobId) {
+    jobParams.push(jobId);
+    jobWhere.push(`id = $${jobParams.length}`);
+  }
+  if (downloadId) {
+    jobParams.push(String(downloadId));
+    jobWhere.push(`options->>'simple_server_download_id' = $${jobParams.length}`);
+  }
+  if (url) {
+    jobParams.push(url);
+    const urlParam = jobParams.length;
+    if (k2sId) {
+      jobParams.push(k2sId);
+      jobWhere.push(`(url = $${urlParam} OR substring(lower(url) from '(?:keep2share\\.cc|k2s\\.cc|k2s\\.io)/file/([^/?#]+)') = $${jobParams.length})`);
+    } else {
+      jobWhere.push(`url = $${urlParam}`);
+    }
+  }
+  jobParams.push(safeLimit);
+  const jobs = jobWhere.length
+    ? (await repo.pool.query(
+      `SELECT * FROM ${jobsTable}
+        WHERE ${jobWhere.map((part) => `(${part})`).join(' OR ')}
+        ORDER BY id DESC
+        LIMIT $${jobParams.length}`,
+      jobParams,
+    )).rows
+    : [];
+
+  const simpleIds = uniqNumbers([
+    downloadId,
+    ...jobs.map((job) => job.options && (parseJsonField(job.options) || job.options).simple_server_download_id),
+  ]);
+  const jobIds = uniqNumbers([jobId, ...jobs.map((job) => job.id)]);
+  const jobUrls = Array.from(new Set(jobs.map((job) => String(job.url || '').trim()).filter(Boolean))).slice(0, 25);
+
+  const downloadWhere = [];
+  const downloadParams = [];
+  if (simpleIds.length) {
+    downloadParams.push(simpleIds);
+    downloadWhere.push(`d.id = ANY($${downloadParams.length}::bigint[])`);
+  }
+  if (jobIds.length) {
+    downloadParams.push(jobIds);
+    downloadWhere.push(`NULLIF(substring(COALESCE(d.metadata, '') from '"hub_job_id"\\s*:\\s*"?([0-9]+)"?'), '')::bigint = ANY($${downloadParams.length}::bigint[])`);
+  }
+  if (url) {
+    downloadParams.push(url);
+    const urlParam = downloadParams.length;
+    if (k2sId) {
+      downloadParams.push(k2sId);
+      downloadWhere.push(`(d.source_url = $${urlParam} OR d.url = $${urlParam}
+        OR substring(lower(d.source_url) from '(?:keep2share\\.cc|k2s\\.cc|k2s\\.io)/file/([^/?#]+)') = $${downloadParams.length}
+        OR substring(lower(d.url) from '(?:keep2share\\.cc|k2s\\.cc|k2s\\.io)/file/([^/?#]+)') = $${downloadParams.length})`);
+    } else {
+      downloadWhere.push(`(d.source_url = $${urlParam} OR d.url = $${urlParam})`);
+    }
+  }
+  if (jobUrls.length) {
+    downloadParams.push(jobUrls);
+    downloadWhere.push(`(d.source_url = ANY($${downloadParams.length}::text[]) OR d.url = ANY($${downloadParams.length}::text[]))`);
+  }
+  downloadParams.push(safeLimit);
+  const downloads = downloadWhere.length
+    ? (await repo.pool.query(
+      `SELECT d.id, d.url, d.source_url, d.platform, d.channel, d.title, d.status,
+              d.filepath, d.filename, d.filesize, d.format, d.is_thumb_ready,
+              d.error, d.metadata, d.created_at, d.updated_at, d.finished_at
+         FROM public.downloads d
+        WHERE ${downloadWhere.map((part) => `(${part})`).join(' OR ')}
+        ORDER BY d.id DESC
+        LIMIT $${downloadParams.length}`,
+      downloadParams,
+    )).rows
+    : [];
+
+  const metadataJobIds = uniqNumbers(downloads.map((download) => hubJobIdFromMetadata(download.metadata)));
+  const missingJobIds = metadataJobIds.filter((id) => !jobIds.includes(id));
+  let extraJobs = [];
+  if (missingJobIds.length) {
+    extraJobs = (await repo.pool.query(
+      `SELECT * FROM ${jobsTable}
+        WHERE id = ANY($1::bigint[])
+        ORDER BY id DESC
+        LIMIT $2`,
+      [missingJobIds, safeLimit],
+    )).rows;
+  }
+  const allJobs = [...jobs, ...extraJobs].filter((job, index, arr) => arr.findIndex((other) => Number(other.id) === Number(job.id)) === index);
+  const allJobIds = uniqNumbers(allJobs.map((job) => job.id));
+  const allDownloadIds = uniqNumbers(downloads.map((download) => download.id));
+
+  const [logs, files, downloadFiles] = await Promise.all([
+    allJobIds.length
+      ? repo.pool.query(
+        `SELECT * FROM ${logsTable}
+          WHERE job_id = ANY($1::bigint[])
+          ORDER BY ts DESC
+          LIMIT $2`,
+        [allJobIds, Math.min(200, safeLimit * 25)],
+      ).then((result) => result.rows)
+      : [],
+    allJobIds.length
+      ? repo.pool.query(
+        `SELECT * FROM ${filesTable}
+          WHERE job_id = ANY($1::bigint[])
+          ORDER BY id DESC
+          LIMIT $2`,
+        [allJobIds, Math.min(200, safeLimit * 25)],
+      ).then((result) => result.rows)
+      : [],
+    allDownloadIds.length
+      ? repo.pool.query(
+        `SELECT id, download_id, relpath, filesize, is_thumb_ready, created_at, updated_at, mtime_ms
+           FROM public.download_files
+          WHERE download_id = ANY($1::bigint[])
+          ORDER BY id DESC
+          LIMIT $2`,
+        [allDownloadIds, Math.min(300, safeLimit * 50)],
+      ).then((result) => result.rows)
+      : [],
+  ]);
+
+  const sanitizedJobs = allJobs.map(sanitizeJob);
+  const sanitizedDownloads = downloads.map(sanitizeDownload);
+  const sanitizedLogs = logs.map((log) => ({ ...log, msg: redactSecretText(log.msg) }));
+  const sanitizedFiles = files.map((file) => ({ ...file, path: redactSecretText(file.path) }));
+  const sanitizedDownloadFiles = downloadFiles.map((file) => ({ ...file, relpath: redactSecretText(file.relpath) }));
+  const visibility = downloads.map((download) => galleryVisibilityForDownload(download, downloadFiles));
+  const mismatches = [];
+
+  for (const job of allJobs) {
+    const opts = parseJsonField(job.options) || job.options || {};
+    const linkedDownloadId = parsePositiveInt(opts.simple_server_download_id);
+    const linkedDownload = linkedDownloadId ? downloads.find((download) => Number(download.id) === linkedDownloadId) : null;
+    if (job.adapter === 'slave-delegate' && job.status === 'running' && !linkedDownloadId) {
+      mismatches.push({ code: 'slave_delegate_running_without_simple_server_download_id', jobId: job.id, message: `Hub-job ${job.id} draait zonder simple_server_download_id.` });
+    }
+    if (job.status === 'failed' && linkedDownload && linkedDownload.status === 'completed') {
+      mismatches.push({ code: 'hub_failed_download_completed', jobId: job.id, downloadId: linkedDownload.id, message: `Hub-job ${job.id} is failed terwijl download ${linkedDownload.id} completed is.` });
+    }
+    if (job.status === 'done' && job.adapter === 'slave-delegate' && !linkedDownload) {
+      mismatches.push({ code: 'hub_done_without_download_row', jobId: job.id, message: `Hub-job ${job.id} is done maar er is geen gekoppelde downloadrij gevonden.` });
+    }
+  }
+  for (const item of visibility) {
+    if (!item.defaultGalleryVisible && downloads.find((download) => Number(download.id) === Number(item.downloadId))?.status === 'completed') {
+      mismatches.push({ code: 'completed_download_not_visible_in_default_gallery', downloadId: item.downloadId, message: `Download ${item.downloadId} is completed maar niet zichtbaar onder de standaard galleryfilters.`, reasons: item.reasons });
+    }
+  }
+
+  return {
+    service: 'job-lifecycle',
+    readOnly: true,
+    input: { jobId, downloadId, url: url || null },
+    summary: lifecycleSummary({ jobs: allJobs, downloads, visibility, mismatches }),
+    hub: {
+      jobs: sanitizedJobs,
+      logs: sanitizedLogs,
+      files: sanitizedFiles,
+    },
+    simpleServer: {
+      downloads: sanitizedDownloads,
+      downloadFiles: sanitizedDownloadFiles,
+    },
+    gallery: {
+      visibility,
+    },
+    mismatches,
+  };
+}
+
 async function mapWithConcurrency(values, limit, fn) {
   const out = new Array(values.length);
   let next = 0;
@@ -531,26 +961,28 @@ function createJobsRouter({ repo, queue, adapters, detect, k2sAuthRoot, k2sAuthE
         lockHeld: true,
       }));
     }
-    if (!hint && isVipergirlsContext && contextUrl && !isThreadUrl) {
+    if (!hint && isVipergirlsContext && contextUrl && !isThreadUrl && !isArchiveDownloadUrl(jobUrl) && !isFileLockerUrl(jobUrl)) {
       const threadUrl = normalizeVipergirlsThreadUrl(contextUrl, { wholeThread: vipergirlsWholeThread });
-      if (!force) {
-        const existing = await repo.findRecentJobByUrl(threadUrl, { statuses: ['queued', 'running'] });
-        if (existing) return { ...existing, duplicate: true, redirected_from: url };
-      }
-      const priority = requestedPriority ?? defaultJobPriority(threadUrl, 'gallerydl');
-      return queue.enqueue({
-        url: threadUrl,
-        adapter: 'gallerydl',
-        priority,
-        options: {
-          ...options,
-          platform: 'vipergirls',
-          channel: sourceContext?.channel || options.channel || '',
-          title: sourceContext?.title || options.title || '',
-          contextUrl: threadUrl,
-          redirected_from_host_url: url,
-        },
-        maxAttempts,
+      return withUrlDedupeLock(repo, threadUrl, async () => {
+        if (!force) {
+          const existing = await repo.findRecentJobByUrl(threadUrl, { statuses: ['queued', 'running'] });
+          if (existing) return { ...existing, duplicate: true, redirected_from: url };
+        }
+        const priority = requestedPriority ?? defaultJobPriority(threadUrl, 'gallerydl');
+        return queue.enqueue({
+          url: threadUrl,
+          adapter: 'gallerydl',
+          priority,
+          options: {
+            ...options,
+            platform: 'vipergirls',
+            channel: sourceContext?.channel || options.channel || '',
+            title: sourceContext?.title || options.title || '',
+            contextUrl: threadUrl,
+            redirected_from_host_url: url,
+          },
+          maxAttempts,
+        });
       });
     }
 
@@ -578,6 +1010,9 @@ function createJobsRouter({ repo, queue, adapters, detect, k2sAuthRoot, k2sAuthE
             existing_source: 'gallery',
           };
         }
+      }
+      if (slave.platform === 'keep2share') {
+        await assertKeep2ShareRemotePreflight(jobUrl);
       }
       const bookJob = await queue.enqueue({
         url: jobUrl,
@@ -876,6 +1311,19 @@ function createJobsRouter({ repo, queue, adapters, detect, k2sAuthRoot, k2sAuthE
     } catch (e) { next(e); }
   });
 
+  r.get('/meta/lifecycle', async (req, res, next) => {
+    try {
+      const jobId = parsePositiveInt(req.query.job_id || req.query.jobId);
+      const downloadId = parsePositiveInt(req.query.download_id || req.query.downloadId);
+      const url = String(req.query.url || '').trim();
+      const limit = parsePositiveInt(req.query.limit, 8);
+      if (!jobId && !downloadId && !url) {
+        return res.status(400).json({ error: 'Geef job_id, download_id of url mee.' });
+      }
+      res.json(await diagnoseLifecycle(repo, { jobId, downloadId, url, limit }));
+    } catch (e) { next(e); }
+  });
+
   r.get('/group/:groupId', async (req, res, next) => {
     try {
       const limit = req.query.limit ? parseInt(req.query.limit, 10) : 1500;
@@ -1029,5 +1477,11 @@ module.exports = {
     parseEnvAssignment,
     scanK2sEnvFile,
     scanK2sProcessEnv,
+    diagnoseLifecycle,
+    redactSecrets,
+    galleryVisibilityForDownload,
+    keep2ShareFileIdFromUrl,
+    assertKeep2ShareRemotePreflight,
+    keep2ShareRemotePreflightFailure,
   },
 };
