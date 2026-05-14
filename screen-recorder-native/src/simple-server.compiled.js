@@ -11818,11 +11818,16 @@ expressApp.post('/download/batch', async (req, res) => {
     const pinToOrigin = !!(itemPinSourceOrigin || itemPinFffOrigin || itemPinAznOrigin);
     const detectedPlatform = detectPlatform(u);
     const preferDetectedPlatform = !!(itemPinFffOrigin && pinToOrigin && detectedPlatform && detectedPlatform !== 'other' && detectedPlatform !== itemOriginPlatform);
-    const platform = pinToOrigin ? itemOriginPlatform : (preferDetectedPlatform ? detectedPlatform : normalizePlatform(metaPlatform, u));
+    // Pin to origin platform for known forum sources: when media URLs are from external
+    // image hosts (imagebam, filesor, imgbox, etc.) but originated from a forum thread,
+    // keep the forum platform instead of deriving from the download URL domain.
+    const isForumOriginPlatform = /^(phun|vipergirls|footfetishforum)$/i.test(itemOriginPlatform);
+    const pinForumOrigin = !!(isForumOriginPlatform && itemOriginPlatform && itemOriginChannel && itemOriginChannel !== 'unknown');
+    const platform = pinToOrigin ? itemOriginPlatform : pinForumOrigin ? itemOriginPlatform : (preferDetectedPlatform ? detectedPlatform : normalizePlatform(metaPlatform, u));
     const isElitebabesCdn = itemOriginPlatform === 'elitebabes' && /cdn\.elitebabes\.com/i.test(u);
     const isPornpicsCdn = itemOriginPlatform === 'pornpics' && /cdni\.pornpics\.com/i.test(u);
-    const channel = pinToOrigin ? itemOriginChannel : (isElitebabesCdn || isPornpicsCdn) ? (itemOriginChannel !== 'unknown' ? itemOriginChannel : metadata && metadata.channel || 'unknown') : preferDetectedPlatform ? deriveChannelFromUrl(platform, u) || itemOriginChannel : metadata && metadata.channel && metadata.channel !== 'unknown' ? metadata.channel : deriveChannelFromUrl(platform, u) || 'unknown';
-    const title = pinToOrigin ? itemOriginTitle : (isElitebabesCdn || isPornpicsCdn) ? (itemOriginTitle || metadata && metadata.title || deriveTitleFromUrl(u)) : preferDetectedPlatform ? deriveTitleFromUrl(u) : metadata && metadata.title ? metadata.title : deriveTitleFromUrl(u);
+    const channel = pinToOrigin ? itemOriginChannel : pinForumOrigin ? itemOriginChannel : (isElitebabesCdn || isPornpicsCdn) ? (itemOriginChannel !== 'unknown' ? itemOriginChannel : metadata && metadata.channel || 'unknown') : preferDetectedPlatform ? deriveChannelFromUrl(platform, u) || itemOriginChannel : metadata && metadata.channel && metadata.channel !== 'unknown' ? metadata.channel : deriveChannelFromUrl(platform, u) || 'unknown';
+    const title = pinToOrigin ? itemOriginTitle : pinForumOrigin ? itemOriginTitle : (isElitebabesCdn || isPornpicsCdn) ? (itemOriginTitle || metadata && metadata.title || deriveTitleFromUrl(u)) : preferDetectedPlatform ? deriveTitleFromUrl(u) : metadata && metadata.title ? metadata.title : deriveTitleFromUrl(u);
     const allowRedditRerun = platform === 'reddit' && isRedditRollingTargetUrl(u);
     const allowPatreonRerun = platform === 'patreon' && (u.includes('/posts') || u.includes('patreon.com/c/'));
     const allowRerun = allowRedditRerun || allowPatreonRerun;
