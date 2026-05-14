@@ -32,6 +32,7 @@
     hudTimer: null,
     mainProgressVisible: true,
     screenshotRunning: false,
+    screenshotDotTimer: null,
 
     // Tags
     availableTags: [],
@@ -1546,6 +1547,7 @@
       if (gallery && typeof gallery.prependItems === 'function' && data.screenshot) {
         gallery.prependItems([data.screenshot]);
       }
+      flashScreenshotDot(true);
       if (!quiet) showHudMessage('Screenshot opgeslagen', 2200);
       if (!quiet) log('Screenshot opgeslagen bij huidige video');
     } catch (e) {
@@ -1555,6 +1557,42 @@
       vs.screenshotRunning = false;
       if (el.vBtnCaptureStage) el.vBtnCaptureStage.disabled = false;
     }
+  }
+
+  function flashScreenshotDot(success = true) {
+    let dot = document.getElementById('vScreenshotFlashDot');
+    if (!dot) {
+      dot = document.createElement('div');
+      dot.id = 'vScreenshotFlashDot';
+      dot.setAttribute('aria-hidden', 'true');
+      Object.assign(dot.style, {
+        position: 'fixed',
+        right: '14px',
+        bottom: '14px',
+        width: '8px',
+        height: '8px',
+        borderRadius: '999px',
+        pointerEvents: 'none',
+        zIndex: '2147483647',
+        opacity: '0',
+        transform: 'scale(0.6)',
+        transition: 'opacity 90ms ease, transform 90ms ease, box-shadow 220ms ease',
+      });
+      document.body.appendChild(dot);
+    }
+    const color = success ? '#4ade80' : '#fb7185';
+    const glow = success ? 'rgba(74, 222, 128, 0.75)' : 'rgba(251, 113, 133, 0.75)';
+    dot.style.background = color;
+    dot.style.boxShadow = `0 0 0 0 ${glow}, 0 0 10px ${glow}`;
+    dot.style.opacity = '1';
+    dot.style.transform = 'scale(1)';
+    if (vs.screenshotDotTimer) clearTimeout(vs.screenshotDotTimer);
+    vs.screenshotDotTimer = setTimeout(() => {
+      dot.style.opacity = '0';
+      dot.style.transform = 'scale(0.6)';
+      dot.style.boxShadow = `0 0 0 8px rgba(0,0,0,0)`;
+      vs.screenshotDotTimer = null;
+    }, 650);
   }
 
   // ─── HUD ──────────────────────────────────────────────────────────────────
