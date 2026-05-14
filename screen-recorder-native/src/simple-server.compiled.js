@@ -12827,6 +12827,13 @@ function upgradeKnownLowQualityMediaUrl(rawUrl) {
         u.pathname = p.replace(/^\/u\/t\//i, '/u/i/');
         out = u.toString();
       }
+      // Imagebam thumb → wrapper page: thumbs2.imagebam.com/.../XXID.jpg → imagebam.com/view/XXID
+      if (/^thumbs?\d*\.imagebam\.com$/i.test(host) || /^thumbnails?\d*\.imagebam\.com$/i.test(host)) {
+        const imgId = p.match(/\/([a-z0-9]+)\.\w+$/i);
+        if (imgId && imgId[1]) {
+          return `https://www.imagebam.com/view/${imgId[1]}`;
+        }
+      }
       const viprWrapper = viprWrapperUrlFromLowQualityImageUrl(u.toString());
       if (viprWrapper) return viprWrapper;
       if ((host === 'vipr.im' || host.endsWith('.vipr.im')) && /^\/th\//i.test(p)) {
