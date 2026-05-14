@@ -11878,7 +11878,17 @@ expressApp.post('/download/batch', async (req, res) => {
   if (deferred.length > 0) {
     console.log(`[BATCH] Responding immediately, ${deferred.length} URLs expanding in background, ~${estimatedGalleries} galleries estimated`);
   }
-  res.json({ success: true, downloads: created, expanding: deferred.length, estimatedGalleries });
+  const duplicateCount = created.filter((row) => row && row.duplicate === true).length;
+  res.json({
+    success: true,
+    downloads: created,
+    total: created.length,
+    queued: Math.max(0, created.length - duplicateCount),
+    duplicates: duplicateCount,
+    errors: created.filter((row) => row && row.error).length,
+    expanding: deferred.length,
+    estimatedGalleries
+  });
 
   // Fire-and-forget: expand deferred URLs in background
   if (deferred.length > 0) {

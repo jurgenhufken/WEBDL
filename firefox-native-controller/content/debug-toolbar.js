@@ -6570,13 +6570,35 @@
     return { total: rows.length, queued, duplicates, errors: 0, skipped: 0 };
   }
 
+  function duplicateIdsFromBatchResult(result, limit = 5) {
+    try {
+      const rows = Array.isArray(result && result.downloads) ? result.downloads : [];
+      return rows
+        .filter((row) => row && row.duplicate)
+        .map((row) => row.downloadId || row.id || row.hubJobId || '')
+        .filter(Boolean)
+        .slice(0, limit);
+    } catch (e) {
+      return [];
+    }
+  }
+
   function formatBatchStats(stats) {
     if (stats && stats.accepted) return `${Number(stats.total) || 0} items aangenomen; hub verwerkt manifest op achtergrond`;
     const extra = [];
     if (stats && Number(stats.errors || 0) > 0) extra.push(`${Number(stats.errors) || 0} fout`);
     if (stats && Number(stats.skipped || 0) > 0) extra.push(`${Number(stats.skipped) || 0} overgeslagen`);
     if (stats && Number(stats.paused || 0) > 0) extra.push(`${Number(stats.paused) || 0} gepauzeerd`);
-    return `${Number(stats && stats.queued) || 0} nieuw, ${Number(stats && stats.duplicates) || 0} bestaand${extra.length ? `, ${extra.join(', ')}` : ''} (${Number(stats && stats.total) || 0} totaal)`;
+    return `${Number(stats && stats.queued) || 0} nieuw, ${Number(stats && stats.duplicates) || 0} bestaat al${extra.length ? `, ${extra.join(', ')}` : ''} (${Number(stats && stats.total) || 0} totaal)`;
+  }
+
+  function formatBatchNotification(label, stats, result) {
+    const duplicateIds = duplicateIdsFromBatchResult(result);
+    const duplicateSuffix = duplicateIds.length ? ` (#${duplicateIds.join(', #')})` : '';
+    if ((Number(stats && stats.queued) || 0) === 0 && (Number(stats && stats.duplicates) || 0) > 0 && (Number(stats && stats.errors) || 0) === 0) {
+      return `${label}: Bestaat al ${Number(stats.duplicates) || 0}/${Number(stats.total) || Number(stats.duplicates) || 0}${duplicateSuffix}`;
+    }
+    return `${label}: ${formatBatchStats(stats)}${duplicateSuffix}`;
   }
 
   async function expandRedditBatchUrlsViaApi(seedUrl) {
@@ -7386,8 +7408,8 @@
             ? ` | 🔄 ~${estGal} galleries worden op achtergrond gedownload`
             : ` | 🔄 Pagina's worden op achtergrond uitgebreid`
           : '';
-        showNotification(`${modeLabel}: ${formatBatchStats(stats)}${expandHint}`);
-        addLog(`${modeLabel} gestart: ${formatBatchStats(stats)}`);
+        showNotification(`${formatBatchNotification(modeLabel, stats, result)}${expandHint}`);
+        addLog(formatBatchNotification(`${modeLabel} gestart`, stats, result));
       } else {
         showNotification(`Batch fout: ${result.error}`, true);
         addLog(`Batch fout: ${result.error}`, 'error');
@@ -7850,8 +7872,8 @@
       if (result && result.success) {
         const stats = summarizeBatchResult(result);
         const label = force ? `Force ${isAnyForumPage ? 'forum' : 'thread'}` : (isAnyForumPage ? 'Forum' : 'Thread');
-        showNotification(`${label}: ${formatBatchStats(stats)}`);
-        addLog(`${label} gestart: ${formatBatchStats(stats)}`);
+        showNotification(formatBatchNotification(label, stats, result));
+        addLog(formatBatchNotification(`${label} gestart`, stats, result));
       } else {
         showNotification(`Thread batch fout: ${(result && result.error) ? result.error : 'unknown'}`, true);
         addLog(`Thread batch fout: ${(result && result.error) ? result.error : 'unknown'}`, 'error');
