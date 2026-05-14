@@ -185,6 +185,7 @@
     if (raw === 'reddit' || raw === 'reddit.com' || raw === 'redd.it' || raw.endsWith('.reddit.com')) return 'reddit';
     if (raw === 'redgifs' || raw === 'redgifs.com' || raw === 'gifdeliverynetwork.com' || raw.endsWith('.redgifs.com') || raw.endsWith('.gifdeliverynetwork.com')) return 'redgifs';
     if (raw === 'footfetishforum' || raw === 'footfetishforum.com' || raw.endsWith('.footfetishforum.com')) return 'footfetishforum';
+    if (raw === 'phun' || raw === 'phun.org' || raw === 'forum.phun.org' || raw.endsWith('.phun.org')) return 'phun';
     if (raw === 'vipergirls' || raw === 'vipergirls.to' || raw === 'viper.to' || raw.endsWith('.vipergirls.to') || raw.endsWith('.viper.to')) return 'vipergirls';
     if (raw === 'keep2share' || raw === 'keep2share.cc' || raw === 'k2s.cc' || raw === 'k2s.io' || raw.endsWith('.keep2share.cc') || raw.endsWith('.k2s.cc') || raw.endsWith('.k2s.io')) return 'keep2share';
     return raw;

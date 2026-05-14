@@ -443,6 +443,7 @@ function normalizeSourceSiteLabel(value) {
   if (raw === 't' || raw === 'telegram' || raw === 't.me' || raw === 'telegram.me' || raw.endsWith('.t.me') || raw.endsWith('.telegram.me')) return 'telegram';
   if (raw === 'vipergirls.to' || raw === 'viper.to' || raw.endsWith('.vipergirls.to') || raw.endsWith('.viper.to')) return 'vipergirls';
   if (raw === 'footfetishforum' || raw === 'footfetishforum.com' || raw.endsWith('.footfetishforum.com')) return 'footfetishforum';
+  if (raw === 'phun' || raw === 'phun.org' || raw === 'forum.phun.org' || raw.endsWith('.phun.org')) return 'phun';
   if (raw === 'youtube.com' || raw === 'youtu.be' || raw.endsWith('.youtube.com')) return 'youtube';
   if (raw === 'twitter.com' || raw === 'x.com' || raw.endsWith('.twitter.com') || raw.endsWith('.x.com')) return 'twitter';
   if (raw === 'reddit.com' || raw === 'redd.it' || raw.endsWith('.reddit.com')) return 'reddit';
