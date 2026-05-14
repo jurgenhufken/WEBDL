@@ -5,7 +5,7 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-05-14-gate2-vipergirls-pageurl';
+  const WEBDL_BUILD = 'debug-toolbar-2026-05-14-rightctrl-screenshot';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
@@ -4470,7 +4470,7 @@
   const ytVideosBtn = makeBtnIn(extraBtnContainer, 'YT videos', '#5b21b6');
   const openAllBtn = makeBtnIn(extraBtnContainer, 'Open links', '#03A9F4');
   try {
-    screenshotBtn.title = 'Maak een screenshot van deze pagina';
+    screenshotBtn.title = 'Maak een screenshot van deze pagina (rechter Ctrl)';
     downloadBtn.title = 'Download de huidige video, foto of geselecteerde media';
     batchDownloadBtn.title = 'Scan alleen deze pagina en download gevonden links/media';
     dashboardBtn.title = 'Open WEBDL dashboard';
@@ -6147,22 +6147,60 @@
     }
   }
 
-  screenshotBtn.addEventListener('click', async function() {
+  function isEditableKeyboardTarget(target) {
+    try {
+      if (!target) return false;
+      const tag = String(target.tagName || '').toUpperCase();
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+      if (target.isContentEditable) return true;
+      const editable = target.closest && target.closest('[contenteditable]');
+      return !!editable;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function isRightControlScreenshotKey(e) {
+    return !!e
+      && e.key === 'Control'
+      && (e.code === 'ControlRight' || e.location === 2);
+  }
+
+  let screenshotFlowRunning = false;
+
+  async function triggerScreenshotFlow(source) {
+    if (screenshotFlowRunning) return { success: false, error: 'Screenshot al bezig' };
+    screenshotFlowRunning = true;
     try {
       screenshotBtn.textContent = '📷 Bezig...';
       screenshotBtn.style.opacity = '0.65';
-      showNotification('Screenshot knop ingedrukt');
-      console.warn('[WEBDL] Screenshot button clicked');
-      await runScreenshotFlow();
+      const label = source === 'hotkey' ? 'Rechter-Control screenshot' : 'Screenshot knop ingedrukt';
+      showNotification(label);
+      console.warn(`[WEBDL] ${source === 'hotkey' ? 'Right Control hotkey' : 'Screenshot button'} triggered`);
+      return await runScreenshotFlow();
     } catch (e) {
       const msg = (e && e.message) ? e.message : String(e);
       console.error('[WEBDL] Screenshot flow failed:', msg);
       showNotification(`Screenshot fout: ${msg}`, true);
+      return { success: false, error: msg };
     } finally {
       screenshotBtn.textContent = '📷 Screenshot';
       screenshotBtn.style.opacity = '1';
+      screenshotFlowRunning = false;
     }
+  }
+
+  screenshotBtn.addEventListener('click', () => {
+    triggerScreenshotFlow('button');
   });
+
+  window.addEventListener('keydown', (e) => {
+    if (!isRightControlScreenshotKey(e)) return;
+    if (e.repeat || isEditableKeyboardTarget(e.target)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    triggerScreenshotFlow('hotkey');
+  }, { capture: true });
 
   // ========================
   // DOWNLOAD VIDEO (queue via WebDL-Hub)
@@ -8527,7 +8565,7 @@
     }
 
     if (message && message.action === 'takeScreenshotNow') {
-      return runScreenshotFlow();
+      return triggerScreenshotFlow('message');
     }
 
     if (message.action === "connectionStateChanged") {

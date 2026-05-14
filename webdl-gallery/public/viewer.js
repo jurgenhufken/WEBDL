@@ -31,6 +31,7 @@
     logOpen: false,
     hudTimer: null,
     mainProgressVisible: true,
+    screenshotRunning: false,
 
     // Tags
     availableTags: [],
@@ -1395,6 +1396,10 @@
   }
 
   async function captureCurrentVideoFrame() {
+    if (vs.screenshotRunning) {
+      showHudMessage('Screenshot bezig');
+      return;
+    }
     const it = vs.items[vs.idx];
     const videoEl = vs.currentMediaEl && vs.currentMediaEl.tagName === 'VIDEO'
       ? vs.currentMediaEl
@@ -1403,6 +1408,7 @@
       showHudMessage('Geen video actief');
       return;
     }
+    vs.screenshotRunning = true;
     if (el.vBtnCaptureStage) el.vBtnCaptureStage.disabled = true;
     try {
       const canvas = drawCurrentVideoFrame(videoEl);
@@ -1429,6 +1435,7 @@
       showHudMessage('Screenshot fout');
       log('Screenshot fout: ' + (e && e.message ? e.message : String(e)));
     } finally {
+      vs.screenshotRunning = false;
       if (el.vBtnCaptureStage) el.vBtnCaptureStage.disabled = false;
     }
   }
@@ -2512,11 +2519,25 @@
     return (10 - parseInt(e.key, 10)) / 2; // 0→5.0, 9→0.5
   }
 
+  function isRightControlKey(e) {
+    return !!e
+      && e.key === 'Control'
+      && (e.code === 'ControlRight' || e.location === 2);
+  }
+
   function bindKeyboard() {
     window.addEventListener('keydown', async (e) => {
       if (!vs.open) return;
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
       const tag = (e.target.tagName || '').toUpperCase();
+      if (isRightControlKey(e)) {
+        if (!e.repeat && !['INPUT', 'TEXTAREA', 'SELECT'].includes(tag)) {
+          e.preventDefault();
+          e.stopPropagation();
+          await captureCurrentVideoFrame();
+        }
+        return;
+      }
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (['INPUT', 'TEXTAREA'].includes(tag)) return;
       const numericRating = ratingFromNumberKey(e);
       if (numericRating != null) {
