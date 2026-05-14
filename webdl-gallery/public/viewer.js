@@ -1523,28 +1523,36 @@
     syncVideoProgress(v);
   }
 
-  // Logarithmic seek acceleration: repeated rapid seeks increase distance
-  const seekAccel = { lastTime: 0, lastDir: 0, streak: 0 };
-  const SEEK_ACCEL_WINDOW = 600; // ms between clicks to count as streak
-  const SEEK_ACCEL_STEPS = [1, 2, 4, 8, 15, 30, 60, 120]; // seconds per streak level
+  // Cadence seek: repeated taps in the same direction produce predictable, recognizable jumps
+  // 1 tap = 1s, 2 taps = 3s, 3 taps = 5s, 4 taps = 10s, 5 taps = 20s, 6 taps = 45s, 7 taps = 90s
+  const seekAccel = { lastTime: 0, lastDir: 0, taps: 0 };
+  const SEEK_TAP_WINDOW = 500; // ms — taps within this window count as a sequence
+  const SEEK_TAP_STEPS = [1, 3, 5, 10, 20, 45, 90];
+  const SEEK_TAP_DOTS = SEEK_TAP_STEPS.map((_, i, arr) =>
+    arr.map((__, j) => j <= i ? '●' : '○').join('')
+  );
 
   function seekRelative(baseSeconds) {
     const v = el.vContent.querySelector('video');
     if (!v || !Number.isFinite(v.duration)) return;
     const dir = baseSeconds > 0 ? 1 : -1;
     const now = Date.now();
-    // Track streak: same direction within window
-    if (dir === seekAccel.lastDir && (now - seekAccel.lastTime) < SEEK_ACCEL_WINDOW) {
-      seekAccel.streak = Math.min(seekAccel.streak + 1, SEEK_ACCEL_STEPS.length - 1);
+    // Count taps: same direction within cadence window
+    if (dir === seekAccel.lastDir && (now - seekAccel.lastTime) < SEEK_TAP_WINDOW) {
+      seekAccel.taps = Math.min(seekAccel.taps + 1, SEEK_TAP_STEPS.length - 1);
     } else {
-      seekAccel.streak = 0;
+      seekAccel.taps = 0;
     }
     seekAccel.lastTime = now;
     seekAccel.lastDir = dir;
-    const delta = dir * SEEK_ACCEL_STEPS[seekAccel.streak];
+    const step = SEEK_TAP_STEPS[seekAccel.taps];
+    const delta = dir * step;
     v.currentTime = Math.max(0, Math.min(v.duration, v.currentTime + delta));
     syncVideoProgress(v);
-    showHudMessage(`${delta > 0 ? '+' : ''}${delta}s`, 900, { skipOverlay: true });
+    const arrow = dir > 0 ? '▸' : '◂';
+    const dots = SEEK_TAP_DOTS[seekAccel.taps];
+    const label = step >= 60 ? `${step / 60}m` : `${step}s`;
+    showHudMessage(`${arrow} ${delta > 0 ? '+' : ''}${label}  ${dots}`, 900, { skipOverlay: true });
   }
 
   function toggleVideoPlayback() {
