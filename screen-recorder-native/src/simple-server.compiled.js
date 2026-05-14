@@ -11426,10 +11426,15 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
             null,
             downloadId
           );
+          return;
+        } else if (Number(reusable.id) > Number(downloadId)) {
+          // Bij gelijktijdige duplicate inserts mag alleen de nieuwere rij afvallen.
+          // Anders kunnen twee workers elkaar kruislings cancelen en blijft er niets over.
+          console.log(`[DL #${downloadId}] Duplicate #${reusable.id} is nieuwer; huidige rij blijft actief`);
         } else {
           await updateDownloadStatus.run('cancelled', 0, `Duplicate URL; al actief als #${reusable.id}`, downloadId);
+          return;
         }
-        return;
       }
     }
   } catch (e) { }

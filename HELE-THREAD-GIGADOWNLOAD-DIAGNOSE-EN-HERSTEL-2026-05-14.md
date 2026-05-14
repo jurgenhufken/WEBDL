@@ -1375,6 +1375,61 @@ Gate 3 K2S-herstelpoging afgelopen uur:
 - Conclusie als actievoorwaarde: verder herstel vereist eerst een K2S-authbron die remote geaccepteerd wordt, bijvoorbeeld een geldige permanente API-token, geldige access/web-access token, of complete loginconfig met wachtwoord. Daarna pas opnieuw dezelfde vier file-ids retryen.
 - Niet doen: deze vier jobs blijven herhaald retryen met dezelfde auth; dat levert alleen nieuwe error-rijen op.
 
+Gate 3 live download- en gallerydiagnose na nieuwe tests:
+
+- Meetvenster voor recente opdrachten: vanaf `2026-05-14 06:45:00+02`.
+- Bewezen via `webdl.jobs`: recente hubjobs `46440` t/m `46452` hadden terminale status; er stonden tijdens deze controle geen recente K2S-jobs vast op `queued` of `running`.
+- Bewezen via `public.downloads`: recente statusverdeling was `completed=5`, `error=9`, `cancelled=8`.
+- Bewezen completed:
+  - download `387144`, platform `webpussi`, video;
+  - download `387149`, platform `camwhores`, video;
+  - download `387150`, platform `vipergirls`, K2S file-id `bd41f519e6fb7`, video;
+  - download `387157`, platform `k2s`, file-id `e71dfdf1462d2`, video;
+  - download `387158`, platform `k2s`, file-id `b36c0262df413`, video.
+- Bewezen op schijf:
+  - `387157`: `/Users/jurgen/Downloads/WEBDL/keep2share/unknown/Keep2Share - Your account status/kinky-fetishes.porn_kwG7Y.mp4`, `46470642` bytes;
+  - `387158`: `/Users/jurgen/Downloads/WEBDL/keep2share/unknown/Keep2Share - Your account status/kinky-fetishes.porn_yTO5Z.mp4`, `677705299` bytes.
+- Bewezen niet-binnengekomen door K2S-auth/API:
+  - file-id `0962a96510e86`: `0 completed`, `2 error`;
+  - file-id `0266c56647e96`: `0 completed`, `3 error`;
+  - file-id `755d8d9d42cac`: `0 completed`, `2 error`;
+  - file-id `9424e49b9f91c`: `0 completed`, `2 error`.
+- Bewezen duplicate-race:
+  - `387137` en `387138` hadden exact dezelfde `url=https://k2s.cc/file/f167d1608f388?site=vipergirls.to` en cancelden elkaar kruislings;
+  - `387145` en `387146` hadden exact dezelfde `url=https://k2s.cc/file/4260c16441f6f?site=viper.to` en cancelden elkaar kruislings;
+  - `387147` en `387148` hadden exact dezelfde `url=https://k2s.cc/file/d89bad5fbabb3?site=viper.to` en cancelden elkaar kruislings;
+  - `387155` en `387156` hadden exact dezelfde `url=https://k2s.cc/file/e0a23073246e6` en cancelden elkaar kruislings.
+- Oorzaak duplicate-race: twee gelijktijdig ingevoegde rijen met dezelfde URL zagen elkaar allebei als actieve duplicate. De startguard cancelde daardoor beide rijen in plaats van alleen de nieuwere duplicate.
+- Actie uitgevoerd: `screen-recorder-native/src/simple-server.js` past de duplicate-startguard aan. Als de duplicate-rij een hogere id heeft, blijft de huidige oudere rij actief; alleen de nieuwere rij mag afvallen. Completed duplicates blijven direct overgenomen worden.
+- Verificatie duplicate-fix:
+  - `node --check screen-recorder-native/src/simple-server.js`: groen;
+  - simple-server herstart op poort `35729`;
+  - healthcheck `GET /health`: `success=true`, `status=running`.
+
+Gate 3 gallery-filter/search diagnose:
+
+- Bewezen vanuit de UI-screenshots: zonder mediafilter waren recente Keep2Share-items zichtbaar; met filter `Video` verdwenen die Keep2Share-video's; zoekterm `juliana_gonebad` toonde `Fout: The operation was aborted`.
+- Bewezen via API:
+  - `GET /api/items?limit=100&sort=recent&media_type=video` retourneerde K2S-video's;
+  - `GET /api/items?limit=100&sort=recent&media_type=video&thumb_ready=1` verborg vóór de fix dezelfde K2S-video's;
+  - de frontend gebruikt bij normale loads `thumb_ready=1`.
+- Bewezen dat de bestanden niet ontbraken: `downloads.is_thumb_ready=true` voor `387157` en `387158`, maar de gekoppelde `download_files.is_thumb_ready=false`.
+- Oorzaak gallery-video-filter: de file-query gebruikte `COALESCE(df.is_thumb_ready, d.is_thumb_ready, false)`. Een expliciete `false` op `download_files` won daardoor van de correcte parentwaarde `downloads.is_thumb_ready=true`.
+- Actie uitgevoerd: `webdl-gallery/server.js` gebruikt nu `df.is_thumb_ready = true OR d.is_thumb_ready = true OR ext is image` voor file-items, zowel in de `WHERE`-filter als in de geretourneerde `is_thumb_ready`.
+- Bewezen na fix:
+  - `GET /api/items?limit=100&sort=recent&media_type=video&thumb_ready=1` retourneert bovenaan `file-4800280` en `file-4800278`, beide platform `k2s`, type `video`, `is_thumb_ready=true`.
+- Zoekperformance:
+  - vóór timeoutfix duurde `q=juliana_gonebad&thumb_ready=1` met `limit=100` ongeveer `18.08s`;
+  - `q=juliana_gonebad&media_type=video&thumb_ready=1` duurde ongeveer `11.07s`;
+  - de frontend brak `loadMore` af na `10s`, waardoor de UI de generieke browsermelding `The operation was aborted` liet zien.
+- Actie uitgevoerd: `webdl-gallery/public/app.js` verhoogt de `loadMore` timeout naar `30s` en toont bij een echte timeout een concrete melding: `Fout: zoekopdracht duurde te lang.`
+- Bewezen na timeoutfix en gallery-herstart:
+  - `q=juliana_gonebad&thumb_ready=1`, `limit=100`: `14.17s`, `100` items;
+  - `q=juliana_gonebad&media_type=video&thumb_ready=1`, `limit=100`: `5.40s` tot `6.46s`, `13` items;
+  - `media_type=video&thumb_ready=1`, `limit=100`: K2S-video's zichtbaar bovenaan.
+- Nuance: algemene zoekopdrachten blijven relatief traag op deze databasegrootte en tonen bij `Alles` ook screenshots. Dit is niet hetzelfde als "zoekindex is structureel opgelost"; het directe UI-abortprobleem is verholpen, maar echte zoekmodernisering blijft een aparte optimalisatiestap.
+- Actie uitgevoerd: gallery-service herstart op poort `35731`.
+
 ## Rollbackstrategie
 
 Als er iets misgaat:

@@ -1732,10 +1732,20 @@ app.get('/api/items', async (req, res) => {
       || req.query.source_model_key
       || req.query.source_model_title
     );
+    const hasOnlyMediaTypeFilter = Boolean(req.query.media_type)
+      && !req.query.platform
+      && !req.query.channel
+      && !req.query.min_rating
+      && !req.query.tag_id
+      && !req.query.source_thread_url
+      && !req.query.source_thread_title
+      && !req.query.source_post_url
+      && !req.query.source_model_key
+      && !req.query.source_model_title;
     // Elke bron moet ruimer dan offset+limit leveren: infinite scroll mag niet
     // vroeg stoppen, en oude importmappen kunnen dubbele records bevatten die
     // later in deze query worden weggefilterd.
-    const overfetch = hasSearchQuery ? 2 : (hasItemScopeFilter ? 30 : 3);
+    const overfetch = hasSearchQuery ? 2 : (hasOnlyMediaTypeFilter ? 8 : (hasItemScopeFilter ? 30 : 3));
     const sourceLimit = useCursor ? limit * overfetch : offset + (limit * overfetch);
     const params = [];
     function addRecentCursor(where, sortExpr, orderExpr) {
@@ -1856,7 +1866,7 @@ app.get('/api/items', async (req, res) => {
       fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_FILE_PARENT_STATUSES.map(s => `'${s}'`).join(',')}])`);
       fileWhere.push(`(df.filesize IS NULL OR df.filesize > 0)`);
       fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${DOWNLOAD_EXT_SQL})`);
-      if (thumbReadyOnly) fileWhere.push(`(COALESCE(df.is_thumb_ready, d.is_thumb_ready, false) = true OR lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${IMAGE_EXT_SQL}))`);
+      if (thumbReadyOnly) fileWhere.push(`(df.is_thumb_ready = true OR d.is_thumb_ready = true OR lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${IMAGE_EXT_SQL}))`);
     }
     if (useCursor && !directOnlyPlatform) {
       addRecentCursor(
@@ -1971,7 +1981,7 @@ app.get('/api/items', async (req, res) => {
                  df.relpath AS filepath, df.filesize,
                  regexp_replace(df.relpath, '^.*\\.', '') AS format,
                  d.duration, df.rating,
-                 (COALESCE(df.is_thumb_ready, d.is_thumb_ready, false) = true OR lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${IMAGE_EXT_SQL})) AS is_thumb_ready,
+                 (df.is_thumb_ready = true OR d.is_thumb_ready = true OR lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${IMAGE_EXT_SQL})) AS is_thumb_ready,
                  d.metadata,
                  d.finished_at, d.created_at,
                  ${fileSortTsExpr} AS sort_ts,

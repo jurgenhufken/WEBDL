@@ -683,7 +683,7 @@
       }
       for (const [k, v] of Object.entries(state.filters)) if (v) params.set(k, v);
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 10000);
+      const timer = setTimeout(() => ctrl.abort(), 30000);
       let resp;
       try {
         resp = await apiFetch('/api/items?' + params.toString(), { signal: ctrl.signal });
@@ -706,7 +706,9 @@
       updateStats();
     } catch (e) {
       if (queryVersion !== state.queryVersion) return;
-      sentinel.textContent = 'Fout: ' + e.message;
+      sentinel.textContent = e && e.name === 'AbortError'
+        ? 'Fout: zoekopdracht duurde te lang.'
+        : 'Fout: ' + e.message;
       state.loading = false;
       return;
     }
