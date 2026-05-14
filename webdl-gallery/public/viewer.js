@@ -2807,15 +2807,68 @@
       bar.appendChild(zone);
     }
 
-    // Draw individual markers
+    // Draw individual markers (interactive: click=delete, drag=move)
     for (let i = 0; i < vs.segments.length; i++) {
+      const segIdx = i;
       const pct = (vs.segments[i] / v.duration) * 100;
       const marker = document.createElement('div');
       marker.className = 'segment-marker';
       const isStart = i % 2 === 0;
-      marker.style.cssText = `position:absolute; bottom:0; top:0; width:3px; pointer-events:none; z-index:6; background:${isStart ? '#50ff78' : '#ff6050'};`;
+      // Wide hit area (12px) centered on the 3px visible line
+      marker.style.cssText = `position:absolute; bottom:0; top:0; width:12px; margin-left:-6px; z-index:6; cursor:grab; user-select:none;`;
       marker.style.left = pct + '%';
-      marker.title = `${isStart ? 'Begin' : 'Einde'}: ${fmtTime(vs.segments[i])}`;
+      marker.title = `${isStart ? 'Begin' : 'Einde'}: ${fmtTime(vs.segments[i])} — klik=verwijder, sleep=verplaats`;
+
+      // Visible line inside the hit area
+      const line = document.createElement('div');
+      line.style.cssText = `position:absolute; left:5px; top:0; bottom:0; width:3px; border-radius:1px; background:${isStart ? '#50ff78' : '#ff6050'}; pointer-events:none;`;
+      marker.appendChild(line);
+
+      // Click = remove this marker
+      marker.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        vs.segments.splice(segIdx, 1);
+        updateSegmentOverlay();
+        showHudMessage(`Marker verwijderd (${vs.segments.length} over)`, 1000);
+        log(`Marker ${segIdx + 1} verwijderd`);
+      });
+
+      // Drag = move marker
+      marker.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        marker.style.cursor = 'grabbing';
+
+        function onMove(ev) {
+          const rect = bar.getBoundingClientRect();
+          const newPct = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
+          const newTime = newPct * v.duration;
+          vs.segments[segIdx] = newTime;
+          marker.style.left = (newPct * 100) + '%';
+          marker.title = `${isStart ? 'Begin' : 'Einde'}: ${fmtTime(newTime)}`;
+        }
+
+        function onUp() {
+          marker.style.cursor = 'grab';
+          window.removeEventListener('mousemove', onMove);
+          window.removeEventListener('mouseup', onUp);
+          // Re-sort and redraw
+          vs.segments.sort((a, b) => a - b);
+          updateSegmentOverlay();
+        }
+
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+      });
+
+      // Block context menu on markers
+      marker.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      });
+
       bar.appendChild(marker);
     }
   }
@@ -3162,6 +3215,23 @@
         const rect = el.vProgressBar.getBoundingClientRect();
         const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
         v.currentTime = pct * v.duration;
+      });
+
+      // Rechtermuisklik op progress bar → segment marker plaatsen
+      el.vProgressBar.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const v = el.vContent.querySelector('video');
+        if (!v || !v.duration) return;
+        const rect = el.vProgressBar.getBoundingClientRect();
+        const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+        const time = pct * v.duration;
+        vs.segments.push(time);
+        vs.segments.sort((a, b) => a - b);
+        const isPair = vs.segments.length % 2 === 0;
+        updateSegmentOverlay();
+        showHudMessage(`Marker ${isPair ? 'einde' : 'begin'}: ${fmtTime(time)}`, 1200);
+        log(`Segment marker ${vs.segments.length}: ${fmtTime(time)}`);
       });
     }
 
