@@ -95,6 +95,7 @@ function normalizeVipergirlsThreadUrl(url, { wholeThread = true } = {}) {
       u.hostname = 'vipergirls.to';
     }
     if (u.hostname.toLowerCase().replace(/^www\./, '') === 'vipergirls.to') {
+      u.pathname = String(u.pathname || '').replace(/^\/threads\/threads\//i, '/threads/');
       const m = u.pathname.match(/^\/threads\/(\d+)(-[^/?#]+)?(?:\/page\d+)?\/?$/i);
       if (m && wholeThread) {
         u.pathname = `/threads/${m[1]}${m[2] || ''}`;

@@ -5,7 +5,7 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-05-14-gate1-whole-thread-baseline';
+  const WEBDL_BUILD = 'debug-toolbar-2026-05-14-gate2-vipergirls-pageurl';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
@@ -1810,10 +1810,22 @@
     }
   }
 
-  function normalizeVipergirlsThreadUrl(rawUrl, baseHref) {
+  function normalizeVipergirlsPageUrl(rawUrl, baseHref) {
     try {
       const u = new URL(String(rawUrl || ''), baseHref || window.location.href);
       u.hash = '';
+      if (!isVipergirlsHost(u.hostname)) return '';
+      u.pathname = String(u.pathname || '').replace(/^\/threads\/threads\//i, '/threads/');
+      return u.toString();
+    } catch (e) {}
+    return '';
+  }
+
+  function normalizeVipergirlsThreadUrl(rawUrl, baseHref) {
+    try {
+      const normalized = normalizeVipergirlsPageUrl(rawUrl, baseHref);
+      if (!normalized) return '';
+      const u = new URL(normalized);
       if (!isVipergirlsHost(u.hostname)) return '';
       const path = String(u.pathname || '');
       const modern = path.match(/\/threads\/(\d+)-([^\/\?#]+)/i);
@@ -1829,7 +1841,8 @@
 
   function parseVipergirlsThreadContext(rawUrl, fallbackTitle) {
     try {
-      const u = new URL(String(rawUrl || ''), window.location.href);
+      const normalized = normalizeVipergirlsPageUrl(rawUrl, window.location.href) || String(rawUrl || '');
+      const u = new URL(normalized, window.location.href);
       if (!isVipergirlsHost(u.hostname)) return null;
       let id = '';
       let name = String(fallbackTitle || '').trim();
@@ -2346,7 +2359,7 @@
         const u = new URL(href, baseHref);
         u.hash = '';
         const host = String(u.hostname || '').toLowerCase();
-        if (isVipergirlsHost(host)) return u.toString();
+        if (isVipergirlsHost(host)) return normalizeVipergirlsPageUrl(u.toString(), baseHref) || u.toString();
       }
       for (const a of Array.from(doc.querySelectorAll('a[href]'))) {
         const text = String(a.textContent || '').trim().toLowerCase();
@@ -2356,7 +2369,7 @@
         const u = new URL(a.getAttribute('href'), baseHref);
         u.hash = '';
         const host = String(u.hostname || '').toLowerCase();
-        if (isVipergirlsHost(host)) return u.toString();
+        if (isVipergirlsHost(host)) return normalizeVipergirlsPageUrl(u.toString(), baseHref) || u.toString();
       }
     } catch (e) {}
     return '';

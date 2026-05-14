@@ -1131,6 +1131,32 @@ Gate 1 verificatie:
 - Statische check: `shouldChunkThreadBatch` en `shouldStop: shouldStopForGigaBatch` komen niet meer voor in `debug-toolbar.js`.
 - `npm test` in `webdl-hub`: groen, 141 tests geslaagd.
 
+### 2026-05-14: Gate 2 ViperGirls page URL
+
+Gate 2 bewijs:
+
+- `tmp-vipergirls-14180551-k2s.json` bevat 153 K2S-rijen: 10 met de eerste thread-URL en 143 met een kapotte `pageUrl` onder `/threads/threads/.../page2` t/m `/page9`.
+- Repo-zoekactie vond geen generator voor `tmp-vipergirls-14180551-k2s.json`; het bestand is diagnose-output.
+- Reproducer met native URL-resolutie:
+  - base `https://viper.to/threads/14180551-title` + href `threads/14180551-title/page2` geeft `https://viper.to/threads/threads/14180551-title/page2`;
+  - base `https://viper.to/threads/14180551-title/page2` + href `../threads/14180551-title/page2` geeft ook `https://viper.to/threads/threads/14180551-title/page2`;
+  - href `/threads/14180551-title/page2` blijft correct.
+- Bron in toolbar: `findNextVipergirlsForumPageUrl` resolveerde next-links met `new URL(href, baseHref)` en retourneerde die URL zonder ViperGirls thread-prefix-correctie. `parseVipergirlsThreadContext` gebruikte daarna de pagina-URL als context.
+
+Gate 2 actie:
+
+- `firefox-native-controller/content/debug-toolbar.js` kreeg `normalizeVipergirlsPageUrl(...)`, die ViperGirls page URLs na resolving corrigeert met `/threads/threads/ -> /threads/` zonder de host naar `vipergirls.to` te forceren.
+- `normalizeVipergirlsThreadUrl(...)`, `parseVipergirlsThreadContext(...)` en `findNextVipergirlsForumPageUrl(...)` gebruiken deze page-normalisatie.
+- `webdl-hub/src/api/routes-jobs.js` corrigeert dezelfde dubbele prefix defensief in `normalizeVipergirlsThreadUrl(...)`, zodat bestaande of externe kapotte context toch naar canonical `vipergirls.to/threads/<id>-...` wordt gerouteerd.
+- Build-label gezet op `debug-toolbar-2026-05-14-gate2-vipergirls-pageurl`.
+
+Gate 2 verificatie:
+
+- `node --check firefox-native-controller/content/debug-toolbar.js`: groen.
+- `node --check webdl-hub/src/api/routes-jobs.js`: groen.
+- `npm test` in `webdl-hub`: groen, 143 tests geslaagd.
+- Nieuwe tests bevestigen dat zowel een job-URL als `sourceContext.url` met `/threads/threads/` naar canonical ViperGirls thread worden hersteld.
+
 ## Rollbackstrategie
 
 Als er iets misgaat:

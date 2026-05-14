@@ -89,6 +89,26 @@ test('Vipergirls hele-thread scan wordt niet geblokkeerd door oude afgeronde job
   assert.ok(calls.some((call) => call.method === 'enqueue'));
 });
 
+test('Vipergirls dubbele thread-prefix wordt naar canonical thread hersteld', async (t) => {
+  const calls = [];
+  const repo = createTestRepo(calls);
+  const queue = createTestQueue(calls);
+  const { server, base } = await startTestServer({ repo, queue });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+
+  const result = await postJSON(base, '/api/jobs', {
+    url: 'https://viper.to/threads/threads/12345-test-thread/page2',
+  });
+
+  assert.equal(result.status, 201);
+  assert.equal(result.data.id, 'new-job');
+  assert.equal(result.data.url, 'https://vipergirls.to/threads/12345-test-thread');
+
+  const recentCall = calls.find((call) => call.method === 'findRecentJobByUrl');
+  assert.equal(recentCall.url, 'https://vipergirls.to/threads/12345-test-thread');
+  assert.deepEqual(recentCall.options, { statuses: ['queued', 'running'] });
+});
+
 test('Vipergirls host-media redirect dedupet alleen actieve hele-thread jobs', async (t) => {
   const calls = [];
   const repo = createTestRepo(calls);
@@ -118,6 +138,33 @@ test('Vipergirls host-media redirect dedupet alleen actieve hele-thread jobs', a
 
   const enqueueCall = calls.find((call) => call.method === 'enqueue');
   assert.equal(enqueueCall.job.adapter, 'gallerydl');
+  assert.equal(enqueueCall.job.options.contextUrl, 'https://vipergirls.to/threads/67890-big-thread');
+});
+
+test('Vipergirls host-media context herstelt dubbele thread-prefix', async (t) => {
+  const calls = [];
+  const repo = createTestRepo(calls);
+  const queue = createTestQueue(calls);
+  const { server, base } = await startTestServer({ repo, queue });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+
+  const result = await postJSON(base, '/api/jobs', {
+    url: 'https://imgbox.com/example-host-file',
+    options: {
+      sourceContext: {
+        platform: 'vipergirls',
+        url: 'https://viper.to/threads/threads/67890-big-thread/page4',
+        channel: 'vipergirls',
+        title: 'big thread',
+      },
+    },
+  });
+
+  assert.equal(result.status, 201);
+  assert.equal(result.data.id, 'new-job');
+  assert.equal(result.data.url, 'https://vipergirls.to/threads/67890-big-thread');
+
+  const enqueueCall = calls.find((call) => call.method === 'enqueue');
   assert.equal(enqueueCall.job.options.contextUrl, 'https://vipergirls.to/threads/67890-big-thread');
 });
 
