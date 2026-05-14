@@ -1619,3 +1619,46 @@ Het herstel is klaar wanneer:
 - Giga kan grote scans in chunks queueën zonder gewone downloads te breken;
 - `npm test` in `webdl-hub` groen blijft;
 - XPI bewust opnieuw gebouwd is.
+
+## Actuele herstelchecklist na GIGA-regressie
+
+Laatst bijgewerkt: 2026-05-14 na commit `86f1676`.
+
+### Vastgelegd op GitHub
+
+- `deb2e43` - checkpoint van de herstelstand na de GIGA downloader-problemen.
+- `86f1676` - herstel voor batch queue, Pixhost fullsize-resolve, Vipergirls thread-root, gallery screenshots en ImageBam thumbnailfilters.
+
+### Afgerond
+
+- Huidige herstelstand is naar GitHub gepusht op branch `codex/fix-gallery-keep2share-live`.
+- Batch-knoppen lopen niet meer stuk op de dure metadata-dedupe scan per item.
+- Pixhost `show/...jpg` wrappers worden als wrapper behandeld en naar fullsize `img*.pixhost.to/images/...` resolved.
+- Vipergirls "hele thread" start vanaf de thread-root, ook wanneer de gebruiker op `/page2` of een post-anchor staat.
+- Screenshots uit de WEB DL viewer blijven bewaard, maar worden standaard niet meer in de gallery getoond.
+- ImageBam thumbnails en logo/site-assets (`thumbs*.imagebam.com`, `_t.jpg`, `imagebam_light.png`) worden uit de gallery geweerd.
+- De add-on XPI is opnieuw gepackt.
+- Gallery en simple-server zijn herstart en reageerden na de herstelactie weer.
+- Runtime-status na herstel: geen actieve downloads en geen queued downloads; alleen een oude TikTok `pending` recording uit 2026-05-01 bleef in de DB staan.
+
+### Nog open
+
+- Controleren of Firefox daadwerkelijk de nieuwe `firefox-debug-controller.xpi` actief gebruikt.
+- Phun.org/forum.phun ondersteuning bouwen voor `forum.phun.org/threads/...`.
+- Generieke forum-basisfallback bouwen zodat onbekende fora niet volledig onbegrepen blijven.
+- XVideos pagina-scan / thread-achtige scan verifiëren en zo nodig uitbreiden.
+- `Bestaat al` meldingen bij rechtsklik, batch en duplicate skip eenduidiger maken.
+- YouTube apart oplossen: recente jobs falen op `n challenge solving failed`; dit is los van de batch-knop timeout.
+- iCloud/RAR/ZIP metadata-afhandeling opnieuw nalopen, inclusief uitgepakte archieven en gallery model/set labels.
+- RAR/ZIP-bestanden uit `https://viper.to/threads/14180551-iCloud-Leaks-3-0-The-fappening-(full-sets)` gericht controleren.
+- Dedupe audit voor alle downloadroutes: Twitter/X, Reddit, fora, imagehosts, K2S, XVideos, YouTube en browser-media.
+- Controleren dat "bestaat al op disk/DB" overal voorrang heeft boven opnieuw downloaden.
+
+### Verificaties die nog wenselijk zijn
+
+- Op de twee gemelde Vipergirls page2 URLs opnieuw "Hele thread" starten en bevestigen dat de scan vanaf pagina 1/thread-root loopt:
+  - `https://vipergirls.to/threads/7410887-nude-beach-collection-natural-Voyeur-txt/page2`
+  - `https://vipergirls.to/threads/5599877-spy-on-people-in-streets-beaches-cars-parks-forests-only-hidden-only-softcore/page2`
+- Een batch van ongeveer 120 items queueën en bevestigen dat de server snel antwoordt zonder `The operation was aborted`.
+- Gallery openen op `http://localhost:35731` en controleren dat screenshots, ImageBam thumbs en site-logo's niet meer in de grid staan.
+- Nieuwe Pixhost download controleren: URL moet `img*.pixhost.to/images/...` zijn, niet `pixhost.to/show/...`.
