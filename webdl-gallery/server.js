@@ -287,6 +287,35 @@ function addSearchFilter(where, params, q, columns) {
   where.push(`(${columns.map((col) => `${col} ILIKE ${param}`).join(' OR ')})`);
 }
 
+function platformSearchAlias(value) {
+  const raw = String(value || '').trim().toLowerCase().replace(/^#/, '').replace(/^@/, '');
+  if (!raw || /\s/.test(raw)) return '';
+  const normalized = normalizeSourceSiteLabel(raw);
+  const aliases = new Map([
+    ['xvideos', 'xvideos'],
+    ['xvideo', 'xvideos'],
+    ['xv', 'xvideos'],
+    ['twitter', 'twitter'],
+    ['x', 'twitter'],
+    ['reddit', 'reddit'],
+    ['youtube', 'youtube'],
+    ['yt', 'youtube'],
+    ['telegram', 'telegram'],
+    ['tiktok', 'tiktok'],
+    ['instagram', 'instagram'],
+    ['vipergirls', 'vipergirls'],
+    ['viper', 'vipergirls'],
+    ['viper.to', 'vipergirls'],
+    ['vipergirls.to', 'vipergirls'],
+    ['keep2share', 'keep2share'],
+    ['k2s', 'keep2share'],
+    ['k2s.cc', 'keep2share'],
+    ['footfetishforum', 'footfetishforum'],
+    ['redgifs', 'redgifs'],
+  ]);
+  return aliases.get(normalized) || aliases.get(raw) || '';
+}
+
 function sourceSiteSql(alias = 'd') {
   const metadata = `${alias}.metadata`;
   return `NULLIF(COALESCE(
@@ -410,6 +439,7 @@ function workLaneFromHubLane(lane) {
 function normalizeSourceSiteLabel(value) {
   const raw = String(value || '').trim().toLowerCase().replace(/^www\./, '');
   if (!raw) return '';
+  if (raw === 'xvideos' || raw === 'xvideos.com' || raw.endsWith('.xvideos.com')) return 'xvideos';
   if (raw === 't' || raw === 'telegram' || raw === 't.me' || raw === 'telegram.me' || raw.endsWith('.t.me') || raw.endsWith('.telegram.me')) return 'telegram';
   if (raw === 'vipergirls.to' || raw === 'viper.to' || raw.endsWith('.vipergirls.to') || raw.endsWith('.viper.to')) return 'vipergirls';
   if (raw === 'footfetishforum' || raw === 'footfetishforum.com' || raw.endsWith('.footfetishforum.com')) return 'footfetishforum';
@@ -758,7 +788,9 @@ function isKnownGalleryJunkRow(row) {
   ].map((v) => String(v || '').toLowerCase()).join(' ');
   if (/(^|[\/_.-])(?:user-online|user-offline|statusicon|reputation(?:_pos)?|spacer|blank|button)(?:[\/_.-]|$)/i.test(text)) return true;
   if (/(^|[\/_.-])(?:imagebam_light|imagebam_dark|imagebam_logo|logo-imagebam)(?:[\/_.-]|$)/i.test(text)) return true;
-  if (/\bthumbs\d*\.imagebam\.com\b/i.test(text)) return true;
+  // Only treat imagebam thumb URLs as junk if they lack a real downloaded file (hotlink placeholders)
+  // Genuinely downloaded imagebam thumbnails from forum threads should pass through
+  if (/\bthumbs\d*\.imagebam\.com\b/i.test(text) && !(Number(row.filesize || 0) > 2048 && row.filepath)) return true;
   if (/\bimagebam\.com\b/i.test(text) && /\/[^\/\s?#]+_t\.(?:jpe?g|png|gif|webp)(?:$|[\s?#])/i.test(text)) return true;
   return false;
 }
@@ -846,6 +878,7 @@ function isGalleryMediaCandidate(row, { requireThumbReady = false } = {}) {
   if (isKnownGalleryJunkRow(row)) return false;
   if (isTempMediaPath(row.filepath) || isAuxMediaPath(row.filepath)) return false;
   if (ARCHIVE_EXTS.includes(ext)) return false;
+  if (VIDEO_EXTS.includes(ext) && Number(row.filesize || 0) > 0 && Number(row.filesize || 0) < 128 * 1024) return false;
   if (requireThumbReady && row.is_thumb_ready !== true && !IMAGE_EXTS.includes(ext)) return false;
   return true;
 }
@@ -919,6 +952,7 @@ async function rowHasPlayableMedia(row) {
   if (rowReferencesImxThumbnail(row)) return false;
   if (rowReferencesViprLowQualityImage(row)) return false;
   if (!VIDEO_EXTS.includes(ext)) return true;
+  if (Number(row.filesize || 0) > 0 && Number(row.filesize || 0) < 128 * 1024) return false;
   if (row.is_thumb_ready === true) return true;
   return hasVideoStream(fp);
 }
@@ -1694,9 +1728,11 @@ function buildItemFilters({ req, params, fileExpr, extExpr, ratingExpr, includeC
   const sourcePostUrl = req.query.source_post_url ? String(req.query.source_post_url).trim() : '';
   const sourceModelKey = req.query.source_model_key ? String(req.query.source_model_key).trim().toLowerCase() : '';
   const sourceModelTitle = req.query.source_model_title ? String(req.query.source_model_title).trim() : '';
+  const qPlatformAlias = !platformValues.length && q ? platformSearchAlias(q) : '';
 
   const where = [`${fileExpr} IS NOT NULL`, `${fileExpr} <> ''`];
   if (platformValues.length) { params.push(platformValues); where.push(`${platformGroupSql('d')} = ANY($${params.length}::text[])`); }
+  else if (qPlatformAlias) { params.push([qPlatformAlias]); where.push(`${platformGroupSql('d')} = ANY($${params.length}::text[])`); }
   if (includeChannel && channelValues.length) {
     const siteChannels = channelValues.filter((value) => String(value).startsWith('site:'));
     const plainChannels = channelValues.filter((value) => !String(value).startsWith('site:'));
@@ -1709,7 +1745,7 @@ function buildItemFilters({ req, params, fileExpr, extExpr, ratingExpr, includeC
       where.push(`LOWER(COALESCE(d.metadata, '')) LIKE $${params.length}`);
     }
   }
-  if (q) {
+  if (q && !qPlatformAlias) {
     addSearchFilter(where, params, q, ['d.title', 'd.filename', 'd.channel', 'd.platform', 'd.source_url', 'd.url', fileExpr]);
   }
   if (sourceThreadUrl) {
@@ -1768,11 +1804,15 @@ function buildScreenshotFilters({ req, params, includeChannel = true }) {
   const mediaType = req.query.media_type ? String(req.query.media_type) : null;
   const tagId = req.query.tag_id ? parseInt(req.query.tag_id, 10) : null;
   const hasSourceScope = Boolean(req.query.source_thread_url || req.query.source_thread_title || req.query.source_post_url || req.query.source_model_key || req.query.source_model_title);
+  const qPlatformAlias = !platformValues.length && q ? platformSearchAlias(q) : '';
 
   const where = [`s.filepath IS NOT NULL`, `s.filepath <> ''`];
   if (hasSourceScope) where.push('false');
   if (platformValues.length) {
     params.push(platformValues);
+    where.push(`COALESCE(NULLIF(s.platform, ''), 'unknown') = ANY($${params.length}::text[])`);
+  } else if (qPlatformAlias) {
+    params.push([qPlatformAlias]);
     where.push(`COALESCE(NULLIF(s.platform, ''), 'unknown') = ANY($${params.length}::text[])`);
   }
   if (includeChannel && channelValues.length) {
@@ -1787,7 +1827,7 @@ function buildScreenshotFilters({ req, params, includeChannel = true }) {
       where.push(`LOWER(COALESCE(s.filepath, '') || ' ' || COALESCE(s.url, '')) LIKE $${params.length}`);
     }
   }
-  if (q) {
+  if (q && !qPlatformAlias) {
     addSearchFilter(where, params, q, ['s.title', 's.filename', 's.channel', 's.platform', 's.filepath']);
   }
   if (Number.isFinite(minRating)) { params.push(minRating); where.push(`s.rating >= $${params.length}`); }
@@ -3190,6 +3230,8 @@ app.post('/api/finder', async (req, res) => {
 
 const server = app.listen(PORT, () => {
   console.log(`webdl-gallery listening on http://localhost:${PORT}`);
+  console.log(`MEDIA_ROOTS: ${JSON.stringify(MEDIA_ROOTS)}`);
+  console.log(`BASE_DIR: ${BASE_DIR}`);
   setTimeout(() => {
     ensureSchema()
       .then(() => ensureSearchIndexes())

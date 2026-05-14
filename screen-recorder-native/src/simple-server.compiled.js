@@ -12348,9 +12348,15 @@ function isSiteInfrastructureUrl(url) {
 
 function isKnownExternalMediaWrapperHost(hostname) {
   try {
-    const host = String(hostname || '').toLowerCase();
+    const host = String(hostname || '').toLowerCase().replace(/^www\./, '');
     if (!host) return false;
-    if (/^(?:www\.)?(?:pixhost\.to|postimages\.org|postimg\.cc|imagebam\.com|imgvb\.com|ibb\.co|imgbox\.com|imagevenue\.com|imgchest\.com|turboimagehost\.com|imx\.to|vipr\.im|pixeldrain\.com|cyberfile\.me|jpg\.pet|gofile\.io|img\.kiwi)$/.test(host)) return true;
+    const suffixes = [
+      'pixhost.to', 'postimages.org', 'postimg.cc', 'imagebam.com', 'imgvb.com',
+      'ibb.co', 'imgbox.com', 'imagevenue.com', 'imgchest.com',
+      'turboimagehost.com', 'imx.to', 'vipr.im', 'pixeldrain.com',
+      'cyberfile.me', 'jpg.pet', 'gofile.io', 'img.kiwi'
+    ];
+    if (suffixes.some((suffix) => host === suffix || host.endsWith(`.${suffix}`))) return true;
     if (isBunkrHost(host)) return true;
     return false;
   } catch (e) {
