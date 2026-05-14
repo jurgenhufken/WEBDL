@@ -2335,19 +2335,43 @@ app.get('/api/platforms', async (req, res) => {
       where.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
       where.push(`(d.filesize IS NULL OR d.filesize > 0)`);
       where.push(DIRECT_DOWNLOAD_HINT_SQL);
+
+      const fileWhere = [`d.status <> ALL(ARRAY[${HIDDEN_FILE_PARENT_STATUSES.map(s => `'${s}'`).join(',')}])`];
+      fileWhere.push(`(df.filesize IS NULL OR df.filesize > 0)`);
+      fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
+      fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
+
       const { rows } = await pool.query(`
         SELECT platform,
-               COUNT(*)::bigint AS count,
-               COUNT(*) FILTER (WHERE ext IN (${IMAGE_EXT_SQL}))::bigint AS image_count,
-               COUNT(*) FILTER (WHERE ext IN (${VIDEO_EXT_SQL}))::bigint AS video_count
+               SUM(count)::bigint AS count,
+               SUM(image_count)::bigint AS image_count,
+               SUM(video_count)::bigint AS video_count
           FROM (
-            SELECT ${platformGroupSql('d')} AS platform,
-                   lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) AS ext
-              FROM downloads d
-             WHERE ${where.join(' AND ')}
-          ) platform_items
+            SELECT platform, COUNT(*) AS count,
+                   COUNT(*) FILTER (WHERE ext IN (${IMAGE_EXT_SQL})) AS image_count,
+                   COUNT(*) FILTER (WHERE ext IN (${VIDEO_EXT_SQL})) AS video_count
+              FROM (
+                SELECT ${platformGroupSql('d')} AS platform,
+                       lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) AS ext
+                  FROM downloads d
+                 WHERE ${where.join(' AND ')}
+              ) direct_items
+             GROUP BY platform
+            UNION ALL
+            SELECT platform, COUNT(*) AS count,
+                   COUNT(*) FILTER (WHERE ext IN (${IMAGE_EXT_SQL})) AS image_count,
+                   COUNT(*) FILTER (WHERE ext IN (${VIDEO_EXT_SQL})) AS video_count
+              FROM (
+                SELECT ${platformGroupSql('d')} AS platform,
+                       lower(regexp_replace(df.relpath, '^.*\\.', '')) AS ext
+                  FROM download_files df
+                  JOIN downloads d ON d.id = df.download_id
+                 WHERE ${fileWhere.join(' AND ')}
+              ) file_items
+             GROUP BY platform
+          ) combined
          GROUP BY platform
-         ORDER BY COUNT(*) DESC`, params);
+         ORDER BY count DESC`, params);
       return res.json({ platforms: rows });
     }
 
