@@ -73,6 +73,12 @@
     hudMessageTimer: null,
     forceTranscodeIds: new Set(),
 
+    // Segment markers: array of time values in seconds.
+    // Pairs of consecutive markers define "keep" segments.
+    // Odd marker = partial (start set, waiting for end)
+    segments: [],
+    segmentSkipEnabled: true,
+
     // Zoom (exact als oude viewer)
     zoomed: false,
     scale: 1,
@@ -1050,6 +1056,7 @@
     vs.mediaSeq += 1;
     vs.loopStart = null;
     vs.loopEnd = null;
+    vs.segments = [];
     const v = el.vContent.querySelector('video');
     if (v) { v.pause(); v.src = ''; v.load(); }
     el.vContent.innerHTML = '';
@@ -1472,6 +1479,8 @@
     ) {
       v.currentTime = vs.loopStart;
     }
+    // Segment skip: auto-jump past skip zones during playback
+    checkSegmentSkip(v);
     if (!vs.seekDragging && Number.isFinite(v.duration) && v.duration > 0) {
       const pct = Math.max(0, Math.min(100, (v.currentTime / v.duration) * 100));
       el.vSeek.value = String(Math.round(pct * 10));
@@ -2698,6 +2707,87 @@
     return m + ':' + String(s).padStart(2, '0');
   }
 
+  // ─── Segment markers ────────────────────────────────────────────────────
+  // Markers come in pairs: [start1, end1, start2, end2, ...]
+  // Regions BETWEEN pairs are "keep" zones; everything else is skipped.
+  // During playback, if currentTime enters a skip zone, jump to next keep zone.
+
+  function addSegmentMarker() {
+    const v = el.vContent.querySelector('video');
+    if (!v || !Number.isFinite(v.duration)) return;
+    const t = v.currentTime;
+    vs.segments.push(t);
+    vs.segments.sort((a, b) => a - b);
+    const isPair = vs.segments.length % 2 === 0;
+    updateSegmentOverlay();
+    showHudMessage(`Marker ${isPair ? 'einde' : 'begin'}: ${fmtTime(t)}`, 1200);
+    log(`Segment marker ${vs.segments.length}: ${fmtTime(t)} (${isPair ? 'paar compleet' : 'wacht op einde'})`);
+  }
+
+  function isInKeepSegment(time) {
+    if (!vs.segments.length) return true;
+    for (let i = 0; i < vs.segments.length - 1; i += 2) {
+      if (time >= vs.segments[i] && time <= vs.segments[i + 1]) return true;
+    }
+    // If odd number of markers, last marker to end of video is "keep"
+    if (vs.segments.length % 2 === 1) {
+      return time >= vs.segments[vs.segments.length - 1];
+    }
+    return false;
+  }
+
+  function nextKeepSegmentStart(time) {
+    for (let i = 0; i < vs.segments.length; i += 2) {
+      if (vs.segments[i] > time) return vs.segments[i];
+    }
+    return null; // no more keep segments
+  }
+
+  function checkSegmentSkip(video) {
+    if (!vs.segmentSkipEnabled || !vs.segments.length || vs.segments.length < 2) return;
+    if (!video || !Number.isFinite(video.duration) || video.paused) return;
+    if (isInKeepSegment(video.currentTime)) return;
+    const next = nextKeepSegmentStart(video.currentTime);
+    if (next != null) {
+      video.currentTime = next;
+      showHudMessage(`Skip → ${fmtTime(next)}`, 900);
+    }
+  }
+
+  function updateSegmentOverlay() {
+    // Remove existing markers
+    const existing = document.querySelectorAll('.segment-marker, .segment-keep');
+    existing.forEach(el => el.remove());
+
+    const v = el.vContent.querySelector('video');
+    const bar = el.vProgressBar;
+    if (!v || !bar || !Number.isFinite(v.duration) || !vs.segments.length) return;
+
+    // Draw keep zones (green)
+    for (let i = 0; i < vs.segments.length - 1; i += 2) {
+      const left = (vs.segments[i] / v.duration) * 100;
+      const width = ((vs.segments[i + 1] - vs.segments[i]) / v.duration) * 100;
+      const zone = document.createElement('div');
+      zone.className = 'segment-keep';
+      zone.style.cssText = `position:absolute; bottom:0; height:100%; background:rgba(80,255,120,.2); pointer-events:none; z-index:4; border-left:2px solid rgba(80,255,120,.7); border-right:2px solid rgba(80,255,120,.7);`;
+      zone.style.left = left + '%';
+      zone.style.width = width + '%';
+      bar.appendChild(zone);
+    }
+
+    // Draw individual markers
+    for (let i = 0; i < vs.segments.length; i++) {
+      const pct = (vs.segments[i] / v.duration) * 100;
+      const marker = document.createElement('div');
+      marker.className = 'segment-marker';
+      const isStart = i % 2 === 0;
+      marker.style.cssText = `position:absolute; bottom:0; top:0; width:3px; pointer-events:none; z-index:6; background:${isStart ? '#50ff78' : '#ff6050'};`;
+      marker.style.left = pct + '%';
+      marker.title = `${isStart ? 'Begin' : 'Einde'}: ${fmtTime(vs.segments[i])}`;
+      bar.appendChild(marker);
+    }
+  }
+
   function toggleLog() {
     vs.logOpen = !vs.logOpen;
     el.vLogPanel.classList.toggle('hidden', !vs.logOpen);
@@ -2738,6 +2828,65 @@
         return;
       }
       if (tag === 'SELECT') return;
+
+      // Numpad detection: e.code starts with 'Numpad'
+      const isNumpad = (e.code || '').startsWith('Numpad');
+
+      if (isNumpad) {
+        const v = el.vContent.querySelector('video');
+        switch (e.code) {
+          case 'Numpad4': // seek left (small step)
+            if (v) seekRelative(-2);
+            e.preventDefault(); break;
+          case 'Numpad6': // seek right (small step)
+            if (v) seekRelative(2);
+            e.preventDefault(); break;
+          case 'Numpad8': // volume up
+            if (v) { v.volume = Math.min(1, v.volume + 0.05); vs.vol = v.volume; showHudMessage(`Volume ${Math.round(v.volume * 100)}%`, 800); }
+            e.preventDefault(); break;
+          case 'Numpad5': // volume down
+            if (v) { v.volume = Math.max(0, v.volume - 0.05); vs.vol = v.volume; showHudMessage(`Volume ${Math.round(v.volume * 100)}%`, 800); }
+            e.preventDefault(); break;
+          case 'Numpad1': // slower (tap/hold → slow down, stop, reverse)
+            changeSpeed(-1);
+            e.preventDefault(); break;
+          case 'Numpad3': // faster
+            changeSpeed(1);
+            e.preventDefault(); break;
+          case 'Numpad7': // big jump back
+            if (v) seekRelative(-15);
+            e.preventDefault(); break;
+          case 'Numpad9': // big jump forward
+            if (v) seekRelative(15);
+            e.preventDefault(); break;
+          case 'Numpad0': // toggle play/pause
+            if (v) { v.paused ? v.play() : v.pause(); }
+            e.preventDefault(); break;
+          case 'NumpadDecimal': // add/close segment marker
+            addSegmentMarker();
+            e.preventDefault(); break;
+          case 'NumpadEnter': // toggle segment skip
+            vs.segmentSkipEnabled = !vs.segmentSkipEnabled;
+            showHudMessage(vs.segmentSkipEnabled ? 'Segment skip: aan' : 'Segment skip: uit', 1200);
+            log(vs.segmentSkipEnabled ? 'Segment skip ingeschakeld' : 'Segment skip uitgeschakeld');
+            e.preventDefault(); break;
+          case 'NumpadAdd': // clear all segments
+            vs.segments = [];
+            updateSegmentOverlay();
+            showHudMessage('Segmenten gewist', 1000);
+            log('Alle segmenten gewist');
+            e.preventDefault(); break;
+          case 'NumpadSubtract': // remove last marker
+            if (vs.segments.length > 0) {
+              vs.segments.pop();
+              updateSegmentOverlay();
+              showHudMessage(`Laatste marker verwijderd (${vs.segments.length} over)`, 1000);
+              log(`Marker verwijderd, ${vs.segments.length} markers over`);
+            }
+            e.preventDefault(); break;
+        }
+        return;
+      }
 
       switch (e.key) {
         case 'Escape':
