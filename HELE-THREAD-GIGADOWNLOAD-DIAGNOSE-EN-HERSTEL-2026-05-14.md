@@ -1088,6 +1088,49 @@ Beslisregel: als gewone "Hele thread" na deze gate werkt, blijft de normale queu
 2. Gallery archive-weergave apart behandelen.
 3. Documentatie bijwerken.
 
+## Uitvoering
+
+Deze sectie wordt bijgehouden tijdens de uitvoering. Elke stap vermeldt status, bewijs, actie en verificatie. Queue-state mutaties horen hier alleen thuis als ze expliciet zijn uitgevoerd en omkeerbaar zijn beschreven.
+
+### 2026-05-14: start uitvoering
+
+Status:
+
+- Branch: `codex/fix-gallery-keep2share-live`.
+- Laatste commits vóór uitvoering:
+  - `50bd203 docs: add gate-based WebDL recovery plan`
+  - `9e0fb9c fix: harden WebDL thread and K2S flows`
+
+Gate 0 bewijs:
+
+- Bewezen: gewone thread-flow raakt nog steeds de Giga/chunk-route. In `firefox-native-controller/content/debug-toolbar.js` staan `shouldChunkThreadBatch` en `queueThreadBatchDownloadRequest` in de normale `runBatchFromWholeThread` afsluiting.
+- Bewezen: gewone FFF thread kan nog steeds `startFffBackgroundScanRequest` raken via `res.stoppedByGiga`.
+- Bewezen: de XPI wordt normaal uit `firefox-native-controller` gebouwd via `/usr/bin/zip`; `StartServer.command` zet `WEBDL_ADDON_SOURCE_DIR` en `WEBDL_ADDON_PACKAGE_PATH`.
+- Besluit: Gate 1 is nodig vóór verdere ViperGirls/K2S/Giga-modernisering.
+
+Gate 1 geplande actie:
+
+- Normale "Hele thread" terugzetten naar `queueBatchDownloadRequest(urls, meta, { force, directHints, sourceContexts })`.
+- Gewone thread-scan mag geen automatische Giga-overdracht meer aanbieden.
+- Expliciete Giga-knop mag de bestaande Giga-route blijven gebruiken totdat Gate 4 een aparte moderne flow bouwt.
+- XPI opnieuw inpakken na toolbar-wijziging.
+
+Gate 1 uitgevoerd:
+
+- `firefox-native-controller/content/debug-toolbar.js` build-label gezet op `debug-toolbar-2026-05-14-gate1-whole-thread-baseline`.
+- Gewone FFF thread-scan krijgt geen `shouldStopForGigaBatch` meer mee.
+- `res.stoppedByGiga` kan alleen nog een background/server-gigascan starten wanneer `options.forceGiga === true`.
+- De normale queue-afsluiting gebruikt alleen `queueBatchDownloadRequest`; `queueThreadBatchDownloadRequest` zit achter `useGigaQueue = options.forceGiga === true`.
+- `firefox-debug-controller.xpi` opnieuw ingepakt uit `firefox-native-controller`.
+
+Gate 1 verificatie:
+
+- `node --check firefox-native-controller/content/debug-toolbar.js`: groen.
+- `node --check firefox-native-controller/background/simple-background.js`: groen.
+- XPI bevat build-label `debug-toolbar-2026-05-14-gate1-whole-thread-baseline`.
+- Statische check: `shouldChunkThreadBatch` en `shouldStop: shouldStopForGigaBatch` komen niet meer voor in `debug-toolbar.js`.
+- `npm test` in `webdl-hub`: groen, 141 tests geslaagd.
+
 ## Rollbackstrategie
 
 Als er iets misgaat:

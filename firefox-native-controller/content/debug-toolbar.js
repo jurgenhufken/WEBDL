@@ -5,7 +5,7 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-05-14-fff-watchdog-active-worker';
+  const WEBDL_BUILD = 'debug-toolbar-2026-05-14-gate1-whole-thread-baseline';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
@@ -7594,8 +7594,8 @@
         : (isVipergirlsThread
           ? await fetchVipergirlsMixedThreadCandidates(startUrl, { maxPages, maxItems })
           : (isForumPage
-          ? await fetchFootFetishForumForumCandidates(startUrl, { maxForumPages, maxThreadPages: maxPages, maxItems, onProgress: updateWholeThreadProgress, shouldStop: shouldStopForGigaBatch })
-          : await fetchFootFetishForumThreadCandidates(startUrl, { maxPages, maxItems, onProgress: updateWholeThreadProgress, shouldStop: shouldStopForGigaBatch })));
+          ? await fetchFootFetishForumForumCandidates(startUrl, { maxForumPages, maxThreadPages: maxPages, maxItems, onProgress: updateWholeThreadProgress })
+          : await fetchFootFetishForumThreadCandidates(startUrl, { maxPages, maxItems, onProgress: updateWholeThreadProgress })));
       const candidates = uniqueCandidates(res && res.candidates ? res.candidates : []);
 
       try {
@@ -7622,7 +7622,7 @@
         showNotification(`${prefix}: ${candidates.length} items (${res && Number.isFinite(Number(res.pages)) ? res.pages : '?'} threadpagina's)`, false);
       } catch (e) {}
 
-      if (res && res.stoppedByGiga) {
+      if (options.forceGiga === true && res && res.stoppedByGiga) {
         const urls = candidates.map((c) => c && c.url).filter(Boolean);
         const directHints = {};
         const sourceContexts = {};
@@ -7702,9 +7702,9 @@
       if (!ok) return;
 
       addLog(force ? `Force ${isAnyForumPage ? 'forum' : 'thread'} batch: ${urls.length} items` : `${isAnyForumPage ? 'Forum' : 'Thread'} batch: ${urls.length} items`);
+      const useGigaQueue = options.forceGiga === true;
       const isFffQueueTarget = isForumPage || isThreadPage;
-      const shouldChunkThreadBatch = isFffQueueTarget || isVipergirlsThread || isVipergirlsForum || urls.length > FFF_THREAD_QUEUE_BATCH_SIZE;
-      const finalMeta = isFffQueueTarget
+      const finalMeta = useGigaQueue && isFffQueueTarget
         ? {
             ...meta,
             platform: 'footfetishforum',
@@ -7712,7 +7712,7 @@
             webdl_pin_context: true,
           }
         : meta;
-      const result = shouldChunkThreadBatch
+      const result = useGigaQueue
         ? await queueThreadBatchDownloadRequest(urls, finalMeta, {
             force,
             directHints: selectedDirectHints,
@@ -7720,7 +7720,7 @@
             batchSize: FFF_THREAD_QUEUE_BATCH_SIZE,
             logPrefix: isFffQueueTarget ? 'FFF thread queue' : (isVipergirlsForum ? 'Vipergirls forum queue' : 'Thread queue'),
           })
-        : await queueBatchDownloadRequest(urls, finalMeta, { force, directHints: selectedDirectHints, sourceContexts: selectedSourceContexts });
+        : await queueBatchDownloadRequest(urls, meta, { force, directHints: selectedDirectHints, sourceContexts: selectedSourceContexts });
       if (result && result.success) {
         const stats = summarizeBatchResult(result);
         const label = force ? `Force ${isAnyForumPage ? 'forum' : 'thread'}` : (isAnyForumPage ? 'Forum' : 'Thread');
