@@ -662,7 +662,7 @@
         if (/^thumbs?\d*\.imagebam\.com$/i.test(host)) {
           try {
             const rawPath = String(u.pathname || '');
-            const m = rawPath.match(/\/([a-f0-9]+)\.[a-z]+$/i);
+            const m = rawPath.match(/\/([a-z0-9]+?)(?:_t)?\.[a-z]+$/i);
             if (m && m[1]) {
               const u2 = new URL(`https://www.imagebam.com/view/${m[1]}`);
               u2.hash = '';
