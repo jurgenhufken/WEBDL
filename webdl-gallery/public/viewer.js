@@ -822,9 +822,14 @@
       gal().restoreViewerAnchor(anchorId).catch(() => {});
     }
 
-    // Pop de viewer history entry (tenzij we al via popstate kwamen)
+    // Verwijder de viewer history entry zodat back altijd naar gallery gaat
     if (!skipHistory) {
-      try { history.back(); } catch (_) {}
+      try {
+        // Gebruik replaceState om de viewer-entry te overschrijven met een gallery-state
+        // zodat back nooit voorbij de gallery gaat
+        const galleryState = { page: 'gallery' };
+        history.replaceState(galleryState, '', location.href);
+      } catch (_) {}
     }
   }
 
@@ -2918,16 +2923,25 @@
       if (isNumpad) {
         const v = el.vContent.querySelector('video');
         switch (e.code) {
-          case 'Numpad4': // seek left (small step)
+          case 'Numpad7': // fine seek left (0.5s)
             if (v) seekRelative(-0.5);
             e.preventDefault(); break;
-          case 'Numpad6': // seek right (small step)
+          case 'Numpad9': // fine seek right (0.5s)
             if (v) seekRelative(0.5);
+            e.preventDefault(); break;
+          case 'Numpad4': // seek left (1s)
+            if (v) seekRelative(-1);
+            e.preventDefault(); break;
+          case 'Numpad6': // seek right (1s)
+            if (v) seekRelative(1);
+            e.preventDefault(); break;
+          case 'Numpad5': // play/pause
+            if (v) { v.paused ? v.play() : v.pause(); }
             e.preventDefault(); break;
           case 'Numpad8': // volume up
             if (v) { v.volume = Math.min(1, v.volume + 0.05); vs.vol = v.volume; showHudMessage(`Volume ${Math.round(v.volume * 100)}%`, 800); }
             e.preventDefault(); break;
-          case 'Numpad5': // volume down
+          case 'Numpad2': // volume down
             if (v) { v.volume = Math.max(0, v.volume - 0.05); vs.vol = v.volume; showHudMessage(`Volume ${Math.round(v.volume * 100)}%`, 800); }
             e.preventDefault(); break;
           case 'Numpad1': // slower (tap/hold → slow down, stop, reverse)
@@ -2935,12 +2949,6 @@
             e.preventDefault(); break;
           case 'Numpad3': // faster
             changeSpeed(1);
-            e.preventDefault(); break;
-          case 'Numpad7': // jump back (tap multiple times for more)
-            if (v) seekRelative(-1);
-            e.preventDefault(); break;
-          case 'Numpad9': // jump forward (tap multiple times for more)
-            if (v) seekRelative(1);
             e.preventDefault(); break;
           case 'NumpadDecimal': // add/close segment marker
             addSegmentMarker();
