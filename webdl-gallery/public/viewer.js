@@ -1515,7 +1515,7 @@
     const delta = Number(seconds) || 0;
     v.currentTime = Math.max(0, Math.min(v.duration, v.currentTime + delta));
     syncVideoProgress(v);
-    showHudMessage(`${delta > 0 ? '+' : ''}${delta}s`, 900);
+    showHudMessage(`${delta > 0 ? '+' : ''}${delta}s`, 900, { skipOverlay: true });
   }
 
   function toggleVideoPlayback() {
@@ -1672,10 +1672,10 @@
     updatePlaybackControls(null);
   }
 
-  function showHudMessage(message, timeout = 1800) {
+  function showHudMessage(message, timeout = 1800, { skipOverlay = false } = {}) {
     if (!message || !el.vHudRight) return;
     el.vHudRight.textContent = message;
-    showHUD();
+    if (!skipOverlay) showHUD();
     clearTimeout(vs.hudMessageTimer);
     vs.hudMessageTimer = setTimeout(() => {
       if (vs.items[vs.idx]) updateHUD(vs.items[vs.idx]);
@@ -2581,7 +2581,7 @@
     updateSpeedIndicator();
     syncVideoProgress(v);
     const label = rate === 0 ? 'Pauze (freeze)' : rate > 0 ? `Snelheid ${rate}x` : `Achteruit ${Math.abs(rate)}x`;
-    showHudMessage(label, 1100);
+    showHudMessage(label, 1100, { skipOverlay: true });
     log(`Snelheid: ${rate === 0 ? 'pauze' : rate > 0 ? rate + '×' : rate + '× (achteruit)'}`);
   }
 
@@ -2763,7 +2763,7 @@
     vs.segments.sort((a, b) => a - b);
     const isPair = vs.segments.length % 2 === 0;
     updateSegmentOverlay();
-    showHudMessage(`Marker ${isPair ? 'einde' : 'begin'}: ${fmtTime(t)}`, 1200);
+    showHudMessage(`Marker ${isPair ? 'einde' : 'begin'}: ${fmtTime(t)}`, 1200, { skipOverlay: true });
     log(`Segment marker ${vs.segments.length}: ${fmtTime(t)} (${isPair ? 'paar compleet' : 'wacht op einde'})`);
   }
 
@@ -3202,20 +3202,20 @@
     vs.autoLaneVisible = !vs.autoLaneVisible;
     if (vs.autoLaneVisible) ensureAutoLaneCanvas();
     renderAutoLane();
-    showHudMessage(vs.autoLaneVisible ? 'Automation lane: zichtbaar' : 'Automation lane: verborgen', 1200);
+    showHudMessage(vs.autoLaneVisible ? 'Automation lane: zichtbaar' : 'Automation lane: verborgen', 1200, { skipOverlay: true });
     log(vs.autoLaneVisible ? 'Speed automation lane geopend' : 'Speed automation lane gesloten');
   }
 
   function toggleAutoEnabled() {
     vs.autoEnabled = !vs.autoEnabled;
-    showHudMessage(vs.autoEnabled ? 'Auto-snelheid: AAN' : 'Auto-snelheid: UIT', 1200);
+    showHudMessage(vs.autoEnabled ? 'Auto-snelheid: AAN' : 'Auto-snelheid: UIT', 1200, { skipOverlay: true });
     log(vs.autoEnabled ? 'Auto-snelheid ingeschakeld' : 'Auto-snelheid uitgeschakeld');
   }
 
   function toggleAutoPen() {
     vs.autoPenActive = !vs.autoPenActive;
     renderAutoLane();
-    showHudMessage(vs.autoPenActive ? '✏️ Pen: AAN — sleep om te tekenen' : '✏️ Pen: UIT', 1200);
+    showHudMessage(vs.autoPenActive ? '✏️ Pen: AAN — sleep om te tekenen' : '✏️ Pen: UIT', 1200, { skipOverlay: true });
     log(vs.autoPenActive ? 'Pen modus aan' : 'Pen modus uit');
   }
 
@@ -3263,29 +3263,30 @@
 
       if (isNumpad) {
         const v = el.vContent.querySelector('video');
+        const Q = { skipOverlay: true };
         switch (e.code) {
           case 'Numpad7': // volume down
-            if (v) { v.volume = Math.max(0, v.volume - 0.05); vs.vol = v.volume; showHudMessage(`Volume ${Math.round(v.volume * 100)}%`, 800); }
+            if (v) { v.volume = Math.max(0, v.volume - 0.05); vs.vol = v.volume; showHudMessage(`Volume ${Math.round(v.volume * 100)}%`, 800, Q); }
             e.preventDefault(); break;
           case 'Numpad9': // volume up
-            if (v) { v.volume = Math.min(1, v.volume + 0.05); vs.vol = v.volume; showHudMessage(`Volume ${Math.round(v.volume * 100)}%`, 800); }
+            if (v) { v.volume = Math.min(1, v.volume + 0.05); vs.vol = v.volume; showHudMessage(`Volume ${Math.round(v.volume * 100)}%`, 800, Q); }
             e.preventDefault(); break;
           case 'Numpad4': // seek left (1s)
-            if (v) seekRelative(-1);
+            if (v) { v.currentTime = Math.max(0, v.currentTime - 1); showHudMessage(`-1s`, 900, Q); }
             e.preventDefault(); break;
           case 'Numpad6': // seek right (1s)
-            if (v) seekRelative(1);
+            if (v) { v.currentTime = Math.min(v.duration || 0, v.currentTime + 1); showHudMessage(`+1s`, 900, Q); }
             e.preventDefault(); break;
           case 'Numpad5': // play/pause
             if (v) { v.paused ? v.play() : v.pause(); }
             e.preventDefault(); break;
           case 'Numpad8': // seek forward fine (0.5s)
-            if (v) seekRelative(0.5);
+            if (v) { v.currentTime = Math.min(v.duration || 0, v.currentTime + 0.5); showHudMessage(`+0.5s`, 900, Q); }
             e.preventDefault(); break;
           case 'Numpad2': // screenshot (capture video frame)
             await captureCurrentVideoFrame();
             e.preventDefault(); break;
-          case 'Numpad1': // slower (tap/hold → slow down, stop, reverse)
+          case 'Numpad1': // slower
             changeSpeed(-1);
             e.preventDefault(); break;
           case 'Numpad3': // faster
@@ -3294,22 +3295,20 @@
           case 'NumpadDecimal': // add/close segment marker
             addSegmentMarker();
             e.preventDefault(); break;
-          case 'NumpadEnter': // toggle segment skip
-            vs.segmentSkipEnabled = !vs.segmentSkipEnabled;
-            showHudMessage(vs.segmentSkipEnabled ? 'Segment skip: aan' : 'Segment skip: uit', 1200);
-            log(vs.segmentSkipEnabled ? 'Segment skip ingeschakeld' : 'Segment skip uitgeschakeld');
+          case 'NumpadEnter': // toggle auto-speed on/off
+            toggleAutoEnabled();
             e.preventDefault(); break;
           case 'NumpadAdd': // clear all segments
             vs.segments = [];
             updateSegmentOverlay();
-            showHudMessage('Segmenten gewist', 1000);
+            showHudMessage('Segmenten gewist', 1000, Q);
             log('Alle segmenten gewist');
             e.preventDefault(); break;
           case 'NumpadSubtract': // remove last marker
             if (vs.segments.length > 0) {
               vs.segments.pop();
               updateSegmentOverlay();
-              showHudMessage(`Laatste marker verwijderd (${vs.segments.length} over)`, 1000);
+              showHudMessage(`Laatste marker verwijderd (${vs.segments.length} over)`, 1000, Q);
               log(`Marker verwijderd, ${vs.segments.length} markers over`);
             }
             e.preventDefault(); break;
@@ -3318,9 +3317,6 @@
             e.preventDefault(); break;
           case 'NumpadDivide': // toggle pen drawing mode
             toggleAutoPen();
-            e.preventDefault(); break;
-          case 'NumpadEnter': // toggle auto-speed on/off
-            toggleAutoEnabled();
             e.preventDefault(); break;
         }
         // Block ALL numpad events from reaching other handlers
