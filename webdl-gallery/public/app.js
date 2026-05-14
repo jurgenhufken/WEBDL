@@ -1624,9 +1624,15 @@
     loadTagFilterDropdown().catch((e) => console.warn('tags filter load failed', e));
     loadFilterDropdowns().catch((e) => console.warn('filters load failed', e));
     await loadMore();
+    if (window.__viewer && typeof window.__viewer.restoreLastPosition === 'function') {
+      await window.__viewer.restoreLastPosition();
+    }
+    document.dispatchEvent(new CustomEvent('webdl:gallery-ready'));
     io.observe(sentinel);
-    startActiveRefresh();
-    if (state.autoRefresh) startAutoRefresh();
+    if (!state.viewerActive) {
+      startActiveRefresh();
+      if (state.autoRefresh) startAutoRefresh();
+    }
   }
 
   init().catch((e) => {

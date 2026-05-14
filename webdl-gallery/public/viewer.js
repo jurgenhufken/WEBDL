@@ -101,6 +101,7 @@
   // Uniek per tabblad — voorkomt dat de browser requests van verschillende tabs samenvoegt
   const VIEWER_TAB_ID = Math.random().toString(36).slice(2, 8);
   const VIEWER_POS_KEY = 'webdl:viewer:last-position';
+  const VIEWER_RESTORE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
   const VIEWER_SPEED_KEY = 'webdl:viewer:playback-rate';
   const MAIN_PROGRESS_KEY = 'webdl:viewer:main-progress-visible';
   const TAG_RECIPES_OPEN_KEY = 'webdl:viewer:tag-recipes-open';
@@ -295,9 +296,29 @@
     return `/thumb/${encodeURIComponent(String(it.id))}?${params.toString()}`;
   }
 
+  const VIEWER_FILTER_KEYS = [
+    'platform', 'channel', 'q', 'sort', 'channel_sort', 'min_rating', 'media_type', 'tag_id',
+    'source_thread_url', 'source_thread_title', 'source_post_url',
+    'source_model_key', 'source_model_title', 'source_scope_label',
+  ];
+
+  function normalizeViewerFilters(filters = {}) {
+    const out = {};
+    for (const key of VIEWER_FILTER_KEYS) out[key] = String(filters[key] || '');
+    if (!out.sort) out.sort = 'recent';
+    if (!out.channel_sort) out.channel_sort = 'count';
+    return out;
+  }
+
+  function viewerFiltersEqual(a, b) {
+    const left = normalizeViewerFilters(a || {});
+    const right = normalizeViewerFilters(b || {});
+    return VIEWER_FILTER_KEYS.every((key) => left[key] === right[key]);
+  }
+
   function snapshotGalleryFilters() {
     const filters = { ...(gal().state.filters || {}) };
-    return {
+    return normalizeViewerFilters({
       platform: filters.platform || '',
       channel: filters.channel || '',
       q: filters.q || '',
@@ -306,7 +327,13 @@
       min_rating: filters.min_rating || '',
       media_type: filters.media_type || '',
       tag_id: el.vTagFilter ? el.vTagFilter.value || '' : '',
-    };
+      source_thread_url: filters.source_thread_url || '',
+      source_thread_title: filters.source_thread_title || '',
+      source_post_url: filters.source_post_url || '',
+      source_model_key: filters.source_model_key || '',
+      source_model_title: filters.source_model_title || '',
+      source_scope_label: filters.source_scope_label || '',
+    });
   }
 
   function viewerFilters() {
@@ -444,6 +471,15 @@
     restoreLastAppliedTags();
     syncViewerModeControls();
     loadTags();
+    document.addEventListener('webdl:gallery-ready', () => {
+      restoreLastPosition().catch((e) => log('Viewer herstel fout: ' + (e && e.message ? e.message : String(e))));
+    });
+    setTimeout(() => {
+      const gallery = gal();
+      if (gallery && gallery.state && Array.isArray(gallery.state.items) && gallery.state.items.length) {
+        restoreLastPosition().catch((e) => log('Viewer herstel fout: ' + (e && e.message ? e.message : String(e))));
+      }
+    }, 0);
   }
 
   function restorePlaybackRate() {
@@ -626,17 +662,43 @@
     log(tagId ? `Filter: #${safeText(tag.name)}` : 'Tagfilter gewist');
   }
 
-  function rememberCurrentPosition() {
+  function rememberCurrentPosition({ open = vs.open } = {}) {
     const it = vs.items[vs.idx];
     if (!it) return;
     try {
       localStorage.setItem(VIEWER_POS_KEY, JSON.stringify({
+        open: Boolean(open),
         id: String(it.id),
         idx: vs.idx,
-        filters: viewerFilters(),
+        filters: normalizeViewerFilters(viewerFilters()),
         at: Date.now(),
       }));
     } catch (_) {}
+  }
+
+  function readRememberedPosition() {
+    try {
+      const raw = localStorage.getItem(VIEWER_POS_KEY);
+      if (!raw) return null;
+      const saved = JSON.parse(raw);
+      if (!saved || saved.open !== true) return null;
+      const id = String(saved.id || '').trim();
+      if (!id) return null;
+      const at = Number(saved.at || 0);
+      if (at && Date.now() - at > VIEWER_RESTORE_MAX_AGE_MS) return null;
+      return {
+        id,
+        idx: Math.max(0, Number(saved.idx) || 0),
+        filters: normalizeViewerFilters(saved.filters || {}),
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function restoreLoadPageBudget(saved) {
+    const indexHint = Math.max(0, Number(saved && saved.idx) || 0);
+    return Math.max(12, Math.min(120, Math.ceil(indexHint / 100) + 20));
   }
 
   function syncViewerModeControls() {
@@ -666,7 +728,7 @@
   }
 
   // ─── Open / sluit ─────────────────────────────────────────────────────────
-  function open(idx) {
+  function open(idx, options = {}) {
     // Kopieer gallery items als startpunt
     const gState = gal().state;
     vs.queryFilters = snapshotGalleryFilters();
@@ -687,8 +749,15 @@
     document.body.style.overflow = 'hidden';
     if (gal().setViewerActive) gal().setViewerActive(true);
 
-    // Push history state zodat browser-back (en muis-back-knop) de viewer sluit
-    history.pushState({ page: 'viewer' }, '', location.href);
+    // Push history state zodat browser-back (en muis-back-knop) de viewer sluit.
+    // Bij herstel na browser-refresh vervangen we de bestaande viewer-entry.
+    try {
+      if (options.replaceHistory || (history.state && history.state.page === 'viewer')) {
+        history.replaceState({ page: 'viewer' }, '', location.href);
+      } else {
+        history.pushState({ page: 'viewer' }, '', location.href);
+      }
+    } catch (_) {}
 
     renderSidebarList();
     showCurrent();
@@ -698,7 +767,7 @@
   function close(skipHistory) {
     if (!vs.open) return;
     const anchorId = vs.items[vs.idx] ? String(vs.items[vs.idx].id) : '';
-    rememberCurrentPosition();
+    rememberCurrentPosition({ open: false });
     vs.open = false;
     stopSlideshow();
     cleanupMedia();
@@ -1215,6 +1284,53 @@
     }
     if (vs.items.length > 0) showCurrent();
     renderSidebarList();
+  }
+
+  let restoreLastPositionStarted = false;
+
+  async function findGalleryIndexById(itemId, maxLoads) {
+    const gallery = gal();
+    if (!gallery || !gallery.state || !Array.isArray(gallery.state.items)) return -1;
+    let idx = gallery.state.items.findIndex((it) => String(it.id) === String(itemId));
+    for (let i = 0; idx < 0 && !gallery.state.done && i < maxLoads; i++) {
+      const beforeLen = gallery.state.items.length;
+      if (typeof gallery.loadMore !== 'function') break;
+      await gallery.loadMore();
+      idx = gallery.state.items.findIndex((it) => String(it.id) === String(itemId));
+      if (gallery.state.items.length === beforeLen) break;
+    }
+    return idx;
+  }
+
+  async function restoreLastPosition() {
+    if (restoreLastPositionStarted || vs.open) return false;
+    const saved = readRememberedPosition();
+    if (!saved) return false;
+    restoreLastPositionStarted = true;
+
+    const gallery = gal();
+    if (!gallery || !gallery.state) return false;
+
+    try {
+      if (
+        saved.filters &&
+        !viewerFiltersEqual(gallery.state.filters || {}, saved.filters) &&
+        typeof gallery.applyQuery === 'function'
+      ) {
+        await gallery.applyQuery(saved.filters, { pushHistory: false });
+      }
+
+      const idx = await findGalleryIndexById(saved.id, restoreLoadPageBudget(saved));
+      if (idx < 0) {
+        localStorage.setItem(VIEWER_POS_KEY, JSON.stringify({ ...saved, open: false, at: Date.now() }));
+        return false;
+      }
+      open(idx, { replaceHistory: true });
+      return true;
+    } catch (e) {
+      log('Viewer herstel fout: ' + (e && e.message ? e.message : String(e)));
+      return false;
+    }
   }
 
   // ─── Rating ───────────────────────────────────────────────────────────────
@@ -3228,7 +3344,7 @@
     rotateCurrentMedia();
   };
   window.__wdOpenTags = openTagsFromEvent;
-  window.__viewer = { init, open, close };
+  window.__viewer = { init, open, close, restoreLastPosition };
 
   // Auto-init zodra DOM klaar is (app.js laadt viewer.js na zichzelf)
   if (document.readyState === 'loading') {
