@@ -2476,24 +2476,50 @@ app.get('/api/channels', async (req, res) => {
         includeChannel: false,
       });
       where.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
-      where.push(`(d.filesize IS NULL OR d.filesize > 0)`);
-      where.push(DIRECT_DOWNLOAD_HINT_SQL);
+      const directWhere = [...where, `(d.filesize IS NULL OR d.filesize > 0)`, DIRECT_DOWNLOAD_HINT_SQL];
+      const fileWhere = [...where];
+      fileWhere.push(`NOT ${DIRECT_DOWNLOAD_HINT_SQL}`);
       const { rows } = await pool.query(`
         SELECT *
           FROM (
-            SELECT ${channelGroupSql('d')} AS channel,
-                   ${platformGroupSql('d')} AS platform,
-                   COUNT(*) AS count,
-                   COUNT(*) FILTER (WHERE lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${IMAGE_EXT_SQL}))::bigint AS image_count,
-                   COUNT(*) FILTER (WHERE lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${VIDEO_EXT_SQL}))::bigint AS video_count,
-                   MAX(COALESCE(d.finished_at, d.updated_at, d.created_at)) AS latest_ts,
-                   MAX(d.rating) AS max_rating
-              FROM downloads d
-             WHERE ${where.join(' AND ')}
-             GROUP BY ${channelGroupSql('d')}, ${platformGroupSql('d')}
+            SELECT channel, platform,
+                   SUM(count)::bigint AS count,
+                   SUM(image_count)::bigint AS image_count,
+                   SUM(video_count)::bigint AS video_count,
+                   MAX(latest_ts) AS latest_ts,
+                   MAX(max_rating) AS max_rating
+              FROM (
+                -- Direct downloads (single-file)
+                SELECT ${channelGroupSql('d')} AS channel,
+                       ${platformGroupSql('d')} AS platform,
+                       COUNT(*) AS count,
+                       COUNT(*) FILTER (WHERE lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${IMAGE_EXT_SQL})) AS image_count,
+                       COUNT(*) FILTER (WHERE lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${VIDEO_EXT_SQL})) AS video_count,
+                       MAX(COALESCE(d.finished_at, d.updated_at, d.created_at)) AS latest_ts,
+                       MAX(d.rating) AS max_rating
+                  FROM downloads d
+                 WHERE ${directWhere.join(' AND ')}
+                 GROUP BY ${channelGroupSql('d')}, ${platformGroupSql('d')}
+                UNION ALL
+                -- Folder downloads (multi-file via download_files)
+                SELECT ${fileChannelSql('d','df')} AS channel,
+                       ${platformGroupSql('d')} AS platform,
+                       COUNT(*) AS count,
+                       COUNT(*) FILTER (WHERE lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${IMAGE_EXT_SQL})) AS image_count,
+                       COUNT(*) FILTER (WHERE lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${VIDEO_EXT_SQL})) AS video_count,
+                       MAX(COALESCE(d.finished_at, d.updated_at, d.created_at)) AS latest_ts,
+                       MAX(COALESCE(df.rating, d.rating)) AS max_rating
+                  FROM downloads d
+                  JOIN download_files df ON df.download_id = d.id
+                 WHERE ${fileWhere.join(' AND ')}
+                   AND df.relpath !~* '${AUX_RELPATH_RE}'
+                   AND lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
+                 GROUP BY ${fileChannelSql('d','df')}, ${platformGroupSql('d')}
+              ) combined
+             GROUP BY channel, platform
           ) channel_items
          ORDER BY ${orderBy}
-         LIMIT 3000`, params);
+         LIMIT 10000`, params);
       return res.json({ channels: rows });
     }
 
