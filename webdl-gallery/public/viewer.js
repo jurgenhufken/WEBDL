@@ -1523,10 +1523,25 @@
     syncVideoProgress(v);
   }
 
-  function seekRelative(seconds) {
+  // Logarithmic seek acceleration: repeated rapid seeks increase distance
+  const seekAccel = { lastTime: 0, lastDir: 0, streak: 0 };
+  const SEEK_ACCEL_WINDOW = 600; // ms between clicks to count as streak
+  const SEEK_ACCEL_STEPS = [1, 2, 4, 8, 15, 30, 60, 120]; // seconds per streak level
+
+  function seekRelative(baseSeconds) {
     const v = el.vContent.querySelector('video');
     if (!v || !Number.isFinite(v.duration)) return;
-    const delta = Number(seconds) || 0;
+    const dir = baseSeconds > 0 ? 1 : -1;
+    const now = Date.now();
+    // Track streak: same direction within window
+    if (dir === seekAccel.lastDir && (now - seekAccel.lastTime) < SEEK_ACCEL_WINDOW) {
+      seekAccel.streak = Math.min(seekAccel.streak + 1, SEEK_ACCEL_STEPS.length - 1);
+    } else {
+      seekAccel.streak = 0;
+    }
+    seekAccel.lastTime = now;
+    seekAccel.lastDir = dir;
+    const delta = dir * SEEK_ACCEL_STEPS[seekAccel.streak];
     v.currentTime = Math.max(0, Math.min(v.duration, v.currentTime + delta));
     syncVideoProgress(v);
     showHudMessage(`${delta > 0 ? '+' : ''}${delta}s`, 900, { skipOverlay: true });
@@ -3285,17 +3300,17 @@
           case 'Numpad9': // volume up
             if (v) { v.volume = Math.min(1, v.volume + 0.05); vs.vol = v.volume; showHudMessage(`Volume ${Math.round(v.volume * 100)}%`, 800, Q); }
             e.preventDefault(); break;
-          case 'Numpad4': // seek left (1s)
-            if (v) { v.currentTime = Math.max(0, v.currentTime - 1); showHudMessage(`-1s`, 900, Q); }
+          case 'Numpad4': // seek left (accelerating)
+            seekRelative(-1);
             e.preventDefault(); break;
-          case 'Numpad6': // seek right (1s)
-            if (v) { v.currentTime = Math.min(v.duration || 0, v.currentTime + 1); showHudMessage(`+1s`, 900, Q); }
+          case 'Numpad6': // seek right (accelerating)
+            seekRelative(1);
             e.preventDefault(); break;
           case 'Numpad5': // play/pause
             if (v) { v.paused ? v.play() : v.pause(); }
             e.preventDefault(); break;
-          case 'Numpad8': // seek forward fine (0.5s)
-            if (v) { v.currentTime = Math.min(v.duration || 0, v.currentTime + 0.5); showHudMessage(`+0.5s`, 900, Q); }
+          case 'Numpad8': // seek forward fine (accelerating)
+            seekRelative(0.5);
             e.preventDefault(); break;
           case 'Numpad2': // screenshot (capture video frame)
             await captureCurrentVideoFrame();
