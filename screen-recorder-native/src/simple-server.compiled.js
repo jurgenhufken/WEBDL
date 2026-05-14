@@ -11878,6 +11878,15 @@ expressApp.post('/download/batch', async (req, res) => {
       jobMetadata.webdl_media_url = u;
       jobMetadata.webdl_detected_platform = detectedPlatform;
     }
+    // Enrich source_sites: include both origin platform and download host for cross-filtering
+    // e.g. K2S file from vipergirls → source_sites: ['vipergirls', 'keep2share']
+    if (pinForumOrigin || pinToOrigin) {
+      const dlHost = detectedPlatform && detectedPlatform !== 'other' ? detectedPlatform : '';
+      const sites = new Set((Array.isArray(jobMetadata.source_sites) ? jobMetadata.source_sites : []).map(s => String(s || '').toLowerCase()).filter(Boolean));
+      if (itemOriginPlatform) sites.add(itemOriginPlatform.toLowerCase());
+      if (dlHost && dlHost !== itemOriginPlatform) sites.add(dlHost.toLowerCase());
+      jobMetadata.source_sites = Array.from(sites);
+    }
     enqueueDownloadJob(downloadId, u, platform, channel, title, jobMetadata);
   }
 
