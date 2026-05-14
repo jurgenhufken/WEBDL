@@ -230,6 +230,17 @@ function isImageUrlLike(input) {
   }
 }
 
+function isDirectVideoUrlLike(input) {
+  try {
+    const u = new URL(String(input || ''));
+    const ext = String(path.extname(String(u.pathname || '')).toLowerCase() || '');
+    return IMPORTABLE_VIDEO_EXTS.has(ext);
+  } catch (e) {
+    const ext = String(path.extname(String(input || '').split(/[?#]/)[0]).toLowerCase() || '');
+    return IMPORTABLE_VIDEO_EXTS.has(ext);
+  }
+}
+
 function isImageHostPageUrlLike(input) {
   try {
     const u = new URL(String(input || ''));
@@ -1513,6 +1524,174 @@ async function resolveKeep2ShareDirectUrl(input, metadata = null) {
   return { url: '', error: `Keep2Share getUrl faalde: ${keep2ShareApiErrorMessage(json)}. Web-cookie fallback: ${webResolved.error || 'geen downloadlink'}` };
 }
 
+function redactKeep2ShareDiagnosticText(value) {
+  return String(value || '')
+    .replace(/((?:auth|token|cookie|password|secret|x[_-]?bc)[^=&\s:]{0,32}\s*[=:]\s*)[^\s&,"'}]+/ig, '$1[redacted]')
+    .replace(/(bearer\s+)[a-z0-9._~+/=-]+/ig, '$1[redacted]');
+}
+
+function keep2ShareCredentialPresence() {
+  const cookieAuth = keep2ShareCookieAuthFromEnv();
+  const directAuthToken = String(process.env.WEBDL_KEEP2SHARE_AUTH_TOKEN || process.env.KEEP2SHARE_AUTH_TOKEN || process.env.K2S_AUTH_TOKEN || '').trim();
+  const directAccessToken = String(process.env.WEBDL_KEEP2SHARE_ACCESS_TOKEN || process.env.KEEP2SHARE_ACCESS_TOKEN || process.env.K2S_ACCESS_TOKEN || '').trim();
+  const directWebAccessToken = String(process.env.WEBDL_KEEP2SHARE_WEB_ACCESS_TOKEN || process.env.KEEP2SHARE_WEB_ACCESS_TOKEN || process.env.K2S_WEB_ACCESS_TOKEN || '').trim();
+  const username = String(process.env.WEBDL_KEEP2SHARE_USERNAME || process.env.KEEP2SHARE_USERNAME || process.env.K2S_USERNAME || '').trim();
+  const password = String(process.env.WEBDL_KEEP2SHARE_PASSWORD || process.env.KEEP2SHARE_PASSWORD || process.env.K2S_PASSWORD || '').trim();
+  const xbc = keep2ShareXbcFromEnv();
+  return {
+    cookie: !!cookieAuth.cookieHeader,
+    cookieSource: cookieAuth.source || '',
+    x_bc: !!xbc,
+    auth_token: !!directAuthToken,
+    access_token: !!directAccessToken,
+    web_access_token: !!directWebAccessToken,
+    username: !!username,
+    password: !!password,
+    login_pair: !!username && !!password,
+  };
+}
+
+function keep2SharePreflightFailure(preflight) {
+  const checks = Array.isArray(preflight && preflight.checks) ? preflight.checks : [];
+  const fileResolve = checks.find((check) => check && check.name === 'file_resolve');
+  return redactKeep2ShareDiagnosticText(
+    fileResolve && fileResolve.reason
+      ? fileResolve.reason
+      : preflight && preflight.remoteAcceptance && preflight.remoteAcceptance.status
+        ? `remote status ${preflight.remoteAcceptance.status}`
+        : 'K2S file preflight rejected'
+  );
+}
+
+async function assertKeep2ShareFilePreflight(url) {
+  if (!isKeep2ShareUrl(url)) return null;
+  const preflight = await keep2ShareRemotePreflight(url);
+  if (!preflight || !preflight.remoteAcceptance || preflight.remoteAcceptance.accepted !== true) {
+    const err = new Error(`Keep2Share file is niet resolvebaar met huidige auth: ${keep2SharePreflightFailure(preflight)}`);
+    err.httpStatus = 409;
+    err.preflight = preflight;
+    throw err;
+  }
+  return preflight;
+}
+
+function summarizeKeep2ShareJson(json) {
+  if (!json || typeof json !== 'object') return null;
+  return {
+    status: json.status || null,
+    code: json.code || null,
+    message: json.message ? redactKeep2ShareDiagnosticText(json.message) : null,
+    error: json.error ? redactKeep2ShareDiagnosticText(typeof json.error === 'string' ? json.error : JSON.stringify(json.error)) : null,
+    hasUrl: !!keep2ShareDownloadUrlFromJson(json),
+    hasAuthToken: !!json.auth_token,
+    hasAccessToken: !!json.access_token,
+    hasAccountExpires: !!json.account_expires,
+    hasAvailableTraffic: json.available_traffic != null,
+  };
+}
+
+async function keep2ShareRemotePreflight(inputUrl = '') {
+  const url = String(inputUrl || '').trim();
+  const fileId = keep2ShareFileIdFromUrl(url);
+  const presence = keep2ShareCredentialPresence();
+  const checks = [];
+  const addCheck = (check) => {
+    checks.push({
+      name: check.name,
+      source: check.source || '',
+      checked: check.checked === true,
+      accepted: check.accepted === true,
+      status: check.status || (check.checked ? (check.accepted ? 'accepted' : 'rejected') : 'not_checked'),
+      reason: check.reason ? redactKeep2ShareDiagnosticText(check.reason) : '',
+      detail: check.detail || null,
+    });
+  };
+
+  const directAccessToken = String(process.env.WEBDL_KEEP2SHARE_ACCESS_TOKEN || process.env.KEEP2SHARE_ACCESS_TOKEN || process.env.K2S_ACCESS_TOKEN || '').trim();
+  if (directAccessToken) {
+    try {
+      const json = await postKeep2ShareApi('accountInfo', { access_token: directAccessToken });
+      addCheck({
+        name: 'api_account_info',
+        source: 'access_token',
+        checked: true,
+        accepted: json && json.status === 'success',
+        reason: json && json.status === 'success' ? 'accountInfo accepteert access_token' : keep2ShareApiErrorMessage(json),
+        detail: summarizeKeep2ShareJson(json),
+      });
+    } catch (e) {
+      addCheck({ name: 'api_account_info', source: 'access_token', checked: true, accepted: false, reason: e && e.message ? e.message : String(e) });
+    }
+  } else {
+    addCheck({ name: 'api_account_info', source: 'access_token', checked: false, accepted: false, reason: 'Geen K2S_ACCESS_TOKEN/WEBDL_KEEP2SHARE_ACCESS_TOKEN ingesteld.' });
+  }
+
+  if (presence.login_pair) {
+    try {
+      const token = await getKeep2ShareAuthToken();
+      addCheck({ name: 'api_login', source: 'username_password', checked: true, accepted: !!token, reason: token ? 'login gaf auth_token terug' : 'login gaf geen auth_token terug' });
+    } catch (e) {
+      addCheck({ name: 'api_login', source: 'username_password', checked: true, accepted: false, reason: e && e.message ? e.message : String(e) });
+    }
+  } else {
+    addCheck({ name: 'api_login', source: 'username_password', checked: false, accepted: false, reason: 'Geen complete K2S_USERNAME/K2S_PASSWORD ingesteld.' });
+  }
+
+  const cookieAuth = await loadKeep2ShareCookieAuth('k2s.cc', null);
+  if (cookieAuth.cookieHeader) {
+    try {
+      const tokenInfo = await getKeep2ShareWebAccessToken(cookieAuth.cookieHeader, 'k2s.cc', { cookieSource: cookieAuth.source });
+      addCheck({
+        name: 'web_auth_token',
+        source: tokenInfo.source || cookieAuth.source || 'cookie',
+        checked: true,
+        accepted: !!tokenInfo.token,
+        reason: tokenInfo.token ? 'K2S web-access-token kon worden opgehaald.' : 'K2S web-access-token kon niet worden opgehaald.',
+      });
+    } catch (e) {
+      addCheck({ name: 'web_auth_token', source: cookieAuth.source || 'cookie', checked: true, accepted: false, reason: e && e.message ? e.message : String(e) });
+    }
+  } else {
+    addCheck({ name: 'web_auth_token', source: 'cookie', checked: false, accepted: false, reason: 'Geen K2S cookie beschikbaar.' });
+  }
+
+  if (url && fileId) {
+    try {
+      const resolved = await resolveKeep2ShareDirectUrl(url, null);
+      addCheck({
+        name: 'file_resolve',
+        source: 'configured_auth',
+        checked: true,
+        accepted: !!(resolved && resolved.url),
+        reason: resolved && resolved.url ? 'K2S gaf een directe download-URL terug.' : (resolved && resolved.error ? resolved.error : 'geen downloadlink'),
+      });
+    } catch (e) {
+      addCheck({ name: 'file_resolve', source: 'configured_auth', checked: true, accepted: false, reason: e && e.message ? e.message : String(e) });
+    }
+  } else if (url) {
+    addCheck({ name: 'file_resolve', source: 'configured_auth', checked: false, accepted: false, reason: 'URL bevat geen K2S file-id.' });
+  }
+
+  const remoteAccepted = checks.some((check) => check.checked && check.accepted);
+  const fileAccepted = checks.some((check) => check.name === 'file_resolve' && check.accepted);
+  return {
+    service: 'keep2share',
+    readOnly: true,
+    configured: Object.entries(presence).some(([key, value]) => key !== 'cookieSource' && value === true),
+    credentialPresence: presence,
+    input: { hasUrl: !!url, fileId: fileId || null },
+    remoteAcceptance: {
+      checked: true,
+      accepted: url && fileId ? fileAccepted : remoteAccepted,
+      status: (url && fileId ? fileAccepted : remoteAccepted) ? 'accepted' : 'rejected',
+      meaning: url && fileId
+        ? 'Bij een URL telt alleen file_resolve als bewijs dat deze file met de huidige auth downloadbaar is.'
+        : 'Zonder URL bewijst dit alleen of een authbron door een K2S endpoint wordt geaccepteerd.',
+    },
+    checks,
+  };
+}
+
 // Geeft het absolute pad terug van het eerste (alfabetisch) geïndexeerde bestand
 // voor een specifieke download. Nodig voor platforms waar meerdere downloads
 // dezelfde filepath (gedeelde channel-dir) delen, bv. gallery-dl/pornpics:
@@ -2372,6 +2551,92 @@ const findReusableDownloadByUrl = db.prepare(`
     id DESC
   LIMIT 1
 `);
+const findReusableKeep2ShareDownloadByFileId = db.prepare(`
+  SELECT id, url, source_url, platform, channel, title, status, progress, filepath, filename, filesize, format, metadata
+  FROM downloads
+  WHERE status IN ('completed', 'pending', 'queued', 'downloading', 'postprocessing')
+    AND (
+      lower(COALESCE(url, '')) LIKE ?
+      OR lower(COALESCE(source_url, '')) LIKE ?
+      OR lower(COALESCE(metadata, '')) LIKE ?
+    )
+  ORDER BY
+    CASE status
+      WHEN 'completed' THEN 0
+      WHEN 'downloading' THEN 1
+      WHEN 'postprocessing' THEN 2
+      WHEN 'queued' THEN 3
+      WHEN 'pending' THEN 4
+      ELSE 9
+    END,
+    updated_at DESC,
+    created_at DESC,
+    id DESC
+  LIMIT 1
+`);
+const findReusableKeep2ShareDownloadByFileIdExcludingId = db.prepare(`
+  SELECT id, url, source_url, platform, channel, title, status, progress, filepath, filename, filesize, format, metadata
+  FROM downloads
+  WHERE id<>?
+    AND status IN ('completed', 'pending', 'queued', 'downloading', 'postprocessing')
+    AND (
+      lower(COALESCE(url, '')) LIKE ?
+      OR lower(COALESCE(source_url, '')) LIKE ?
+      OR lower(COALESCE(metadata, '')) LIKE ?
+    )
+  ORDER BY
+    CASE status
+      WHEN 'completed' THEN 0
+      WHEN 'downloading' THEN 1
+      WHEN 'postprocessing' THEN 2
+      WHEN 'queued' THEN 3
+      WHEN 'pending' THEN 4
+      ELSE 9
+    END,
+    updated_at DESC,
+    created_at DESC,
+    id DESC
+  LIMIT 1
+`);
+const findReusableDownloadMetadataCandidates = db.prepare(`
+  SELECT id, url, source_url, platform, channel, title, status, progress, filepath, filename, filesize, format, metadata
+  FROM downloads
+  WHERE status IN ('completed', 'pending', 'queued', 'downloading', 'postprocessing')
+    AND lower(COALESCE(metadata, '')) LIKE ?
+  ORDER BY
+    CASE status
+      WHEN 'completed' THEN 0
+      WHEN 'downloading' THEN 1
+      WHEN 'postprocessing' THEN 2
+      WHEN 'queued' THEN 3
+      WHEN 'pending' THEN 4
+      ELSE 9
+    END,
+    updated_at DESC,
+    created_at DESC,
+    id DESC
+  LIMIT 200
+`);
+const findReusableDownloadMetadataCandidatesExcludingId = db.prepare(`
+  SELECT id, url, source_url, platform, channel, title, status, progress, filepath, filename, filesize, format, metadata
+  FROM downloads
+  WHERE id<>?
+    AND status IN ('completed', 'pending', 'queued', 'downloading', 'postprocessing')
+    AND lower(COALESCE(metadata, '')) LIKE ?
+  ORDER BY
+    CASE status
+      WHEN 'completed' THEN 0
+      WHEN 'downloading' THEN 1
+      WHEN 'postprocessing' THEN 2
+      WHEN 'queued' THEN 3
+      WHEN 'pending' THEN 4
+      ELSE 9
+    END,
+    updated_at DESC,
+    created_at DESC,
+    id DESC
+  LIMIT 200
+`);
 const findReusableDownloadByUrlExcludingId = db.prepare(`
   SELECT id, url, platform, channel, title, status, progress, filepath, filename, filesize, format, metadata
   FROM downloads
@@ -2411,6 +2676,133 @@ const findReusableDownloadBySourceRef = db.prepare(`
     id DESC
   LIMIT 1
 `);
+const getDownloadFileRelpathsByDownloadId = db.prepare(`
+  SELECT relpath
+  FROM download_files
+  WHERE download_id = ?
+  ORDER BY id
+  LIMIT ?
+`);
+
+function parseJsonObject(value) {
+  if (!value || typeof value !== 'string') return value && typeof value === 'object' ? value : null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function metadataReferencesInputUrl(metadata, inputUrl) {
+  const meta = parseJsonObject(metadata);
+  if (!meta) return false;
+  const target = String(inputUrl || '').trim();
+  if (!target) return false;
+  const fields = [
+    meta.webdl_input_url,
+    meta.webdl_media_url,
+    meta.webdl_resolved_url,
+    meta.webdl_wrapper_url,
+    meta.original_url,
+    meta.input_url,
+  ];
+  const nested = [
+    meta.external_metadata,
+    meta.webdl_external_metadata,
+  ];
+  for (const ctx of nested) {
+    if (ctx && typeof ctx === 'object') {
+      fields.push(ctx.url, ctx.source_url, ctx.page_url, ctx.original_url, ctx.direct_url, ctx.final_url);
+    }
+  }
+  return fields.some((value) => String(value || '').trim() === target);
+}
+
+async function findReusableDownloadForUrl(inputUrl, options = {}) {
+  const excludeId = Number(options && options.excludeId);
+  const shouldExclude = Number.isFinite(excludeId) && excludeId > 0;
+  const direct = shouldExclude ?
+    await findReusableDownloadByUrlExcludingId.get(inputUrl, excludeId) :
+    await findReusableDownloadByUrl.get(inputUrl);
+  if (direct && direct.id) return direct;
+
+  const k2sId = keep2ShareFileIdFromUrl(inputUrl);
+  if (k2sId) {
+    const needle = `%/file/${k2sId}%`;
+    const existingK2s = shouldExclude ?
+      await findReusableKeep2ShareDownloadByFileIdExcludingId.get(excludeId, needle, needle, needle) :
+      await findReusableKeep2ShareDownloadByFileId.get(needle, needle, needle);
+    if (existingK2s && existingK2s.id) return existingK2s;
+  }
+
+  const raw = String(inputUrl || '').trim();
+  if (raw.length >= 12) {
+    const candidates = shouldExclude ?
+      await findReusableDownloadMetadataCandidatesExcludingId.all(excludeId, `%${raw.toLowerCase()}%`) :
+      await findReusableDownloadMetadataCandidates.all(`%${raw.toLowerCase()}%`);
+    for (const row of candidates || []) {
+      if (metadataReferencesInputUrl(row && row.metadata, raw)) return row;
+    }
+  }
+  return null;
+}
+
+const archivePostprocessInFlight = new Set();
+
+function downloadRowFilepathAbs(row) {
+  const fp = String(row && row.filepath || '').trim();
+  if (!fp) return '';
+  return path.isAbsolute(fp) ? fp : path.resolve(BASE_DIR, fp);
+}
+
+async function existingDownloadHasIndexedMedia(downloadId) {
+  try {
+    const rows = await getDownloadFileRelpathsByDownloadId.all(downloadId, 2000);
+    for (const row of rows || []) {
+      const rel = String(row && row.relpath || '').trim();
+      if (!rel) continue;
+      const abs = path.isAbsolute(rel) ? rel : path.resolve(BASE_DIR, rel);
+      if (isMediaFilePath(abs) && !isAuxiliaryMediaPath(abs)) return true;
+    }
+  } catch (e) { }
+  return false;
+}
+
+async function ensureExistingArchivePostprocessed(row, reason = 'duplicate') {
+  const id = Number(row && row.id);
+  if (!Number.isFinite(id) || id <= 0) return;
+  if (archivePostprocessInFlight.has(id)) return;
+  archivePostprocessInFlight.add(id);
+  try {
+    const fresh = await getDownload.get(id);
+    if (!fresh || String(fresh.status || '').toLowerCase() !== 'completed') return;
+    const filepath = downloadRowFilepathAbs(fresh);
+    if (!filepath || !fs.existsSync(filepath) || !isArchiveFilePath(filepath)) return;
+    if (await existingDownloadHasIndexedMedia(id)) return;
+    console.log(`[archive] bestaande archive postprocess #${id} (${reason}): ${filepath}`);
+    await updateDownloadStatus.run('postprocessing', 95, null, id);
+    const extracted = await extractArchiveDownloadFiles(id, filepath, path.dirname(filepath));
+    try { await db.prepare("UPDATE downloads SET status = 'completed', progress = 100, is_thumb_ready = true, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(id); } catch (e) { }
+    console.log(`[archive] bestaande archive #${id}: ${extracted.mediaCount || 0} media geindexeerd`);
+  } catch (e) {
+    console.log(`[archive] bestaande archive postprocess fout #${id}: ${e && e.message ? e.message : String(e)}`);
+    try { await updateDownloadStatus.run('error', 0, `Archive uitpakken faalde: ${e && e.message ? e.message : String(e)}`, id); } catch (_) { }
+  } finally {
+    archivePostprocessInFlight.delete(id);
+  }
+}
+
+function scheduleExistingArchivePostprocess(row, reason) {
+  const id = Number(row && row.id);
+  if (!Number.isFinite(id) || id <= 0) return;
+  setImmediate(() => {
+    ensureExistingArchivePostprocessed(row, reason).catch((e) => {
+      console.log(`[archive] postprocess scheduling fout #${id}: ${e && e.message ? e.message : String(e)}`);
+    });
+  });
+}
+
 const getDownloadIdByFilepath = db.prepare(`SELECT id FROM downloads WHERE filepath=? LIMIT 1`);
 const getAllDownloads = db.prepare(`SELECT * FROM downloads WHERE status IN ('downloading', 'postprocessing') ORDER BY updated_at DESC, created_at DESC LIMIT 500`);
 const getActiveDownloads = db.prepare(`
@@ -5281,24 +5673,25 @@ function detectLane(platform, url = '') {
   const p = String(platform || '').toLowerCase();
   const u = String(url || '').toLowerCase();
 
-  // Images are cheap direct transfers and must never sit behind video jobs.
-  if (isImageUrlLike(u) || isImageHostPageUrlLike(u)) return 'light';
+  // Direct transfers without postprocessing must never sit behind video jobs.
+  if (isImageUrlLike(u) || isDirectVideoUrlLike(u) || isImageHostPageUrlLike(u)) return 'light';
+  if (/(?:keep2share\.cc|k2s\.cc|k2s\.io)\/file\//i.test(u)) return 'light';
 
   // If this is a live stream or explicitly a video, definitely heavy
   if (u.includes('is_live=true') || u.includes('/live/') || u.includes('tiktok.com/@') && !u.includes('/photo/')) {
     return 'heavy';
   }
 
-  // Only pure image/direct link platforms get the fast lane
+  // Media that downloads without ffmpeg merge/transcode gets the fast lane.
   const lightPlatforms = [
     'footfetishforum', 'forum-area', 'imagetwist', 'imagebam', 'imgbox', 'imagevenue', 'imgchest', 'imgvb',
     'imx', 'vipr', 'turboimagehost', 'imgkiwi', 'pixhost', 'postimg', 'bunkr', 'jpg', 'aznudefeet', 'pornpics',
-    'kinky', 'wikifeet', 'wikifeetx', 'elitebabes', 'erome', 'keep2share'
+    'kinky', 'wikifeet', 'wikifeetx', 'elitebabes', 'erome', 'keep2share', 'twitter'
   ];
 
   if (lightPlatforms.includes(p)) return 'light';
 
-  // Everything else (youtube, onlyfans, tiktok videos, instagram zips, reddit videos, wikifeet galleries) is heavy
+  // Everything else (youtube, onlyfans, tiktok videos, instagram zips, reddit videos) is heavy
   return 'heavy';
 }
 
@@ -8125,7 +8518,8 @@ const KNOWN_PLATFORMS = new Set([
 function normalizePlatform(platform, url) {
   const p = typeof platform === 'string' ? platform.trim().toLowerCase() : '';
   const detected = detectPlatform(url);
-  if (p === '_keep2share' || p === 'keep2share.cc' || p === 'k2s' || p === 'k2scc') return 'keep2share';
+  if (p === '_keep2share' || p === 'keep2share.cc' || p === 'k2s.cc' || p === 'k2s.io' || p === 'k2s' || p === 'k2scc') return 'keep2share';
+  if (p.endsWith('.keep2share.cc') || p.endsWith('.k2s.cc') || p.endsWith('.k2s.io')) return 'keep2share';
   if (!p || p === 'unknown' || p === 'other') return detected;
   if (KNOWN_PLATFORMS.has(p)) return p;
   if (/^[a-z0-9_-]{2,30}$/.test(p)) return p;
@@ -9152,6 +9546,23 @@ expressApp.get('/health', (req, res) => {
     status: 'running',
     serverTime: new Date().toISOString()
   });
+});
+
+expressApp.get('/api/keep2share/preflight', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  try {
+    const url = String(req.query.url || '').trim();
+    res.json(await keep2ShareRemotePreflight(url));
+  } catch (e) {
+    res.status(500).json({
+      service: 'keep2share',
+      readOnly: true,
+      remoteAcceptance: { checked: true, accepted: false, status: 'error' },
+      error: redactKeep2ShareDiagnosticText(e && e.message ? e.message : String(e)),
+    });
+  }
 });
 
 // Status
@@ -10751,8 +11162,12 @@ expressApp.post('/download', async (req, res) => {
       const lookupUrl = canonicalYoutubeUrl(it.url);
       try {
         if (!forceDuplicates) {
-          const existing = await findReusableDownloadByUrl.get(lookupUrl);
-          if (existing && existing.id) { stats.duplicates++; continue; }
+          const existing = await findReusableDownloadForUrl(lookupUrl);
+          if (existing && existing.id) {
+            scheduleExistingArchivePostprocess(existing, 'youtube-expand-duplicate');
+            stats.duplicates++;
+            continue;
+          }
         }
         const channelName = it.uploader || 'unknown';
         const titleText = it.title || 'untitled';
@@ -10781,6 +11196,20 @@ expressApp.post('/download', async (req, res) => {
     return res.status(400).json({ success: false, error: 'Dit is een profiel/kanaal link. Gebruik de BATCH knop in de extensie om het hele kanaal te downloaden.' });
   }
 
+  if (isKeep2ShareUrl(effectiveUrl)) {
+    try {
+      await assertKeep2ShareFilePreflight(effectiveUrl);
+    } catch (e) {
+      return res.status(e && e.httpStatus ? e.httpStatus : 409).json({
+        success: false,
+        error: e && e.message ? e.message : String(e),
+        preflight: e && e.preflight ? {
+          remoteAcceptance: e.preflight.remoteAcceptance || null,
+          input: e.preflight.input || null,
+        } : null,
+      });
+    }
+  }
 
   const sourceContext = pickSourceContextForUrl(metadata, effectiveUrl);
   const rawPageUrl = metadata && typeof metadata.url === 'string' ? metadata.url.trim() : '';
@@ -10829,7 +11258,7 @@ expressApp.post('/download', async (req, res) => {
     } catch (e) { }
   }
 
-  const existing = await findReusableDownloadByUrl.get(lookupUrl);
+  const existing = await findReusableDownloadForUrl(lookupUrl);
   let isMissingFile = false;
   if (existing && existing.status === 'completed') {
     const absPath = existing.filepath ? require('path').resolve(BASE_DIR, existing.filepath) : null;
@@ -10855,6 +11284,7 @@ expressApp.post('/download', async (req, res) => {
           console.log(`   ⚠️  Duplicate handling fout: ${e.message}`);
         }
 
+        scheduleExistingArchivePostprocess(existing, 'direct-duplicate');
         return res.json({
           success: true,
           downloadId: Number(existing.id),
@@ -11144,8 +11574,12 @@ async function _expandAndQueueBackground(deferredUrls, { originPlatform, originC
         try {
           // In-memory dedup: prevent race-condition duplicates across concurrent expand runs
           if (!forceDuplicates && _expandQueuedUrls.has(cdnUrl)) { skippedCount++; continue; }
-          const existing = await findReusableDownloadByUrl.get(cdnUrl);
-          if (!forceDuplicates && existing && existing.id) { skippedCount++; continue; }
+          const existing = await findReusableDownloadForUrl(cdnUrl);
+          if (!forceDuplicates && existing && existing.id) {
+            scheduleExistingArchivePostprocess(existing, 'background-expand-duplicate');
+            skippedCount++;
+            continue;
+          }
           _expandQueuedUrls.add(cdnUrl);
           // Cap set size to prevent unbounded memory growth
           if (_expandQueuedUrls.size > 200000) {
@@ -11252,6 +11686,22 @@ expressApp.post('/download/batch', async (req, res) => {
   // Process immediate URLs synchronously (fast)
   const created = [];
   for (const u of immediate) {
+    if (isKeep2ShareUrl(u)) {
+      try {
+        await assertKeep2ShareFilePreflight(u);
+      } catch (e) {
+        created.push({
+          url: u,
+          platform: 'keep2share',
+          error: e && e.message ? e.message : String(e),
+          preflight: e && e.preflight ? {
+            remoteAcceptance: e.preflight.remoteAcceptance || null,
+            input: e.preflight.input || null,
+          } : null,
+        });
+        continue;
+      }
+    }
     const itemSourceContext = pickSourceContextForUrl(metadata, u);
     const itemPageUrl = itemSourceContext && itemSourceContext.url ? String(itemSourceContext.url).trim() : pageUrl;
     const itemOrigin = normalizeOriginThreadContext(itemSourceContext, metaPlatform, itemPageUrl || pageUrl, metadata && metadata.channel, metadata && metadata.title);
@@ -11277,7 +11727,7 @@ expressApp.post('/download/batch', async (req, res) => {
     const allowPatreonRerun = platform === 'patreon' && (u.includes('/posts') || u.includes('patreon.com/c/'));
     const allowRerun = allowRedditRerun || allowPatreonRerun;
 
-    const existing = await findReusableDownloadByUrl.get(u);
+    const existing = await findReusableDownloadForUrl(u);
     let isMissingFile = false;
     if (existing && existing.status === 'completed') {
       const absPath = existing.filepath ? require('path').resolve(BASE_DIR, existing.filepath) : null;
@@ -11286,6 +11736,7 @@ expressApp.post('/download/batch', async (req, res) => {
       }
     }
     if (!forceDuplicates && existing && existing.id && !isMissingFile && !(allowRerun && String(existing.status || '') === 'completed')) {
+      scheduleExistingArchivePostprocess(existing, 'batch-duplicate');
       created.push({
         downloadId: existing.id,
         url: u,
@@ -11408,13 +11859,14 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
     const allowRedditRerun = platform === 'reddit' && isRedditRollingTargetUrl(url);
     const allowPatreonRerun = platform === 'patreon' && (url.includes('/posts') || url.includes('patreon.com/c/'));
     const allowRerun = allowRedditRerun || allowPatreonRerun;
-    const reusable = await findReusableDownloadByUrlExcludingId.get(url, downloadId);
+    const reusable = await findReusableDownloadForUrl(url, { excludeId: downloadId });
     if (!forceDuplicates && reusable && reusable.id) {
       if (allowRerun && String(reusable.status || '') === 'completed') {
 
         // Voor r/<subreddit> en u/<user> willen we herhaalde scans toestaan.
       } else {
         if (reusable.status === 'completed' && reusable.filepath) {
+          scheduleExistingArchivePostprocess(reusable, 'start-duplicate');
           await updateDownload.run(
             'completed',
             100,
@@ -12832,6 +13284,90 @@ function rejectInvalidDirectDownload(url, filepath, filename, rawHeaders) {
   return '';
 }
 
+const DIRECT_ARCHIVE_EXTS = new Set(['.zip', '.rar', '.7z', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.cbz', '.cbr']);
+
+function isArchiveFilePath(inputPath) {
+  const ext = String(path.extname(String(inputPath || '')).toLowerCase() || '');
+  return DIRECT_ARCHIVE_EXTS.has(ext);
+}
+
+function archiveEntryLooksUnsafe(entry) {
+  const raw = String(entry || '').trim();
+  if (!raw) return false;
+  const normalized = raw.replace(/\\/g, '/');
+  if (normalized.startsWith('/') || /^[a-z]:/i.test(normalized)) return true;
+  return normalized.split('/').some((part) => part === '..');
+}
+
+function uniqueDirectoryPath(basePath, downloadId) {
+  const base = path.resolve(String(basePath || ''));
+  if (!fs.existsSync(base)) return base;
+  const suffix = downloadId ? `_${downloadId}` : '';
+  for (let i = 1; i < 1000; i++) {
+    const candidate = `${base}${suffix}_${i}`;
+    if (!fs.existsSync(candidate)) return candidate;
+  }
+  return `${base}${suffix}_${Date.now()}`;
+}
+
+function runArchiveTool(args, { timeoutMs = 10 * 60 * 1000 } = {}) {
+  return new Promise((resolve, reject) => {
+    const bin = '/usr/bin/bsdtar';
+    if (!fs.existsSync(bin)) {
+      reject(new Error('bsdtar niet gevonden; archive kan niet worden uitgepakt'));
+      return;
+    }
+    const proc = spawn(bin, args);
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => {
+      try { proc.kill('SIGKILL'); } catch (e) { }
+      reject(new Error('archive uitpakken duurde te lang'));
+    }, Math.max(1000, timeoutMs));
+    proc.stdout.on('data', (d) => { stdout = (stdout + d.toString()).slice(-2_000_000); });
+    proc.stderr.on('data', (d) => { stderr = (stderr + d.toString()).slice(-200_000); });
+    proc.on('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve({ stdout, stderr });
+      else reject(new Error(stderr || `bsdtar exit code ${code}`));
+    });
+  });
+}
+
+async function extractArchiveDownloadFiles(downloadId, archivePath, outputDir) {
+  if (!isArchiveFilePath(archivePath)) return { archive: false, mediaCount: 0, mediaBytes: 0, extractDir: '' };
+  if (!safeIsAllowedExistingPath(archivePath)) throw new Error('Archive staat buiten toegestane downloadmap');
+  const listing = await runArchiveTool(['-tf', archivePath], { timeoutMs: 2 * 60 * 1000 });
+  const entries = String(listing.stdout || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (entries.some(archiveEntryLooksUnsafe)) {
+    throw new Error('Archive bevat onveilige paden en is niet uitgepakt');
+  }
+
+  const stem = sanitizeName(path.basename(archivePath, path.extname(archivePath))) || `archive_${downloadId}`;
+  const extractDir = uniqueDirectoryPath(path.join(outputDir, `${stem}__extracted`), downloadId);
+  fs.mkdirSync(extractDir, { recursive: true });
+  await runArchiveTool(['-xf', archivePath, '-C', extractDir]);
+
+  const files = listMediaFilesInDir(extractDir, DOWNLOAD_FILES_AUTO_INDEX_MAX_FILES);
+  let mediaBytes = 0;
+  const indexedAt = new Date().toISOString();
+  for (const filePath of files) {
+    try {
+      if (!isMediaFilePath(filePath) || isAuxiliaryMediaPath(filePath)) continue;
+      const relPath = relPathFromBaseDir(filePath);
+      if (!relPath || (!path.isAbsolute(relPath) && relPath.startsWith('..'))) continue;
+      const st = fs.statSync(filePath);
+      mediaBytes += Number(st.size) || 0;
+      await upsertDownloadFile.run(downloadId, relPath, st.size, Math.floor(st.mtimeMs), indexedAt, indexedAt);
+    } catch (e) { }
+  }
+  return { archive: true, mediaCount: files.length, mediaBytes, extractDir };
+}
+
 async function startDirectFileDownload(downloadId, url, platform, channel, title, metadata) {
   try {
     if (isCancelled(downloadId)) {
@@ -13112,7 +13648,24 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
             if (originThread && originThread.url) metaObj.source_url = originThread.url;
           }
 
-          if (isImage) {
+          const isArchive = isArchiveFilePath(filepath);
+          let archiveExtract = null;
+          if (isArchive) {
+            try {
+              await updateDownloadStatus.run('postprocessing', 95, null, downloadId);
+              archiveExtract = await extractArchiveDownloadFiles(downloadId, filepath, dir);
+              metaObj.archive_extracted = true;
+              metaObj.archive_extract_dir = archiveExtract.extractDir || '';
+              metaObj.archive_media_count = archiveExtract.mediaCount || 0;
+              metaObj.archive_media_bytes = archiveExtract.mediaBytes || 0;
+              try {
+                await db.prepare("UPDATE downloads SET is_thumb_ready = true WHERE id = ?").run(downloadId);
+              } catch (e) { }
+            } catch (e) {
+              await updateDownloadStatus.run('error', 0, `Archive uitpakken faalde: ${e && e.message ? e.message : String(e)}`, downloadId);
+              return;
+            }
+          } else if (isImage) {
             try {
               await updateDownloadThumbnail.run(`/download/${downloadId}/thumb`, downloadId);
               // Image files serve as their own thumbnail - mark ready immediately
@@ -13120,7 +13673,7 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
             } catch (e) { }
           }
 
-          try {
+          if (!isArchive) try {
             const relPath = path.relative(BASE_DIR, filepath);
             if (relPath && !relPath.startsWith('..')) {
               const indexedAt = new Date().toISOString();

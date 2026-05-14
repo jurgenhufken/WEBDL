@@ -17,7 +17,7 @@ const VIDEO_EXTS = new Set(['.mp4', '.mkv', '.webm', '.mov', '.m4v', '.avi', '.w
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.avif']);
 const SKIP_EXTS = new Set(['.part', '.ytdl', '.tmp']);
 const PARTIAL_MEDIA_BASENAME_RE = /(?:^|[._-])(?:temp|partial|part|download)(?:[._-]|$)/i;
-const YTDLP_FORMAT_FRAGMENT_RE = /\.f\d+\.(?:mp4|webm|m4a|mkv|mov|m4v|avi|wmv|flv|ts|m2ts|mpg|mpeg|ogv|3gp|3g2)$/i;
+const YTDLP_FORMAT_FRAGMENT_RE = /\.(?:f\d+|fhls-\d+|ffallback)\.(?:mp4|webm|m4a|mkv|mov|m4v|avi|wmv|flv|ts|m2ts|mpg|mpeg|ogv|3gp|3g2)$/i;
 const AUX_IMAGE_BASENAME_RE = /(^\d{1,3}[-_. ]?thumbnail|(?:^|[-_. ])thumbnail|_thumb(_v\d+)?|_preview|_logo)\.(jpe?g|png|webp|gif|bmp|avif)$/i;
 const SITE_SHELL_IMAGE_BASENAME_RE = /^(?:vipergirls|viper)[-_.]\d+\.(jpe?g|png|webp|gif|bmp|avif)$/i;
 const FORUM_CHROME_IMAGE_BASENAME_RE = /(?:^|[-_. ])(?:statusicon|reputation|avatar|button|spacer|blank)(?:[-_. ]|$)/i;
@@ -232,6 +232,7 @@ async function readInfoJsonForMedia(mediaPath, fallbackInfo = null) {
       if (!fsSync.existsSync(exact)) continue;
       const raw = await fs.readFile(exact, 'utf8');
       const data = JSON.parse(raw);
+      data.__webdl_filename_tweet_id = twitterIdFromMediaFilename(mediaPath);
       data.__webdl_raw_tweet_id = rawJsonScalar(raw, 'tweet_id');
       data.__webdl_raw_conversation_id = rawJsonScalar(raw, 'conversation_id');
       const sourceInfo = galleryDlSourceInfo(data);
@@ -298,6 +299,15 @@ function rawJsonScalar(raw, key) {
   return '';
 }
 
+function twitterIdFromMediaFilename(filePath) {
+  try {
+    const stem = path.basename(String(filePath || ''), path.extname(String(filePath || '')));
+    const m = stem.match(/^(\d{15,25})(?:[_-]\d+)?(?:[_-].*)?$/);
+    return m && m[1] ? String(m[1]) : '';
+  } catch {}
+  return '';
+}
+
 function galleryDlAuthor(data) {
   const author = data && typeof data.author === 'object' ? data.author : null;
   const user = data && typeof data.user === 'object' ? data.user : null;
@@ -313,7 +323,7 @@ function galleryDlSourceInfo(data) {
 
   const handle = String(data.username || author?.name || '').trim().replace(/^@+/, '');
   const display = String(data.fullname || author?.nick || author?.name || handle || '').trim();
-  const tweetId = data.__webdl_raw_tweet_id || data.__webdl_raw_conversation_id || data.source_post_id || data.tweet_id || data.conversation_id || '';
+  const tweetId = data.__webdl_filename_tweet_id || data.__webdl_raw_tweet_id || data.__webdl_raw_conversation_id || data.source_post_id || data.tweet_id || data.conversation_id || '';
   const postTitle = String(data.content || data.text || data.description || data.source_post_title || '').replace(/\s+/g, ' ').trim();
   const profileUrl = handle ? `https://x.com/${encodeURIComponent(handle)}` : '';
   const postUrl = handle && tweetId ? `https://x.com/${encodeURIComponent(handle)}/status/${encodeURIComponent(String(tweetId))}` : '';
@@ -658,6 +668,7 @@ async function syncToGallery(job, outputFiles, logger, repo) {
       const sourceUrl = rawSourceUrl;
       const sourceUrlIsJobUrl = sourceUrl && String(sourceUrl) === String(job.url || '');
       const shouldDedupeBySourceUrl = Boolean(sourceUrl) && !(sourceUrlIsJobUrl && outputFiles.length > 1);
+      const twitterMediaId = realPlatform === 'twitter' ? twitterIdFromMediaFilename(f.path) : '';
       const telegramSourceGraph = isTelegram ? {
         nodes: [
           { type: 'host', platform: 'telegram' },
@@ -694,6 +705,26 @@ async function syncToGallery(job, outputFiles, logger, repo) {
         if (!duplicate && shouldDedupeBySourceUrl) {
           const byUrl = await client.query('SELECT id FROM downloads WHERE source_url = $1 LIMIT 1', [sourceUrl]);
           duplicate = byUrl.rows.length > 0;
+        }
+
+        if (!duplicate && twitterMediaId) {
+          const byTwitterMedia = await client.query(
+            `SELECT id
+               FROM downloads
+              WHERE platform = 'twitter'
+                AND (
+                  filename = $1
+                  OR source_url = $2
+                  OR COALESCE(metadata::text, '') LIKE $3
+                )
+              LIMIT 1`,
+            [
+              path.basename(f.path),
+              fileInfo?.sourcePostUrl || `https://x.com/status/${twitterMediaId}`,
+              `%${twitterMediaId}%`,
+            ],
+          );
+          duplicate = byTwitterMedia.rows.length > 0;
         }
 
         if (!duplicate) {
@@ -807,6 +838,7 @@ function startWorkerPool({
   const workerId = `w-${crypto.randomBytes(3).toString('hex')}`;
   let stopping = false;
   const active = new Set();
+  const activeProcesses = new Set();
   const heartbeatMs = intEnv('WEBDL_WORKER_HEARTBEAT_MS', 30_000);
   const staleRunningMinutes = intEnv('WEBDL_STALE_RUNNING_MINUTES', 15);
 
@@ -923,7 +955,7 @@ function startWorkerPool({
       }
     }
 
-    const planned = adapter.plan(job.url, { ...job.options, cwd: workdir });
+    const planned = adapter.plan(job.url, { ...job.options, cwd: workdir, lane: job.lane });
     const startedAtMs = Date.now();
     await repo.appendLog(job.id, 'info', `start ${adapter.name}: ${planned.cmd} ${planned.args.join(' ')}`);
     logger.info('job.start', { job: job.id, adapter: adapter.name });
@@ -935,6 +967,7 @@ function startWorkerPool({
     const redditFallbackLimit = intEnv('WEBDL_REDDIT_VREDDIT_FALLBACK_LIMIT', 80);
     const redditFallbackQueued = new Set();
     const proc = runProcess(planned);
+    activeProcesses.add(proc);
     const heartbeatTimer = setInterval(() => {
       repo.heartbeatJob(job.id, workerId).catch((e) => {
         logger.warn('job.heartbeat.error', { job: job.id, err: String(e.message || e) });
@@ -1107,6 +1140,7 @@ function startWorkerPool({
 
     try {
       const { code, signal, timedOut, idleTimedOut } = await proc.done;
+      activeProcesses.delete(proc);
       clearInterval(heartbeatTimer);
       if (liveGalleryTimer) clearInterval(liveGalleryTimer);
       if (code === 0) {
@@ -1133,6 +1167,7 @@ function startWorkerPool({
         return false; // failure
       }
     } catch (err) {
+      activeProcesses.delete(proc);
       clearInterval(heartbeatTimer);
       if (liveGalleryTimer) clearInterval(liveGalleryTimer);
       const retry = job.attempts < job.max_attempts;
@@ -1312,6 +1347,9 @@ function startWorkerPool({
   async function stop() {
     stopping = true;
     clearInterval(staleTimer);
+    for (const proc of activeProcesses) {
+      try { proc.kill('SIGTERM'); } catch (_) {}
+    }
     await Promise.all(loopPromises);
   }
 
@@ -1333,4 +1371,10 @@ function startWorkerPool({
   return { stop, workerId, stats };
 }
 
-module.exports = { startWorkerPool, syncToGallery, filterSettledMediaOutputs, isImportableMedia };
+module.exports = {
+  startWorkerPool,
+  syncToGallery,
+  filterSettledMediaOutputs,
+  isImportableMedia,
+  _test: { galleryDlSourceInfo, twitterIdFromMediaFilename },
+};

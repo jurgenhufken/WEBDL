@@ -106,14 +106,16 @@ const DOWNLOAD_EXTS = [...MEDIA_EXTS, ...ARCHIVE_EXTS];
 const BROWSER_NATIVE_VIDEO_EXTS = new Set(['.mp4', '.webm', '.ogv']);
 const THUMB_WIDTH = Math.max(160, Number(process.env.WEBDL_GALLERY_THUMB_WIDTH || 480));
 const THUMB_HEIGHT = Math.max(90, Number(process.env.WEBDL_GALLERY_THUMB_HEIGHT || 270));
-const THUMB_CONCURRENCY = Math.max(1, Number(process.env.WEBDL_GALLERY_THUMB_CONCURRENCY || 4));
-const THUMB_WARM_INTERVAL_MS = Math.max(500, Number(process.env.WEBDL_GALLERY_THUMB_WARM_INTERVAL_MS || 1000));
-const THUMB_WARM_BATCH = Math.max(1, Number(process.env.WEBDL_GALLERY_THUMB_WARM_BATCH || 100));
+const THUMB_CONCURRENCY = Math.max(1, Number(process.env.WEBDL_GALLERY_THUMB_CONCURRENCY || 1));
+const THUMB_WARM_INTERVAL_MS = Math.max(500, Number(process.env.WEBDL_GALLERY_THUMB_WARM_INTERVAL_MS || 5000));
+const THUMB_WARM_BATCH = Math.max(1, Number(process.env.WEBDL_GALLERY_THUMB_WARM_BATCH || 20));
+const THUMB_WARM_ENABLED = !/^(0|false|no|off)$/i.test(process.env.WEBDL_GALLERY_THUMB_WARM_ENABLED || '1');
 const AUX_RELPATH_RE = String.raw`((^|[\\/])\d{1,3}[-_. ]?thumbnail\.(jpe?g|png|webp|gif|bmp|avif)$|(^|[-_. ])(thumb|thumbnail)\.(jpe?g|png|webp|gif|bmp|avif)$|(^|[-_. ])sample\.(mp4|webm|mkv|mov|m4v|avi|wmv|flv|ts|m2ts|mpg|mpeg|ogv|3gp|3g2)$|_thumb(_v[0-9]+)?\.(jpe?g|png|webp)$|_preview\.(jpe?g|png|webp|gif|bmp|avif)$|\.(json|part|tmp|ytdl)$)`;
 const TEMP_RELPATH_RE = String.raw`(^|[\\/])(_UNPACK_|_FAILED_|_ADMIN_|__ADMIN__|incomplete)([^\\/]*)([\\/]|$)`;
 const AUX_RELPATH_PATTERN = new RegExp(AUX_RELPATH_RE, 'i');
 const TEMP_RELPATH_PATTERN = new RegExp(TEMP_RELPATH_RE, 'i');
 const DOWNLOAD_EXT_SQL = DOWNLOAD_EXTS.map(e => `'${e}'`).join(',');
+const MEDIA_EXT_SQL = MEDIA_EXTS.map(e => `'${e}'`).join(',');
 const IMAGE_EXT_SQL = IMAGE_EXTS.map(e => `'${e}'`).join(',');
 const VIDEO_EXT_SQL = VIDEO_EXTS.map(e => `'${e}'`).join(',');
 const ACTIVE_DB_STATUSES = ['downloading', 'postprocessing'];
@@ -297,6 +299,7 @@ function sourceSiteSql(alias = 'd') {
 function platformGroupSql(alias = 'd') {
   return `CASE
     WHEN LOWER(COALESCE(${alias}.platform, '')) IN ('t', 'telegram') THEN 'telegram'
+    WHEN LOWER(COALESCE(${alias}.platform, '')) IN ('k2s', 'k2scc', 'k2s.cc', 'k2s.io', 'keep2share.cc') THEN 'keep2share'
     ELSE COALESCE(NULLIF(${alias}.platform, ''), 'unknown')
   END`;
 }
@@ -304,7 +307,7 @@ function platformGroupSql(alias = 'd') {
 function channelGroupSql(alias = 'd') {
   const sourceSite = sourceSiteSql(alias);
   return `CASE
-    WHEN ${alias}.platform IN ('sabnzbd', 'keep2share') AND ${sourceSite} IS NOT NULL
+    WHEN LOWER(COALESCE(${alias}.platform, '')) IN ('sabnzbd', 'keep2share', 'k2s', 'k2scc', 'k2s.cc', 'k2s.io', 'keep2share.cc') AND ${sourceSite} IS NOT NULL
       THEN 'site:' || ${sourceSite}
     ELSE ${alias}.channel
   END`;
@@ -641,7 +644,7 @@ function isGalleryMediaCandidate(row, { requireThumbReady = false } = {}) {
   const ext = fileExt(row.filepath, row.format, row);
   if (!DOWNLOAD_EXTS.includes(ext)) return false;
   if (isTempMediaPath(row.filepath) || isAuxMediaPath(row.filepath)) return false;
-  if (ARCHIVE_EXTS.includes(ext)) return true;
+  if (ARCHIVE_EXTS.includes(ext)) return false;
   if (requireThumbReady && row.is_thumb_ready !== true && !IMAGE_EXTS.includes(ext)) return false;
   return true;
 }
@@ -731,25 +734,27 @@ async function filterPlayableMediaRows(rows, maxNeeded = rows.length) {
 }
 
 function galleryDedupeKey(row) {
-  const fileKey = String(row.filepath || '').trim();
-  if (fileKey) return `file:${fileKey.toLowerCase()}`;
-
   if (String(row.item_kind || '') === 'download') {
-    const sourceKey = canonicalGallerySourceUrl(row.source_url || row.url);
-    if (sourceKey) return `source:${sourceKey}`;
-
     const ext = fileExt(row.filepath, row.format);
     const isVideo = VIDEO_EXTS.includes(ext);
     if (isVideo) {
       const titleKey = String(row.title || row.filename || '')
         .trim()
         .toLowerCase()
+        .replace(/^rt\s+@[a-z0-9_]+:\s*/i, '')
         .replace(/\s+/g, ' ');
       const durationKey = parseDurationSeconds(row.duration) || '';
       const sizeKey = row.filesize == null ? '' : String(row.filesize);
       if (titleKey && (durationKey || sizeKey)) return `video:${titleKey}|${durationKey}|${sizeKey}`;
     }
+
+    const sourceKey = canonicalGallerySourceUrl(row.source_url || row.url);
+    if (sourceKey) return `source:${sourceKey}`;
   }
+
+  const fileKey = String(row.filepath || '').trim();
+  if (fileKey) return `file:${fileKey.toLowerCase()}`;
+
   return `${row.item_kind}:${row.id}`;
 }
 
@@ -1538,9 +1543,7 @@ function buildItemFilters({ req, params, fileExpr, extExpr, ratingExpr, includeC
 }
 
 const DIRECT_DOWNLOAD_HINT_SQL = `(
-  lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${DOWNLOAD_EXT_SQL})
-  OR lower(COALESCE(d.url, '') || ' ' || COALESCE(d.source_url, '') || ' ' || COALESCE(d.filename, '') || ' ' || COALESCE(d.filepath, '') || ' ' || COALESCE(d.metadata, ''))
-     ~ '(application(%2f|/)x-rar|application(%2f|/)zip|application(%2f|/)x-7z|x-rar-compressed|[._ -](rar|zip|7z|tar|tgz|gz|bz2|xz|cbz|cbr)([?#&._ -]|$))'
+  lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})
 )`;
 
 function wantsThumbReadyOnly(req) {
@@ -1850,7 +1853,7 @@ app.get('/api/items', async (req, res) => {
         SELECT 1 FROM download_files mf
          WHERE mf.download_id = d.id
            AND mf.relpath !~* '${AUX_RELPATH_RE}'
-           AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${DOWNLOAD_EXT_SQL})
+           AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
       )`);
     }
     const fileWhere = directOnlyPlatform ? ['false'] : buildItemFilters({
@@ -1865,7 +1868,7 @@ app.get('/api/items', async (req, res) => {
       fileWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
       fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_FILE_PARENT_STATUSES.map(s => `'${s}'`).join(',')}])`);
       fileWhere.push(`(df.filesize IS NULL OR df.filesize > 0)`);
-      fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${DOWNLOAD_EXT_SQL})`);
+      fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
       if (thumbReadyOnly) fileWhere.push(`(df.is_thumb_ready = true OR d.is_thumb_ready = true OR lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${IMAGE_EXT_SQL}))`);
     }
     if (useCursor && !directOnlyPlatform) {
@@ -2111,7 +2114,7 @@ app.get('/api/platforms', async (req, res) => {
       SELECT 1 FROM download_files mf
        WHERE mf.download_id = d.id
          AND mf.relpath !~* '${AUX_RELPATH_RE}'
-       AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${DOWNLOAD_EXT_SQL})
+       AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
     )`);
 
     const fileWhere = buildItemFilters({
@@ -2126,7 +2129,7 @@ app.get('/api/platforms', async (req, res) => {
     fileWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
     fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_FILE_PARENT_STATUSES.map(s => `'${s}'`).join(',')}])`);
     fileWhere.push(`(df.filesize IS NULL OR df.filesize > 0)`);
-    fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${DOWNLOAD_EXT_SQL})`);
+    fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
 
     const screenshotWhere = buildScreenshotFilters({ req, params, includeChannel: false });
     screenshotWhere.push(`(s.filesize IS NULL OR s.filesize > 0)`);
@@ -2227,7 +2230,7 @@ app.get('/api/channels', async (req, res) => {
       SELECT 1 FROM download_files mf
        WHERE mf.download_id = d.id
          AND mf.relpath !~* '${AUX_RELPATH_RE}'
-       AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${DOWNLOAD_EXT_SQL})
+       AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
     )`);
     const directChannelExpr = channelGroupSql('d');
     const directPlatformExpr = platformGroupSql('d');
@@ -2244,7 +2247,7 @@ app.get('/api/channels', async (req, res) => {
     fileWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
     fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_FILE_PARENT_STATUSES.map(s => `'${s}'`).join(',')}])`);
     fileWhere.push(`(df.filesize IS NULL OR df.filesize > 0)`);
-    fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${DOWNLOAD_EXT_SQL})`);
+    fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
 
     const screenshotWhere = buildScreenshotFilters({ req, params, includeChannel: false });
     screenshotWhere.push(`(s.filesize IS NULL OR s.filesize > 0)`);
@@ -2980,7 +2983,9 @@ const server = app.listen(PORT, () => {
       .catch((e) => console.warn('[schema-init] failed:', e.message));
   }, 30000).unref();
   setTimeout(() => {
-    warmThumbBacklog('startup').catch((e) => console.warn('[thumb-warm] failed:', e.message));
+    if (THUMB_WARM_ENABLED) {
+      warmThumbBacklog('startup').catch((e) => console.warn('[thumb-warm] failed:', e.message));
+    }
   }, 3000).unref();
   setTimeout(() => {
     syncKeep2ShareFiles('startup').catch((e) => console.warn('[keep2share-sync] failed:', e.message));
@@ -2988,8 +2993,10 @@ const server = app.listen(PORT, () => {
   setInterval(() => {
     syncKeep2ShareFiles('timer').catch((e) => console.warn('[keep2share-sync] failed:', e.message));
   }, KEEP2SHARE_SYNC_MS).unref();
-  setInterval(() => {
-    warmThumbBacklog('timer').catch((e) => console.warn('[thumb-warm] failed:', e.message));
-  }, THUMB_WARM_INTERVAL_MS).unref();
+  if (THUMB_WARM_ENABLED) {
+    setInterval(() => {
+      warmThumbBacklog('timer').catch((e) => console.warn('[thumb-warm] failed:', e.message));
+    }, THUMB_WARM_INTERVAL_MS).unref();
+  }
 });
 global.__webdlGalleryServer = server;
