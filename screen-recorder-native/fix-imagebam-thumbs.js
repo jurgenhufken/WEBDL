@@ -65,7 +65,7 @@ async function main() {
   const { rows } = await pool.query(`
     SELECT id, url, platform, channel, source_url, title, status, filesize
     FROM downloads
-    WHERE url ~* 'thumbs?\\d*\\.imagebam\\.com'
+    WHERE url ~* '(thumbs?|thumbnails?)\\d*\\.imagebam\\.com'
     AND status IN ('completed', 'error', 'superseded')
     ORDER BY channel, id
   `);

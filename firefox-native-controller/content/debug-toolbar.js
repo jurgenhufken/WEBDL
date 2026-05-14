@@ -659,7 +659,7 @@
 
         // Imagebam: convert thumbnail URLs to full-size wrapper pages
         // thumbs2.imagebam.com/xx/yy/zz/HASH.jpg → imagebam.com/view/HASH
-        if (/^thumbs?\d*\.imagebam\.com$/i.test(host)) {
+        if (/^thumbs?\d*\.imagebam\.com$/i.test(host) || /^thumbnails?\d*\.imagebam\.com$/i.test(host)) {
           try {
             const rawPath = String(u.pathname || '');
             const m = rawPath.match(/\/([a-z0-9]+?)(?:_t)?\.[a-z]+$/i);
