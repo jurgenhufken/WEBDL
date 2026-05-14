@@ -1524,9 +1524,12 @@
   }
 
   // Cadence seek: repeated taps in the same direction produce predictable, recognizable jumps
+  // Quick taps increase level. Pausing maintains level. Longer pause = gradual decay.
   // 1 tap = 1s, 2 taps = 3s, 3 taps = 5s, 4 taps = 10s, 5 taps = 20s, 6 taps = 45s, 7 taps = 90s
   const seekAccel = { lastTime: 0, lastDir: 0, taps: 0 };
-  const SEEK_TAP_WINDOW = 500; // ms — taps within this window count as a sequence
+  const SEEK_TAP_FAST = 500;     // ms — taps within this = increase level
+  const SEEK_TAP_HOLD = 2000;    // ms — keep current level up to this
+  const SEEK_TAP_DECAY = 1000;   // ms — after HOLD, lose 1 level per this interval
   const SEEK_TAP_STEPS = [1, 3, 5, 10, 20, 45, 90];
   const SEEK_TAP_DOTS = SEEK_TAP_STEPS.map((_, i, arr) =>
     arr.map((__, j) => j <= i ? '●' : '○').join('')
@@ -1537,12 +1540,22 @@
     if (!v || !Number.isFinite(v.duration)) return;
     const dir = baseSeconds > 0 ? 1 : -1;
     const now = Date.now();
-    // Count taps: same direction within cadence window
-    if (dir === seekAccel.lastDir && (now - seekAccel.lastTime) < SEEK_TAP_WINDOW) {
-      seekAccel.taps = Math.min(seekAccel.taps + 1, SEEK_TAP_STEPS.length - 1);
-    } else {
+    const elapsed = now - seekAccel.lastTime;
+
+    if (dir !== seekAccel.lastDir) {
+      // Direction change → reset
       seekAccel.taps = 0;
+    } else if (elapsed < SEEK_TAP_FAST) {
+      // Fast tap → increase level
+      seekAccel.taps = Math.min(seekAccel.taps + 1, SEEK_TAP_STEPS.length - 1);
+    } else if (elapsed < SEEK_TAP_HOLD) {
+      // Short pause → stay at same level
+    } else {
+      // Longer pause → decay: lose 1 level per DECAY interval past HOLD
+      const decayLevels = Math.floor((elapsed - SEEK_TAP_HOLD) / SEEK_TAP_DECAY);
+      seekAccel.taps = Math.max(0, seekAccel.taps - decayLevels);
     }
+
     seekAccel.lastTime = now;
     seekAccel.lastDir = dir;
     const step = SEEK_TAP_STEPS[seekAccel.taps];
