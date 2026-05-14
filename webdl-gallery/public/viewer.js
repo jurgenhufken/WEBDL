@@ -2891,13 +2891,13 @@
   function ensureAutoLaneCanvas() {
     let canvas = document.getElementById('vAutoLaneCanvas');
     if (canvas) return canvas;
-    const bar = el.vProgressBar;
-    if (!bar) return null;
+    const stage = el.vStage;
+    if (!stage) return null;
 
-    // Container for the lane
+    // Container for the lane — full width, above bottom overlay
     const container = document.createElement('div');
     container.id = 'vAutoLaneContainer';
-    container.style.cssText = `position:absolute; bottom:100%; left:0; right:0; height:${AUTO_LANE_HEIGHT}px; background:rgba(0,0,0,.35); backdrop-filter:blur(4px); border-top:1px solid rgba(255,140,0,.4); border-bottom:1px solid rgba(255,80,200,.5); z-index:10; display:none; cursor:crosshair;`;
+    container.style.cssText = `position:absolute; left:0; right:0; bottom:120px; height:${AUTO_LANE_HEIGHT}px; background:rgba(0,0,0,.35); backdrop-filter:blur(4px); border-top:1px solid rgba(255,140,0,.4); border-bottom:1px solid rgba(255,80,200,.5); z-index:55; display:none; cursor:crosshair;`;
 
     canvas = document.createElement('canvas');
     canvas.id = 'vAutoLaneCanvas';
@@ -2924,8 +2924,7 @@
     container.appendChild(penLabel);
     container.append(labelTop, labelBot, label1x);
 
-    bar.style.position = 'relative';
-    bar.appendChild(container);
+    stage.appendChild(container);
     bindAutoLaneMouse(container, canvas);
     return canvas;
   }
