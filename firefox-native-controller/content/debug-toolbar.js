@@ -924,8 +924,13 @@
       for (const sel of selectors) {
         const el = doc.querySelector(sel);
         if (!el) continue;
-        const href = el.getAttribute('href');
+        let href = el.getAttribute('href');
         if (!href) continue;
+        // XenForo sometimes emits root-relative paths without leading slash
+        // e.g. "threads/slug.123/page-2" instead of "/threads/slug.123/page-2"
+        if (/^(threads|forums|pages)\//i.test(href) && !/^https?:/i.test(href)) {
+          href = '/' + href;
+        }
         const abs = new URL(href, baseHref);
         abs.hash = '';
         return abs.toString();
