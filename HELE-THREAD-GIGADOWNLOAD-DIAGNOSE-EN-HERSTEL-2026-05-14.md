@@ -1279,6 +1279,67 @@ Gate 3 acceptatie voor de volgende codewijziging:
 - Nieuwe status/preflight moet secretwaarden maskeren en alleen bron/type/status tonen.
 - Lifecycle-diagnose moet mismatch expliciet kunnen tonen, vooral `hub failed` met `download completed`.
 
+Gate 3 K2S-preflight uitgevoerd:
+
+- `webdl-hub/src/api/routes-jobs.js` heeft nu `GET /api/jobs/meta/k2s-preflight`.
+- Endpoint is read-only en doet geen K2S API/web-request.
+- Response toont:
+  - `configured`: lokale config aanwezig ja/nee;
+  - `sources`: `process.env`, `screen-recorder-native/.env`, `webdl-hub/.env`;
+  - per source alleen status, count en credentialtypes zoals `cookie`, `x_bc`, `auth_token`, `username`;
+  - `queueGate.localConfigPass`: of de lokale hub-gate nieuwe K2S-jobs zou doorlaten;
+  - `remoteAcceptance.checked=false`: expliciet bewijs dat token/cookie-acceptatie door K2S niet is vastgesteld.
+- Secretwaarden en concrete keynamen worden niet teruggegeven.
+- `hasKeep2ShareApiAuthConfigured()` gebruikt dezelfde preflightbron voor consistentie met de bestaande K2S queue-gate.
+- Tests toegevoegd in `webdl-hub/test/api/routes-jobs-k2s-preflight.test.js`.
+
+Gate 3 K2S-preflight verificatie:
+
+- `node --check webdl-hub/src/api/routes-jobs.js`: groen.
+- `node --check webdl-hub/test/api/routes-jobs-k2s-preflight.test.js`: groen.
+- `npm test` in `webdl-hub`: groen, 146 tests geslaagd.
+
+Gate 3 concrete K2S-fout uit extensie:
+
+- Gebruikersmelding: `Firefox K2S-login gevonden, maar de K2S API accepteert deze browser-token niet voor getUrl: You are not authorized for this action. Web-cookie fallback: K2S web-API gaf geen JSON terug (404, auth=firefox-localstorage). Zet K2S_COOKIE/K2S_X_BC of een permanent K2S API-token in .env.`
+- Bewezen codebron: fouttekst komt uit `screen-recorder-native/src/simple-server.js` in `resolveKeep2ShareDirectUrl(...)`.
+- Bewezen runtimecontext: live simple-server draaide als launchd-proces met `cwd=/` en command `/opt/homebrew/bin/node /Users/jurgen/WEBDL/screen-recorder-native/src/simple-server.js`.
+- Bewezen oorzaak 1: `screen-recorder-native/src/config.js` gebruikte `require('dotenv').config()` zonder expliciet pad. Met `cwd=/` laadt dotenv niet automatisch `screen-recorder-native/.env`.
+- Bewezen oorzaak 2: `screen-recorder-native/.env` bevatte wel K2S-keynamen `K2S_COOKIE`, `K2S_X_BC`, `K2S_USERNAME`, maar de live startvorm kon die file zonder padfix missen.
+- Bewezen oorzaak 3: in de K2S web-token fallback probeerde `getKeep2ShareWebAccessToken(...)` Firefox-localStorage vóór de cookie-tokenflow. Daardoor kon de fout blijven eindigen op `auth=firefox-localstorage`, zelfs wanneer een expliciete cookie bedoeld was.
+
+Gate 3 K2S-authfix uitgevoerd:
+
+- `screen-recorder-native/src/config.js` laadt `.env` nu via `path.resolve(__dirname, '..', '.env')`, onafhankelijk van de process working directory.
+- `screen-recorder-native/src/simple-server.js` en runtimekopie `screen-recorder-native/src/simple-server.compiled.js` onderscheiden cookiebronnen:
+  - `env-cookie`;
+  - `metadata-cookie`;
+  - `firefox-cookie`.
+- Expliciete metadata/env-cookie wordt nu vóór Firefox-localStorage geprobeerd bij het ophalen van een K2S web access token.
+- Errorlabels zijn aangescherpt: een geweigerde `.env` accessToken wordt niet meer als Firefox-login gelabeld.
+- Deze fix bewijst nog niet dat K2S de huidige cookie accepteert; hij bewijst alleen dat de juiste lokale bron geladen en vóór Firefox-localStorage geprobeerd wordt.
+
+Gate 3 K2S-authfix verificatie:
+
+- `node --check screen-recorder-native/src/config.js`: groen.
+- `node --check screen-recorder-native/src/simple-server.js`: groen.
+- `node --check screen-recorder-native/src/simple-server.compiled.js`: groen.
+- Reproducer vanuit `cwd=/`: `require('/Users/jurgen/WEBDL/screen-recorder-native/src/config')` laadt non-secret K2S-keynamen `K2S_COOKIE`, `K2S_X_BC`, `K2S_USERNAME`.
+- `npm test` in `webdl-hub`: groen, 146 tests geslaagd.
+- Live herstart uitgevoerd via launchd voor `com.webdl.simple-server` en `com.webdl.hub`.
+- Live health na herstart:
+  - simple-server: groen;
+  - hub: groen.
+- Live simple-server draait nog steeds met `cwd=/`; de padfix is dus relevant voor deze echte startvorm.
+- Live hub-preflight `GET /api/jobs/meta/k2s-preflight`:
+  - `configured=true`;
+  - `credentialTypes=["cookie","username","x_bc"]`;
+  - `process_env`: leeg;
+  - `screen-recorder-native/.env`: configured, `keyCount=3`;
+  - `webdl-hub/.env`: leeg;
+  - `remoteAcceptance.status="not_checked"`.
+- Live simple-server status na herstart: `activeDownloads=0`, `queuedDownloads=0`, `pendingDownloads=1`; die ene pending rij blijft de oude TikTok-rij en is geen K2S-run.
+
 ## Rollbackstrategie
 
 Als er iets misgaat:

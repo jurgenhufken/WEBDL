@@ -1,7 +1,8 @@
-require('dotenv').config();
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
+
+require('dotenv').config({ path: path.resolve(__dirname, '..', '.env') });
 
 function firstExisting(paths) {
   for (const p of paths) {

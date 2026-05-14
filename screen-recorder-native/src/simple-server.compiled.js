@@ -1025,22 +1025,33 @@ function cookieValueFromHeader(header, name) {
   return '';
 }
 
-function keep2ShareCookieFromEnv() {
-  return cookieHeaderFromMetadataCookies(
+function keep2ShareCookieAuthFromEnv() {
+  const cookieHeader = cookieHeaderFromMetadataCookies(
     process.env.WEBDL_KEEP2SHARE_COOKIE ||
     process.env.KEEP2SHARE_COOKIE ||
     process.env.K2S_COOKIE ||
     ''
   );
+  return { cookieHeader, source: cookieHeader ? 'env-cookie' : '' };
+}
+
+function keep2ShareCookieFromEnv() {
+  return keep2ShareCookieAuthFromEnv().cookieHeader;
+}
+
+async function loadKeep2ShareCookieAuth(hostname, metadata) {
+  const metadataCookies = metadata && typeof metadata === 'object' ? cookieHeaderFromMetadataCookies(metadata.cookies) : '';
+  if (metadataCookies) return { cookieHeader: metadataCookies, source: 'metadata-cookie' };
+  const envCookieAuth = keep2ShareCookieAuthFromEnv();
+  if (envCookieAuth.cookieHeader) return envCookieAuth;
+  const host = String(hostname || '').toLowerCase();
+  const cookieHeader = await loadCookiesForDomain(host) || await loadCookiesForDomain('k2s.cc') || await loadCookiesForDomain('keep2share.cc');
+  return { cookieHeader, source: cookieHeader ? 'firefox-cookie' : '' };
 }
 
 async function loadKeep2ShareCookieHeader(hostname, metadata) {
-  const metadataCookies = metadata && typeof metadata === 'object' ? cookieHeaderFromMetadataCookies(metadata.cookies) : '';
-  if (metadataCookies) return metadataCookies;
-  const envCookies = keep2ShareCookieFromEnv();
-  if (envCookies) return envCookies;
-  const host = String(hostname || '').toLowerCase();
-  return await loadCookiesForDomain(host) || await loadCookiesForDomain('k2s.cc') || await loadCookiesForDomain('keep2share.cc');
+  const auth = await loadKeep2ShareCookieAuth(hostname, metadata);
+  return auth.cookieHeader;
 }
 
 function keep2ShareUserAgentFromEnv() {
@@ -1317,7 +1328,7 @@ async function loadKeep2ShareFirefoxWebAuth(preferredHost = '') {
   return keep2ShareFirefoxWebAuthCache;
 }
 
-async function getKeep2ShareWebAccessToken(cookieHeader = '', preferredHost = '') {
+async function getKeep2ShareWebAccessToken(cookieHeader = '', preferredHost = '', options = {}) {
   const direct = String(
     process.env.WEBDL_KEEP2SHARE_WEB_ACCESS_TOKEN ||
     process.env.KEEP2SHARE_WEB_ACCESS_TOKEN ||
@@ -1325,12 +1336,10 @@ async function getKeep2ShareWebAccessToken(cookieHeader = '', preferredHost = ''
     ''
   ).trim();
   if (direct) return { token: direct, source: 'env' };
-  if (keep2ShareWebAccessTokenCache.token && keep2ShareWebAccessTokenCache.expiresAt > Date.now() + 60000) {
+  const cookieSource = String(options.cookieSource || '').trim();
+  if (!cookieHeader && keep2ShareWebAccessTokenCache.token && keep2ShareWebAccessTokenCache.expiresAt > Date.now() + 60000) {
     return { token: keep2ShareWebAccessTokenCache.token, source: keep2ShareWebAccessTokenCache.source };
   }
-
-  const firefoxAuth = await loadKeep2ShareFirefoxWebAuth(preferredHost);
-  if (firefoxAuth.token) return { token: firefoxAuth.token, source: firefoxAuth.source, cookieHeader: firefoxAuth.cookieHeader };
 
   const baseHeaders = {
     'Accept': 'application/json, text/plain, */*',
@@ -1349,11 +1358,14 @@ async function getKeep2ShareWebAccessToken(cookieHeader = '', preferredHost = ''
       let json = null;
       try { json = JSON.parse(text); } catch (e) { }
       if (res.ok && json && json.access_token) {
-        keep2ShareWebAccessTokenCache = { token: String(json.access_token), expiresAt: Date.now() + 30 * 60 * 1000, source: 'cookie' };
-        return { token: keep2ShareWebAccessTokenCache.token, source: 'cookie' };
+        keep2ShareWebAccessTokenCache = { token: String(json.access_token), expiresAt: Date.now() + 30 * 60 * 1000, source: cookieSource || 'cookie' };
+        return { token: keep2ShareWebAccessTokenCache.token, source: keep2ShareWebAccessTokenCache.source };
       }
     } catch (e) { }
   }
+
+  const firefoxAuth = await loadKeep2ShareFirefoxWebAuth(preferredHost);
+  if (firefoxAuth.token) return { token: firefoxAuth.token, source: firefoxAuth.source, cookieHeader: firefoxAuth.cookieHeader };
 
   try {
     const res = await fetch('https://api.k2s.cc/v1/auth/token', {
@@ -1377,12 +1389,15 @@ async function getKeep2ShareWebAccessToken(cookieHeader = '', preferredHost = ''
   return { token: '', source: '' };
 }
 
-async function fetchKeep2ShareWebApiJson(pathname, { filePageUrl = '', cookieHeader = '', metadata = null } = {}) {
-  let cookie = cookieHeader || await loadKeep2ShareCookieHeader('k2s.cc', metadata);
+async function fetchKeep2ShareWebApiJson(pathname, { filePageUrl = '', cookieHeader = '', cookieSource = '', metadata = null } = {}) {
+  let cookieAuth = cookieHeader
+    ? { cookieHeader, source: cookieSource || 'provided-cookie' }
+    : await loadKeep2ShareCookieAuth('k2s.cc', metadata);
+  let cookie = cookieAuth.cookieHeader;
   const referer = String(filePageUrl || 'https://k2s.cc/').trim();
   let preferredHost = 'k2s.cc';
   try { preferredHost = new URL(referer).hostname || preferredHost; } catch (e) { }
-  const tokenInfo = await getKeep2ShareWebAccessToken(cookie, preferredHost);
+  const tokenInfo = await getKeep2ShareWebAccessToken(cookie, preferredHost, { cookieSource: cookieAuth.source });
   if (!tokenInfo.token) return { json: null, status: 0, error: 'K2S web-access-token kon niet worden opgehaald' };
   if (tokenInfo.cookieHeader) cookie = tokenInfo.cookieHeader;
   if (tokenInfo.source === 'firefox-localstorage') cookie = '';
@@ -1429,10 +1444,11 @@ function keep2ShareDownloadUrlFromJson(json) {
 async function resolveKeep2ShareWebDirectUrl(input, metadata = null) {
   const fileId = keep2ShareFileIdFromUrl(input);
   if (!fileId) return { url: '', error: 'Keep2Share file-id ontbreekt in URL' };
-  const cookieHeader = await loadKeep2ShareCookieHeader('k2s.cc', metadata);
+  const cookieAuth = await loadKeep2ShareCookieAuth('k2s.cc', metadata);
+  const cookieHeader = cookieAuth.cookieHeader;
   if (!cookieHeader) return { url: '', error: 'Keep2Share cookie-auth ontbreekt' };
   const filePageUrl = String(input || '').trim();
-  const result = await fetchKeep2ShareWebApiJson(`files/${encodeURIComponent(fileId)}/download`, { filePageUrl, cookieHeader, metadata });
+  const result = await fetchKeep2ShareWebApiJson(`files/${encodeURIComponent(fileId)}/download`, { filePageUrl, cookieHeader, cookieSource: cookieAuth.source, metadata });
   if (result.json) {
     const downloadUrl = keep2ShareDownloadUrlFromJson(result.json);
     if (downloadUrl) return { url: downloadUrl, error: '' };
@@ -1459,9 +1475,9 @@ async function resolveKeep2ShareDirectUrl(input, metadata = null) {
   if (!authToken && !accessToken) {
     try {
       const host = new URL(String(input || '')).hostname.toLowerCase();
-      const cookieHeader = await loadKeep2ShareCookieHeader(host, null);
-      accessToken = cookieValueFromHeader(cookieHeader, 'accessToken');
-      if (accessToken) accessTokenSource = 'firefox-cookie';
+      const cookieAuth = await loadKeep2ShareCookieAuth(host, null);
+      accessToken = cookieValueFromHeader(cookieAuth.cookieHeader, 'accessToken');
+      if (accessToken) accessTokenSource = cookieAuth.source || 'cookie';
     } catch (e) { }
   }
   if (!authToken && !accessToken) {
@@ -1481,6 +1497,17 @@ async function resolveKeep2ShareDirectUrl(input, metadata = null) {
     return {
       url: '',
       error: `Firefox K2S-login gevonden, maar de K2S API accepteert deze browser-token niet voor getUrl: ${keep2ShareApiErrorMessage(json)}. Web-cookie fallback: ${webResolved.error || 'geen downloadlink'}. Zet K2S_COOKIE/K2S_X_BC of een permanent K2S API-token in .env.`
+    };
+  }
+  if (!authToken && accessTokenSource) {
+    const sourceLabel = accessTokenSource === 'env-cookie'
+      ? 'K2S accessToken uit .env-cookie'
+      : accessTokenSource === 'metadata-cookie'
+        ? 'K2S accessToken uit meegegeven cookie'
+        : 'K2S accessToken';
+    return {
+      url: '',
+      error: `${sourceLabel} werd niet geaccepteerd voor getUrl: ${keep2ShareApiErrorMessage(json)}. Web-cookie fallback: ${webResolved.error || 'geen downloadlink'}`
     };
   }
   return { url: '', error: `Keep2Share getUrl faalde: ${keep2ShareApiErrorMessage(json)}. Web-cookie fallback: ${webResolved.error || 'geen downloadlink'}` };

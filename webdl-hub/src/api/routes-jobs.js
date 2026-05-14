@@ -377,25 +377,115 @@ const K2S_AUTH_KEYS = [
   'K2S_XBC',
 ];
 
-function envFileHasAnyKey(filePath, keys) {
+function keep2ShareAuthRoot() {
+  return path.resolve(__dirname, '..', '..', '..');
+}
+
+function keep2ShareAuthType(key) {
+  const normalized = String(key || '').toUpperCase();
+  if (normalized.includes('USERNAME')) return 'username';
+  if (normalized.includes('COOKIE')) return 'cookie';
+  if (normalized.includes('X_BC') || normalized.includes('XBC')) return 'x_bc';
+  if (normalized.includes('ACCESS_TOKEN')) return 'access_token';
+  if (normalized.includes('AUTH_TOKEN')) return 'auth_token';
+  return 'other';
+}
+
+function summarizeK2sAuthKeys(keys) {
+  const entries = Array.from(new Set((keys || []).map((key) => String(key || '').toUpperCase()).filter(Boolean)));
+  const types = Array.from(new Set(entries.map(keep2ShareAuthType))).sort();
+  return { keyCount: entries.length, types };
+}
+
+function parseEnvAssignment(line) {
+  const m = String(line || '').match(/^\s*(?:export\s+)?([A-Z0-9_]+)\s*=\s*(.*)$/i);
+  if (!m) return null;
+  return {
+    key: String(m[1] || '').toUpperCase(),
+    value: String(m[2] || '').trim().replace(/^['"]|['"]$/g, ''),
+  };
+}
+
+function scanK2sEnvFile(filePath, keys = K2S_AUTH_KEYS) {
+  const wanted = new Set(keys.map((k) => String(k || '').toUpperCase()));
+  const result = {
+    source: filePath,
+    kind: 'env_file',
+    exists: false,
+    readable: false,
+    configured: false,
+    keyCount: 0,
+    types: [],
+    status: 'missing_file',
+  };
+
   try {
-    if (!fs.existsSync(filePath)) return false;
-    const wanted = new Set(keys.map((k) => k.toUpperCase()));
+    if (!fs.existsSync(filePath)) return result;
+    result.exists = true;
+    const found = [];
     for (const line of fs.readFileSync(filePath, 'utf8').split(/\r?\n/)) {
-      const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)$/i);
-      if (!m || !wanted.has(String(m[1]).toUpperCase())) continue;
-      const value = String(m[2] || '').trim().replace(/^['"]|['"]$/g, '');
-      if (value) return true;
+      const entry = parseEnvAssignment(line);
+      if (entry && wanted.has(entry.key) && entry.value) found.push(entry.key);
     }
-  } catch (_) {}
-  return false;
+    const summary = summarizeK2sAuthKeys(found);
+    result.readable = true;
+    result.configured = summary.keyCount > 0;
+    result.keyCount = summary.keyCount;
+    result.types = summary.types;
+    result.status = result.configured ? 'configured' : 'empty';
+  } catch (e) {
+    result.exists = true;
+    result.status = 'unreadable';
+  }
+  return result;
+}
+
+function scanK2sProcessEnv(env = process.env, keys = K2S_AUTH_KEYS) {
+  const found = keys.filter((key) => String(env && env[key] || '').trim());
+  const summary = summarizeK2sAuthKeys(found);
+  return {
+    source: 'process.env',
+    kind: 'process_env',
+    exists: true,
+    readable: true,
+    configured: summary.keyCount > 0,
+    keyCount: summary.keyCount,
+    types: summary.types,
+    status: summary.keyCount > 0 ? 'configured' : 'empty',
+  };
+}
+
+function getKeep2ShareAuthPreflight({ root = keep2ShareAuthRoot(), env = process.env } = {}) {
+  const sources = [
+    scanK2sProcessEnv(env),
+    scanK2sEnvFile(path.join(root, 'screen-recorder-native', '.env')),
+    scanK2sEnvFile(path.join(root, 'webdl-hub', '.env')),
+  ];
+  const configured = sources.some((source) => source.configured);
+  const types = Array.from(new Set(sources.flatMap((source) => source.types))).sort();
+
+  return {
+    service: 'keep2share',
+    readOnly: true,
+    configured,
+    sources,
+    credentialTypes: types,
+    queueGate: {
+      localConfigPass: configured,
+      meaning: configured
+        ? 'Lokale K2S-config is aanwezig genoeg om de hub queue-gate te passeren.'
+        : 'Lokale K2S-config ontbreekt; de hub queue-gate blokkeert nieuwe K2S-jobs.',
+    },
+    remoteAcceptance: {
+      checked: false,
+      status: 'not_checked',
+      meaning: 'Deze read-only preflight doet geen K2S API/web-request en bewijst dus niet dat K2S de token, cookie of sessie accepteert.',
+    },
+  };
 }
 
 function hasKeep2ShareApiAuthConfigured() {
-  if (K2S_AUTH_KEYS.some((key) => String(process.env[key] || '').trim())) return true;
-  const root = path.resolve(__dirname, '..', '..', '..');
-  return envFileHasAnyKey(path.join(root, 'screen-recorder-native', '.env'), K2S_AUTH_KEYS)
-    || envFileHasAnyKey(path.join(root, 'webdl-hub', '.env'), K2S_AUTH_KEYS);
+  return getKeep2ShareAuthPreflight().configured;
 }
 
 async function mapWithConcurrency(values, limit, fn) {
@@ -411,7 +501,7 @@ async function mapWithConcurrency(values, limit, fn) {
   return out;
 }
 
-function createJobsRouter({ repo, queue, adapters, detect }) {
+function createJobsRouter({ repo, queue, adapters, detect, k2sAuthRoot, k2sAuthEnv }) {
   const r = express.Router();
 
   async function enqueueOneUrl({ url, hint = null, options = {}, maxAttempts = 3, force = false, requestedPriority = null, lockHeld = false }) {
@@ -780,6 +870,12 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
     } catch (e) { next(e); }
   });
 
+  r.get('/meta/k2s-preflight', (_req, res, next) => {
+    try {
+      res.json(getKeep2ShareAuthPreflight({ root: k2sAuthRoot, env: k2sAuthEnv }));
+    } catch (e) { next(e); }
+  });
+
   r.get('/group/:groupId', async (req, res, next) => {
     try {
       const limit = req.query.limit ? parseInt(req.query.limit, 10) : 1500;
@@ -925,4 +1021,13 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
   return r;
 }
 
-module.exports = { createJobsRouter };
+module.exports = {
+  createJobsRouter,
+  _test: {
+    getKeep2ShareAuthPreflight,
+    keep2ShareAuthType,
+    parseEnvAssignment,
+    scanK2sEnvFile,
+    scanK2sProcessEnv,
+  },
+};
