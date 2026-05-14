@@ -500,11 +500,25 @@ function isOpaqueMediaToken(value) {
   return /^[A-Za-z0-9_-]{10,}$/.test(text) && /[A-Za-z]/.test(text) && /\d/.test(text);
 }
 
+function isVipergirlsMediaTokenTitle(value, row) {
+  const text = String(value || '').trim();
+  if (!text || /\s/.test(text)) return false;
+  if (!/^[A-Za-z0-9_-]{5,24}$/.test(text) || !/[A-Za-z]/.test(text) || !/\d/.test(text)) return false;
+  const haystack = [
+    row && row.url,
+    row && row.source_url,
+    row && row.filepath,
+    row && row.filename,
+    row && row.metadata,
+  ].map((v) => String(v || '').toLowerCase()).join(' ');
+  return /\b(?:imx\.to|imgbox\.com|vipr\.im|imagebam\.com|pixhost\.to|imagetwist\.com|imgspice\.com|imagevenue\.com)\b/i.test(haystack);
+}
+
 function titleFromVipergirlsThreadUrl(value) {
   try {
     const u = new URL(String(value || ''));
     const host = u.hostname.replace(/^www\./i, '').toLowerCase();
-    if (host !== 'vipergirls.to') return '';
+    if (host !== 'vipergirls.to' && host !== 'viper.to') return '';
     const m = u.pathname.match(/\/threads\/\d+-([^/?#]+)/i);
     if (!m || !m[1]) return '';
     return decodeURIComponent(m[1]).replace(/[-_]+/g, ' ').trim();
@@ -519,7 +533,7 @@ function sourceModelTitleForRow(row, graphSummary, sourceSite, filename) {
   const site = String(sourceSite || row?.platform || '').toLowerCase();
   if (site === 'twitter' || site === 'x' || site.includes('twitter')) return '';
   const fallback = sourceModelTitleFromText(row?.title || filename || '');
-  return isOpaqueMediaToken(fallback) ? '' : fallback;
+  return isOpaqueMediaToken(fallback) || isVipergirlsMediaTokenTitle(fallback, row) ? '' : fallback;
 }
 
 function contentSitesFromRow(row, parsedMetadata) {
@@ -576,7 +590,7 @@ function mapItem(row) {
   const displayTitle = graphSummary.source_post_title
     && (String(sourceSite || '').toLowerCase() === 'twitter' || isOpaqueMediaToken(rowTitle))
     ? graphSummary.source_post_title
-    : String(row.platform || '').toLowerCase() === 'vipergirls' && threadTitle && (isOpaqueMediaToken(rowTitle) || /^[0-9_]+$/.test(rowTitle) || isKnownGalleryJunkRow(row))
+    : String(row.platform || '').toLowerCase() === 'vipergirls' && threadTitle && (isOpaqueMediaToken(rowTitle) || isVipergirlsMediaTokenTitle(rowTitle, row) || /^[0-9_]+$/.test(rowTitle) || isKnownGalleryJunkRow(row))
       ? threadTitle
       : row.title;
   return {
