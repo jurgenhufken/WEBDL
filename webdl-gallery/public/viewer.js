@@ -1419,6 +1419,10 @@
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok || !data.success) throw new Error(data.error || `HTTP ${resp.status}`);
+      const gallery = gal();
+      if (gallery && typeof gallery.prependItems === 'function' && data.screenshot) {
+        gallery.prependItems([data.screenshot]);
+      }
       showHudMessage('Screenshot opgeslagen', 2200);
       log('Screenshot opgeslagen bij huidige video');
     } catch (e) {

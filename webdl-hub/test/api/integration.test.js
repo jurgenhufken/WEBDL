@@ -137,6 +137,8 @@ test('API-integratie', { concurrency: false }, async (t) => {
   await t.test('POST retry op cancelled job → queued', async () => {
     const { data } = await postJSON(base, '/api/jobs/' + jobId + '/retry', {});
     assert.equal(data.status, 'queued');
+    assert.equal(data.attempts, 0);
+    assert.equal(data.finished_at, null);
   });
 
   await t.test('POST pause/resume beïnvloedt queued job', async () => {

@@ -179,6 +179,20 @@ test('DB-tests', { concurrency: false }, async (t) => {
     assert.ok(failed.finished_at);
   });
 
+  await t.test('retryJob maakt uitgeputte jobs weer claimbaar', async () => {
+    await repo.truncateAll();
+    const j = await repo.createJob({ url: 'u', adapter: 'ytdlp', maxAttempts: 1 });
+    await repo.claimNextJob('w');
+    await repo.cancelJob(j.id);
+    const retried = await repo.retryJob(j.id);
+    assert.equal(retried.status, 'queued');
+    assert.equal(retried.attempts, 0);
+    assert.equal(retried.finished_at, null);
+    const claimed = await repo.claimNextJob('w2');
+    assert.equal(claimed.id, j.id);
+    assert.equal(claimed.status, 'running');
+  });
+
   await t.test('cancelJob werkt alleen op queued/running', async () => {
     await repo.truncateAll();
     const j = await repo.createJob({ url: 'u', adapter: 'ytdlp' });

@@ -8,11 +8,18 @@ const path = require('node:path');
 const { isSlaveUrl, delegateToSlave } = require('../queue/slave-router');
 const { classifyLane, defaultJobPriority } = require('../db/repo');
 
+const BATCH_MANIFEST_DIR = process.env.WEBDL_BATCH_MANIFEST_DIR
+  || path.join(process.cwd(), 'tmp', 'batch-manifests');
+
 function intEnv(name, fallback) {
   const raw = process.env[name];
   if (raw === undefined || raw === '') return fallback;
   const n = Number.parseInt(raw, 10);
   return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+async function ensureBatchManifestDir() {
+  await fs.promises.mkdir(BATCH_MANIFEST_DIR, { recursive: true });
 }
 
 // Detecteer URLs die uit meerdere items bestaan (playlist/kanaal/shorts-tab).
@@ -170,6 +177,7 @@ function isRefreshableCollectionUrl(url, adapterName = '') {
       return /^\/threads\/\d+(?:-[^/?#]+)?$/i.test(pathname);
     }
     if (host === 'x.com' || host.endsWith('.x.com') || host === 'twitter.com' || host.endsWith('.twitter.com')) {
+      if (/^\/hashtag\/[A-Za-z0-9_]{1,139}$/i.test(pathname)) return true;
       return /^\/(?!i\/|home$|explore$|search$|settings$|messages$|notifications$)[A-Za-z0-9_]{1,20}$/i.test(pathname);
     }
     return false;
@@ -608,6 +616,108 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
   });
 
   // ─── Batch enqueue ──────────────────────────────────────────────────────────
+  async function enqueueBatchRows({ urls, hint, batchOptions, maxAttempts, force, requestedPriority }) {
+    const results = await mapWithConcurrency(urls, 8, async (url) => {
+      try {
+        const job = await enqueueOneUrl({
+          url,
+          hint,
+          options: batchOptions,
+          maxAttempts,
+          force,
+          requestedPriority,
+        });
+        return { success: true, url, job, duplicate: !!job.duplicate };
+      } catch (e) {
+        return { success: false, url, error: String(e.message || e) };
+      }
+    });
+    return {
+      success: true,
+      total: urls.length,
+      queued: results.filter((row) => row.success && !row.duplicate).length,
+      duplicates: results.filter((row) => row.success && row.duplicate).length,
+      errors: results.filter((row) => !row.success).length,
+      jobs: results.filter((row) => row.success).map((row) => row.job),
+      failed: results.filter((row) => !row.success).slice(0, 50),
+    };
+  }
+
+  r.post('/batch-file', async (req, res, next) => {
+    try {
+      const { adapter: hint, options = {}, metadata = {}, maxAttempts = 3, force = false } = req.body || {};
+      const urls = uniqueUrls(req.body && req.body.urls);
+      if (!urls.length) return res.status(400).json({ error: 'urls ontbreekt' });
+      const requestedPriority = requestedPriorityFromBody(req.body);
+      const batchOptions = {
+        ...(metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {}),
+        ...(options && typeof options === 'object' && !Array.isArray(options) ? options : {}),
+      };
+      const batchId = crypto.randomBytes(8).toString('hex');
+      await ensureBatchManifestDir();
+      const manifestFile = path.join(BATCH_MANIFEST_DIR, `${new Date().toISOString().replace(/[:.]/g, '-')}-${batchId}.json`);
+      await fs.promises.writeFile(
+        manifestFile,
+        JSON.stringify({
+          batchId,
+          createdAt: new Date().toISOString(),
+          total: urls.length,
+          hint: hint || null,
+          maxAttempts,
+          force: force === true,
+          requestedPriority,
+          options: batchOptions,
+          urls,
+        }, null, 2),
+      );
+
+      setImmediate(async () => {
+        try {
+          const chunkSize = Math.max(1, intEnv('WEBDL_BATCH_FILE_CHUNK_SIZE', 100));
+          const totals = { queued: 0, duplicates: 0, errors: 0 };
+          console.log(JSON.stringify({ t: new Date().toISOString(), lvl: 'info', msg: 'batch_file.start', batchId, total: urls.length, manifestFile }));
+          for (let offset = 0; offset < urls.length; offset += chunkSize) {
+            const chunk = urls.slice(offset, offset + chunkSize);
+            const result = await enqueueBatchRows({
+              urls: chunk,
+              hint,
+              batchOptions,
+              maxAttempts,
+              force,
+              requestedPriority,
+            });
+            totals.queued += result.queued;
+            totals.duplicates += result.duplicates;
+            totals.errors += result.errors;
+            console.log(JSON.stringify({
+              t: new Date().toISOString(),
+              lvl: 'info',
+              msg: 'batch_file.chunk',
+              batchId,
+              offset,
+              size: chunk.length,
+              queued: result.queued,
+              duplicates: result.duplicates,
+              errors: result.errors,
+            }));
+            await new Promise((resolve) => setTimeout(resolve, 25));
+          }
+          console.log(JSON.stringify({ t: new Date().toISOString(), lvl: 'info', msg: 'batch_file.done', batchId, total: urls.length, ...totals }));
+        } catch (e) {
+          console.log(JSON.stringify({ t: new Date().toISOString(), lvl: 'error', msg: 'batch_file.error', batchId, err: String(e.message || e) }));
+        }
+      });
+
+      res.status(202).json({
+        success: true,
+        accepted: true,
+        batchId,
+        total: urls.length,
+        manifestFile,
+      });
+    } catch (e) { next(e); }
+  });
+
   r.post('/batch', async (req, res, next) => {
     try {
       const { adapter: hint, options = {}, metadata = {}, maxAttempts = 3, force = false } = req.body || {};
@@ -618,33 +728,8 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
         ...(metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {}),
         ...(options && typeof options === 'object' && !Array.isArray(options) ? options : {}),
       };
-      const results = await mapWithConcurrency(urls, 8, async (url) => {
-        try {
-          const job = await enqueueOneUrl({
-            url,
-            hint,
-            options: batchOptions,
-            maxAttempts,
-            force,
-            requestedPriority,
-          });
-          return { success: true, url, job, duplicate: !!job.duplicate };
-        } catch (e) {
-          return { success: false, url, error: String(e.message || e) };
-        }
-      });
-      const queued = results.filter((row) => row.success && !row.duplicate).length;
-      const duplicates = results.filter((row) => row.success && row.duplicate).length;
-      const errors = results.filter((row) => !row.success).length;
-      res.status(201).json({
-        success: true,
-        total: urls.length,
-        queued,
-        duplicates,
-        errors,
-        jobs: results.filter((row) => row.success).map((row) => row.job),
-        failed: results.filter((row) => !row.success).slice(0, 50),
-      });
+      const result = await enqueueBatchRows({ urls, hint, batchOptions, maxAttempts, force, requestedPriority });
+      res.status(201).json(result);
     } catch (e) { next(e); }
   });
 
@@ -718,7 +803,7 @@ function createJobsRouter({ repo, queue, adapters, detect }) {
     try {
       const id = parseInt(req.params.id, 10);
       if (!Number.isFinite(id)) return res.status(400).json({ error: 'ongeldig ID' });
-      const j = await repo.failJob(id, null, { retry: true });
+      const j = await repo.retryJob(id);
       if (!j) return res.status(404).json({ error: 'niet gevonden' });
       res.json(j);
     } catch (e) { next(e); }

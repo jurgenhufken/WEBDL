@@ -1070,11 +1070,15 @@ function startWorkerPool({
         await repo.pool.query(
           `UPDATE ${repo.schema}.jobs
               SET options = COALESCE(options, '{}'::jsonb) || jsonb_build_object('partial_success', true, 'partial_reason', $2::text)
-            WHERE id = $1`,
+            WHERE id = $1 AND status = 'running'`,
           [job.id, partialReason],
         );
       }
-      await queue.complete(job.id);
+      const completedJob = await queue.complete(job.id);
+      if (!completedJob) {
+        logger.info('job.complete.skipped', { job: job.id, reason: 'job no longer running' });
+        return mediaOuts.length;
+      }
       await repo.appendLog(
         job.id,
         partialReason ? 'warn' : 'info',
@@ -1246,10 +1250,10 @@ function startWorkerPool({
 
   // ─── Lane-based loops ──────────────────────────────────────────────────────
   // Elke lane heeft eigen concurrency-limiet en eigen worker-loop.
-  //   process-video: 1 (ffmpeg merge CPU-zwaar)
-  //   video:         4 (directe video, geen merge; netwerk-bound)
-  //   gallery:       1 (gallery-dl batches; intern snel, onderling serieel)
-  //   image:         8 (snel, netwerk-bound)
+  //   process-video: ffmpeg/merge-zware jobs
+  //   video:         directe video, geen merge; netwerk-bound
+  //   gallery:       gallery-dl batches; limiet via env omdat sites rate-limiten
+  //   image:         snelle imagehost/directe image jobs
   const LANES = [
     { name: 'process-video', concurrency: nonNegativeIntEnv('WEBDL_PROCESS_VIDEO_CONCURRENCY', 1) },
     { name: 'video',         concurrency: nonNegativeIntEnv('WEBDL_DIRECT_VIDEO_CONCURRENCY', 2) },
@@ -1283,6 +1287,16 @@ function startWorkerPool({
       if (waitMs > 0) {
         logger.info('throttle.wait', { job: job.id, domain, waitMs, lane });
         await sleep(waitMs);
+        const freshJob = await repo.getJob(job.id).catch(() => null);
+        if (!freshJob || freshJob.status !== 'running' || freshJob.locked_by !== workerId) {
+          logger.info('job.skipped.after_throttle', {
+            job: job.id,
+            lane,
+            status: freshJob ? freshJob.status : 'missing',
+            lockedBy: freshJob ? freshJob.locked_by : null,
+          });
+          continue;
+        }
       }
 
       const p = runOneThrottled(job)

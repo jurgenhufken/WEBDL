@@ -10,6 +10,7 @@ test('matches typische gallery-dl hosts', () => {
   assert.equal(a.matches('https://www.pixiv.net/en/artworks/123'), true);
   assert.equal(a.matches('https://twitter.com/user/status/1'), true);
   assert.equal(a.matches('https://x.com/user/status/1'), true);
+  assert.equal(a.matches('https://x.com/hashtag/FEETJOI?src=hashtag_click'), true);
   assert.equal(a.matches('https://x.com/FeetOmegle43663?t=7k1bLwYzJ5aqMlyuHvk8QQ&s=09'), true);
   assert.equal(a.matches('https://danbooru.donmai.us/posts/1'), true);
 });
@@ -47,6 +48,12 @@ test('plan gebruikt brede Twitter/X media-opties', () => {
   for (const opt of ['conversations=true', 'replies=true', 'retweets=true', 'quoted=true', 'pinned=true', 'videos=true']) {
     assert.ok(p.args.includes(opt), `missing ${opt}`);
   }
+});
+
+test('plan normaliseert X hashtag naar schone hashtag-url', () => {
+  const p = a.plan('https://x.com/hashtag/FEETJOI?src=hashtag_click', { cwd: '/tmp/j1' });
+  assert.equal(p.args.at(-1), 'https://x.com/hashtag/FEETJOI');
+  assert.ok(p.args.includes('videos=true'));
 });
 
 test('parseProgress is null (geen globale %)', () => {

@@ -1,6 +1,7 @@
 'use strict';
 
 const http = require('node:http');
+const fs = require('node:fs/promises');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const express = require('express');
@@ -140,4 +141,65 @@ test('X/Twitter profielen worden niet geblokkeerd door eerder gesyncte media', a
   assert.deepEqual(recentCall.options, { statuses: ['queued', 'running'] });
   assert.deepEqual(downloadCall.options, { statuses: ['queued', 'running'] });
   assert.ok(calls.some((call) => call.method === 'enqueue'));
+});
+
+test('/batch-file accepteert snel en verwerkt manifest op achtergrond', async (t) => {
+  const previousChunkSize = process.env.WEBDL_BATCH_FILE_CHUNK_SIZE;
+  process.env.WEBDL_BATCH_FILE_CHUNK_SIZE = '1';
+
+  const calls = [];
+  const repo = createTestRepo(calls);
+  const queue = createTestQueue(calls);
+  const { server, base } = await startTestServer({ repo, queue });
+  let manifestFile = '';
+
+  t.after(async () => {
+    if (previousChunkSize === undefined) delete process.env.WEBDL_BATCH_FILE_CHUNK_SIZE;
+    else process.env.WEBDL_BATCH_FILE_CHUNK_SIZE = previousChunkSize;
+    await new Promise((resolve) => server.close(resolve));
+    if (manifestFile) await fs.unlink(manifestFile).catch(() => {});
+  });
+
+  const result = await postJSON(base, '/api/jobs/batch-file', {
+    urls: [
+      'https://x.com/hashtag/FEETJOI?src=hashtag_click',
+      'https://x.com/hashtag/FEETJOI?src=hashtag_click',
+      'https://x.com/solesjoi',
+    ],
+    metadata: { queued_from: 'test' },
+    priority: 10,
+  });
+
+  assert.equal(result.status, 202);
+  assert.equal(result.data.success, true);
+  assert.equal(result.data.accepted, true);
+  assert.equal(result.data.total, 2);
+  assert.match(result.data.batchId, /^[a-f0-9]{16}$/);
+  manifestFile = result.data.manifestFile;
+
+  const manifest = JSON.parse(await fs.readFile(manifestFile, 'utf8'));
+  assert.equal(manifest.total, 2);
+  assert.deepEqual(manifest.urls, [
+    'https://x.com/hashtag/FEETJOI?src=hashtag_click',
+    'https://x.com/solesjoi',
+  ]);
+  assert.equal(manifest.requestedPriority, 10);
+
+  await new Promise((resolve, reject) => {
+    const deadline = Date.now() + 1000;
+    const poll = () => {
+      const enqueued = calls.filter((call) => call.method === 'enqueue');
+      if (enqueued.length === 2) return resolve();
+      if (Date.now() > deadline) return reject(new Error(`expected 2 enqueues, got ${enqueued.length}`));
+      setTimeout(poll, 20);
+    };
+    poll();
+  });
+
+  const enqueued = calls.filter((call) => call.method === 'enqueue');
+  assert.deepEqual(enqueued.map((call) => call.job.url), [
+    'https://x.com/hashtag/FEETJOI?src=hashtag_click',
+    'https://x.com/solesjoi',
+  ]);
+  assert.ok(enqueued.every((call) => call.job.priority === 10));
 });

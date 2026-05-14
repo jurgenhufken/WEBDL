@@ -466,6 +466,7 @@ input[type="range"]:disabled { opacity: 0.35; cursor: default; }
 }
 .card-info { position: absolute; left: 0; right: 0; bottom: 0; padding: 7px 36px 8px 10px; color: #fff; z-index: 1; }
 .card-title { font-size: 12px; font-weight: 600; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; text-shadow: 0 1px 2px rgba(0,0,0,0.45); }
+.card-download .card-title { font-size: 13px; letter-spacing: 0; }
 .card-sub { font-size: 11px; color: rgba(218,235,245,.84); margin-top: 2px; text-shadow: 0 1px 2px rgba(0,0,0,0.35); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .card-stars { margin-top: 4px; color: var(--star-on); font-size: 12px; letter-spacing: 1px; filter: drop-shadow(0 0 2px rgba(240,208,96,0.4)); }
 .card-stars .off { color: var(--star-off); filter: none; }

@@ -13,7 +13,9 @@ const { execFile } = require('node:child_process');
 
 const FFMPEG = process.env.WEBDL_FFMPEG || '/opt/homebrew/bin/ffmpeg';
 const VIDEO_EXTS = new Set(['.mp4', '.mkv', '.webm', '.mov', '.m4v', '.avi', '.wmv', '.flv', '.ts', '.m2ts', '.mpg', '.mpeg', '.ogv', '.3gp', '.3g2']);
+const ARCHIVE_EXTS = new Set(['.zip', '.rar', '.7z', '.tar', '.gz', '.tgz', '.bz2', '.xz']);
 const MEDIA_EXTS = new Set([...VIDEO_EXTS, '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.avif']);
+const DOWNLOAD_EXTS = new Set([...MEDIA_EXTS, ...ARCHIVE_EXTS]);
 const SKIP_BASENAME_RE = /(_thumb(_v\d+)?|_preview|_logo)\.(jpe?g|png|webp|gif|bmp|avif)$/i;
 const MEDIA_ROOTS = [
   process.env.WEBDL_BASE_DIR,
@@ -25,10 +27,19 @@ const MEDIA_ROOTS = [
   '/Volumes/WEBDL Extra/WEBDL',
 ].filter(Boolean).flatMap((p) => String(p).split(/[;\n]/).map((v) => v.trim()).filter(Boolean));
 
+function intEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
 function isMediaPath(filePath) {
   const base = path.basename(filePath || '');
   if (SKIP_BASENAME_RE.test(base)) return false;
-  return MEDIA_EXTS.has(path.extname(base).toLowerCase());
+  const ext = path.extname(base).toLowerCase();
+  if (!ext && base && !base.startsWith('.')) return true;
+  return DOWNLOAD_EXTS.has(ext);
 }
 
 function relativeToMediaRoot(filePath) {
@@ -184,6 +195,7 @@ async function indexSlaveDownloadFiles(repo, downloadId, files) {
 
 function startSlavePoller({ repo, logger, intervalMs = 5000 }) {
   let stopping = false;
+  const orphanMinutes = intEnv('WEBDL_SLAVE_ORPHAN_MINUTES', 2);
 
   async function processOne(row) {
     const hubJobId = Number(row.hub_job_id);
@@ -276,6 +288,85 @@ function startSlavePoller({ repo, logger, intervalMs = 5000 }) {
 
   async function tick() {
     try {
+      // Herstel slave-delegate jobs die door een hub-herstart zijn blijven
+      // hangen tussen claimen en simple_server_download_id opslaan.
+      const { rows: orphanRows } = await repo.pool.query(
+        `SELECT
+           d.id AS download_id,
+           j.id AS hub_job_id,
+           d.status AS slave_status,
+           d.filepath AS filepath,
+           d.error AS slave_error,
+           d.id AS id,
+           j.url AS job_url
+         FROM ${repo.schema}.jobs j
+         LEFT JOIN LATERAL (
+           SELECT d.id, d.status, d.filepath, d.error
+             FROM downloads d
+            WHERE d.source_url = j.url
+               OR d.url = j.url
+            ORDER BY CASE d.status
+                       WHEN 'completed' THEN 0
+                       WHEN 'error' THEN 1
+                       WHEN 'cancelled' THEN 2
+                       ELSE 9
+                     END,
+                     d.updated_at DESC NULLS LAST,
+                     d.id DESC
+            LIMIT 1
+         ) d ON true
+         WHERE j.status = 'running'
+           AND j.adapter = 'slave-delegate'
+           AND NOT (j.options ? 'simple_server_download_id')
+           AND (j.locked_at IS NULL OR j.locked_at < NOW() - ($1::int * INTERVAL '1 minute'))
+         ORDER BY j.locked_at ASC NULLS FIRST, j.id ASC
+         LIMIT 200`,
+        [orphanMinutes],
+      );
+      for (const row of orphanRows) {
+        if (stopping) break;
+        if (row.download_id) {
+          await repo.pool.query(
+            `UPDATE ${repo.schema}.jobs
+                SET locked_by = 'slave-' || $1::text,
+                    locked_at = now(),
+                    options = COALESCE(options, '{}'::jsonb) || jsonb_build_object(
+                      'simple_server_download_id', $1::text,
+                      'slave_delegate_recovered_at', now()::text
+                    )
+              WHERE id = $2
+                AND status = 'running'
+                AND adapter = 'slave-delegate'`,
+            [String(row.download_id), row.hub_job_id],
+          );
+          await repo.appendLog(row.hub_job_id, 'warn', `↪️  slave-koppeling hersteld naar download #${row.download_id}`);
+          logger.info('slave.orphan.relinked', { hubJob: row.hub_job_id, downloadId: row.download_id, status: row.slave_status });
+          if (['completed', 'error', 'cancelled'].includes(String(row.slave_status || ''))) {
+            await processOne(row);
+          }
+        } else {
+          await repo.pool.query(
+            `UPDATE ${repo.schema}.jobs
+                SET status = 'queued',
+                    locked_by = NULL,
+                    locked_at = NULL,
+                    started_at = NULL,
+                    error = NULL,
+                    attempts = 0,
+                    options = COALESCE(options, '{}'::jsonb) || jsonb_build_object(
+                      'slave_delegate_requeued_at', now()::text
+                    )
+              WHERE id = $1
+                AND status = 'running'
+                AND adapter = 'slave-delegate'
+                AND NOT (options ? 'simple_server_download_id')`,
+            [row.hub_job_id],
+          );
+          await repo.appendLog(row.hub_job_id, 'warn', '↻ slave-delegate opnieuw queued: geen simple-server download-id gevonden na stale claim');
+          logger.info('slave.orphan.requeued', { hubJob: row.hub_job_id, url: row.job_url });
+        }
+      }
+
       // Vind hub-jobs in status='running' met slave-delegate adapter die een
       // simple_server_download_id hebben en waarvan de downloads rij klaar
       // of mislukt is.
@@ -322,4 +413,4 @@ function startSlavePoller({ repo, logger, intervalMs = 5000 }) {
   return { stop: async () => { stopping = true; await loopPromise; } };
 }
 
-module.exports = { startSlavePoller };
+module.exports = { startSlavePoller, _test: { isMediaPath } };

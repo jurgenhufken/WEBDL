@@ -100,7 +100,9 @@ function relativeToMediaRoot(filePath) {
 const RG_BIN = process.env.RG_BIN || (fs.existsSync('/Applications/Codex.app/Contents/Resources/rg') ? '/Applications/Codex.app/Contents/Resources/rg' : 'rg');
 const VIDEO_EXTS = ['mp4','webm','mkv','mov','m4v','avi','wmv','flv','ts','m2ts','mpg','mpeg','ogv','3gp','3g2'];
 const IMAGE_EXTS = ['jpg','jpeg','png','gif','webp','avif','bmp'];
+const ARCHIVE_EXTS = ['rar','zip','7z','tar','gz','tgz','bz2','xz','cbz','cbr'];
 const MEDIA_EXTS = [...VIDEO_EXTS, ...IMAGE_EXTS];
+const DOWNLOAD_EXTS = [...MEDIA_EXTS, ...ARCHIVE_EXTS];
 const BROWSER_NATIVE_VIDEO_EXTS = new Set(['.mp4', '.webm', '.ogv']);
 const THUMB_WIDTH = Math.max(160, Number(process.env.WEBDL_GALLERY_THUMB_WIDTH || 480));
 const THUMB_HEIGHT = Math.max(90, Number(process.env.WEBDL_GALLERY_THUMB_HEIGHT || 270));
@@ -111,7 +113,7 @@ const AUX_RELPATH_RE = String.raw`((^|[\\/])\d{1,3}[-_. ]?thumbnail\.(jpe?g|png|
 const TEMP_RELPATH_RE = String.raw`(^|[\\/])(_UNPACK_|_FAILED_|_ADMIN_|__ADMIN__|incomplete)([^\\/]*)([\\/]|$)`;
 const AUX_RELPATH_PATTERN = new RegExp(AUX_RELPATH_RE, 'i');
 const TEMP_RELPATH_PATTERN = new RegExp(TEMP_RELPATH_RE, 'i');
-const MEDIA_EXT_SQL = MEDIA_EXTS.map(e => `'${e}'`).join(',');
+const DOWNLOAD_EXT_SQL = DOWNLOAD_EXTS.map(e => `'${e}'`).join(',');
 const IMAGE_EXT_SQL = IMAGE_EXTS.map(e => `'${e}'`).join(',');
 const VIDEO_EXT_SQL = VIDEO_EXTS.map(e => `'${e}'`).join(',');
 const ACTIVE_DB_STATUSES = ['downloading', 'postprocessing'];
@@ -308,8 +310,28 @@ function channelGroupSql(alias = 'd') {
   END`;
 }
 
-function fileExt(filePath, format) {
-  return format ? String(format).toLowerCase() : path.extname(filePath || '').replace('.', '').toLowerCase();
+function inferArchiveExt(row) {
+  const haystack = [
+    row && row.format,
+    row && row.filename,
+    row && row.filepath,
+    row && row.url,
+    row && row.source_url,
+    row && row.metadata,
+  ].map((v) => String(v || '').toLowerCase()).join(' ');
+  const extMatch = haystack.match(/(?:^|[/?#&=._ -])(rar|zip|7z|tar|gz|tgz|bz2|xz|cbz|cbr)(?:$|[?#&._ -])/i);
+  if (extMatch) return extMatch[1].toLowerCase();
+  if (haystack.includes('application%2fx-rar') || haystack.includes('application/x-rar') || haystack.includes('x-rar-compressed')) return 'rar';
+  if (haystack.includes('application%2fzip') || haystack.includes('application/zip')) return 'zip';
+  if (haystack.includes('application%2fx-7z') || haystack.includes('application/x-7z')) return '7z';
+  return '';
+}
+
+function fileExt(filePath, format, row = null) {
+  const explicit = String(format || '').trim().toLowerCase();
+  if (explicit) return explicit;
+  const fromPath = path.extname(filePath || '').replace('.', '').toLowerCase();
+  return fromPath || inferArchiveExt(row);
 }
 
 function platformFromUrl(url) {
@@ -391,6 +413,7 @@ function sourceSiteFromMetadata(metadata, sourceUrl) {
       const fromMetadata = normalizeSourceSiteLabel(
         parsed.source_site
         || parsed.original_site
+        || (Array.isArray(parsed.source_sites) ? parsed.source_sites[0] : '')
         || contextHost
         || parsed.source_context?.platform
         || parsed.origin_thread?.platform
@@ -508,9 +531,15 @@ function contentSitesFromRow(row, parsedMetadata) {
     .map((entry) => entry.label);
 }
 
+function galleryTypeForExt(ext) {
+  if (VIDEO_EXTS.includes(ext)) return 'video';
+  if (IMAGE_EXTS.includes(ext)) return 'image';
+  if (ARCHIVE_EXTS.includes(ext)) return 'archive';
+  return 'download';
+}
+
 function mapItem(row) {
-  const ext = fileExt(row.filepath, row.format);
-  const isVideo = VIDEO_EXTS.includes(ext);
+  const ext = fileExt(row.filepath, row.format, row);
   const filename = row.filename || path.basename(row.filepath || '');
   const durationText = row.duration == null ? null : String(row.duration);
   const durationSeconds = parseDurationSeconds(durationText);
@@ -535,7 +564,7 @@ function mapItem(row) {
     title: displayTitle,
     filename,
     ext,
-    type: isVideo ? 'video' : 'image',
+    type: galleryTypeForExt(ext),
     duration: durationText,
     duration_seconds: durationSeconds,
     source_site: sourceSite || null,
@@ -609,9 +638,10 @@ function isTempMediaPath(value) {
 }
 
 function isGalleryMediaCandidate(row, { requireThumbReady = false } = {}) {
-  const ext = fileExt(row.filepath, row.format);
-  if (!MEDIA_EXTS.includes(ext)) return false;
+  const ext = fileExt(row.filepath, row.format, row);
+  if (!DOWNLOAD_EXTS.includes(ext)) return false;
   if (isTempMediaPath(row.filepath) || isAuxMediaPath(row.filepath)) return false;
+  if (ARCHIVE_EXTS.includes(ext)) return true;
   if (requireThumbReady && row.is_thumb_ready !== true && !IMAGE_EXTS.includes(ext)) return false;
   return true;
 }
@@ -1497,10 +1527,21 @@ function buildItemFilters({ req, params, fileExpr, extExpr, ratingExpr, includeC
       SELECT iut.download_id
         FROM item_user_tags iut
        WHERE iut.tag_id = $${params.length}
+      UNION
+      SELECT dt.download_id
+        FROM download_tags dt
+        JOIN tags t ON t.name = dt.tag
+       WHERE t.id = $${params.length}
     )`);
   }
   return where;
 }
+
+const DIRECT_DOWNLOAD_HINT_SQL = `(
+  lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${DOWNLOAD_EXT_SQL})
+  OR lower(COALESCE(d.url, '') || ' ' || COALESCE(d.source_url, '') || ' ' || COALESCE(d.filename, '') || ' ' || COALESCE(d.filepath, '') || ' ' || COALESCE(d.metadata, ''))
+     ~ '(application(%2f|/)x-rar|application(%2f|/)zip|application(%2f|/)x-7z|x-rar-compressed|[._ -](rar|zip|7z|tar|tgz|gz|bz2|xz|cbz|cbr)([?#&._ -]|$))'
+)`;
 
 function wantsThumbReadyOnly(req) {
   return /^(1|true|yes|on)$/i.test(String(req.query.thumb_ready || req.query.thumbs_ready || ''));
@@ -1714,7 +1755,7 @@ app.get('/api/items', async (req, res) => {
     directWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
     directWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
     directWhere.push(`(d.filesize IS NULL OR d.filesize > 0)`);
-    directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
+    directWhere.push(DIRECT_DOWNLOAD_HINT_SQL);
     const fastRecentDirectOnly = sort === 'recent' && !hasSearchQuery && !hasItemScopeFilter;
     if (thumbReadyOnly || fastRecentDirectOnly) {
       directWhere.push(`(d.is_thumb_ready = true OR lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${IMAGE_EXT_SQL}))`);
@@ -1724,6 +1765,12 @@ app.get('/api/items', async (req, res) => {
     }
     if (fastRecentDirectOnly) {
       const fastParams = [];
+      const fastScreenshotWhere = [
+        `s.filepath IS NOT NULL`,
+        `s.filepath <> ''`,
+        `(s.filesize IS NULL OR s.filesize > 0)`,
+        `COALESCE(s.is_thumb_ready, false) = true`,
+      ];
       const fastWhere = buildItemFilters({
         req, params: fastParams,
         fileExpr: 'd.filepath',
@@ -1739,6 +1786,7 @@ app.get('/api/items', async (req, res) => {
         const cursorOrderParam = fastParams.length;
         const cursorTsExpr = `($${cursorTsParam}::timestamptz AT TIME ZONE current_setting('TimeZone'))`;
         fastWhere.push(`(COALESCE(d.finished_at, d.updated_at, d.created_at) < ${cursorTsExpr} OR (COALESCE(d.finished_at, d.updated_at, d.created_at) = ${cursorTsExpr} AND d.id::bigint < $${cursorOrderParam}::bigint))`);
+        fastScreenshotWhere.push(`(COALESCE(s.created_at, s.updated_at) < ${cursorTsExpr} OR (COALESCE(s.created_at, s.updated_at) = ${cursorTsExpr} AND (2000000000000 + s.id)::bigint < $${cursorOrderParam}::bigint))`);
       }
       const fastSourceLimit = useCursor
         ? Math.max(limit * 10, 80)
@@ -1746,18 +1794,33 @@ app.get('/api/items', async (req, res) => {
       fastParams.push(fastSourceLimit);
       const fastLimitParam = fastParams.length;
       const { rows } = await pool.query(`
-        SELECT 'download' AS item_kind,
-               d.id::text AS id, d.id AS rating_id,
-               d.url, d.source_url, d.platform, d.channel, d.title, d.filename,
-               d.filepath, d.filesize, d.format, d.duration, d.rating,
-               (d.is_thumb_ready = true OR lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${IMAGE_EXT_SQL})) AS is_thumb_ready,
-               d.metadata,
-               d.finished_at, d.created_at,
-               COALESCE(d.finished_at, d.updated_at, d.created_at) AS sort_ts,
-               d.id::bigint AS source_order
-          FROM downloads d
-         WHERE ${fastWhere.join(' AND ')}
-         ORDER BY d.finished_at DESC NULLS LAST, d.updated_at DESC NULLS LAST, d.created_at DESC NULLS LAST, d.id DESC
+        SELECT *
+          FROM (
+            SELECT 'download' AS item_kind,
+                   d.id::text AS id, d.id AS rating_id,
+                   d.url, d.source_url, d.platform, d.channel, d.title, d.filename,
+                   d.filepath, d.filesize, d.format, d.duration, d.rating,
+                   (d.is_thumb_ready = true OR lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${IMAGE_EXT_SQL})) AS is_thumb_ready,
+                   d.metadata,
+                   d.finished_at, d.created_at,
+                   COALESCE(d.finished_at, d.updated_at, d.created_at) AS sort_ts,
+                   d.id::bigint AS source_order
+              FROM downloads d
+             WHERE ${fastWhere.join(' AND ')}
+            UNION ALL
+            SELECT 'screenshot' AS item_kind,
+                   's-' || s.id::text AS id, NULL::bigint AS rating_id,
+                   s.url, s.url AS source_url, s.platform, s.channel, s.title, s.filename,
+                   s.filepath, s.filesize, 'jpg' AS format, NULL::text AS duration, s.rating,
+                   s.is_thumb_ready,
+                   NULL::text AS metadata,
+                   s.created_at AS finished_at, s.created_at,
+                   COALESCE(s.created_at, s.updated_at) AS sort_ts,
+                   (2000000000000 + s.id)::bigint AS source_order
+              FROM screenshots s
+             WHERE ${fastScreenshotWhere.join(' AND ')}
+          ) fast_items
+         ORDER BY sort_ts DESC NULLS LAST, source_order DESC
          LIMIT $${fastLimitParam}`,
         fastParams,
       );
@@ -1777,7 +1840,7 @@ app.get('/api/items', async (req, res) => {
         SELECT 1 FROM download_files mf
          WHERE mf.download_id = d.id
            AND mf.relpath !~* '${AUX_RELPATH_RE}'
-           AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
+           AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${DOWNLOAD_EXT_SQL})
       )`);
     }
     const fileWhere = directOnlyPlatform ? ['false'] : buildItemFilters({
@@ -1792,7 +1855,7 @@ app.get('/api/items', async (req, res) => {
       fileWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
       fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_FILE_PARENT_STATUSES.map(s => `'${s}'`).join(',')}])`);
       fileWhere.push(`(df.filesize IS NULL OR df.filesize > 0)`);
-      fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
+      fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${DOWNLOAD_EXT_SQL})`);
       if (thumbReadyOnly) fileWhere.push(`(COALESCE(df.is_thumb_ready, d.is_thumb_ready, false) = true OR lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${IMAGE_EXT_SQL}))`);
     }
     if (useCursor && !directOnlyPlatform) {
@@ -2005,7 +2068,7 @@ app.get('/api/platforms', async (req, res) => {
       });
       where.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
       where.push(`(d.filesize IS NULL OR d.filesize > 0)`);
-      where.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
+      where.push(DIRECT_DOWNLOAD_HINT_SQL);
       const { rows } = await pool.query(`
         SELECT platform,
                COUNT(*)::bigint AS count,
@@ -2033,12 +2096,12 @@ app.get('/api/platforms', async (req, res) => {
     directWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
     directWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
     directWhere.push(`(d.filesize IS NULL OR d.filesize > 0)`);
-    directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
+    directWhere.push(DIRECT_DOWNLOAD_HINT_SQL);
     directWhere.push(`NOT EXISTS (
       SELECT 1 FROM download_files mf
        WHERE mf.download_id = d.id
          AND mf.relpath !~* '${AUX_RELPATH_RE}'
-         AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
+       AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${DOWNLOAD_EXT_SQL})
     )`);
 
     const fileWhere = buildItemFilters({
@@ -2053,7 +2116,7 @@ app.get('/api/platforms', async (req, res) => {
     fileWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
     fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_FILE_PARENT_STATUSES.map(s => `'${s}'`).join(',')}])`);
     fileWhere.push(`(df.filesize IS NULL OR df.filesize > 0)`);
-    fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
+    fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${DOWNLOAD_EXT_SQL})`);
 
     const screenshotWhere = buildScreenshotFilters({ req, params, includeChannel: false });
     screenshotWhere.push(`(s.filesize IS NULL OR s.filesize > 0)`);
@@ -2118,7 +2181,7 @@ app.get('/api/channels', async (req, res) => {
       });
       where.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
       where.push(`(d.filesize IS NULL OR d.filesize > 0)`);
-      where.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
+      where.push(DIRECT_DOWNLOAD_HINT_SQL);
       const { rows } = await pool.query(`
         SELECT *
           FROM (
@@ -2149,12 +2212,12 @@ app.get('/api/channels', async (req, res) => {
     directWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
     directWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
     directWhere.push(`(d.filesize IS NULL OR d.filesize > 0)`);
-    directWhere.push(`lower(COALESCE(NULLIF(d.format,''), regexp_replace(d.filepath, '^.*\\.', ''))) IN (${MEDIA_EXT_SQL})`);
+    directWhere.push(DIRECT_DOWNLOAD_HINT_SQL);
     directWhere.push(`NOT EXISTS (
       SELECT 1 FROM download_files mf
        WHERE mf.download_id = d.id
          AND mf.relpath !~* '${AUX_RELPATH_RE}'
-         AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
+       AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${DOWNLOAD_EXT_SQL})
     )`);
     const directChannelExpr = channelGroupSql('d');
     const directPlatformExpr = platformGroupSql('d');
@@ -2171,7 +2234,7 @@ app.get('/api/channels', async (req, res) => {
     fileWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);
     fileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_FILE_PARENT_STATUSES.map(s => `'${s}'`).join(',')}])`);
     fileWhere.push(`(df.filesize IS NULL OR df.filesize > 0)`);
-    fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
+    fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${DOWNLOAD_EXT_SQL})`);
 
     const screenshotWhere = buildScreenshotFilters({ req, params, includeChannel: false });
     screenshotWhere.push(`(s.filesize IS NULL OR s.filesize > 0)`);
@@ -2323,7 +2386,30 @@ app.post('/api/viewer-screenshot', express.raw({ type: 'image/*', limit: '35mb' 
         Number.isFinite(timeSeconds) ? timeSeconds : null,
       ],
     );
-    res.status(201).json({ success: true, screenshot: { ...result.rows[0], id: `s-${result.rows[0].id}` } });
+    const inserted = result.rows[0];
+    const screenshotItem = mapItem({
+      item_kind: 'screenshot',
+      id: `s-${inserted.id}`,
+      rating_id: null,
+      url: inserted.url,
+      source_url: inserted.url,
+      platform: inserted.platform,
+      channel: inserted.channel,
+      title: inserted.title,
+      filename: inserted.filename,
+      filepath: inserted.filepath,
+      filesize: inserted.filesize,
+      format: ext.replace(/^\./, ''),
+      duration: null,
+      rating: null,
+      is_thumb_ready: true,
+      metadata: null,
+      finished_at: inserted.created_at,
+      created_at: inserted.created_at,
+      sort_ts: inserted.created_at,
+      source_order: 2000000000000 + Number(inserted.id),
+    });
+    res.status(201).json({ success: true, screenshot: screenshotItem });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -2414,16 +2500,27 @@ app.get('/api/tags', async (_req, res) => {
       SELECT t.id, t.name, t.is_favorite,
              COALESCE(t.user_use_count, 0)::int AS user_use_count,
              t.last_used_at,
-             (
-               COUNT(DISTINCT iut.download_id) +
-               COUNT(DISTINCT sut.screenshot_id)
-             )::int AS applied_count,
+             (COALESCE(download_counts.cnt, 0) + COALESCE(screenshot_counts.cnt, 0))::int AS applied_count,
              COALESCE(t.user_use_count, 0)::int AS uses
         FROM tags t
-        LEFT JOIN item_user_tags iut ON iut.tag_id = t.id
-        LEFT JOIN screenshot_user_tags sut ON sut.tag_id = t.id
+        LEFT JOIN LATERAL (
+          SELECT COUNT(*)::int AS cnt
+            FROM (
+              SELECT iut.download_id
+                FROM item_user_tags iut
+               WHERE iut.tag_id = t.id
+              UNION
+              SELECT dt.download_id
+                FROM download_tags dt
+               WHERE dt.tag = t.name
+            ) tagged_downloads
+        ) download_counts ON true
+        LEFT JOIN LATERAL (
+          SELECT COUNT(DISTINCT sut.screenshot_id)::int AS cnt
+            FROM screenshot_user_tags sut
+           WHERE sut.tag_id = t.id
+        ) screenshot_counts ON true
        WHERE t.is_user = true
-       GROUP BY t.id, t.name, t.is_favorite, t.user_use_count, t.last_used_at
        ORDER BY t.is_favorite DESC,
                 COALESCE(t.user_use_count, 0) DESC,
                 t.last_used_at DESC NULLS LAST,
@@ -2794,8 +2891,13 @@ app.get('/api/items/:id/tags', async (req, res) => {
         [id]);
       return res.json({ tags: rows.filter((r) => !isJunkTagName(r.name)) });
     }
-    const { rows } = await pool.query(
-      'SELECT t.id, t.name FROM tags t JOIN item_user_tags iut ON iut.tag_id=t.id WHERE iut.download_id=$1 ORDER BY t.name',
+    const { rows } = await pool.query(`
+      SELECT DISTINCT t.id, t.name
+        FROM tags t
+        LEFT JOIN item_user_tags iut ON iut.tag_id=t.id AND iut.download_id=$1
+        LEFT JOIN download_tags dt ON dt.tag=t.name AND dt.download_id=$1
+       WHERE iut.download_id IS NOT NULL OR dt.download_id IS NOT NULL
+       ORDER BY t.name`,
       [id]);
     res.json({ tags: rows.filter((r) => !isJunkTagName(r.name)) });
   } catch (e) { res.status(500).json({ error: e.message }); }

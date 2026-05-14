@@ -61,6 +61,13 @@ function normalizeGalleryDlUrl(url) {
         u.hash = '';
       }
     }
+    const twitterHost = u.hostname.toLowerCase().replace(/^www\./, '');
+    if ((twitterHost === 'x.com' || twitterHost === 'twitter.com' || twitterHost === 'mobile.twitter.com') && /^\/hashtag\/[^/?#]+\/?$/i.test(u.pathname)) {
+      u.hostname = 'x.com';
+      u.search = '';
+      u.hash = '';
+      u.pathname = u.pathname.replace(/\/+$/, '');
+    }
     return u.toString();
   } catch {}
   return url;

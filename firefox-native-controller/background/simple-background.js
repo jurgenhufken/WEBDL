@@ -9,10 +9,13 @@ const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 const HTTP_STATUS_PROBE_INTERVAL_MS = 4000;
 const HTTP_TIMEOUT_MS = 6000;
+const FFF_BACKGROUND_WATCHDOG_INTERVAL_MS = 30000;
+const FFF_BACKGROUND_STALE_MS = 180000;
+const FFF_BACKGROUND_MAX_RESTARTS = 2;
 const PROBE_FAILURES_BEFORE_DISCONNECT = 2; // Reduced so it detects faster
 const PROBE_DISCONNECT_GRACE_MS = 12000; // Drop after 12s of no heartbeat
 const SOCKET_ENABLED = false;
-const BACKGROUND_BUILD = 'simple-background-v17-xvideos-browser-batch-giga';
+const BACKGROUND_BUILD = 'simple-background-v24-fff-watchdog-active-worker';
 const HUB_URL = 'http://localhost:35730';
 const HUB_URL_FALLBACK = 'http://127.0.0.1:35730';
 
@@ -289,6 +292,8 @@ async function startFffBackgroundScan(payload = {}) {
   const url = String(payload.url || '').trim();
   if (!url) return { success: false, error: 'Geen FootFetishForum URL voor achtergrondscan' };
   const scanId = `fff-bg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const activeWorker = payload.activeWorker !== false;
+  const restartCount = Math.max(0, parseInt(String(payload.__restartCount || '0'), 10) || 0);
   let tab = null;
   try {
     traceFffBackgroundStart(scanId, 'background-start', {
@@ -297,13 +302,27 @@ async function startFffBackgroundScan(payload = {}) {
         payloadKeys: Object.keys(payload && typeof payload === 'object' ? payload : {}),
         initialUrls: Array.isArray(payload.initialUrls) ? payload.initialUrls.length : 0,
         initialThreadLinks: Array.isArray(payload.initialThreadLinks) ? payload.initialThreadLinks.length : 0,
+        activeWorker,
       },
     });
-    tab = await browser.tabs.create({ url, active: false });
-    activeFffBackgroundScans.set(scanId, { scanId, tabId: tab && tab.id, url, startedAt: Date.now(), status: 'loading' });
-    traceFffBackgroundStart(scanId, 'background-tab-created', { url, extra: { tabId: tab && tab.id } });
+    tab = await browser.tabs.create({ url, active: activeWorker });
+    activeFffBackgroundScans.set(scanId, {
+      scanId,
+      tabId: tab && tab.id,
+      url,
+      payload: { ...(payload && typeof payload === 'object' ? payload : {}), url },
+      restartCount,
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+      status: 'loading',
+    });
+    traceFffBackgroundStart(scanId, 'background-tab-created', { url, extra: { tabId: tab && tab.id, activeWorker } });
     await waitForTabComplete(tab.id, 45000);
-    activeFffBackgroundScans.set(scanId, { scanId, tabId: tab.id, url, startedAt: Date.now(), status: 'dispatching' });
+    activeFffBackgroundScans.set(scanId, {
+      ...(activeFffBackgroundScans.get(scanId) || { scanId, tabId: tab.id, url }),
+      status: 'dispatching',
+      updatedAt: Date.now(),
+    });
     traceFffBackgroundStart(scanId, 'background-dispatch', { url, extra: { tabId: tab.id } });
     const ack = await sendTabMessageWithRetry(tab.id, {
       action: 'runFffBackgroundScan',
@@ -313,7 +332,12 @@ async function startFffBackgroundScan(payload = {}) {
         workerTabId: tab.id,
       }
     }, 40, 500);
-    activeFffBackgroundScans.set(scanId, { scanId, tabId: tab.id, url, startedAt: Date.now(), status: 'running', acceptedAt: Date.now() });
+    activeFffBackgroundScans.set(scanId, {
+      ...(activeFffBackgroundScans.get(scanId) || { scanId, tabId: tab.id, url }),
+      status: 'running',
+      acceptedAt: Date.now(),
+      updatedAt: Date.now(),
+    });
     traceFffBackgroundStart(scanId, 'background-accepted', { url, extra: { tabId: tab.id, ack } });
     return { success: true, accepted: true, scanId, tabId: tab.id, worker: ack };
   } catch (e) {
@@ -327,11 +351,72 @@ async function startFffBackgroundScan(payload = {}) {
       status: 'error',
       error: e && e.message ? e.message : String(e),
       finishedAt: Date.now(),
+      updatedAt: Date.now(),
     });
     traceFffBackgroundStart(scanId, 'background-error', { url, error: e && e.message ? e.message : String(e), extra: { tabId: tab && tab.id } });
     return { success: false, error: e && e.message ? e.message : String(e) };
   }
 }
+
+function startFffBackgroundScanWatchdog() {
+  setInterval(() => {
+    const now = Date.now();
+    for (const [scanId, row] of activeFffBackgroundScans.entries()) {
+      if (!row || !['loading', 'dispatching', 'running'].includes(String(row.status || ''))) continue;
+      const lastSeen = Number(row.updatedAt || row.acceptedAt || row.startedAt || 0);
+      if (!lastSeen || (now - lastSeen) < FFF_BACKGROUND_STALE_MS) continue;
+
+      const restartCount = Math.max(0, Number(row.restartCount) || 0);
+      if (restartCount >= FFF_BACKGROUND_MAX_RESTARTS) {
+        activeFffBackgroundScans.set(scanId, {
+          ...row,
+          status: 'stale',
+          error: `Geen FFF-progress sinds ${Math.round((now - lastSeen) / 1000)}s`,
+          updatedAt: now,
+        });
+        traceFffBackgroundStart(scanId, 'watchdog-stale-final', {
+          url: row.lastUrl || row.url || '',
+          stats: row.stats || null,
+          error: `Geen progress sinds ${Math.round((now - lastSeen) / 1000)}s`,
+          extra: { restartCount },
+        });
+        continue;
+      }
+
+      const payload = row.payload && typeof row.payload === 'object' ? { ...row.payload } : {};
+      payload.url = payload.url || row.url || row.lastUrl || '';
+      payload.activeWorker = true;
+      payload.__restartCount = restartCount + 1;
+      activeFffBackgroundScans.set(scanId, {
+        ...row,
+        status: 'stale-restarting',
+        error: `Geen FFF-progress sinds ${Math.round((now - lastSeen) / 1000)}s; restart ${payload.__restartCount}/${FFF_BACKGROUND_MAX_RESTARTS}`,
+        updatedAt: now,
+      });
+      traceFffBackgroundStart(scanId, 'watchdog-restart', {
+        url: row.lastUrl || row.url || payload.url || '',
+        stats: row.stats || null,
+        extra: {
+          restartCount: payload.__restartCount,
+          oldTabId: row.tabId || null,
+          restartUrl: payload.url || '',
+        },
+      });
+      if (row.tabId) {
+        try { browser.tabs.remove(row.tabId).catch(() => {}); } catch (e) {}
+      }
+      startFffBackgroundScan(payload).catch((e) => {
+        traceFffBackgroundStart(scanId, 'watchdog-restart-error', {
+          url: payload.url || '',
+          error: e && e.message ? e.message : String(e),
+          extra: { restartCount: payload.__restartCount },
+        });
+      });
+    }
+  }, FFF_BACKGROUND_WATCHDOG_INTERVAL_MS);
+}
+
+startFffBackgroundScanWatchdog();
 
 async function runXvideosBrowserBatch(batchId, payload = {}) {
   const urls = Array.isArray(payload.urls)
@@ -883,16 +968,16 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (action === 'getHubStatus') {
-    getHubJson('api/health')
+    getHubJson('api/adapters')
       .then((health) => {
-        if (health && health.ok === true) {
-          sendResponse({ success: true, ok: true, db: health.db || null });
+        if (health && Array.isArray(health.adapters)) {
+          sendResponse({ success: true, ok: true, db: null, lightweight: true });
           return;
         }
         sendResponse({
           success: false,
           ok: false,
-          error: health && health.error ? health.error : 'Hub health endpoint niet bereikbaar'
+          error: health && health.error ? health.error : 'Hub adapters endpoint niet bereikbaar'
         });
       })
       .catch((error) => sendResponse({ success: false, ok: false, error: error && error.message ? error.message : String(error) }));

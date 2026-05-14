@@ -116,10 +116,11 @@
 
   function mediaTypeOf(it) {
     const explicit = String(it && (it.type || it.media_type || '') || '').toLowerCase();
-    if (explicit === 'video' || explicit === 'image') return explicit;
+    if (explicit === 'video' || explicit === 'image' || explicit === 'archive' || explicit === 'download') return explicit;
     const value = String((it && (it.filepath || it.filename || it.format)) || '').toLowerCase();
     if (/\.(mp4|webm|mkv|mov|m4v|avi|flv|ts)(?:$|[?#])/.test(value) || ['mp4', 'webm', 'mkv', 'mov', 'm4v', 'avi', 'flv', 'ts'].includes(value)) return 'video';
     if (/\.(jpe?g|png|webp|gif|avif|bmp)(?:$|[?#])/.test(value) || ['jpg', 'jpeg', 'png', 'webp', 'gif', 'avif', 'bmp'].includes(value)) return 'image';
+    if (/\.(rar|zip|7z|tar|tgz|gz|bz2|xz|cbz|cbr)(?:$|[?#])/.test(value) || ['rar', 'zip', '7z', 'tar', 'tgz', 'gz', 'bz2', 'xz', 'cbz', 'cbr'].includes(value)) return 'archive';
     return '';
   }
 
@@ -127,6 +128,7 @@
     const type = mediaTypeOf(it);
     if (type === 'video') return 'video';
     if (type === 'image') return 'afbeelding';
+    if (type === 'archive' || type === 'download') return 'download';
     return '';
   }
 
@@ -151,7 +153,7 @@
   function looksLikeFilenameTitle(value) {
     const text = String(value || '').trim();
     if (!text) return false;
-    if (/\.(jpe?g|png|webp|gif|avif|bmp|mp4|webm|mkv|mov|m4v|avi|flv|ts)$/i.test(text)) return true;
+    if (/\.(jpe?g|png|webp|gif|avif|bmp|mp4|webm|mkv|mov|m4v|avi|flv|ts|rar|zip|7z|tar|tgz|gz|bz2|xz|cbz|cbr)$/i.test(text)) return true;
     if (/^[a-f0-9]{12,}$/i.test(text) && /\d/.test(text)) return true;
     if (/^[0-9]+[-_][a-f0-9-]{12,}$/i.test(text)) return true;
     if (/^[a-f0-9-]{24,}$/i.test(text) && /\d/.test(text)) return true;
@@ -159,6 +161,14 @@
   }
 
   function displayTitle(it) {
+    const type = mediaTypeOf(it);
+    if (type === 'archive' || type === 'download') {
+      const filename = String(it && (it.filename || '') || '').trim();
+      if (filename) return filename;
+      const filepath = String(it && (it.filepath || '') || '').trim();
+      const base = filepath.split(/[\\/]/).filter(Boolean).pop() || '';
+      if (base) return base;
+    }
     const title = String(it && it.title || '').trim();
     if (title && title.toLowerCase() !== 'untitled' && !looksLikeFilenameTitle(title)) return title;
     const pageTitle = String(it && (it.source_thread_title || it.channel) || '').trim();
@@ -282,6 +292,13 @@
 
   function attachThumbRetry(el, it) {
     if (!el || !it || !it.id) return;
+    const type = mediaTypeOf(it);
+    if (type === 'archive' || type === 'download') {
+      el.style.backgroundImage = 'none';
+      el.dataset.kind = 'download';
+      el.classList.add('thumb-missing');
+      return;
+    }
     let tries = 0;
     const load = (retry = 0) => {
       el.classList.remove('thumb-missing');
@@ -308,6 +325,8 @@
   function cardEl(it, idx) {
     const c = document.createElement('div');
     c.className = 'card';
+    const itemType = mediaTypeOf(it);
+    if (itemType === 'archive' || itemType === 'download') c.classList.add('card-download');
     c.dataset.idx = String(idx);
     c.dataset.id  = String(it.id);
     const platformText = canonicalSiteLabel(it.platform) || String(it.platform || '?').trim() || '?';
@@ -333,7 +352,8 @@
       : (subSource && subSource !== titleText ? subSource : '');
     const contentSites = Array.isArray(it.content_sites) ? it.content_sites.filter(Boolean).slice(0, 3) : [];
     const postLabel = postLabelForItem(it, titleText);
-    const subParts = [postLabel, sub, contentSites.length ? `inhoud: ${contentSites.join(', ')}` : ''].filter(Boolean);
+    const sizeLabel = itemType === 'archive' || itemType === 'download' ? compactBytes(it.filesize) : '';
+    const subParts = [sizeLabel, postLabel, sub, contentSites.length ? `inhoud: ${contentSites.join(', ')}` : ''].filter(Boolean);
     c.innerHTML = `
       <div class="card-thumb">
         ${badge}${mediaMark}${durationMark}
@@ -358,6 +378,10 @@
       c.appendChild(srcBtn);
     }
     c.addEventListener('click', () => {
+      if (itemType === 'archive' || itemType === 'download') {
+        window.open(`/media/${encodeURIComponent(String(it.id))}`, '_blank', 'noopener');
+        return;
+      }
       if (window.__viewer) {
         const itemId = String(c.dataset.id || it.id || '');
         const currentIdx = state.items.findIndex((item) => String(item.id) === itemId);
@@ -405,6 +429,14 @@
     grid.insertBefore(frag, grid.firstChild);
     trackNewest();
     flashNewBanner(newItems.length);
+  }
+
+  function prependItems(newItems) {
+    const incoming = Array.isArray(newItems) ? newItems : [newItems];
+    const fresh = incoming.filter((it) => it && it.id != null && !state.knownIds.has(String(it.id)));
+    if (!fresh.length) return;
+    renderPrepend(fresh);
+    updateStats();
   }
 
   function redrawGrid() {
@@ -1578,6 +1610,7 @@
     applyTagFilter,
     setViewerActive,
     restoreViewerAnchor,
+    prependItems,
     loadMore,
     reload: reloadGallery,
     applyQuery: applyGalleryQuery,

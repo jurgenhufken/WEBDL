@@ -514,7 +514,7 @@ function createRepo({ databaseUrl = config.databaseUrl, schema = config.dbSchema
       `UPDATE ${T.jobs}
           SET status = 'done', progress_pct = 100, finished_at = now(),
               locked_by = NULL, locked_at = NULL, error = NULL
-        WHERE id = $1
+        WHERE id = $1 AND status = 'running'
         RETURNING *`,
       [id],
     );
@@ -533,6 +533,24 @@ function createRepo({ databaseUrl = config.databaseUrl, schema = config.dbSchema
         WHERE id = $1
         RETURNING *`,
       [id, nextStatus, errorMsg],
+    );
+    return rows[0] || null;
+  }
+
+  async function retryJob(id) {
+    const { rows } = await query(
+      `UPDATE ${T.jobs}
+          SET status = 'queued',
+              error = NULL,
+              locked_by = NULL,
+              locked_at = NULL,
+              started_at = NULL,
+              finished_at = NULL,
+              progress_pct = 0,
+              attempts = 0
+        WHERE id = $1
+        RETURNING *`,
+      [id],
     );
     return rows[0] || null;
   }
@@ -681,7 +699,7 @@ function createRepo({ databaseUrl = config.databaseUrl, schema = config.dbSchema
   return {
     pool, schema, close, ping,
     createJob, getJob, findRecentJobByUrl, findGalleryDownloadByUrl, listJobs, getJobStats, getLaneStats, getQueueDiagnostics, listGroups, getGroupSummary, findGroupSummaryByExpandUrl, listJobsByGroup,
-    claimNextJob, completeJob, failJob, cancelJob, updateProgress, heartbeatJob,
+    claimNextJob, completeJob, failJob, retryJob, cancelJob, updateProgress, heartbeatJob,
     pauseJob, resumeJob, setJobPriority, reclaimStaleRunning,
     addFile, listFiles, appendLog, listLogs,
     truncateAll, markGallerySynced,

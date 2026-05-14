@@ -11371,7 +11371,7 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
             platform === 'aznudefeet' && !looksLikeDirectFileUrl(url) ||
             platform === 'tiktok' && isTikTokPhotoUrl(url)
           ) driver = 'gallery-dl'; else
-            if (isKnownHtmlWrapperUrl(url) || looksLikeDirectFileUrl(url)) driver = 'direct';
+            if (isKeep2ShareUrl(url) || isKnownHtmlWrapperUrl(url) || looksLikeDirectFileUrl(url)) driver = 'direct';
   setDownloadActivityContext(downloadId, { url, platform, channel, title, lane: jobLane.get(downloadId) || '', driver });
   emitDownloadEventActivity('dispatch', downloadId, { url, platform, channel, title, lane: jobLane.get(downloadId) || '', driver }).catch(() => { });
 
@@ -11438,6 +11438,10 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
     platform === 'tiktok' && isTikTokPhotoUrl(url)
   ) {
     return startGalleryDlDownload(downloadId, url, platform, channel, title, metadata);
+  }
+
+  if (isKeep2ShareUrl(url)) {
+    return startDirectFileDownload(downloadId, url, platform, channel, title, metadata);
   }
 
   if (isKnownHtmlWrapperUrl(url)) {
@@ -12350,6 +12354,60 @@ function extractDirectMediaCandidates(html, baseUrl) {
   }
 }
 
+function isViprWrapperUrl(rawUrl) {
+  try {
+    const u = new URL(String(rawUrl || ''));
+    const host = String(u.hostname || '').toLowerCase().replace(/^www\./, '');
+    const p = String(u.pathname || '');
+    return host === 'vipr.im' && /^\/[a-z0-9]+\/?$/i.test(p);
+  } catch (e) {
+    return false;
+  }
+}
+
+function isViprFullImageUrl(rawUrl) {
+  try {
+    const u = new URL(String(rawUrl || ''));
+    const host = String(u.hostname || '').toLowerCase();
+    const p = String(u.pathname || '');
+    if (!(host === 'vipr.im' || host.endsWith('.vipr.im'))) return false;
+    if (/^\/th\//i.test(p)) return false;
+    return /^\/i\/[^/]+\/[^/]+/i.test(p) && /\.(?:jpe?g|png|gif|webp|bmp)(?:$|[/?#])/i.test(p);
+  } catch (e) {
+    return false;
+  }
+}
+
+function extractViprDirectMediaCandidate(html, baseUrl) {
+  try {
+    const h = String(html || '');
+    const decodedHtml = decodeHtmlEscapedUrlText(h);
+    const variants = decodedHtml && decodedHtml !== h ? [h, decodedHtml] : [h];
+    const out = [];
+    const seen = new Set();
+    const pushUrl = (raw) => {
+      const normalized = upgradeKnownLowQualityMediaUrl(normalizeHtmlExtractedUrl(raw, baseUrl));
+      if (!normalized || seen.has(normalized)) return;
+      if (!isViprFullImageUrl(normalized)) return;
+      seen.add(normalized);
+      out.push(normalized);
+    };
+
+    for (const variant of variants) {
+      for (const m of variant.matchAll(/<(?:a|img|source|meta|link)\b[^>]+(?:href|src|data-src|data-url|data-image|data-full-url|content)=["']([^"']+)["'][^>]*>/ig)) {
+        if (m && m[1]) pushUrl(m[1]);
+      }
+      for (const m of variant.matchAll(/https?:\/\/[^"'\s<>]+/gi)) {
+        if (m && m[0]) pushUrl(m[0]);
+      }
+    }
+
+    return out[0] || '';
+  } catch (e) {
+    return '';
+  }
+}
+
 function cookieHeaderFromSetCookie(headers) {
   try {
     if (!headers) return '';
@@ -12560,6 +12618,11 @@ async function resolveHtmlWrapperToDirectMedia(url, timeoutMs = 15000, referer =
     }
     if (!r.text) return { url: '', externalMetadata: null };
     const externalMetadata = extractExternalWrapperMetadata(r.text, u0, '', String(r.finalUrl || u0));
+    if (isViprWrapperUrl(u0) || isViprWrapperUrl(r.finalUrl || '')) {
+      const vipr = extractViprDirectMediaCandidate(r.text, r.finalUrl || u0);
+      if (vipr) return { url: vipr, externalMetadata: externalMetadata ? { ...externalMetadata, resolved_url: vipr } : null };
+      return { url: '', externalMetadata };
+    }
     if (isImxWrapperUrl(u0)) {
       const imx = await resolveImxDirectMedia(u0, timeoutMs, referer, r);
       const imxUrl = resolvedMediaUrl(imx);
@@ -12826,6 +12889,20 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
         }
       } catch (e) { }
       if (isKnownHtmlWrapperUrl(url)) {
+        const wrapperHost = (() => {
+          try { return String(new URL(String(url || '')).hostname || '').toLowerCase(); } catch (e) { return ''; }
+        })();
+        const wrapperPath = (() => {
+          try { return String(new URL(String(url || '')).pathname || ''); } catch (e) { return ''; }
+        })();
+        const unresolvedFffAttachment = (wrapperHost === 'footfetishforum.com' || wrapperHost.endsWith('.footfetishforum.com'))
+          && /^\/attachments\/(?:[^\/]+\.)?\d+\/?$/i.test(wrapperPath);
+        if (unresolvedFffAttachment) {
+          console.log(`[DL #${downloadId}] SKIP unresolved FFF attachment wrapper: ${url}`);
+          await updateDownloadStatus.run('cancelled', 0, null, downloadId);
+          jobLane.delete(downloadId);
+          return;
+        }
         await updateDownloadStatus.run('error', 0, 'Kon wrapper media URL niet resolven naar een direct bestand', downloadId);
         return;
       }
@@ -16676,9 +16753,10 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
   res.setHeader('Expires', '0');
   const limit = Math.max(1, Math.min(500, parseInt(req.query.limit || '120', 10) || 120));
   const type = String(req.query.type || 'all').toLowerCase();
-  const tagFilter = String(req.query.tag || '').trim();
+  const tagFilter = String(req.query.tag || '').trim().toLowerCase().replace(/^#/, '');
   const sort = String(req.query.sort || 'recent').toLowerCase();
-  const searchQuery = String(req.query.q || '').trim().toLowerCase();
+  let searchQuery = String(req.query.q || '').trim().toLowerCase();
+  if (tagFilter && !searchQuery) searchQuery = `#${tagFilter}`;
   const cursorRaw = String(req.query.cursor || '').trim();
   const cur = decodeCursor(cursorRaw);
   const includeActive = String(req.query.include_active || '0') !== '0';
@@ -17080,6 +17158,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
 
         const reqTime = Date.now() - reqStartTime;
         console.log(`📤 [${new Date().toISOString().substr(11, 8)}] Response /api/media/recent-files (search fast-path) - ${items.length} items in ${reqTime}ms`);
+        await attachTagsToItems(items, db);
         return res.json({
           success: true,
           items,
