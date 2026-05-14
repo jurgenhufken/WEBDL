@@ -702,6 +702,37 @@
     return Math.max(12, Math.min(120, Math.ceil(indexHint / 100) + 20));
   }
 
+  function currentViewerHistoryState() {
+    const it = vs.items[vs.idx];
+    if (!it) return { page: 'viewer' };
+    return {
+      page: 'viewer',
+      id: String(it.id),
+      idx: vs.idx,
+      filters: normalizeViewerFilters(viewerFilters()),
+    };
+  }
+
+  function positionFromHistoryState(state) {
+    if (!state || state.page !== 'viewer') return null;
+    const id = String(state.id || '').trim();
+    if (!id) return null;
+    return {
+      id,
+      idx: Math.max(0, Number(state.idx) || 0),
+      filters: normalizeViewerFilters(state.filters || {}),
+    };
+  }
+
+  function syncViewerHistoryState() {
+    if (!vs.open || !vs.items[vs.idx]) return;
+    try {
+      if (history.state && history.state.page === 'viewer') {
+        history.replaceState(currentViewerHistoryState(), '', location.href);
+      }
+    } catch (_) {}
+  }
+
   function syncViewerModeControls() {
     if (el.vWrap) {
       el.vWrap.textContent = vs.wrap ? '🔁 Query loop' : '∞ Oneindig';
@@ -754,9 +785,9 @@
     // Bij herstel na browser-refresh vervangen we de bestaande viewer-entry.
     try {
       if (options.replaceHistory || (history.state && history.state.page === 'viewer')) {
-        history.replaceState({ page: 'viewer' }, '', location.href);
+        history.replaceState(currentViewerHistoryState(), '', location.href);
       } else {
-        history.pushState({ page: 'viewer' }, '', location.href);
+        history.pushState(currentViewerHistoryState(), '', location.href);
       }
     } catch (_) {}
 
@@ -1006,6 +1037,7 @@
     updateSidebarActive();
     scrollListToActive();
     rememberCurrentPosition();
+    syncViewerHistoryState();
 
     // Tags prefetch
     vs.currentItemTags = [];
@@ -1308,7 +1340,11 @@
     const saved = readRememberedPosition();
     if (!saved) return false;
     restoreLastPositionStarted = true;
+    return restorePosition(saved);
+  }
 
+  async function restorePosition(saved) {
+    if (vs.open || !saved || !saved.id) return false;
     const gallery = gal();
     if (!gallery || !gallery.state) return false;
 
@@ -2926,10 +2962,15 @@
       }
     });
 
-    // Browser back (popstate) → sluit viewer
+    // Browser back sluit de viewer; browser forward opent dezelfde media-entry opnieuw.
     window.addEventListener('popstate', (e) => {
       if (vs.open) {
         close(true); // skipHistory=true want we zijn al terug
+        return;
+      }
+      const pos = positionFromHistoryState(e.state);
+      if (pos) {
+        restorePosition(pos).catch((err) => log('Viewer forward-herstel fout: ' + (err && err.message ? err.message : String(err))));
       }
     });
 
