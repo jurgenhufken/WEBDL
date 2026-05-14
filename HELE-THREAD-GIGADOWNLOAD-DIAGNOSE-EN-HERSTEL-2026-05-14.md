@@ -1340,6 +1340,41 @@ Gate 3 K2S-authfix verificatie:
   - `remoteAcceptance.status="not_checked"`.
 - Live simple-server status na herstart: `activeDownloads=0`, `queuedDownloads=0`, `pendingDownloads=1`; die ene pending rij blijft de oude TikTok-rij en is geen K2S-run.
 
+Gate 3 K2S-herstelpoging afgelopen uur:
+
+- Venster: `2026-05-14 06:05:08+02` t/m `2026-05-14 07:05:08+02`.
+- Bewezen: in dat uur waren er 5 K2S-achtige `error` downloadrijen, 4 unieke K2S file-ids.
+- Bewezen foutklasse: alle 5 vielen onder `auth_firefox_token_rejected`.
+- Bewezen herstelkandidaten:
+  - hubjob `46441`, oorspronkelijke download `387139`, file-id `0962a96510e86`;
+  - hubjob `46442`, oorspronkelijke download `387141`, file-id `0266c56647e96`;
+  - hubjob `46443`, oorspronkelijke download `387142`, file-id `755d8d9d42cac`;
+  - hubjob `46444`, oorspronkelijke download `387143`, file-id `9424e49b9f91c`.
+- Bewezen niet apart geretried: download `387140`, omdat die dezelfde file-id had als `387141` en `387141` betere thread-context had.
+- Actie uitgevoerd na toestemming: `POST /api/jobs/:id/retry` voor `46441`, `46442`, `46443`, `46444`.
+- Bewezen resultaat: alle vier retries maakten nieuwe simple-server downloadrijen maar faalden opnieuw:
+  - hubjob `46441` -> download `387153` -> `error`;
+  - hubjob `46442` -> download `387154` -> `error`;
+  - hubjob `46443` -> download `387151` -> `error`;
+  - hubjob `46444` -> download `387152` -> `error`.
+- Nieuwe fout na retry: `K2S web-API gaf geen JSON terug (404, auth=firefox-localstorage). Zet K2S_COOKIE/K2S_X_BC of WEBDL_KEEP2SHARE_AUTH_TOKEN/K2S_AUTH_TOKEN of WEBDL_KEEP2SHARE_USERNAME/PASSWORD in .env.`
+- Non-secret `.env` inspectie:
+  - `K2S_COOKIE` aanwezig;
+  - cookie-namen: `auth_id`, `sess`, `auth_hash`, `auth_uniq_*`, `auth_uid_*`;
+  - geen `accessToken`;
+  - geen `refreshToken`;
+  - geen `pcId`;
+  - geen `x-ec1jam0tc2vzc2lvbi1pza-id`;
+  - `K2S_X_BC` aanwezig;
+  - `K2S_USERNAME` aanwezig;
+  - geen `K2S_PASSWORD`;
+  - geen `K2S_AUTH_TOKEN`;
+  - geen `K2S_ACCESS_TOKEN`;
+  - geen `K2S_WEB_ACCESS_TOKEN`.
+- Conclusie als bewezen negatieve claim: de vier K2S-downloads van het afgelopen uur zijn niet automatisch herstelbaar met de huidige lokale auth.
+- Conclusie als actievoorwaarde: verder herstel vereist eerst een K2S-authbron die remote geaccepteerd wordt, bijvoorbeeld een geldige permanente API-token, geldige access/web-access token, of complete loginconfig met wachtwoord. Daarna pas opnieuw dezelfde vier file-ids retryen.
+- Niet doen: deze vier jobs blijven herhaald retryen met dezelfde auth; dat levert alleen nieuwe error-rijen op.
+
 ## Rollbackstrategie
 
 Als er iets misgaat:
