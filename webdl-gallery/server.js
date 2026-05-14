@@ -948,10 +948,15 @@ async function rowHasPlayableMedia(row) {
   const ext = fileExt(row.filepath, row.format);
   const fp = mediaPathForRow(row);
   if (!fp) return false;
-  if (!fs.existsSync(fp)) return false;
-  if (isKnownGalleryJunkRow(row) || mediaFileLooksLikeHotlinkPlaceholder(fp, row)) return false;
+  if (isKnownGalleryJunkRow(row)) return false;
   if (rowReferencesImxThumbnail(row)) return false;
   if (rowReferencesViprLowQualityImage(row)) return false;
+  const isImage = IMAGE_EXTS.includes(ext);
+  // Trust DB for images: skip disk check if thumb-ready or filesize known
+  if (isImage && (row.is_thumb_ready === true || Number(row.filesize || 0) > 0)) return true;
+  // For everything else, verify on disk
+  if (!fs.existsSync(fp)) return false;
+  if (mediaFileLooksLikeHotlinkPlaceholder(fp, row)) return false;
   if (!VIDEO_EXTS.includes(ext)) return true;
   if (Number(row.filesize || 0) > 0 && Number(row.filesize || 0) < 128 * 1024) return false;
   if (row.is_thumb_ready === true) return true;
@@ -974,13 +979,14 @@ async function filterPlayableMediaRows(rows, maxNeeded = rows.length) {
 
 function galleryDedupeKey(row) {
   if (String(row.item_kind || '') === 'download') {
+    // Filepath first — batch downloads share URLs but have unique filepaths
+    const fileKey = String(row.filepath || '').trim();
+    if (fileKey) return `file:${fileKey.toLowerCase()}`;
+
     const ext = fileExt(row.filepath, row.format);
     const isVideo = VIDEO_EXTS.includes(ext);
     const exactUrlKey = canonicalGallerySourceUrl(row.url);
     if (exactUrlKey) return `url:${exactUrlKey}`;
-
-    const fileKey = String(row.filepath || '').trim();
-    if (fileKey) return `file:${fileKey.toLowerCase()}`;
 
     if (isVideo) {
       const titleKey = String(row.title || row.filename || '')
