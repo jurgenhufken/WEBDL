@@ -11821,8 +11821,10 @@ expressApp.post('/download/batch', async (req, res) => {
     // Pin to origin platform for known forum sources: when media URLs are from external
     // image hosts (imagebam, filesor, imgbox, etc.) but originated from a forum thread,
     // keep the forum platform instead of deriving from the download URL domain.
+    // Exception: K2S downloads keep their own platform (keep2share) with the forum as source_site.
     const isForumOriginPlatform = /^(phun|vipergirls|footfetishforum)$/i.test(itemOriginPlatform);
-    const pinForumOrigin = !!(isForumOriginPlatform && itemOriginPlatform && itemOriginChannel && itemOriginChannel !== 'unknown');
+    const isK2sUrl = isKeep2ShareUrl(u) || /filestore\.app/i.test(u);
+    const pinForumOrigin = !!(isForumOriginPlatform && itemOriginPlatform && itemOriginChannel && itemOriginChannel !== 'unknown' && !isK2sUrl);
     const platform = pinToOrigin ? itemOriginPlatform : pinForumOrigin ? itemOriginPlatform : (preferDetectedPlatform ? detectedPlatform : normalizePlatform(metaPlatform, u));
     const isElitebabesCdn = itemOriginPlatform === 'elitebabes' && /cdn\.elitebabes\.com/i.test(u);
     const isPornpicsCdn = itemOriginPlatform === 'pornpics' && /cdni\.pornpics\.com/i.test(u);
