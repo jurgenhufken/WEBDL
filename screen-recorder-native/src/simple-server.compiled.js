@@ -2774,6 +2774,20 @@ function metadataReferencesInputUrl(metadata, inputUrl) {
   return fields.some((value) => String(value || '').trim() === target);
 }
 
+function shouldRunExpensiveMetadataReuseLookup(inputUrl) {
+  try {
+    const raw = String(inputUrl || '').trim();
+    if (!raw) return false;
+    if (keep2ShareFileIdFromUrl(raw)) return false;
+    if (pixhostMediaKey(raw)) return false;
+    if (!/^https?:\/\//i.test(raw)) return true;
+    if (isKnownHtmlWrapperUrl(raw)) return true;
+    return false;
+  } catch (e) {
+    return false;
+  }
+}
+
 async function findReusableDownloadForUrl(inputUrl, options = {}) {
   const excludeId = Number(options && options.excludeId);
   const shouldExclude = Number.isFinite(excludeId) && excludeId > 0;
@@ -2787,6 +2801,31 @@ async function findReusableDownloadForUrl(inputUrl, options = {}) {
   const sourceRef = await findReusableDownloadBySourceRef.get(raw, raw);
   if (sourceRef && sourceRef.id && (!shouldExclude || Number(sourceRef.id) !== excludeId)) return sourceRef;
 
+  const externalKey = pixhostMediaKey(raw);
+  if (externalKey) {
+    const basename = (() => {
+      try { return decodeURIComponent(path.basename(new URL(raw).pathname || '')).toLowerCase(); } catch (e) { return ''; }
+    })();
+    if (basename && basename.length >= 6) {
+      const rows = shouldExclude ?
+        await findReusableKeep2ShareDownloadByFileIdExcludingId.all(excludeId, `%${basename}%`, `%${basename}%`, `%${basename}%`) :
+        await findReusableKeep2ShareDownloadByFileId.all(`%${basename}%`, `%${basename}%`, `%${basename}%`);
+      for (const row of rows || []) {
+        if (sameExternalMediaObject(raw, row && row.url) || sameExternalMediaObject(raw, row && row.source_url)) return row;
+        if (row && row.metadata) {
+          const meta = parseJsonObject(row.metadata);
+          const values = [
+            meta && meta.webdl_input_url,
+            meta && meta.webdl_media_url,
+            meta && meta.webdl_resolved_url,
+            meta && meta.webdl_wrapper_url,
+          ];
+          if (values.some((value) => sameExternalMediaObject(raw, value))) return row;
+        }
+      }
+    }
+  }
+
   const k2sId = keep2ShareFileIdFromUrl(inputUrl);
   if (k2sId) {
     const needle = `%/file/${k2sId}%`;
@@ -2796,7 +2835,7 @@ async function findReusableDownloadForUrl(inputUrl, options = {}) {
     if (existingK2s && existingK2s.id) return existingK2s;
   }
 
-  if (includeMetadata && raw.length >= 12) {
+  if (includeMetadata && raw.length >= 12 && shouldRunExpensiveMetadataReuseLookup(raw)) {
     const candidates = shouldExclude ?
       await findReusableDownloadMetadataCandidatesExcludingId.all(excludeId, `%${raw.toLowerCase()}%`) :
       await findReusableDownloadMetadataCandidates.all(`%${raw.toLowerCase()}%`);
@@ -12333,17 +12372,37 @@ function isKnownHtmlWrapperUrl(url) {
     const u = new URL(String(url || ''));
     const host = String(u.hostname || '').toLowerCase();
     const p = String(u.pathname || '');
-    if (looksLikeDirectFileUrl(url) || isSiteInfrastructureUrl(url)) return false;
+    if (isSiteInfrastructureUrl(url)) return false;
     if ((host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) && /^\/attachments\/(?:[^\/]+\.)?\d+\/?$/i.test(p)) return true;
     if (host === 'upload.footfetishforum.com' && p.startsWith('/image/')) return true;
     if (host.endsWith('pixhost.to') && p.startsWith('/show/')) return true;
     if (host === 'jpg.pet' && /^\/img\//i.test(p)) return true;
     if (host === 'pixeldrain.com' && /^\/u\//i.test(p)) return true;
+    if (looksLikeDirectFileUrl(url)) return false;
     if (isKnownExternalMediaWrapperHost(host)) return true;
     return false;
   } catch (e) {
     return false;
   }
+}
+
+function pixhostMediaKey(rawUrl) {
+  try {
+    const u = new URL(String(rawUrl || '').trim());
+    const host = String(u.hostname || '').toLowerCase().replace(/^www\./, '');
+    if (!(host === 'pixhost.to' || host.endsWith('.pixhost.to'))) return '';
+    const m = String(u.pathname || '').match(/^\/(?:show|images|thumbs)\/([^\/?#]+)\/([^\/?#]+)$/i);
+    if (!m || !m[1] || !m[2]) return '';
+    return `pixhost:${String(m[1]).toLowerCase()}/${decodeURIComponent(String(m[2])).toLowerCase()}`;
+  } catch (e) {
+    return '';
+  }
+}
+
+function sameExternalMediaObject(a, b) {
+  const ak = pixhostMediaKey(a);
+  if (!ak) return false;
+  return ak === pixhostMediaKey(b);
 }
 
 async function fetchTextWithTimeout(url, timeoutMs = 15000, referer = '') {
@@ -12739,6 +12798,7 @@ function upgradeKnownLowQualityMediaUrl(rawUrl) {
       }
       if (host.endsWith('pixhost.to')) {
         u.pathname = p.replace(/\/thumbs\//i, '/images/');
+        u.hostname = String(u.hostname || '').replace(/^t(\d+)\.pixhost\.to$/i, 'img$1.pixhost.to');
         out = u.toString();
       }
       if ((host === 'image.imx.to' || host.endsWith('.image.imx.to')) && /^\/u\/t\//i.test(p)) {
@@ -12786,10 +12846,12 @@ function isLikelyThumbnailImageUrl(rawUrl) {
     const host = String(u.hostname || '').toLowerCase();
     const p = String(u.pathname || '').toLowerCase();
     if (/^(?:thumbs?|thumbnails?)\d*\./i.test(host)) return true;
+    if (/^thumbs\d*\.imagebam\.com$/i.test(host)) return true;
     if ((host === 'image.imx.to' || host.endsWith('.image.imx.to')) && /^\/u\/t\//i.test(p)) return true;
     if (isViprLowQualityImageUrl(input)) return true;
     if ((host === 'vipr.im' || host.endsWith('.vipr.im')) && /^\/th\//i.test(p)) return true;
     if ((host === 'pixhost.to' || host.endsWith('.pixhost.to')) && /\/thumbs\//i.test(p)) return true;
+    if (/\/[^\/?#]+_t\.(?:jpe?g|png|gif|webp)(?:$|[?#])/i.test(p) && /imagebam\.com$/i.test(host)) return true;
     if (/\/(?:thumb|thumbs|thumbnail|thumbnails|preview|previews|small|mini|square)\//i.test(p)) return true;
     if (/\.(?:th|thumb|thumbnail|preview|small|md)\.(?:jpe?g|png|gif|webp|bmp|avif|heic|heif)(?:$|[?#])/i.test(input)) return true;
     if (/(?:^|[-_.\/])(?:thumb|thumbnail|preview|small|mini)(?:[-_.\/]|$)/i.test(p)) return true;

@@ -11,7 +11,7 @@
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
   const HUB = 'http://localhost:35730';
   const HUB_FALLBACK = 'http://127.0.0.1:35730';
-  const REQUEST_TIMEOUT_MS = 15000;
+  const REQUEST_TIMEOUT_MS = 60000;
   const WEBDL_UNLIMITED = Number.POSITIVE_INFINITY;
   const GIGA_SCAN_MEDIA_THRESHOLD = 1000;
   const GIGA_SCAN_THREAD_PAGE_THRESHOLD = 50;
@@ -1839,9 +1839,26 @@
     return '';
   }
 
+  function normalizeVipergirlsThreadRootUrl(rawUrl, baseHref) {
+    try {
+      const normalized = normalizeVipergirlsThreadUrl(rawUrl, baseHref);
+      if (!normalized) return '';
+      const u = new URL(normalized, baseHref || window.location.href);
+      if (!isVipergirlsHost(u.hostname)) return '';
+      u.pathname = String(u.pathname || '')
+        .replace(/\/page\d+\/?$/i, '')
+        .replace(/\/p\/\d+\/?$/i, '');
+      u.search = '';
+      u.hash = '';
+      if (!/\/threads\/\d+-/i.test(String(u.pathname || ''))) return '';
+      return u.toString();
+    } catch (e) {}
+    return '';
+  }
+
   function parseVipergirlsThreadContext(rawUrl, fallbackTitle) {
     try {
-      const normalized = normalizeVipergirlsPageUrl(rawUrl, window.location.href) || String(rawUrl || '');
+      const normalized = normalizeVipergirlsThreadRootUrl(rawUrl, window.location.href) || normalizeVipergirlsPageUrl(rawUrl, window.location.href) || String(rawUrl || '');
       const u = new URL(normalized, window.location.href);
       if (!isVipergirlsHost(u.hostname)) return null;
       let id = '';
@@ -5144,10 +5161,10 @@
     const backgroundPayload = { url, metadata: meta };
     let viaBg = null;
     if (!shouldPreferHubQueue(meta, url)) {
-      viaBg = await sendBackgroundAction('queueDownload', backgroundPayload, 12000);
+      viaBg = await sendBackgroundAction('queueDownload', backgroundPayload, 60000);
       if (viaBg && viaBg.success) return viaBg;
     }
-    const viaHub = await postHubJson('api/jobs', payload, 12000);
+    const viaHub = await postHubJson('api/jobs', payload, 60000);
     if (viaHub && !viaHub.error) return normalizeHubSingleResult(viaHub, url);
     return viaBg && viaBg.error ? viaBg : viaHub;
   }
@@ -5167,10 +5184,10 @@
     };
     let viaBg = null;
     if (!shouldPreferHubQueue(meta, target)) {
-      viaBg = await sendBackgroundAction('queueDownload', backgroundPayload, 12000);
+      viaBg = await sendBackgroundAction('queueDownload', backgroundPayload, 60000);
       if (viaBg && viaBg.success) return viaBg;
     }
-    const viaHub = await postHubJson('api/jobs', hubPayload, 12000);
+    const viaHub = await postHubJson('api/jobs', hubPayload, 60000);
     if (viaHub && !viaHub.error) return normalizeHubSingleResult(viaHub, target);
     return viaBg && viaBg.error ? viaBg : viaHub;
   }
@@ -5188,7 +5205,7 @@
     if (opt.force === true) payload.force = true;
     let viaBg = null;
     if (opt.preferHub !== true) {
-      viaBg = await sendBackgroundAction('queueBatchDownload', payload, 20000);
+      viaBg = await sendBackgroundAction('queueBatchDownload', payload, 120000);
       if (viaBg && viaBg.success) return viaBg;
     }
     const viaHub = await postHubJson('api/jobs/batch', {
@@ -5197,7 +5214,7 @@
       options: { queued_from: 'firefox-toolbar' },
       force: opt.force === true,
       priority: 10,
-    }, 20000);
+    }, 120000);
     if (viaHub && !viaHub.error) return normalizeHubBatchResult(viaHub);
     return viaBg && viaBg.error ? viaBg : viaHub;
   }
@@ -6986,7 +7003,11 @@
     btn.style.opacity = '0.6';
 
     try {
-      const result = await queueBatchDownloadRequest(urls, meta);
+      const result = await queueThreadBatchDownloadRequest(urls, meta, {
+        batchSize: 25,
+        preferHub: true,
+        logPrefix: `YouTube ${label} queue`,
+      });
       if (result.success) {
         const stats = summarizeBatchResult(result);
         showNotification(`YouTube ${label}: ${formatBatchStats(stats)}`);
@@ -7736,7 +7757,9 @@
         showNotification(`${isAnyForumPage ? `Forum scannen: ${formatScanLimit(maxForumPages)} forum-pagina's, ` : 'Thread scannen: '} ${formatScanLimit(maxPages)} pagina's/thread, ${formatScanLimit(maxItems)} items${hint}`, false);
       } catch (e) {}
 
-      const startUrl = String(window.location.href || '').replace(/#.*$/, '');
+      const startUrl = isVipergirlsThread
+        ? (normalizeVipergirlsThreadRootUrl(window.location.href, window.location.href) || String(window.location.href || '').replace(/#.*$/, ''))
+        : String(window.location.href || '').replace(/#.*$/, '');
       const res = isVipergirlsForum
         ? await fetchVipergirlsForumCandidates(startUrl, { maxForumPages, maxThreads: maxItems, maxItems })
         : (isVipergirlsThread

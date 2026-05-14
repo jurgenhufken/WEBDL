@@ -129,6 +129,7 @@ const KEEP2SHARE_SYNC_MAX_ADDS = process.env.KEEP2SHARE_SYNC_MAX_ADDS
   ? Number(process.env.KEEP2SHARE_SYNC_MAX_ADDS)
   : Number.POSITIVE_INFINITY;
 const DEBUG_GALLERY_QUERY = /^(1|true|yes|on)$/i.test(process.env.DEBUG_GALLERY_QUERY || '');
+const SHOW_SCREENSHOTS_IN_GALLERY = /^(1|true|yes|on)$/i.test(process.env.WEBDL_GALLERY_SHOW_SCREENSHOTS || '');
 let keep2shareSyncRunning = false;
 const thumbInflight = new Map();
 const activeThumbPaths = new Map();
@@ -753,8 +754,12 @@ function isKnownGalleryJunkRow(row) {
     row && row.filename,
     row && row.filepath,
     row && row.url,
+    row && row.source_url,
   ].map((v) => String(v || '').toLowerCase()).join(' ');
   if (/(^|[\/_.-])(?:user-online|user-offline|statusicon|reputation(?:_pos)?|spacer|blank|button)(?:[\/_.-]|$)/i.test(text)) return true;
+  if (/(^|[\/_.-])(?:imagebam_light|imagebam_dark|imagebam_logo|logo-imagebam)(?:[\/_.-]|$)/i.test(text)) return true;
+  if (/\bthumbs\d*\.imagebam\.com\b/i.test(text)) return true;
+  if (/\bimagebam\.com\b/i.test(text) && /\/[^\/\s?#]+_t\.(?:jpe?g|png|gif|webp)(?:$|[\s?#])/i.test(text)) return true;
   return false;
 }
 
@@ -1983,12 +1988,12 @@ app.get('/api/items', async (req, res) => {
     }
     if (fastRecentDirectOnly) {
       const fastParams = [];
-      const fastScreenshotWhere = [
+      const fastScreenshotWhere = SHOW_SCREENSHOTS_IN_GALLERY ? [
         `s.filepath IS NOT NULL`,
         `s.filepath <> ''`,
         `(s.filesize IS NULL OR s.filesize > 0)`,
         `COALESCE(s.is_thumb_ready, false) = true`,
-      ];
+      ] : ['false'];
       const fastWhere = buildItemFilters({
         req, params: fastParams,
         fileExpr: 'd.filepath',
@@ -2085,7 +2090,7 @@ app.get('/api/items', async (req, res) => {
         '(1000000000000 + df.id)::bigint',
       );
     }
-    const screenshotWhere = directOnlyPlatform ? ['false'] : buildScreenshotFilters({ req, params });
+    const screenshotWhere = directOnlyPlatform || !SHOW_SCREENSHOTS_IN_GALLERY ? ['false'] : buildScreenshotFilters({ req, params });
     screenshotWhere.push(`(s.filesize IS NULL OR s.filesize > 0)`);
     if (thumbReadyOnly) screenshotWhere.push(`COALESCE(s.is_thumb_ready, false) = true`);
     if (useCursor) {
@@ -2338,7 +2343,7 @@ app.get('/api/platforms', async (req, res) => {
     fileWhere.push(`(df.filesize IS NULL OR df.filesize > 0)`);
     fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
 
-    const screenshotWhere = buildScreenshotFilters({ req, params, includeChannel: false });
+    const screenshotWhere = SHOW_SCREENSHOTS_IN_GALLERY ? buildScreenshotFilters({ req, params, includeChannel: false }) : ['false'];
     screenshotWhere.push(`(s.filesize IS NULL OR s.filesize > 0)`);
 
     const { rows } = await pool.query(`
@@ -2457,7 +2462,7 @@ app.get('/api/channels', async (req, res) => {
     fileWhere.push(`(df.filesize IS NULL OR df.filesize > 0)`);
     fileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})`);
 
-    const screenshotWhere = buildScreenshotFilters({ req, params, includeChannel: false });
+    const screenshotWhere = SHOW_SCREENSHOTS_IN_GALLERY ? buildScreenshotFilters({ req, params, includeChannel: false }) : ['false'];
     screenshotWhere.push(`(s.filesize IS NULL OR s.filesize > 0)`);
 
     const { rows } = await pool.query(`
