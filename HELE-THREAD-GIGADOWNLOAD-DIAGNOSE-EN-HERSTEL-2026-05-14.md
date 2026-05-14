@@ -1157,6 +1157,128 @@ Gate 2 verificatie:
 - `npm test` in `webdl-hub`: groen, 143 tests geslaagd.
 - Nieuwe tests bevestigen dat zowel een job-URL als `sourceContext.url` met `/threads/threads/` naar canonical ViperGirls thread worden hersteld.
 
+### 2026-05-14: Gate 3 read-only K2S/no-op/gallery/slave diagnose
+
+Scope:
+
+- Alleen read-only diagnose uitgevoerd: `SELECT`-queries, `curl` health/status en code-inspectie.
+- Geen jobs gepauzeerd, geretried, geprioriteerd, opnieuw aangeboden of gemuteerd.
+- Doel van deze gate: vaststellen waar K2S/no-op/gallery/slave/lifecycle werkelijk faalt voordat er een endpoint, poller, gallery-fix of retry-actie wordt gebouwd.
+
+Gate 3 runtimebewijs:
+
+- Bewezen: hub health is groen: `GET http://localhost:35730/api/health` geeft `{"ok":true,"db":"up"}`.
+- Bewezen: gallery health is groen: `GET http://localhost:35731/api/health` geeft `{"ok":true}`.
+- Bewezen: simple-server draait en meldt `activeDownloads=0`, `queuedDownloads=0`, `pendingDownloads=1`, `db_active_by_status.pending=1`.
+- Bewezen: de ene actieve/pending simple-server rij is geen K2S/slave-run maar oude TikTok-download `public.downloads.id=255834`, status `pending`, platform `tiktok`, channel `@lesbienna.jen`, aangemaakt op `2026-05-01 19:03:09`.
+- Bewezen: `webdl-hub/tmp/batch-manifests` bevatte tijdens de diagnose `0` bestanden.
+- Bewezen: huidige schema's gebruiken `webdl.jobs.adapter/options/lane/status`, niet een losse `source`-kolom; logregels gebruiken `webdl.logs.ts/msg`, niet `created_at/message`.
+
+Gate 3 K2S-authbewijs:
+
+- Bewezen: `webdl-hub/src/api/routes-jobs.js` definieert een K2S-auth gate via `K2S_AUTH_KEYS`.
+- Bewezen: `hasKeep2ShareApiAuthConfigured()` controleert eerst `process.env`, daarna `screen-recorder-native/.env` en `webdl-hub/.env`.
+- Bewezen zonder secretwaarden te lezen of te documenteren:
+  - `screen-recorder-native/.env`: bestaat en bevat K2S-keynamen `K2S_USERNAME`, `K2S_COOKIE`, `K2S_X_BC`.
+  - `webdl-hub/.env`: bestaat, maar bevat geen K2S-keynamen uit de gate-lijst.
+  - huidig shellproces: geen K2S-keynamen aanwezig in `process.env`.
+- Bewezen gevolg: de hub-code kan K2S-auth als "geconfigureerd" zien via `screen-recorder-native/.env`.
+- Niet bewezen: dat K2S de aanwezige cookie/token bij elke run accepteert. De foutdata hieronder bewijst juist dat token/API/fallback-fouten nog voorkomen.
+
+Gate 3 K2S/slave-queuebewijs:
+
+- Bewezen: K2S-hubjobs zijn te selecteren als `adapter='slave-delegate'` met `options->>'slave_platform'='keep2share'`.
+- Bewezen: er waren tijdens de diagnose geen K2S-hubjobs met status `queued` of `running`.
+- Bewezen: actuele K2S-hubjobtotalen:
+  - `cancelled/image`: 452, waarvan 443 met `simple_server_download_id`, max `created_at=2026-05-08 18:53:12+02`;
+  - `cancelled/paused`: 61, alle 61 met `simple_server_download_id`, max `created_at=2026-05-08 18:51:09+02`;
+  - `done/image`: 1014, alle 1014 met `simple_server_download_id`, max `created_at=2026-05-14 03:30:23+02`;
+  - `done/video`: 11, alle 11 met `simple_server_download_id`, max `created_at=2026-05-14 03:30:22+02`;
+  - `failed/image`: 347, alle 347 met `simple_server_download_id`, max `created_at=2026-05-14 03:30:24+02`;
+  - `failed/video`: 1, met `simple_server_download_id`, max `created_at=2026-05-14 03:30:27+02`.
+- Bewezen: K2S-hubjobs van `2026-05-14` hadden duidelijke terminale uitkomsten: 11 `done` met `public.downloads.status='completed'` en 5 `failed` met `public.downloads.status='error'`.
+- Bewezen: actuele K2S job/download lifecycle-join:
+  - `cancelled/cancelled`: 465;
+  - `cancelled/completed`: 32;
+  - `cancelled/error`: 7;
+  - `cancelled` zonder gekoppelde download: 9;
+  - `done/completed`: 1025;
+  - `failed/completed`: 133;
+  - `failed/error`: 215.
+- Bewezen: voor alle slave-delegate jobs samen bestaat lifecycle-mismatch ook buiten K2S:
+  - `failed/completed`: 184;
+  - `failed/error`: 314;
+  - `failed/superseded`: 132;
+  - `done/completed`: 4751;
+  - `done/superseded`: 141.
+- Conclusie als bewezen negatieve claim: er is op dit meetmoment geen actieve K2S/slave no-op backlog aangetroffen.
+- Conclusie als bewezen risico: lifecycle-mismatch bestaat historisch wel; een hubjob kan `failed` zijn terwijl de gekoppelde `public.downloads`-rij `completed` is.
+
+Gate 3 public.downloads/gallerybewijs:
+
+- Bewezen: actuele K2S-achtige `public.downloads` statusverdeling, geselecteerd op platform/url/source_url met `keep2share` of `k2s`:
+  - `cancelled`: 477;
+  - `completed`: 2783;
+  - `error`: 226.
+- Bewezen: op `2026-05-14` waren de K2S-achtige `public.downloads`-rijen binnen deze selector `completed|vipergirls|11` en `error|vipergirls|5`.
+- Bewezen: completed K2S-achtige rijen hebben geen brede bestandskwaliteit-gaten: totaal 2783, `missing_filepath=0`, `zero_filesize=0`.
+- Bewezen: van die 2783 completed rijen voldoen 2782 aan de brede gallery-kandidaatcheck `filepath aanwezig + filesize > 0 + bekende media/archive/image-extensie`.
+- Bewezen: 1188 van de 2783 completed K2S-achtige rijen hebben een gekoppelde `download_files`-rij.
+- Bewezen: extensieverdeling van completed K2S-achtige rijen wordt gedomineerd door `mp4`:
+  - `mp4`: 2764;
+  - `rar`: 9;
+  - `jpg`: 6;
+  - `zip`: 2;
+  - `mkv`: 1;
+  - 1 pad zonder herkenbare extensie in de query (`h9MkpAAC`).
+- Niet bewezen: dat completed K2S-resultaten breed door gallery-filters verborgen worden. De huidige data wijst eerder op geldige gallery-kandidaten; exact verborgen gedrag moet per item via een visibility-diagnose worden bewezen.
+
+Gate 3 foutbewijs:
+
+- Bewezen: top K2S-achtige downloaderrors bevatten concrete auth/API/fallback-klassen:
+  - 72 keer: `K2S web-API gaf geen JSON terug (404, auth=firefox-localstorage)...`;
+  - 24 keer: `Keep2Share web-download faalde: HTTP 403...`;
+  - 13 keer: `slave download completed without importable media files`;
+  - 10 keer: generic `HTTP Error 404`;
+  - 7 keer: generic direct-video metadata-pad met `Cannot write...`;
+  - 3 keer: `Keep2Share premium-resolve faalde: fetch failed`.
+- Bewezen: K2S-achtige errors op `2026-05-14` waren:
+  - 4 keer generic direct-video metadatafout `Cannot write video metadata to JS...`;
+  - 1 keer browser-token door K2S API geweigerd met JSON/web fallback;
+  - 1 keer browser-token door K2S API geweigerd met web-download fallback;
+  - 1 keer `Keep2Share premium-resolve faalde: fetch failed`.
+- Bewezen: hublogs over de laatste 7 dagen bevatten 545 keer `Keep2Share premium API-token ontbreekt...`; dit is historisch bewijs voor auth-gate/fallbackproblemen.
+- Bewezen: hublogs van `2026-05-14` tonen vooral succesvolle gallery/slave lifecycle-activiteit:
+  - 558 keer `gallery sync voltooid`;
+  - 465 keer `live gallery sync: 1 nieuw`;
+  - 179 keer `slave klaar: 1 bestand(en) gekoppeld, 1 voor gallery geindexeerd`;
+  - 65 keer `Kon wrapper media URL niet resolven naar een direct bestand`.
+
+Gate 3 interpretatie zonder aannames:
+
+- Bewezen: K2S-authconfiguratie is aanwezig genoeg om de hub-gate te passeren, maar dit bewijst geen geldige K2S-sessie.
+- Bewezen: er was bij diagnose geen actieve K2S/slave no-op in de queue.
+- Bewezen: K2S heeft nog reële faalklassen: browser-token/API-acceptatie, web-download `403`, premium-resolve `fetch failed`, wrapper-resolutie en direct-video metadata-output.
+- Bewezen: completed K2S-achtige downloads zien er in bulk niet uit als gallery-filteruitval door ontbrekend pad of nul bytes.
+- Hypothese: een door de gebruiker waargenomen no-op kan eerder een oude auth/fallback-fout, een transient worker/poller timing, of UI-verwarring tussen `accepted`, `queued`, `running` en `completed` zijn geweest. Deze hypothese blijft onbewezen totdat een concrete run-id, URL, job-id of download-id door de lifecycle is gevolgd.
+
+Gate 3 vervolgplan:
+
+1. Bouw eerst een read-only K2S preflight/status: rapporteer welke authbron is gevonden (`process.env`, `screen-recorder-native/.env`, `webdl-hub/.env`) zonder waarden te tonen, en onderscheid "key aanwezig" van "K2S accepteert token/cookie".
+2. Bouw daarna een read-only lifecycle-diagnose voor een URL/job/download: hubjobstatus, `simple_server_download_id`, `public.downloads.status`, laatste fout/logregel, gallery-kandidaatreden en eventuele mismatch.
+3. Maak de UI-taal rondom K2S/Giga/manifest expliciet: `accepted` is niet hetzelfde als `queued`, `running`, `completed` of "zichtbaar in gallery".
+4. Onderzoek `Kon wrapper media URL niet resolven naar een direct bestand` als aparte failure-class.
+5. Onderzoek generic direct-video metadatafouten als aparte failure-class.
+6. Plan pas daarna een poller-, retry-, endpoint- of gallery-fix, en alleen als de diagnose per concrete run bewijst waar de faallocatie zit.
+
+Gate 3 acceptatie voor de volgende codewijziging:
+
+- Geen muterende queue-operaties als onderdeel van diagnose.
+- Geen globale retry of manifest-resubmit op basis van bulkcounts.
+- Geen claim "K2S werkt/niet werkt" zonder run-id of download-id.
+- Nieuwe status/preflight moet secretwaarden maskeren en alleen bron/type/status tonen.
+- Lifecycle-diagnose moet mismatch expliciet kunnen tonen, vooral `hub failed` met `download completed`.
+
 ## Rollbackstrategie
 
 Als er iets misgaat:
