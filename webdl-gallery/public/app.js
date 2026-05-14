@@ -1624,6 +1624,15 @@
   async function init() {
     readFiltersFromControls();
     pushQueryHistory(state.filters);
+
+    // Ensure browser history has a gallery entry so viewer's history.back()
+    // returns here instead of the browser start page.
+    try {
+      if (!history.state || history.state.page !== 'gallery') {
+        history.replaceState({ page: 'gallery' }, '', location.href);
+      }
+    } catch (_) {}
+
     loadTagFilterDropdown().catch((e) => console.warn('tags filter load failed', e));
     loadFilterDropdowns().catch((e) => console.warn('filters load failed', e));
     await loadMore();
