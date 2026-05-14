@@ -313,6 +313,28 @@ function channelGroupSql(alias = 'd') {
   END`;
 }
 
+function archiveExtractedModelTitleSql(downloadAlias = 'd', fileAlias = 'df') {
+  const rel = `${fileAlias}.relpath`;
+  const archiveStem = `regexp_replace(COALESCE(${downloadAlias}.filename, ''), '\\.[^.]+$', '')`;
+  const firstDir = `substring(${rel} from '/archive_extracted/[^/]+/([^/]+)/')`;
+  return `CASE
+    WHEN ${rel} ~ '/archive_extracted/' THEN
+      COALESCE(
+        NULLIF(CASE
+          WHEN LOWER(COALESCE(${firstDir}, '')) ~ '^(new folder|untitled|leaks?|images?|photos?|pictures?|pics?|videos?|movies?|gif|gifs|set|full|originals?)'
+            THEN ''
+          ELSE COALESCE(${firstDir}, '')
+        END, ''),
+        NULLIF(${archiveStem}, '')
+      )
+    ELSE NULL
+  END`;
+}
+
+function fileChannelSql(downloadAlias = 'd', fileAlias = 'df') {
+  return `COALESCE(NULLIF(${archiveExtractedModelTitleSql(downloadAlias, fileAlias)}, ''), ${channelGroupSql(downloadAlias)})`;
+}
+
 function inferArchiveExt(row) {
   const haystack = [
     row && row.format,
@@ -493,6 +515,47 @@ function sourceModelKeyFromTitle(value) {
     .replace(/^-+|-+$/g, '');
 }
 
+function cleanArchiveModelSegment(value) {
+  return String(value || '')
+    .replace(/\.[a-z0-9]{2,5}$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function archiveExtractedInfoForRow(row) {
+  const rel = String(row?.filepath || '').replace(/\\/g, '/');
+  const marker = '/archive_extracted/';
+  const pos = rel.indexOf(marker);
+  if (pos < 0) return null;
+  const parts = rel.slice(pos + marker.length).split('/').filter(Boolean);
+  if (!parts.length) return null;
+  const extractDir = parts[0] || '';
+  const firstFolder = parts.length > 2 ? cleanArchiveModelSegment(parts[1]) : '';
+  const archiveStem = cleanArchiveModelSegment(extractDir.replace(/_\d+$/, '') || row?.filename || '');
+  const genericFolder = /^(new folder|untitled|leaks?|images?|photos?|pictures?|pics?|videos?|movies?|gif|gifs|set|full|originals?)(?:\s*\(\d+\))?$/i;
+  const modelTitle = firstFolder && !genericFolder.test(firstFolder)
+    ? firstFolder
+    : archiveStem;
+  return {
+    archive_stem: archiveStem,
+    extract_dir: extractDir,
+    model_title: modelTitle || archiveStem || '',
+  };
+}
+
+function usefulModelTitleFromFilename(filename) {
+  const stem = sourceModelTitleFromText(filename || '');
+  if (!stem) return '';
+  const compact = stem.replace(/[\s._-]+/g, '');
+  if (!compact || compact.length < 3) return '';
+  if (/^(img|image|pic|photo|video|movie|clip|scene|another|untitled|newfolder)\d*$/i.test(compact)) return '';
+  if (/^(img|dsc|dscn|vid|mov|wa|pxl)[\s._-]?\d{3,}/i.test(stem)) return '';
+  if (/^\d+[-_][a-f0-9-]{10,}$/i.test(stem)) return '';
+  if (/^[a-f0-9-]{12,}$/i.test(stem) && /\d/.test(stem)) return '';
+  if (/^[A-Za-z0-9_-]{5,14}$/.test(stem) && /[A-Za-z]/.test(stem) && /\d/.test(stem)) return '';
+  return stem;
+}
+
 function isOpaqueMediaToken(value) {
   const text = String(value || '').trim();
   if (!text || /\s/.test(text)) return false;
@@ -528,9 +591,18 @@ function titleFromVipergirlsThreadUrl(value) {
 }
 
 function sourceModelTitleForRow(row, graphSummary, sourceSite, filename) {
+  const archiveInfo = archiveExtractedInfoForRow(row);
+  if (archiveInfo && archiveInfo.model_title) return archiveInfo.model_title;
+  const site = String(sourceSite || row?.platform || '').toLowerCase();
+  const rowTitle = String(row?.title || '').trim();
+  const threadTitle = String(graphSummary?.source_thread_title || '').trim();
+  if (row?.item_kind === 'file' && (site === 'vipergirls' || site.includes('viper'))) {
+    const fileModel = usefulModelTitleFromFilename(filename || row?.filename || row?.filepath || '');
+    if (!rowTitle || !threadTitle || rowTitle === threadTitle || /icloud leaks/i.test(rowTitle)) return fileModel || '';
+  }
+  if (row?.item_kind === 'screenshot' && /^screenshot\b/i.test(rowTitle)) return '';
   const postTitle = sourceModelTitleFromText(graphSummary?.source_post_title || '');
   if (postTitle && !isOpaqueMediaToken(postTitle)) return postTitle;
-  const site = String(sourceSite || row?.platform || '').toLowerCase();
   if (site === 'twitter' || site === 'x' || site.includes('twitter')) return '';
   const fallback = sourceModelTitleFromText(row?.title || filename || '');
   return isOpaqueMediaToken(fallback) || isVipergirlsMediaTokenTitle(fallback, row) ? '' : fallback;
@@ -590,6 +662,10 @@ function mapItem(row) {
   const displayTitle = graphSummary.source_post_title
     && (String(sourceSite || '').toLowerCase() === 'twitter' || isOpaqueMediaToken(rowTitle))
     ? graphSummary.source_post_title
+    : row.item_kind === 'file' && archiveExtractedInfoForRow(row)?.model_title
+      ? archiveExtractedInfoForRow(row).model_title
+    : row.item_kind === 'file' && sourceModelTitle && sourceModelTitle !== threadTitle
+      ? sourceModelTitle
     : String(row.platform || '').toLowerCase() === 'vipergirls' && threadTitle && (isOpaqueMediaToken(rowTitle) || isVipergirlsMediaTokenTitle(rowTitle, row) || /^[0-9_]+$/.test(rowTitle) || isKnownGalleryJunkRow(row))
       ? threadTitle
       : row.title;
@@ -1562,7 +1638,7 @@ async function resolveMediaContext(idRaw) {
   if (fileMatch) {
     const { rows } = await pool.query(`
       SELECT 'file-' || df.id::text AS id,
-             d.url, d.source_url, d.platform, d.channel, d.title,
+             d.url, d.source_url, d.platform, ${fileChannelSql('d', 'df')} AS channel, d.title,
              regexp_replace(df.relpath, '^.*/', '') AS filename,
              df.relpath AS filepath
         FROM download_files df
@@ -1600,7 +1676,7 @@ function splitMultiFilter(value) {
     .filter(Boolean);
 }
 
-function buildItemFilters({ req, params, fileExpr, extExpr, ratingExpr, includeChannel = true }) {
+function buildItemFilters({ req, params, fileExpr, extExpr, ratingExpr, includeChannel = true, channelExpr = 'd.channel' }) {
   const platformValues = splitMultiFilter(req.query.platform);
   const channelValues = splitMultiFilter(req.query.channel);
   const q = req.query.q ? String(req.query.q).trim() : null;
@@ -1621,7 +1697,7 @@ function buildItemFilters({ req, params, fileExpr, extExpr, ratingExpr, includeC
     const plainChannels = channelValues.filter((value) => !String(value).startsWith('site:'));
     if (plainChannels.length) {
       params.push(plainChannels);
-      where.push(`d.channel = ANY($${params.length}::text[])`);
+      where.push(`${channelExpr} = ANY($${params.length}::text[])`);
     }
     for (const channel of siteChannels) {
       params.push('%' + String(channel).slice(5).toLowerCase() + '%');
@@ -1648,7 +1724,7 @@ function buildItemFilters({ req, params, fileExpr, extExpr, ratingExpr, includeC
     const modelClauses = [];
     for (const needle of modelNeedles) {
       params.push('%' + String(needle).toLowerCase() + '%');
-      modelClauses.push(`LOWER(COALESCE(d.metadata, '') || ' ' || COALESCE(d.title, '') || ' ' || COALESCE(d.filename, '')) LIKE $${params.length}`);
+      modelClauses.push(`LOWER(COALESCE(d.metadata, '') || ' ' || COALESCE(d.title, '') || ' ' || COALESCE(d.filename, '') || ' ' || COALESCE(${fileExpr}, '')) LIKE $${params.length}`);
     }
     if (modelClauses.length) where.push(`(${modelClauses.join(' OR ')})`);
   }
@@ -1985,11 +2061,13 @@ app.get('/api/items', async (req, res) => {
            AND lower(regexp_replace(mf.relpath, '^.*\\.', '')) IN (${MEDIA_EXT_SQL})
       )`);
     }
+    const fileChannelExpr = fileChannelSql('d', 'df');
     const fileWhere = directOnlyPlatform ? ['false'] : buildItemFilters({
       req, params,
       fileExpr: 'df.relpath',
       extExpr: "regexp_replace(df.relpath, '^.*\\.', '')",
       ratingExpr: 'df.rating',
+      channelExpr: fileChannelExpr,
     });
     if (!directOnlyPlatform) {
       fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
@@ -2053,9 +2131,9 @@ app.get('/api/items', async (req, res) => {
       : sort === 'rating_asc'
         ? 'df.rating ASC NULLS LAST, df.id ASC'
       : sort === 'channel'
-        ? 'LOWER(NULLIF(d.channel, \'\')) ASC NULLS LAST, df.mtime_ms DESC NULLS LAST, df.updated_at DESC NULLS LAST, d.finished_at DESC NULLS LAST, d.updated_at DESC NULLS LAST, d.created_at DESC NULLS LAST, df.id DESC'
+        ? `LOWER(NULLIF(${fileChannelExpr}, '')) ASC NULLS LAST, df.mtime_ms DESC NULLS LAST, df.updated_at DESC NULLS LAST, d.finished_at DESC NULLS LAST, d.updated_at DESC NULLS LAST, d.created_at DESC NULLS LAST, df.id DESC`
       : sort === 'channel_desc'
-        ? 'LOWER(NULLIF(d.channel, \'\')) DESC NULLS LAST, df.mtime_ms DESC NULLS LAST, df.updated_at DESC NULLS LAST, d.finished_at DESC NULLS LAST, d.updated_at DESC NULLS LAST, d.created_at DESC NULLS LAST, df.id DESC'
+        ? `LOWER(NULLIF(${fileChannelExpr}, '')) DESC NULLS LAST, df.mtime_ms DESC NULLS LAST, df.updated_at DESC NULLS LAST, d.finished_at DESC NULLS LAST, d.updated_at DESC NULLS LAST, d.created_at DESC NULLS LAST, df.id DESC`
       : sort === 'oldest'
         ? 'd.id ASC, df.id ASC'
         : 'df.mtime_ms DESC NULLS LAST, df.updated_at DESC NULLS LAST, d.finished_at DESC NULLS LAST, d.updated_at DESC NULLS LAST, d.created_at DESC NULLS LAST, df.id DESC';
@@ -2108,7 +2186,7 @@ app.get('/api/items', async (req, res) => {
       file_items AS MATERIALIZED (
           SELECT 'file' AS item_kind,
                  'file-' || df.id::text AS id, d.id AS rating_id,
-                 d.url, d.source_url, d.platform, d.channel, d.title,
+                 d.url, d.source_url, d.platform, ${fileChannelExpr} AS channel, d.title,
                  regexp_replace(df.relpath, '^.*/', '') AS filename,
                  df.relpath AS filepath, df.filesize,
                  regexp_replace(df.relpath, '^.*\\.', '') AS format,
@@ -2363,13 +2441,14 @@ app.get('/api/channels', async (req, res) => {
     )`);
     const directChannelExpr = channelGroupSql('d');
     const directPlatformExpr = platformGroupSql('d');
+    const scopedFileChannelExpr = fileChannelSql('d', 'df');
 
     const fileWhere = buildItemFilters({
       req, params,
       fileExpr: 'df.relpath',
       extExpr: "regexp_replace(df.relpath, '^.*\\.', '')",
       ratingExpr: 'df.rating',
-      includeChannel: false,
+      channelExpr: scopedFileChannelExpr,
     });
     fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
     fileWhere.push(`df.relpath !~* '${TEMP_RELPATH_RE}'`);
@@ -2401,7 +2480,7 @@ app.get('/api/channels', async (req, res) => {
                 FROM downloads d
                WHERE ${directWhere.join(' AND ')}
               UNION ALL
-              SELECT ${channelGroupSql('d')} AS channel,
+              SELECT ${scopedFileChannelExpr} AS channel,
                      ${platformGroupSql('d')} AS platform,
                      lower(regexp_replace(df.relpath, '^.*\\.', '')) AS ext,
                      lower(df.relpath) AS media_key,
