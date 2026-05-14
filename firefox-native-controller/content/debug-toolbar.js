@@ -8570,7 +8570,7 @@
             webdl_pin_context: true,
           }
         : meta;
-      const result = useGigaQueue
+      const result = useGigaQueue || urls.length > 1000
         ? await queueThreadBatchDownloadRequest(urls, finalMeta, {
             force,
             directHints: selectedDirectHints,
