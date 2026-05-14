@@ -695,7 +695,7 @@
     const it = vs.items[vs.idx];
     if (!it) return;
     try {
-      localStorage.setItem(VIEWER_POS_KEY, JSON.stringify({
+      sessionStorage.setItem(VIEWER_POS_KEY, JSON.stringify({
         open: Boolean(open),
         id: String(it.id),
         idx: vs.idx,
@@ -707,7 +707,7 @@
 
   function readRememberedPosition() {
     try {
-      const raw = localStorage.getItem(VIEWER_POS_KEY);
+      const raw = sessionStorage.getItem(VIEWER_POS_KEY);
       if (!raw) return null;
       const saved = JSON.parse(raw);
       if (!saved || saved.open !== true) return null;
@@ -1389,7 +1389,7 @@
 
       const idx = await findGalleryIndexById(saved.id, restoreLoadPageBudget(saved));
       if (idx < 0) {
-        localStorage.setItem(VIEWER_POS_KEY, JSON.stringify({ ...saved, open: false, at: Date.now() }));
+        sessionStorage.setItem(VIEWER_POS_KEY, JSON.stringify({ ...saved, open: false, at: Date.now() }));
         return false;
       }
       open(idx, { replaceHistory: true });
