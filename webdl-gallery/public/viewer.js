@@ -1395,9 +1395,10 @@
     });
   }
 
-  async function captureCurrentVideoFrame() {
+  async function captureCurrentVideoFrame(options = {}) {
+    const quiet = !!(options && options.quiet);
     if (vs.screenshotRunning) {
-      showHudMessage('Screenshot bezig');
+      if (!quiet) showHudMessage('Screenshot bezig');
       return;
     }
     const it = vs.items[vs.idx];
@@ -1405,7 +1406,7 @@
       ? vs.currentMediaEl
       : el.vContent.querySelector('video');
     if (!it || !videoEl) {
-      showHudMessage('Geen video actief');
+      if (!quiet) showHudMessage('Geen video actief');
       return;
     }
     vs.screenshotRunning = true;
@@ -1429,11 +1430,11 @@
       if (gallery && typeof gallery.prependItems === 'function' && data.screenshot) {
         gallery.prependItems([data.screenshot]);
       }
-      showHudMessage('Screenshot opgeslagen', 2200);
-      log('Screenshot opgeslagen bij huidige video');
+      if (!quiet) showHudMessage('Screenshot opgeslagen', 2200);
+      if (!quiet) log('Screenshot opgeslagen bij huidige video');
     } catch (e) {
-      showHudMessage('Screenshot fout');
-      log('Screenshot fout: ' + (e && e.message ? e.message : String(e)));
+      if (!quiet) showHudMessage('Screenshot fout');
+      if (!quiet) log('Screenshot fout: ' + (e && e.message ? e.message : String(e)));
     } finally {
       vs.screenshotRunning = false;
       if (el.vBtnCaptureStage) el.vBtnCaptureStage.disabled = false;
@@ -2533,7 +2534,7 @@
         if (!e.repeat && !['INPUT', 'TEXTAREA', 'SELECT'].includes(tag)) {
           e.preventDefault();
           e.stopPropagation();
-          await captureCurrentVideoFrame();
+          await captureCurrentVideoFrame({ quiet: true });
         }
         return;
       }

@@ -6060,24 +6060,32 @@
     throw new Error(`Screenshot te klein (${lastSize} bytes)`);
   }
 
-  async function runScreenshotFlow() {
-    showNotification('Screenshot gestart...');
-    addLog('Screenshot...');
+  async function runScreenshotFlow(options = {}) {
+    const quiet = !!(options && options.quiet);
+    const notify = (msg, isError = false) => {
+      if (!quiet) showNotification(msg, isError);
+    };
+    const writeLog = (msg, level) => {
+      if (!quiet) addLog(msg, level);
+    };
+    notify('Screenshot gestart...');
+    writeLog('Screenshot...');
     const meta = scrapeMetadata();
     const target = pickBestVideoTarget();
     const video = target ? target.video : null;
 
     const localOnly = !isConnected;
     if (localOnly) {
-      showNotification('Niet verbonden met server (screenshot kan niet naar WEBDL)', true);
-      addLog('Niet verbonden met server (screenshot)', 'error');
+      notify('Niet verbonden met server (screenshot kan niet naar WEBDL)', true);
+      writeLog('Niet verbonden met server (screenshot)', 'error');
+      if (quiet) return { success: false, error: 'Niet verbonden met server' };
       const okLocal = window.confirm('Niet verbonden met WEBDL server. Screenshot lokaal opslaan in Firefox Downloads?\n\nLet op: dit komt NIET in WEBDL/DB.');
       if (!okLocal) return { success: false, error: 'Niet verbonden met server' };
     }
 
     if (!video) {
-      showNotification('Geen video gevonden op pagina', true);
-      addLog('Geen video gevonden', 'error');
+      notify('Geen video gevonden op pagina', true);
+      writeLog('Geen video gevonden', 'error');
       return { success: false, error: 'Geen video gevonden op pagina' };
     }
 
@@ -6091,7 +6099,7 @@
         a.href = URL.createObjectURL(jpegBlob);
         a.download = `screenshot_${Date.now()}.jpg`;
         document.body.appendChild(a); a.click(); document.body.removeChild(a);
-        showNotification(`Screenshot lokaal gedownload`);
+        notify(`Screenshot lokaal gedownload`);
         return { success: true, local: true };
       }
 
@@ -6118,14 +6126,15 @@
         throw new Error((result && result.error) ? result.error : 'Screenshot mislukt');
       }
 
-      showNotification(`Screenshot opgeslagen: ${result.file}`);
-      addLog(`Screenshot: ${result.path}`);
+      notify(`Screenshot opgeslagen: ${result.file}`);
+      writeLog(`Screenshot: ${result.path}`);
       return { success: true, path: result.path, file: result.file };
     } catch (e) {
       const msg = (e && e.message) ? e.message : String(e);
-      showNotification(`Server screenshot mislukt: ${msg}`, true);
-      addLog(`Server screenshot mislukt: ${msg}`, 'error');
+      notify(`Server screenshot mislukt: ${msg}`, true);
+      writeLog(`Server screenshot mislukt: ${msg}`, 'error');
 
+      if (quiet) return { success: false, error: msg };
       const okLocal = window.confirm(`Server screenshot mislukt. Lokaal opslaan in Firefox Downloads?\n\nLet op: dit komt NIET in WEBDL/DB.\n\n${msg}`);
       if (!okLocal) return { success: false, error: msg };
 
@@ -6133,15 +6142,15 @@
         if (!jpegBlob) {
           jpegBlob = await captureReliableJpegBlob(video, 3);
         }
-        if (!jpegBlob) { showNotification('Kan video niet capturen', true); return; }
+        if (!jpegBlob) { notify('Kan video niet capturen', true); return; }
         const a = document.createElement('a');
         a.href = URL.createObjectURL(jpegBlob);
         a.download = `screenshot_${Date.now()}.jpg`;
         document.body.appendChild(a); a.click(); document.body.removeChild(a);
-        showNotification(`Screenshot lokaal gedownload`);
+        notify(`Screenshot lokaal gedownload`);
         return { success: true, local: true };
       } catch (e2) {
-        showNotification('Screenshot mislukt (beveiligd?)', true);
+        notify('Screenshot mislukt (beveiligd?)', true);
         return { success: false, error: (e2 && e2.message) ? e2.message : 'Screenshot mislukt (beveiligd?)' };
       }
     }
@@ -6170,22 +6179,26 @@
 
   async function triggerScreenshotFlow(source) {
     if (screenshotFlowRunning) return { success: false, error: 'Screenshot al bezig' };
+    const quiet = source === 'hotkey';
     screenshotFlowRunning = true;
     try {
-      screenshotBtn.textContent = '📷 Bezig...';
-      screenshotBtn.style.opacity = '0.65';
-      const label = source === 'hotkey' ? 'Rechter-Control screenshot' : 'Screenshot knop ingedrukt';
-      showNotification(label);
+      if (!quiet) {
+        screenshotBtn.textContent = '📷 Bezig...';
+        screenshotBtn.style.opacity = '0.65';
+        showNotification('Screenshot knop ingedrukt');
+      }
       console.warn(`[WEBDL] ${source === 'hotkey' ? 'Right Control hotkey' : 'Screenshot button'} triggered`);
-      return await runScreenshotFlow();
+      return await runScreenshotFlow({ quiet });
     } catch (e) {
       const msg = (e && e.message) ? e.message : String(e);
       console.error('[WEBDL] Screenshot flow failed:', msg);
-      showNotification(`Screenshot fout: ${msg}`, true);
+      if (!quiet) showNotification(`Screenshot fout: ${msg}`, true);
       return { success: false, error: msg };
     } finally {
-      screenshotBtn.textContent = '📷 Screenshot';
-      screenshotBtn.style.opacity = '1';
+      if (!quiet) {
+        screenshotBtn.textContent = '📷 Screenshot';
+        screenshotBtn.style.opacity = '1';
+      }
       screenshotFlowRunning = false;
     }
   }
