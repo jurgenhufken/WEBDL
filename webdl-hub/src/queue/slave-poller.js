@@ -70,6 +70,13 @@ function resolveSlaveRelPath(relPath, basePath) {
   return path.resolve(MEDIA_ROOTS[0] || process.cwd(), raw);
 }
 
+function parseDuplicateActiveDownloadId(message) {
+  const match = String(message || '').match(/\bal actief als #(\d+)\b/i);
+  if (!match) return 0;
+  const id = Number.parseInt(match[1], 10);
+  return Number.isFinite(id) && id > 0 ? id : 0;
+}
+
 async function collectMediaFilesFromDir(dir, limit = 2000) {
   const out = [];
   const stack = [dir];
@@ -210,6 +217,38 @@ function startSlavePoller({ repo, logger, intervalMs = 5000 }) {
     // dezelfde cancelled rij in elke LIMIT-batch terugkomen en blokkeert die
     // completed slave downloads achteraan de poller.
     if (row.slave_status === 'cancelled') {
+      const duplicateDownloadId = parseDuplicateActiveDownloadId(row.slave_error);
+      if (duplicateDownloadId && duplicateDownloadId !== Number(row.id)) {
+        const { rows } = await repo.pool.query(
+          `SELECT id, status AS slave_status, filepath, error AS slave_error
+             FROM downloads
+            WHERE id = $1
+            LIMIT 1`,
+          [duplicateDownloadId],
+        );
+        const duplicate = rows[0];
+        if (duplicate && ['completed', 'error', 'cancelled'].includes(String(duplicate.slave_status || ''))) {
+          await repo.pool.query(
+            `UPDATE ${repo.schema}.jobs
+                SET options = COALESCE(options, '{}'::jsonb) || jsonb_build_object(
+                      'simple_server_download_id', $1::text,
+                      'duplicate_resolved_from_download_id', $2::text,
+                      'duplicate_resolved_at', now()::text
+                    )
+              WHERE id = $3`,
+            [String(duplicateDownloadId), String(row.id), hubJobId],
+          );
+          await repo.appendLog(hubJobId, 'warn', `↪️  slave duplicate gevolgd: download #${row.id} -> #${duplicateDownloadId}`);
+          await processOne({
+            ...row,
+            ...duplicate,
+            id: duplicate.id,
+            download_id: duplicate.id,
+            hub_job_id: hubJobId,
+          });
+          return;
+        }
+      }
       await repo.cancelJob(hubJobId);
       await repo.appendLog(hubJobId, 'warn', `↯ slave cancelled: ${row.slave_error || 'cancelled'}`);
       logger.info('slave.cancelled', { hubJob: hubJobId, downloadId: row.id });
@@ -413,4 +452,4 @@ function startSlavePoller({ repo, logger, intervalMs = 5000 }) {
   return { stop: async () => { stopping = true; await loopPromise; } };
 }
 
-module.exports = { startSlavePoller, _test: { isMediaPath } };
+module.exports = { startSlavePoller, _test: { isMediaPath, parseDuplicateActiveDownloadId } };

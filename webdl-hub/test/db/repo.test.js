@@ -12,7 +12,7 @@ const DATABASE_URL = process.env.DATABASE_URL || 'postgres://jurgen@localhost:54
 const TEST_SCHEMA = 'webdl_test';
 
 test('classifyLane zet losse TikTok videos in de snelle video-lane', () => {
-  assert.equal(classifyLane('https://www.tiktok.com/@user/video/1234567890123456789', 'ytdlp'), 'video');
+  assert.equal(classifyLane('https://www.tiktok.com/@user/video/1234567890123456789', 'ytdlp'), 'image');
 });
 
 test('classifyLane houdt TikTok tags en profielen in process-video', () => {
@@ -20,15 +20,34 @@ test('classifyLane houdt TikTok tags en profielen in process-video', () => {
   assert.equal(classifyLane('https://www.tiktok.com/@toetokqueen', 'ytdlp'), 'process-video');
 });
 
+test('classifyLane houdt YouTube altijd in heavy lane', () => {
+  assert.equal(classifyLane('https://www.youtube.com/watch?v=abc', 'ytdlp'), 'process-video');
+  assert.equal(classifyLane('https://www.youtube.com/shorts/abc', 'ytdlp'), 'process-video');
+  assert.equal(classifyLane('https://youtu.be/abc', 'ytdlp'), 'process-video');
+  assert.equal(classifyLane('https://www.youtube.com/@channel/shorts', 'ytdlp'), 'process-video');
+  assert.equal(classifyLane('https://www.youtube.com/playlist?list=PL123', 'ytdlp'), 'process-video');
+});
+
+test('classifyLane zet non-merge video zonder nabewerking in fast lane', () => {
+  assert.equal(classifyLane('https://cdn.example.com/video.mp4', 'ytdlp'), 'image');
+  assert.equal(classifyLane('https://www.xvideos.com/video.abc/title', 'ytdlp'), 'image');
+  assert.equal(classifyLane('https://k2s.cc/file/abc', 'slave-delegate'), 'image');
+  assert.equal(classifyLane('https://x.com/example', 'gallerydl'), 'image');
+  assert.equal(classifyLane('https://twitter.com/example/status/123', 'gallerydl'), 'image');
+});
+
 test('defaultJobPriority geeft snelle image/reddit jobs voorrang', () => {
   assert.equal(defaultJobPriority('https://example.com/a.jpg', 'ytdlp'), 55);
   assert.equal(defaultJobPriority('https://www.reddit.com/r/test/', 'reddit'), 65);
-  assert.equal(classifyLane('https://www.redgifs.com/watch/SomeClipId', 'redgifs'), 'video');
+  assert.equal(classifyLane('https://www.redgifs.com/watch/SomeClipId', 'redgifs'), 'image');
   assert.equal(defaultJobPriority('https://www.redgifs.com/watch/SomeClipId', 'redgifs'), 25);
   assert.equal(classifyLane('https://vipergirls.to/threads/6777850-Example', 'gallerydl'), 'gallery');
+  assert.equal(classifyLane('https://x.com/example', 'gallerydl'), 'image');
   assert.equal(defaultJobPriority('https://imgur.com/gallery/abc', 'gallerydl'), 60);
   assert.equal(defaultJobPriority('https://www.youtube.com/watch?v=abc', 'ytdlp'), 0);
-  assert.equal(defaultJobPriority('https://cdn.example.com/video.mp4', 'ytdlp'), 20);
+  assert.equal(defaultJobPriority('https://cdn.example.com/video.mp4', 'ytdlp'), 55);
+  assert.equal(defaultJobPriority('https://www.xvideos.com/video.abc/title', 'ytdlp'), 55);
+  assert.equal(defaultJobPriority('https://k2s.cc/file/abc', 'slave-delegate'), 70);
 });
 
 async function canConnect() {

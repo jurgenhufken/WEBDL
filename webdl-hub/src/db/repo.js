@@ -8,9 +8,9 @@ const VALID_SCHEMA = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 
 // Lane classifier: bepaalt concurrency-bucket.
 // Oude UI-banen:
-//  - Heavy:  'process-video' voor video met postprocessing/merge/transcode.
-//  - Middle: 'video' voor langere/directe video zonder postprocessing.
-//  - Fast:   'image' en 'gallery' voor afbeeldingen, imagehosts en scans.
+//  - Heavy:  'process-video' voor collections of video met postprocessing/merge/transcode.
+//  - Middle: 'video' voor langere mixed-content adapters.
+//  - Fast:   'image' en 'gallery' voor afbeeldingen, imagehosts, scans en video zonder nabewerking.
 const IMAGE_URL_RE = /\.(jpe?g|png|webp|gif|avif|bmp|tiff?)(\?|$)/i;
 const DIRECT_VIDEO_RE = /\.(mp4|webm|mkv|mov|m4v|avi|wmv|flv|ts|m2ts|mpg|mpeg|ogv|3gp|3g2)(\?|$)/i;
 const MERGE_VIDEO_HOSTS = [
@@ -27,16 +27,24 @@ function isDirectTikTokVideo(pathname) {
   return /^\/@[^/]+\/video\/\d+\/?$/i.test(pathname);
 }
 
+function isTwitterHost(host) {
+  return host === 'x.com' || host === 'twitter.com' || host === 'mobile.twitter.com';
+}
+
 function classifyLane(url, adapter) {
   const u = String(url || '').toLowerCase();
-  if (DIRECT_VIDEO_RE.test(u)) return 'video';
+  if (DIRECT_VIDEO_RE.test(u)) return 'image';
   if (adapter === 'slave-delegate') {
     // Slave-delegated hosts are handled by simple-server; in the hub they
-    // stay Fast unless the URL is a direct video, which belongs in Middle.
+    // stay Fast; simple-server decides its own light/heavy runtime lane.
     return 'image';
   }
   if (IMAGE_URL_RE.test(u)) return 'image';
   if (adapter === 'gallerydl' || adapter === 'xenforo') {
+    try {
+      const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+      if (adapter === 'gallerydl' && isTwitterHost(host)) return 'image';
+    } catch (_) {}
     // gallery-dl batches kunnen zelf veel media bevatten. Houd ze serieel,
     // zodat grote Viper/forum threads elkaar niet beconcurreren.
     return 'gallery';
@@ -45,7 +53,7 @@ function classifyLane(url, adapter) {
     // gallery-dl/reddit zijn meestal images; videos in deze flow zijn zeldzaam.
     return 'image';
   }
-  if (adapter === 'redgifs') return 'video';
+  if (adapter === 'redgifs') return 'image';
   if (adapter === 'ofscraper') {
     // ofscraper gebruikt een gedeeld profiel/cache; parallelle runs raken elkaar.
     return 'process-video';
@@ -55,19 +63,19 @@ function classifyLane(url, adapter) {
     return 'video';
   }
   // Alleen bekende merge-/sessie-zware hosts blokkeren de zware lane.
-  // Andere yt-dlp hosts (zoals directe tube sites) mogen parallel in video.
+  // Andere yt-dlp hosts gebruiken single-file best en mogen in fast.
   if (adapter === 'ytdlp') {
     try {
       const parsed = new URL(url);
       const host = parsed.hostname.replace(/^www\./, '');
       if (isTikTokHost(host)) {
-        return isDirectTikTokVideo(parsed.pathname) ? 'video' : 'process-video';
+        return isDirectTikTokVideo(parsed.pathname) ? 'image' : 'process-video';
       }
       if (MERGE_VIDEO_HOSTS.some((h) => host === h || host.endsWith('.' + h))) {
         return 'process-video';
       }
     } catch (_) {}
-    return 'video';
+    return 'image';
   }
   return 'video';
 }

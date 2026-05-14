@@ -334,7 +334,7 @@ function plan(url, opts = {}) {
       idleTimeoutMs: Number.parseInt(process.env.WEBDL_DIRECT_MEDIA_IDLE_TIMEOUT_MS || String(90 * 1000), 10),
     };
   }
-  const quality = opts.quality || (isMergeVideoUrl(plannedUrl) ? 'bv*+ba/best' : 'best/bv*+ba');
+  const quality = opts.quality || (isMergeVideoUrl(plannedUrl) ? 'bv*+ba/best' : 'best');
   const isYoutube = /(?:youtube\.com|youtu\.be)/i.test(String(plannedUrl || ''));
   const isTikTok = isTikTokUrl(plannedUrl);
   const args = [

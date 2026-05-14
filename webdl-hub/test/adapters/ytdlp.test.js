@@ -24,11 +24,19 @@ test('plan bouwt yt-dlp-argv met output-template', () => {
 test('plan gebruikt single-file voorkeur voor directe videosites', () => {
   const p = ytdlp.plan('https://www.xvideos.com/video.abc/title', { cwd: '/tmp/jobdir' });
   const formatIndex = p.args.indexOf('-f');
-  assert.equal(p.args[formatIndex + 1], 'best/bv*+ba');
+  assert.equal(p.args[formatIndex + 1], 'best');
 });
 
-test('plan houdt merge-voorkeur voor zware sites', () => {
+test('plan houdt merge-voorkeur voor losse YouTube videos', () => {
   const p = ytdlp.plan('https://www.youtube.com/watch?v=abc', { cwd: '/tmp/jobdir' });
+  const formatIndex = p.args.indexOf('-f');
+  assert.equal(p.args[formatIndex + 1], 'bv*+ba/best');
+  assert.ok(p.idleTimeoutMs > 0);
+  assert.ok(p.timeoutMs > 0);
+});
+
+test('plan houdt merge-voorkeur voor zware YouTube collecties', () => {
+  const p = ytdlp.plan('https://www.youtube.com/@channel/shorts', { cwd: '/tmp/jobdir' });
   const formatIndex = p.args.indexOf('-f');
   assert.equal(p.args[formatIndex + 1], 'bv*+ba/best');
   assert.ok(p.idleTimeoutMs > 0);
@@ -38,7 +46,7 @@ test('plan houdt merge-voorkeur voor zware sites', () => {
 test('plan behandelt losse TikTok videos als directe video', () => {
   const p = ytdlp.plan('https://www.tiktok.com/@user/video/1234567890123456789', { cwd: '/tmp/jobdir' });
   const formatIndex = p.args.indexOf('-f');
-  assert.equal(p.args[formatIndex + 1], 'best/bv*+ba');
+  assert.equal(p.args[formatIndex + 1], 'best');
   assert.ok(p.args.includes('--impersonate'));
 });
 

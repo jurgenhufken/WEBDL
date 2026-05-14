@@ -167,9 +167,9 @@ function workLane(lane) {
   switch (lane) {
     case 'image':
     case 'gallery':
-      return { key: 'fast', label: 'Fast', detail: 'afbeeldingen', lanes: ['image', 'gallery'] };
+      return { key: 'fast', label: 'Fast', detail: 'afbeeldingen en video zonder nabewerking', lanes: ['image', 'gallery'] };
     case 'video':
-      return { key: 'middle', label: 'Middle', detail: 'video zonder postprocessing', lanes: ['video'] };
+      return { key: 'middle', label: 'Middle', detail: 'mixed adapters', lanes: ['video'] };
     case 'process-video':
       return { key: 'heavy', label: 'Heavy', detail: 'video met postprocessing', lanes: ['process-video'] };
     case 'paused':
@@ -191,8 +191,8 @@ function laneMetaLabel(lane) {
 
 function aggregateWorkLanes(rows = []) {
   const base = [
-    { key: 'fast', label: 'Fast', detail: 'afbeeldingen', queued: 0, running: 0, failed: 0, paused: 0 },
-    { key: 'middle', label: 'Middle', detail: 'video zonder postprocessing', queued: 0, running: 0, failed: 0, paused: 0 },
+    { key: 'fast', label: 'Fast', detail: 'afbeeldingen en video zonder nabewerking', queued: 0, running: 0, failed: 0, paused: 0 },
+    { key: 'middle', label: 'Middle', detail: 'mixed adapters', queued: 0, running: 0, failed: 0, paused: 0 },
     { key: 'heavy', label: 'Heavy', detail: 'video met postprocessing', queued: 0, running: 0, failed: 0, paused: 0 },
   ];
   const byKey = new Map(base.map((row) => [row.key, row]));

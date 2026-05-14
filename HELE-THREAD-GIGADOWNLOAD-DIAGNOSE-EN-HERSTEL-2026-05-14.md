@@ -1430,6 +1430,171 @@ Gate 3 gallery-filter/search diagnose:
 - Nuance: algemene zoekopdrachten blijven relatief traag op deze databasegrootte en tonen bij `Alles` ook screenshots. Dit is niet hetzelfde als "zoekindex is structureel opgelost"; het directe UI-abortprobleem is verholpen, maar echte zoekmodernisering blijft een aparte optimalisatiestap.
 - Actie uitgevoerd: gallery-service herstart op poort `35731`.
 
+Gate 3 lifecycle-diagnose uitgevoerd:
+
+- `webdl-hub/src/api/routes-jobs.js` heeft nu `GET /api/jobs/meta/lifecycle`.
+- Endpoint is read-only en accepteert `job_id`, `download_id` of `url`.
+- Response koppelt:
+  - hub-jobstatus, adapter, opties, files en recente logs;
+  - `simple_server_download_id` en/of `public.downloads`-rijen;
+  - `download_files`-rijen;
+  - gallery-zichtbaarheid onder de standaard thumb-ready filter;
+  - expliciete mismatches zoals `hub_failed_download_completed`, `slave_delegate_running_without_simple_server_download_id` en `completed_download_not_visible_in_default_gallery`.
+- Secretachtige velden en logfragmenten met `auth`, `token`, `cookie`, `password`, `secret` of `x_bc` worden gemaskeerd in de response.
+- K2S-URLs worden ook op file-id gekoppeld, zodat `k2s.cc/file/<id>` en `keep2share.cc/file/<id>` dezelfde lifecycle kunnen tonen.
+- Verificatie:
+  - `node --check webdl-hub/src/api/routes-jobs.js`: groen;
+  - gerichte tests `routes-jobs-lifecycle.test.js` en `routes-jobs-k2s-preflight.test.js`: groen;
+  - `npm test` in `webdl-hub`: groen, 149 tests geslaagd.
+- Live uitgevoerd:
+  - `com.webdl.hub` herstart;
+  - `GET /api/health`: groen;
+  - `GET /api/jobs/meta/lifecycle?job_id=46441`: `service="job-lifecycle"`, `readOnly=true`, `state="failed"`, `jobs=1`, `downloads=2`, `mismatches=[]`.
+
+Gate 3 K2S remote preflight uitgevoerd:
+
+- `screen-recorder-native/src/simple-server.js` en `screen-recorder-native/src/simple-server.compiled.js` hebben nu `GET /api/keep2share/preflight`.
+- Endpoint is read-only:
+  - zonder URL test het welke authbronnen aanwezig zijn en of K2S een web-token/API-token accepteert;
+  - met URL test het of die concrete K2S file-id naar een directe download-URL kan worden resolved, zonder het bestand te downloaden;
+  - secrets worden niet geretourneerd.
+- Live status na simple-server-herstart:
+  - lokale auth aanwezig: cookie uit `.env`, `K2S_X_BC`, username;
+  - ontbreekt: `K2S_PASSWORD`, `K2S_AUTH_TOKEN`, `K2S_ACCESS_TOKEN`, `K2S_WEB_ACCESS_TOKEN`;
+  - algemene web-auth geeft een token terug via `firefox-localstorage`.
+- Bewezen via remote preflight:
+  - file-id `e71dfdf1462d2`: accepted, directe download-URL resolvebaar;
+  - file-id `b36c0262df413`: accepted, directe download-URL resolvebaar;
+  - file-id `bd41f519e6fb7`: accepted, directe download-URL resolvebaar;
+  - oude retry-kandidaten `0962a96510e86`, `0266c56647e96`, `755d8d9d42cac`, `9424e49b9f91c`: rejected, `file_resolve` faalt met K2S web-API 404.
+- Conclusie: K2S-auth is niet algemeen stuk. De vier oude retry-kandidaten zijn met de huidige sessie/file-state niet downloadbaar; opnieuw retryen blijft dus onzinnig totdat een sterkere authbron aanwezig is, zoals `K2S_PASSWORD`, `K2S_ACCESS_TOKEN` of een permanente API-token.
+- Verificatie:
+  - `node --check screen-recorder-native/src/simple-server.js`: groen;
+  - `node --check screen-recorder-native/src/simple-server.compiled.js`: groen;
+  - `GET /health` op simple-server na herstart: groen.
+
+Gate 3 K2S canonical platform fix uitgevoerd:
+
+- Gebruikersobservatie bevestigd: recente directe downloads vanaf K2S/Keep2Share werden in `downloads.platform` als `k2s` opgeslagen en gekoppeld aan `source_site="k2s"`, terwijl dezelfde klasse canonical `keep2share` hoort te zijn.
+- Bewezen DB-state vóór fix: 6 rijen met `platform='k2s'`, waaronder `387155` t/m `387160`.
+- Oorzaak:
+  - `webdl-hub/src/queue/slave-router.js` normaliseerde `source_context.platform='k2s'` niet naar `keep2share`, waardoor `storagePlatform` `k2s` werd.
+  - `screen-recorder-native/src/simple-server.js` kende `k2s`, maar niet alle host-aliasen zoals `k2s.cc` en `k2s.io` in `normalizePlatform`.
+  - `webdl-gallery/server.js` groepeerde `platform='k2s'` niet als `keep2share`.
+- Actie uitgevoerd:
+  - hub slave-router canoniseert `k2s`, `k2s.cc`, `k2s.io`, `k2scc`, `_keep2share` en subdomeinen naar `keep2share`;
+  - simple-server normaliseert dezelfde K2S-aliasen naar `keep2share`;
+  - gallery platform/channel grouping behandelt bestaande `k2s`-achtige platformwaarden als `keep2share`;
+  - bestaande 6 DB-rijen met `platform='k2s'` zijn bijgewerkt naar `platform='keep2share'`; metadatawaarden zoals `source_site`, `original_platform`, `source_context.platform` en `origin_thread.platform` zijn waar aanwezig ook naar `keep2share` gecanoniseerd.
+- Verificatie:
+  - `SELECT platform, COUNT(*) FROM downloads WHERE platform IN ('k2s','keep2share')` toont alleen nog `keep2share`;
+  - `node --check` groen voor hub slave-router, hub routes, simple-server, runtimekopie en gallery;
+  - `npm test` in `webdl-hub`: groen, 152 tests geslaagd;
+  - gerichte test toegevoegd: `delegateToSlave canoniseert K2S bronplatform naar keep2share`;
+  - live herstart uitgevoerd voor `com.webdl.simple-server`, `com.webdl.hub` en `com.webdl.gallery`; alle healthchecks groen.
+
+Gate 3 FileJoker/ViperGirls redirect en K2S duplicate-race uitgevoerd:
+
+- Gebruikersobservatie bij ViperGirls-thread `5250806`: preview toonde 15 FileJoker `.zip` URLs, maar de batch maakte 8 `gallerydl` jobs aan op de ViperGirls thread-URL zelf.
+- Oorzaak:
+  - `routes-jobs.js` redirectte bij ViperGirls-context elke niet-thread host-URL naar een hele-thread `gallerydl` scan.
+  - Voor imagehost-links is dat gewenst, maar voor archive/file-locker links zoals `filejoker.net/...zip` is dat fout.
+- Actie uitgevoerd:
+  - FileJoker/herqueue jobs `46472` t/m `46486` zijn op verzoek verwijderd uit de hub queue; lege hub-outputdirs zijn opgeruimd.
+  - `routes-jobs.js` bewaart archive/file-locker URLs nu als eigen job-URL en redirectt die niet naar ViperGirls thread-scan.
+  - Regressietest toegevoegd: `Vipergirls FileJoker archive links worden niet naar thread-scan geredirect`.
+- K2S-proefjob diagnose:
+  - job `46454` stond `cancelled`, maar de echte K2S download was completed als download `387159`;
+  - bestand bestaat fysiek: `/Users/jurgen/Downloads/WEBDL/keep2share/unknown/Keep2Share - h1nvnMPEG-4.mp4/h1nvnMPEG-4.mp4`, 2.06 GB;
+  - gallery vindt dit item als `file-4800282`, platform `keep2share`.
+- Oorzaak van de misleidende `cancelled` status:
+  - simple-server maakte door een race een duplicate download `387160`;
+  - `387160` werd gecancelled met `Duplicate URL; al actief als #387159`;
+  - de hub-poller volgde die duplicate-verwijzing niet en zette hub-job `46454` daardoor op `cancelled`.
+- Actie uitgevoerd:
+  - job `46454` handmatig hersteld naar `done`, `progress_pct=100`, gekoppeld aan `simple_server_download_id=387159`;
+  - `webdl.files` heeft nu de file-koppeling voor job `46454`;
+  - `slave-poller.js` volgt voortaan `Duplicate URL; al actief als #...` naar de echte download en verwerkt die alsnog als completed/error/cancelled.
+- Verificatie:
+  - `node --check webdl-hub/src/api/routes-jobs.js webdl-hub/src/queue/slave-poller.js`: groen;
+  - gerichte tests groen: K2S preflight, ViperGirls routes, slave-poller duplicate parsing;
+  - `git diff --check`: schoon;
+  - `com.webdl.hub` herstart; `GET /api/health`: groen.
+
+Gate 3 ViperGirls dedupe-regressie hersteld:
+
+- Gebruikersobservatie bevestigd: na klikken op hele thread kwamen meerdere `gallerydl` jobs binnen voor dezelfde ViperGirls-thread.
+- Live voorbeelden:
+  - thread `16182496` had 8 queued duplicates;
+  - thread `4972758` had meerdere duplicates en malformed URLs met herhaalde `/threads/<id>-slug/threads/<id>-slug/...`;
+  - twee FileJoker jobs `46500` en `46501` faalden direct en zijn verwijderd op verzoek.
+- Oorzaak:
+  - oude dedupe was niet bewust uitgezet, maar werd omzeild doordat de redirect-lock op de host/image URL zat, niet op de uiteindelijke canonical thread-URL;
+  - malformed ViperGirls context-URLs werden niet volledig teruggebracht naar `https://vipergirls.to/threads/<id>-slug`.
+- Actie uitgevoerd:
+  - `normalizeVipergirlsThreadUrl` herkent nu ook herhaalde ingebedde thread-segmenten;
+  - `sourceContext` URLs worden gecanoniseerd voordat ze voor redirect/dedupe gebruikt worden;
+  - ViperGirls host-media redirect gebruikt nu een advisory lock op de uiteindelijke canonical thread-URL;
+  - live queue opgeschoond: per thread blijft 1 actieve job over; duplicaten zijn cancelled, FileJoker-failures verwijderd.
+- Live verificatie:
+  - test-post met imagehost-link + malformed ViperGirls context retourneerde `duplicate:true` op bestaande job `46495`;
+  - actieve ViperGirls gallerydl jobs zijn teruggebracht naar 1 per thread.
+- Verificatie:
+  - regressietests toegevoegd voor herhaalde ingebedde ViperGirls thread URLs en context URLs;
+  - `npm test` in `webdl-hub`: groen, 156 tests geslaagd.
+
+Gate 3 stabilisatie na vastgelopen hub/gallerydl:
+
+- Gebruikersobservatie:
+  - hub leek vast te lopen terwijl er opnieuw ViperGirls/gallery items binnenkwamen;
+  - na hub-herstart bleken oude `gallery-dl` processen als orphan met `PPID=1` te kunnen doorlopen;
+  - stale-reclaim kon daarna dezelfde hubjobs opnieuw aanbieden, waardoor dubbele `gallery-dl` processen voor dezelfde thread ontstonden.
+- Bewezen runtime-status na opschonen:
+  - `simple-server` health/status groen: `activeDownloads=0`, `queuedDownloads=0`, `pendingDownloads=1`;
+  - de ene pending simple-server rij is de bekende oude TikTok-rij, geen actuele K2S/ViperGirls download;
+  - hub health groen; gallery health groen;
+  - `pgrep -lf 'gallery-dl|yt-dlp'` leeg;
+  - hub stats: `running=0`, `queued=0`, `paused=6691`.
+- Conclusie: er staat niets actief vast; de resterende hub-backlog staat gepauzeerd en moet gericht hervat worden, niet blind allemaal tegelijk.
+- Oorzaak:
+  - `webdl-hub/src/util/process-runner.js` start downloadprocessen detached, zodat een hele process group kan worden gestopt;
+  - `webdl-hub/src/queue/worker.js` hield actieve child-processen niet centraal bij;
+  - `pool.stop()` zette alleen `stopping=true` en wachtte op actieve jobs;
+  - bij een launchd-herstart kon de hub verdwijnen terwijl `gallery-dl` bleef doorlopen;
+  - daarna kon `reclaimStaleRunning()` dezelfde job opnieuw queueën.
+- Actie uitgevoerd:
+  - `webdl-hub/src/queue/worker.js` registreert actieve `runProcess(...)` runners in `activeProcesses`;
+  - `pool.stop()` stuurt nu `SIGTERM` naar alle actieve runners;
+  - `process-runner` escaleert daarna zelf naar `SIGKILL` als het childproces niet stopt;
+  - geen Giga-state, manifest-idempotentie of watchdog-gedrag toegevoegd;
+  - hub herstart via `launchctl kickstart -k gui/$(id -u)/com.webdl.hub`.
+- Verificatie:
+  - `node --check` groen voor simple-server, runtimekopie, gallery, hub routes, slave-poller, slave-router en worker;
+  - `npm test` in `webdl-hub`: groen, 156 tests geslaagd;
+  - live na hub-herstart: hub health groen, `pgrep -lf 'gallery-dl|yt-dlp'` leeg, `running=0`, `queued=0`, `paused=6691`.
+
+Gate 3 lane-correctie na chat-scan:
+
+- Chat-bewijs opnieuw gelezen uit lokale rollout-transcripts:
+  - rond `04:16` was de afspraak dat oude YouTube-downloads moesten stoppen/pauzeren, zodat ViperGirls/K2S/FFF niet verdrongen werden;
+  - rond `10:38` was de correctie dat een proef niet met YouTube/heavy moest beginnen maar met fastlane;
+  - rond `10:48` is expliciet gecorrigeerd: `youtube is altijd heavy`;
+  - documenten zijn ondersteunend; de chat-afspraak is leidend.
+- Foute tussenstap:
+  - ik had losse YouTube `watch?v=...`, `/shorts/...` en `youtu.be/...` tijdelijk als fast (`image`) behandeld;
+  - ik had daardoor bestaande gepauzeerde YouTube-hubjobs naar `pauseLane=image` gezet;
+  - dat was in strijd met de chat-afspraak en met de bestaande YouTube-heavy/throttle inrichting.
+- Herstel uitgevoerd:
+  - YouTube valt opnieuw via `MERGE_VIDEO_HOSTS` onder heavy (`process-video`);
+  - `ytdlp.plan(...)` gebruikt voor alle YouTube/mergehosts weer `-f bv*+ba/best`;
+  - non-YouTube directe video zonder nabewerking kan fast blijven;
+  - bestaande DB-backlog hersteld: `6676` gepauzeerde YouTube-jobs staan weer op `pauseLane=process-video`;
+  - de 6 proefjobs van `@FeetAndMore` zijn historisch teruggezet van `lane=image` naar `lane=process-video`.
+- Verificatie:
+  - gerichte hub-tests groen voor `repo.test.js` en `ytdlp.test.js`: 30 tests geslaagd;
+  - DB-controle: `0` YouTube-jobs met `pauseLane=image`, `0` YouTube-jobs met `lane=image`, `6676` gepauzeerde YouTube-jobs met `pauseLane=process-video`;
+  - geen automatische hervatting uitgevoerd.
+
 ## Rollbackstrategie
 
 Als er iets misgaat:

@@ -62,11 +62,20 @@ function hostnameFromUrl(raw) {
   }
 }
 
+function canonicalPlatformAlias(value) {
+  const raw = String(value || '').trim().toLowerCase().replace(/^www\./, '');
+  if (!raw) return '';
+  if (raw === 'k2s' || raw === 'k2scc' || raw === '_keep2share') return 'keep2share';
+  if (raw === 'keep2share.cc' || raw === 'k2s.cc' || raw === 'k2s.io') return 'keep2share';
+  if (raw.endsWith('.keep2share.cc') || raw.endsWith('.k2s.cc') || raw.endsWith('.k2s.io')) return 'keep2share';
+  return raw;
+}
+
 function normalizeSourceSite(sourceContext) {
   if (!sourceContext || typeof sourceContext !== 'object') return '';
-  const platform = String(sourceContext.platform || '').trim().toLowerCase();
+  const platform = canonicalPlatformAlias(sourceContext.platform);
   if (platform) return platform;
-  return hostnameFromUrl(sourceContext.url);
+  return canonicalPlatformAlias(hostnameFromUrl(sourceContext.url));
 }
 
 function buildSourceGraph({ mediaUrl, storagePlatform, sourceContext }) {
@@ -157,31 +166,34 @@ async function delegateToSlave(pool, { url, platform, metadata = {}, priority = 
         ? metadata.source_context
         : null)
     : null;
-  const originalPlatform = String(metadata.original_platform || metadata.source_site || metadata.original_site || '').trim().toLowerCase();
+  const originalPlatform = canonicalPlatformAlias(metadata.original_platform || metadata.source_site || metadata.original_site || '');
   const originalChannel = String(metadata.original_channel || '').trim();
   const originalTitle = String(metadata.original_title || '').trim();
   const sourceUrl = sourceContext && sourceContext.url ? String(sourceContext.url) : url;
   const sourceSite = sourceContext && sourceContext.url ? normalizeSourceSite(sourceContext) : '';
-  const storagePlatform = sourceSite || originalPlatform || platform;
+  const storagePlatform = canonicalPlatformAlias(sourceSite || originalPlatform || platform);
   const storageChannel = sourceContext && sourceContext.channel ? String(sourceContext.channel) : originalChannel || 'unknown';
   const storageTitle = sourceContext && sourceContext.title ? String(sourceContext.title) : originalTitle || 'untitled';
+  const storedSourceContext = sourceContext && typeof sourceContext === 'object'
+    ? { ...sourceContext, platform: sourceSite || canonicalPlatformAlias(sourceContext.platform) || storagePlatform }
+    : null;
   const storedMetadata = {
     ...metadata,
     origin: 'webdl-hub',
   };
-  if (sourceContext && sourceContext.url) {
+  if (storedSourceContext && storedSourceContext.url) {
     storedMetadata.webdl_pin_context = true;
-    storedMetadata.origin_thread = sourceContext;
-    storedMetadata.source_context = sourceContext;
+    storedMetadata.origin_thread = storedSourceContext;
+    storedMetadata.source_context = storedSourceContext;
     storedMetadata.source_site = sourceSite || '';
-    storedMetadata.source_sites = Array.from(new Set([sourceSite, ...(Array.isArray(metadata.source_sites) ? metadata.source_sites : [])].filter(Boolean)));
-    storedMetadata.source_graph = buildSourceGraph({ mediaUrl: url, storagePlatform, sourceContext });
+    storedMetadata.source_sites = Array.from(new Set([sourceSite, ...(Array.isArray(metadata.source_sites) ? metadata.source_sites.map(canonicalPlatformAlias) : [])].filter(Boolean)));
+    storedMetadata.source_graph = buildSourceGraph({ mediaUrl: url, storagePlatform, sourceContext: storedSourceContext });
     storedMetadata.webdl_media_url = url;
     storedMetadata.webdl_detected_platform = platform;
   } else if (originalPlatform && originalPlatform !== platform) {
     storedMetadata.webdl_pin_context = true;
     storedMetadata.source_site = originalPlatform;
-    storedMetadata.source_sites = Array.from(new Set([originalPlatform, ...(Array.isArray(metadata.source_sites) ? metadata.source_sites : [])].filter(Boolean)));
+    storedMetadata.source_sites = Array.from(new Set([originalPlatform, ...(Array.isArray(metadata.source_sites) ? metadata.source_sites.map(canonicalPlatformAlias) : [])].filter(Boolean)));
     storedMetadata.webdl_media_url = url;
     storedMetadata.webdl_detected_platform = platform;
   }

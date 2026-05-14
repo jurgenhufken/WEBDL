@@ -42,14 +42,14 @@ function createTestQueue(calls) {
   };
 }
 
-async function startTestServer({ repo, queue }) {
+async function startTestServer({ repo, queue, adapters = [{ name: 'gallerydl' }], detectOverride = null }) {
   const app = express();
   app.use(express.json());
   app.use('/api/jobs', createJobsRouter({
     repo,
     queue,
-    adapters: [{ name: 'gallerydl' }],
-    detect: () => ({ name: 'gallerydl' }),
+    adapters,
+    detect: detectOverride || (() => ({ name: 'gallerydl' })),
   }));
   app.use((err, _req, res, _next) => res.status(500).json({ error: String(err.message || err) }));
   const server = http.createServer(app);
@@ -109,6 +109,21 @@ test('Vipergirls dubbele thread-prefix wordt naar canonical thread hersteld', as
   assert.deepEqual(recentCall.options, { statuses: ['queued', 'running'] });
 });
 
+test('Vipergirls herhaalde ingebedde thread-url wordt naar canonical thread hersteld', async (t) => {
+  const calls = [];
+  const repo = createTestRepo(calls);
+  const queue = createTestQueue(calls);
+  const { server, base } = await startTestServer({ repo, queue });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+
+  const result = await postJSON(base, '/api/jobs', {
+    url: 'https://vipergirls.to/threads/4972758-Real-Kinky-Amateur-Pics-Private-Collection!!!/threads/4972758-Real-Kinky-Amateur-Pics-Private-Collection!!!/page3',
+  });
+
+  assert.equal(result.status, 201);
+  assert.equal(result.data.url, 'https://vipergirls.to/threads/4972758-Real-Kinky-Amateur-Pics-Private-Collection!!!');
+});
+
 test('Vipergirls host-media redirect dedupet alleen actieve hele-thread jobs', async (t) => {
   const calls = [];
   const repo = createTestRepo(calls);
@@ -141,6 +156,43 @@ test('Vipergirls host-media redirect dedupet alleen actieve hele-thread jobs', a
   assert.equal(enqueueCall.job.options.contextUrl, 'https://vipergirls.to/threads/67890-big-thread');
 });
 
+test('Vipergirls FileJoker archive links worden niet naar thread-scan geredirect', async (t) => {
+  const calls = [];
+  const repo = createTestRepo(calls);
+  const queue = createTestQueue(calls);
+  const adapters = [{ name: 'gallerydl' }, { name: 'ytdlp' }];
+  const { server, base } = await startTestServer({
+    repo,
+    queue,
+    adapters,
+    detectOverride: (url) => ({ name: /filejoker\.net/i.test(url) ? 'ytdlp' : 'gallerydl' }),
+  });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+
+  const filejokerUrl = 'https://filejoker.net/kggb37zf0dva/ex-girlfriends_24.03.2020_RG_0234.zip';
+  const result = await postJSON(base, '/api/jobs', {
+    url: filejokerUrl,
+    force: true,
+    options: {
+      sourceContext: {
+        platform: 'vipergirls',
+        url: 'https://vipergirls.to/threads/67890-big-thread/page4',
+        channel: 'vipergirls',
+        title: 'big thread',
+      },
+    },
+  });
+
+  assert.equal(result.status, 201);
+  assert.equal(result.data.id, 'new-job');
+  assert.equal(result.data.url, filejokerUrl);
+
+  const enqueueCall = calls.find((call) => call.method === 'enqueue');
+  assert.equal(enqueueCall.job.url, filejokerUrl);
+  assert.equal(enqueueCall.job.adapter, 'ytdlp');
+  assert.equal(enqueueCall.job.options.contextUrl, 'https://vipergirls.to/threads/67890-big-thread');
+});
+
 test('Vipergirls host-media context herstelt dubbele thread-prefix', async (t) => {
   const calls = [];
   const repo = createTestRepo(calls);
@@ -162,6 +214,32 @@ test('Vipergirls host-media context herstelt dubbele thread-prefix', async (t) =
 
   assert.equal(result.status, 201);
   assert.equal(result.data.id, 'new-job');
+  assert.equal(result.data.url, 'https://vipergirls.to/threads/67890-big-thread');
+
+  const enqueueCall = calls.find((call) => call.method === 'enqueue');
+  assert.equal(enqueueCall.job.options.contextUrl, 'https://vipergirls.to/threads/67890-big-thread');
+});
+
+test('Vipergirls host-media context herstelt herhaalde ingebedde thread-url', async (t) => {
+  const calls = [];
+  const repo = createTestRepo(calls);
+  const queue = createTestQueue(calls);
+  const { server, base } = await startTestServer({ repo, queue });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+
+  const result = await postJSON(base, '/api/jobs', {
+    url: 'https://imgbox.com/example-host-file',
+    options: {
+      sourceContext: {
+        platform: 'vipergirls',
+        url: 'https://vipergirls.to/threads/67890-big-thread/threads/67890-big-thread/page4',
+        channel: 'vipergirls',
+        title: 'big thread',
+      },
+    },
+  });
+
+  assert.equal(result.status, 201);
   assert.equal(result.data.url, 'https://vipergirls.to/threads/67890-big-thread');
 
   const enqueueCall = calls.find((call) => call.method === 'enqueue');

@@ -18,3 +18,8 @@ test('slave-poller slaat thumbnails en previews over', () => {
   assert.equal(_test.isMediaPath('/tmp/download/video_thumb.jpg'), false);
   assert.equal(_test.isMediaPath('/tmp/download/video_preview.webp'), false);
 });
+
+test('slave-poller herkent duplicate-download verwijzingen', () => {
+  assert.equal(_test.parseDuplicateActiveDownloadId('Duplicate URL; al actief als #387159'), 387159);
+  assert.equal(_test.parseDuplicateActiveDownloadId('cancelled'), 0);
+});
