@@ -830,14 +830,9 @@
       gal().restoreViewerAnchor(anchorId).catch(() => {});
     }
 
-    // Verwijder de viewer history entry zodat back altijd naar gallery gaat
+    // Pop de viewer history entry (tenzij we al via popstate kwamen)
     if (!skipHistory) {
-      try {
-        // Gebruik replaceState om de viewer-entry te overschrijven met een gallery-state
-        // zodat back nooit voorbij de gallery gaat
-        const galleryState = { page: 'gallery' };
-        history.replaceState(galleryState, '', location.href);
-      } catch (_) {}
+      try { history.back(); } catch (_) {}
     }
   }
 
