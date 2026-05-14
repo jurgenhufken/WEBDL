@@ -85,6 +85,7 @@
     autoEnabled: false,
     autoLaneVisible: false,
     autoDragIdx: -1,
+    autoPenActive: false, // pen drawing mode
 
     // Zoom (exact als oude viewer)
     zoomed: false,
@@ -2901,7 +2902,7 @@
     // Container for the lane
     const container = document.createElement('div');
     container.id = 'vAutoLaneContainer';
-    container.style.cssText = `position:absolute; bottom:100%; left:0; right:0; height:${AUTO_LANE_HEIGHT}px; background:rgba(0,0,0,.55); border-top:1px solid rgba(255,255,255,.15); border-bottom:1px solid rgba(80,200,255,.3); z-index:10; display:none; cursor:crosshair;`;
+    container.style.cssText = `position:absolute; bottom:100%; left:0; right:0; height:${AUTO_LANE_HEIGHT}px; background:rgba(0,0,0,.35); backdrop-filter:blur(4px); border-top:1px solid rgba(255,140,0,.4); border-bottom:1px solid rgba(255,80,200,.5); z-index:10; display:none; cursor:crosshair;`;
 
     canvas = document.createElement('canvas');
     canvas.id = 'vAutoLaneCanvas';
@@ -2910,15 +2911,22 @@
 
     // Speed labels
     const labelTop = document.createElement('span');
-    labelTop.style.cssText = 'position:absolute; top:1px; left:3px; font-size:9px; color:rgba(255,255,255,.4); pointer-events:none;';
+    labelTop.style.cssText = 'position:absolute; top:1px; left:3px; font-size:9px; color:rgba(255,200,80,.6); pointer-events:none; text-shadow:0 0 4px rgba(255,140,0,.5);';
     labelTop.textContent = `${AUTO_MAX_RATE}×`;
     const labelBot = document.createElement('span');
-    labelBot.style.cssText = 'position:absolute; bottom:1px; left:3px; font-size:9px; color:rgba(255,255,255,.4); pointer-events:none;';
+    labelBot.style.cssText = 'position:absolute; bottom:1px; left:3px; font-size:9px; color:rgba(255,200,80,.6); pointer-events:none; text-shadow:0 0 4px rgba(255,140,0,.5);';
     labelBot.textContent = `${AUTO_MIN_RATE}×`;
     const label1x = document.createElement('span');
     const pct1x = 1 - ((1 - AUTO_MIN_RATE) / (AUTO_MAX_RATE - AUTO_MIN_RATE));
-    label1x.style.cssText = `position:absolute; top:${pct1x * 100}%; left:3px; font-size:9px; color:rgba(80,200,255,.5); pointer-events:none; transform:translateY(-50%);`;
+    label1x.style.cssText = `position:absolute; top:${pct1x * 100}%; left:3px; font-size:9px; color:rgba(255,80,200,.7); pointer-events:none; transform:translateY(-50%); text-shadow:0 0 6px rgba(255,80,200,.4);`;
     label1x.textContent = '1×';
+
+    // Pen mode indicator
+    const penLabel = document.createElement('span');
+    penLabel.id = 'vAutoPenLabel';
+    penLabel.style.cssText = 'position:absolute; top:2px; right:6px; font-size:10px; color:rgba(255,80,200,.8); pointer-events:none; display:none; text-shadow:0 0 6px rgba(255,80,200,.5);';
+    penLabel.textContent = '✏️ PEN';
+    container.appendChild(penLabel);
     container.append(labelTop, labelBot, label1x);
 
     bar.style.position = 'relative';
@@ -2978,17 +2986,23 @@
 
     // 1x reference line
     const y1x = rateToY(1, h);
-    ctx.strokeStyle = 'rgba(80,200,255,.2)';
+    ctx.strokeStyle = 'rgba(255,80,200,.3)';
     ctx.lineWidth = 1;
     ctx.setLineDash([4, 4]);
     ctx.beginPath(); ctx.moveTo(0, y1x); ctx.lineTo(w, y1x); ctx.stroke();
     ctx.setLineDash([]);
 
+    // Pen cursor indicator
+    const penLabel = document.getElementById('vAutoPenLabel');
+    if (penLabel) penLabel.style.display = vs.autoPenActive ? '' : 'none';
+    const laneContainer = canvas.parentElement;
+    if (laneContainer) laneContainer.style.cursor = vs.autoPenActive ? 'crosshair' : 'default';
+
     const pts = vs.autoPoints;
     if (!pts.length) return;
 
     // Draw curve
-    ctx.strokeStyle = 'rgba(80,200,255,.7)';
+    ctx.strokeStyle = 'rgba(255,140,50,.9)';
     ctx.lineWidth = 2;
     ctx.beginPath();
 
@@ -3026,7 +3040,7 @@
     ctx.lineTo(w, h);
     ctx.lineTo(0, h);
     ctx.closePath();
-    ctx.fillStyle = 'rgba(80,200,255,.08)';
+    ctx.fillStyle = 'rgba(255,140,50,.12)';
     ctx.fill();
 
     // Draw points
@@ -3035,15 +3049,19 @@
       const isDragging = vs.autoDragIdx === i;
       ctx.beginPath();
       ctx.arc(x, y, isDragging ? 7 : 5, 0, Math.PI * 2);
-      ctx.fillStyle = isDragging ? '#fff' : 'rgba(80,200,255,.9)';
+      ctx.fillStyle = isDragging ? '#fff' : 'rgba(255,80,200,.95)';
       ctx.fill();
+      // Glow
+      ctx.shadowColor = 'rgba(255,80,200,.6)';
+      ctx.shadowBlur = isDragging ? 10 : 6;
       ctx.strokeStyle = 'rgba(0,0,0,.5)';
       ctx.lineWidth = 1.5;
       ctx.stroke();
 
       // Rate label
-      ctx.fillStyle = 'rgba(255,255,255,.7)';
-      ctx.font = '9px sans-serif';
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = 'rgba(255,220,150,.9)';
+      ctx.font = 'bold 9px sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText(`${pts[i].rate.toFixed(1)}×`, x, y - 9);
     }
@@ -3093,9 +3111,48 @@
       }
     });
 
-    // Mousedown = start drag
+    // Mousedown = start drag or pen draw
     container.addEventListener('mousedown', (e) => {
       if (e.button !== 0) return;
+
+      // Pen mode: draw freehand
+      if (vs.autoPenActive) {
+        e.preventDefault();
+        e.stopPropagation();
+        let lastPct = -1;
+
+        function onPenMove(ev) {
+          const { pct, rate } = getPctAndRate(ev);
+          // Only add point if moved enough (avoid duplicates)
+          if (Math.abs(pct - lastPct) < 0.005) return;
+          lastPct = pct;
+          // Remove existing points near this position
+          vs.autoPoints = vs.autoPoints.filter(p => Math.abs(p.pct - pct) > 0.008);
+          vs.autoPoints.push({ pct, rate: Math.round(rate * 10) / 10, curve: 0 });
+          vs.autoPoints.sort((a, b) => a.pct - b.pct);
+          renderAutoLane();
+        }
+
+        // Initial point
+        const { pct, rate } = getPctAndRate(e);
+        vs.autoPoints = vs.autoPoints.filter(p => Math.abs(p.pct - pct) > 0.008);
+        vs.autoPoints.push({ pct, rate: Math.round(rate * 10) / 10, curve: 0 });
+        lastPct = pct;
+        renderAutoLane();
+
+        function onPenUp() {
+          vs.autoPoints.sort((a, b) => a.pct - b.pct);
+          renderAutoLane();
+          window.removeEventListener('mousemove', onPenMove);
+          window.removeEventListener('mouseup', onPenUp);
+        }
+
+        window.addEventListener('mousemove', onPenMove);
+        window.addEventListener('mouseup', onPenUp);
+        return;
+      }
+
+      // Normal mode: drag existing point
       const idx = findNearestPoint(e);
       if (idx < 0) return;
       e.preventDefault();
@@ -3149,11 +3206,23 @@
 
   function toggleAutoLane() {
     vs.autoLaneVisible = !vs.autoLaneVisible;
-    vs.autoEnabled = vs.autoLaneVisible;
     if (vs.autoLaneVisible) ensureAutoLaneCanvas();
     renderAutoLane();
-    showHudMessage(vs.autoLaneVisible ? 'Snelheid automation: aan' : 'Snelheid automation: uit', 1200);
+    showHudMessage(vs.autoLaneVisible ? 'Automation lane: zichtbaar' : 'Automation lane: verborgen', 1200);
     log(vs.autoLaneVisible ? 'Speed automation lane geopend' : 'Speed automation lane gesloten');
+  }
+
+  function toggleAutoEnabled() {
+    vs.autoEnabled = !vs.autoEnabled;
+    showHudMessage(vs.autoEnabled ? 'Auto-snelheid: AAN' : 'Auto-snelheid: UIT', 1200);
+    log(vs.autoEnabled ? 'Auto-snelheid ingeschakeld' : 'Auto-snelheid uitgeschakeld');
+  }
+
+  function toggleAutoPen() {
+    vs.autoPenActive = !vs.autoPenActive;
+    renderAutoLane();
+    showHudMessage(vs.autoPenActive ? '✏️ Pen: AAN — sleep om te tekenen' : '✏️ Pen: UIT', 1200);
+    log(vs.autoPenActive ? 'Pen modus aan' : 'Pen modus uit');
   }
 
   function toggleLog() {
@@ -3201,11 +3270,11 @@
       if (isNumpad) {
         const v = el.vContent.querySelector('video');
         switch (e.code) {
-          case 'Numpad7': // fine seek left (0.5s)
-            if (v) seekRelative(-0.5);
+          case 'Numpad7': // volume down
+            if (v) { v.volume = Math.max(0, v.volume - 0.05); vs.vol = v.volume; showHudMessage(`Volume ${Math.round(v.volume * 100)}%`, 800); }
             e.preventDefault(); break;
-          case 'Numpad9': // fine seek right (0.5s)
-            if (v) seekRelative(0.5);
+          case 'Numpad9': // volume up
+            if (v) { v.volume = Math.min(1, v.volume + 0.05); vs.vol = v.volume; showHudMessage(`Volume ${Math.round(v.volume * 100)}%`, 800); }
             e.preventDefault(); break;
           case 'Numpad4': // seek left (1s)
             if (v) seekRelative(-1);
@@ -3216,11 +3285,11 @@
           case 'Numpad5': // play/pause
             if (v) { v.paused ? v.play() : v.pause(); }
             e.preventDefault(); break;
-          case 'Numpad8': // volume up
-            if (v) { v.volume = Math.min(1, v.volume + 0.05); vs.vol = v.volume; showHudMessage(`Volume ${Math.round(v.volume * 100)}%`, 800); }
+          case 'Numpad8': // seek forward fine (0.5s)
+            if (v) seekRelative(0.5);
             e.preventDefault(); break;
-          case 'Numpad2': // volume down
-            if (v) { v.volume = Math.max(0, v.volume - 0.05); vs.vol = v.volume; showHudMessage(`Volume ${Math.round(v.volume * 100)}%`, 800); }
+          case 'Numpad2': // screenshot (capture video frame)
+            await captureCurrentVideoFrame();
             e.preventDefault(); break;
           case 'Numpad1': // slower (tap/hold → slow down, stop, reverse)
             changeSpeed(-1);
@@ -3250,10 +3319,19 @@
               log(`Marker verwijderd, ${vs.segments.length} markers over`);
             }
             e.preventDefault(); break;
-          case 'NumpadMultiply': // toggle speed automation lane
+          case 'NumpadMultiply': // toggle speed automation lane visibility
             toggleAutoLane();
             e.preventDefault(); break;
+          case 'NumpadDivide': // toggle pen drawing mode
+            toggleAutoPen();
+            e.preventDefault(); break;
+          case 'NumpadEnter': // toggle auto-speed on/off
+            toggleAutoEnabled();
+            e.preventDefault(); break;
         }
+        // Block ALL numpad events from reaching other handlers
+        e.preventDefault();
+        e.stopPropagation();
         return;
       }
 
