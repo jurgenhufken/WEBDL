@@ -1176,7 +1176,14 @@
 
   async function navPrev() {
     return enqueueNavigation(async () => {
-      await navTo(vs.idx - 1);
+      if (vs.random) {
+        if (!vs.done && vs.items.length < 300) {
+          await loadMoreViewerItems();
+        }
+        await navTo(Math.floor(Math.random() * vs.items.length));
+      } else {
+        await navTo(vs.idx - 1);
+      }
     });
   }
 

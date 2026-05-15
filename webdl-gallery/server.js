@@ -2049,6 +2049,19 @@ app.get('/api/items', async (req, res) => {
       });
       fastWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_GALLERY_STATUSES.map(s => `'${s}'`).join(',')}])`);
       fastWhere.push(`(d.filesize IS NULL OR d.filesize > 0)`);
+      fastWhere.push(DIRECT_DOWNLOAD_HINT_SQL);
+      // Folder-based downloads (via download_files)
+      const fastFileWhere = buildItemFilters({
+        req, params: fastParams,
+        fileExpr: 'df.relpath',
+        extExpr: "regexp_replace(df.relpath, '^.*\\\\.', '')",
+        ratingExpr: 'df.rating',
+        channelExpr: fileChannelSql('d', 'df'),
+      });
+      fastFileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_FILE_PARENT_STATUSES.map(s => `'${s}'`).join(',')}])`);
+      fastFileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
+      fastFileWhere.push(`(df.filesize IS NULL OR df.filesize > 0)`);
+      fastFileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\\\.', '')) IN (${MEDIA_EXT_SQL})`);
       if (useCursor) {
         fastParams.push(cursorTs);
         const cursorTsParam = fastParams.length;
@@ -2056,11 +2069,12 @@ app.get('/api/items', async (req, res) => {
         const cursorOrderParam = fastParams.length;
         const cursorTsExpr = `($${cursorTsParam}::timestamptz AT TIME ZONE current_setting('TimeZone'))`;
         fastWhere.push(`(COALESCE(d.finished_at, d.updated_at, d.created_at) < ${cursorTsExpr} OR (COALESCE(d.finished_at, d.updated_at, d.created_at) = ${cursorTsExpr} AND d.id::bigint < $${cursorOrderParam}::bigint))`);
+        fastFileWhere.push(`(COALESCE(d.finished_at, d.updated_at, d.created_at) < ${cursorTsExpr} OR (COALESCE(d.finished_at, d.updated_at, d.created_at) = ${cursorTsExpr} AND df.id::bigint < $${cursorOrderParam}::bigint))`);
         fastScreenshotWhere.push(`(COALESCE(s.created_at, s.updated_at) < ${cursorTsExpr} OR (COALESCE(s.created_at, s.updated_at) = ${cursorTsExpr} AND (2000000000000 + s.id)::bigint < $${cursorOrderParam}::bigint))`);
       }
       const fastSourceLimit = useCursor
-        ? Math.max(limit * 10, 80)
-        : Math.max(offset + (limit * 10), 80);
+        ? Math.max(limit * 50, 500)
+        : Math.max(offset + (limit * 50), 500);
       fastParams.push(fastSourceLimit);
       const fastLimitParam = fastParams.length;
       const { rows } = await pool.query(`
@@ -2077,6 +2091,30 @@ app.get('/api/items', async (req, res) => {
                    d.id::bigint AS source_order
               FROM downloads d
              WHERE ${fastWhere.join(' AND ')}
+            UNION ALL
+            SELECT item_kind, id, rating_id, url, source_url, platform, channel,
+                   title, filename, filepath, filesize, format, duration, rating,
+                   is_thumb_ready, metadata, finished_at, created_at, sort_ts, source_order
+              FROM (
+                SELECT DISTINCT ON (d.id)
+                       'file' AS item_kind,
+                       'file-' || df.id::text AS id, d.id AS rating_id,
+                       d.url, d.source_url, ${platformGroupSql('d')} AS platform, ${fileChannelSql('d','df')} AS channel,
+                       d.title, regexp_replace(df.relpath, '^.*/', '') AS filename,
+                       df.relpath AS filepath, df.filesize,
+                       regexp_replace(df.relpath, '^.*\\.', '') AS format,
+                       NULL::text AS duration,
+                       COALESCE(df.rating, d.rating) AS rating,
+                       (COALESCE(df.is_thumb_ready, false) = true OR lower(regexp_replace(df.relpath, '^.*\\.', '')) IN (${IMAGE_EXT_SQL})) AS is_thumb_ready,
+                       d.metadata,
+                       d.finished_at, d.created_at,
+                       COALESCE(d.finished_at, d.updated_at, d.created_at) AS sort_ts,
+                       df.id::bigint AS source_order
+                  FROM downloads d
+                  JOIN download_files df ON df.download_id = d.id
+                 WHERE ${fastFileWhere.join(' AND ')}
+                 ORDER BY d.id, df.is_thumb_ready DESC NULLS LAST, df.id
+              ) file_deduped
             UNION ALL
             SELECT 'screenshot' AS item_kind,
                    's-' || s.id::text AS id, NULL::bigint AS rating_id,

@@ -14946,12 +14946,41 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
       '--merge-output-format', 'mp4',
       '--write-thumbnail',
       '--write-info-json'];
+
+    // K2S direct file downloads: URL has the filename in the query string and
+    // the full URL is too long / contains special chars for .info.json writing.
+    const isK2sDirectFile = /filestore\.app/i.test(url);
+    if (isK2sDirectFile) {
+      // Remove --write-info-json — the URL encodes the full filename
+      const infoJsonIdx = baseArgs.indexOf('--write-info-json');
+      if (infoJsonIdx !== -1) baseArgs.splice(infoJsonIdx, 1);
+      // Extract the real filename from the URL ?filename= parameter
+      try {
+        const k2sUrl = new URL(url);
+        const k2sFilename = k2sUrl.searchParams.get('filename') || '';
+        if (k2sFilename) {
+          const safeName = k2sFilename.replace(/[^a-zA-Z0-9._\-() ]/g, '_');
+          const k2sOutputTemplate = path.join(dir, safeName);
+          baseArgs.push('--no-overwrites', '--progress', '--newline', '-o', k2sOutputTemplate, url);
+          // Skip the normal arg-append below
+        } else {
+          baseArgs.push('--restrict-filenames');
+          if (!forceOverwrite) baseArgs.push('--no-overwrites');
+          baseArgs.push('--progress', '--newline', '-o', outputTemplate, url);
+        }
+      } catch (e) {
+        baseArgs.push('--restrict-filenames');
+        if (!forceOverwrite) baseArgs.push('--no-overwrites');
+        baseArgs.push('--progress', '--newline', '-o', outputTemplate, url);
+      }
+    } else {
     if (!forceOverwrite) {
       baseArgs.push('--no-overwrites');
     } else {
       baseArgs.push('--force-overwrites');
     }
     baseArgs.push('--progress', '--newline', '-o', outputTemplate, url);
+    }
 
 
     if (platform === 'youtube') {
