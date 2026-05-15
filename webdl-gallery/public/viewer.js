@@ -3428,6 +3428,12 @@
         case 'i': case 'I': setLoopPoint('start'); e.preventDefault(); break;
         case 'o': case 'O': setLoopPoint('end');   e.preventDefault(); break;
         case 'p': case 'P': clearLoop();            e.preventDefault(); break;
+        case 'r': case 'R':
+          vs.random = !vs.random;
+          if (el.vRandom) { el.vRandom.textContent = `🔀 Rand: ${vs.random ? 'aan' : 'uit'}`; el.vRandom.classList.toggle('active', vs.random); }
+          if (el.vRandom2) { el.vRandom2.textContent = vs.random ? '🔀 Aan' : '🔀 Rand'; el.vRandom2.classList.toggle('active', vs.random); }
+          e.preventDefault();
+          break;
       }
     }, { capture: true });
   }
