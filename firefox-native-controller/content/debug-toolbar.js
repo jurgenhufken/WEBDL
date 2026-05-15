@@ -5,7 +5,7 @@
     if (host === 'localhost' || host === '127.0.0.1') return;
   } catch (e) {}
 
-  const WEBDL_BUILD = 'debug-toolbar-2026-05-14-forum-viper-k2s-imagevenue';
+  const WEBDL_BUILD = 'debug-toolbar-2026-05-15-aznudefeet-dedupe-imagefap';
   console.log("WEBDL toolbar script geladen!", WEBDL_BUILD);
   const SERVER = 'http://localhost:35729';
   const SERVER_FALLBACK = 'http://127.0.0.1:35729';
@@ -3370,6 +3370,20 @@
     const out = [];
     const seen = new Set();
 
+    // Normalise AZNudeFeet image URLs so thumb variants map to the same key.
+    // e.g. /thumb_123.jpg → /123.jpg , /tn_123.jpg → /123.jpg
+    const normalizeAznUrl = (raw) => {
+      try {
+        const u = new URL(String(raw || ''), window.location.href);
+        // Strip common thumbnail prefixes from the filename
+        u.pathname = u.pathname.replace(/\/(thumb_|tn_|small_|med_|preview_)/gi, '/');
+        // Remove query-string resizing params
+        u.search = '';
+        u.hash = '';
+        return u.toString();
+      } catch (e) { return String(raw || ''); }
+    };
+
     const push = (raw, el, kind) => {
       try {
         const s = String(raw || '').trim();
@@ -3381,50 +3395,50 @@
         if (!/^https?:$/i.test(String(u.protocol || ''))) return;
         if (host.includes('aznudelive.com')) return;
         if (!(host.includes('aznudefeet.com') || host.includes('aznude.com') || host.includes('azncdn.com'))) return;
-        if (/\b(logo|avatar|icon|sprite|banner|ad[sx]?|promo)\b/i.test(path)) return;
+        if (/\b(logo|avatar|icon|sprite|banner|ad[sx]?|promo|placeholder|related|sidebar)\b/i.test(path)) return;
         const final = u.toString();
-        if (seen.has(final)) return;
-        seen.add(final);
+        const key = normalizeAznUrl(final);
+        if (seen.has(key)) return;
+        seen.add(key);
+        // Prefer the URL without thumb prefix (full-size)
         out.push({ url: final, el: el || null, kind: kind || '' });
       } catch (e) {}
     };
 
-    const pushSrcset = (raw, el, kind) => {
-      try {
-        const srcset = String(raw || '').trim();
-        if (!srcset) return;
-        for (const part of srcset.split(',').map((s) => String(s || '').trim()).filter(Boolean)) {
-          const first = part.split(/\s+/)[0];
-          if (first) push(first, el, kind);
-          if (out.length >= maxItems) return;
-        }
-      } catch (e) {}
-    };
+    // Scope to the gallery content area if possible (skip sidebar, related models, footer)
+    const galleryRoot = document.querySelector('.gallery-pics, .pics-area, .gallery-content, .photo-list, #gallery, .view-gallery')
+                     || document.querySelector('main, article, .content, #content, .page-content')
+                     || document;
 
-    for (const img of Array.from(document.querySelectorAll('img'))) {
+    // Collect from <img> in gallery area only
+    for (const img of Array.from(galleryRoot.querySelectorAll('img'))) {
       if (out.length >= maxItems) break;
       try {
         const r = img.getBoundingClientRect();
         if (r && (r.width < 80 || r.height < 80)) continue;
         const cls = String(img.className || '').toLowerCase();
-        if (/\b(avatar|icon|emoji|logo)\b/i.test(cls)) continue;
+        if (/\b(avatar|icon|emoji|logo|related|sidebar|ad)\b/i.test(cls)) continue;
+        // Skip images inside known non-gallery containers
+        if (img.closest && img.closest('.related-models, .sidebar, .ad-zone, footer, .footer, nav, .nav')) continue;
       } catch (e) {}
-      let hadParentDirect = false;
+      // Prefer the parent <a> link (full-size URL) over the <img> src (thumbnail)
       try {
         const parentLink = img.closest ? img.closest('a[href]') : null;
         const href = parentLink && parentLink.getAttribute ? parentLink.getAttribute('href') : '';
         if (href && /\.(jpe?g|png|gif|webp|bmp|avif|heic|heif)(\?|$)/i.test(String(href))) {
           push(href, parentLink, 'direct_link');
-          hadParentDirect = true;
+          continue; // Skip img.src — we have the full-size URL
         }
       } catch (e) {}
-      push(img.currentSrc || img.src || img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-lazy-src'), img, hadParentDirect ? 'img_under_direct_link' : 'img');
-      try { pushSrcset(img.getAttribute('srcset'), img, 'img_srcset'); } catch (e) {}
+      push(img.currentSrc || img.src || img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-lazy-src'), img, 'img');
     }
 
-    for (const a of Array.from(document.querySelectorAll('a[href]'))) {
+    // Also pick up direct download links in gallery area
+    for (const a of Array.from(galleryRoot.querySelectorAll('a[href]'))) {
       if (out.length >= maxItems) break;
       try {
+        // Skip links in non-gallery containers
+        if (a.closest && a.closest('.related-models, .sidebar, .ad-zone, footer, .footer, nav, .nav')) continue;
         const href = a.getAttribute('href');
         if (!href) continue;
         if (/\.(jpe?g|png|gif|webp|bmp|avif|heic|heif)(\?|$)/i.test(href)) {
