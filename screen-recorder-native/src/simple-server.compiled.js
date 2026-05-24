@@ -6822,6 +6822,93 @@ expressApp.post('/api/queue/resume', async (req, res) => {
   }
 });
 
+// darknetvideos.com /video.php?id=N OR search-page — spawn
+// scripts/darknet_dl.py async (parse JSON-LD VideoObject → contentUrl).
+expressApp.post('/api/darknetvideos/video', (req, res) => {
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const url = String(body.url || '').trim();
+    const channel = String(body.channel || '').trim();
+    if (!url || !/^https?:\/\/(?:www\.)?darknetvideos\.com\//i.test(url)) {
+      return res.status(400).json({ success: false, error: 'url moet darknetvideos.com URL zijn' });
+    }
+    const script = path.join(__dirname, '..', '..', 'scripts', 'darknet_dl.py');
+    if (!fs.existsSync(script)) {
+      return res.status(500).json({ success: false, error: `script ontbreekt: ${script}` });
+    }
+    const args = [script, url];
+    if (channel) args.push('--channel-override', channel);
+    const child = spawn('/usr/bin/python3', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: false,
+      env: { ...process.env },
+    });
+    const pid = child.pid;
+    let stderr = '';
+    child.stderr.on('data', (d) => { stderr += d.toString().slice(0, 4096); });
+    child.on('close', (code) => {
+      console.log(`[darknet_dl pid=${pid}] exit ${code}`);
+      if (code !== 0) console.warn(`[darknet_dl pid=${pid}] stderr: ${stderr.slice(0, 500)}`);
+    });
+    child.unref();
+    return res.json({
+      success: true,
+      url,
+      channel: channel || '(auto)',
+      pid,
+      message: 'darknet_dl.py gestart op achtergrond',
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: String(e && e.message ? e.message : e) });
+  }
+});
+
+// footstockings.com /albums/<id>/<slug>/ — spawn scripts/foot_album_dl.py
+// async, return meteen, script schrijft zelf files + DB-rows.
+//
+// Body: { url, channel } — channel wordt --channel-override (verplicht
+// voor groepering onder listing-context, anders valt 'ie terug op slug).
+expressApp.post('/api/footstockings/album', (req, res) => {
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const url = String(body.url || '').trim();
+    const channel = String(body.channel || '').trim();
+    if (!url || !/^https?:\/\/(?:www\.)?footstockings\.com\/albums\/\d+\/[^/]+\/?$/i.test(url)) {
+      return res.status(400).json({ success: false, error: 'url moet footstockings album-URL zijn' });
+    }
+    const script = path.join(__dirname, '..', '..', 'scripts', 'foot_album_dl.py');
+    if (!fs.existsSync(script)) {
+      return res.status(500).json({ success: false, error: `script ontbreekt: ${script}` });
+    }
+    const args = [script, url];
+    if (channel) args.push('--channel-override', channel);
+    const child = spawn('/usr/bin/python3', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: false,
+      env: { ...process.env },
+    });
+    const pid = child.pid;
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => { stdout += d.toString().slice(0, 4096); });
+    child.stderr.on('data', (d) => { stderr += d.toString().slice(0, 4096); });
+    child.on('close', (code) => {
+      console.log(`[foot_album_dl pid=${pid}] exit ${code}`);
+      if (code !== 0) console.warn(`[foot_album_dl pid=${pid}] stderr: ${stderr.slice(0, 500)}`);
+    });
+    child.unref();
+    return res.json({
+      success: true,
+      url,
+      channel: channel || '(slug)',
+      pid,
+      message: 'foot_album_dl.py gestart op achtergrond — gallery refresht binnen 1-2 min',
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: String(e && e.message ? e.message : e) });
+  }
+});
+
 // Global priority mode — when ON, new downloads get priority=1
 let globalPriorityMode = false;
 expressApp.get('/api/settings/priority', (req, res) => {
@@ -8600,6 +8687,10 @@ function detectPlatform(url) {
   if (/erome\.com/i.test(u)) return 'erome';
   if (/imagefap\.com/i.test(u)) return 'imagefap';
   if (/keep2share\.cc|k2s\.cc/i.test(u)) return 'keep2share';
+  if (/footstockings\.com/i.test(u)) return 'footstockings';
+  if (/heavyfetish\.com/i.test(u)) return 'heavyfetish';
+  if (/darknessporn\.com/i.test(u)) return 'darknessporn';
+  if (/darknetvideos\.com/i.test(u)) return 'darknetvideos';
 
   try {
     const host = new URL(u).hostname.toLowerCase();
@@ -8651,6 +8742,10 @@ const KNOWN_PLATFORMS = new Set([
   'erome',
   'imagefap',
   'keep2share',
+  'footstockings',
+  'heavyfetish',
+  'darknessporn',
+  'darknetvideos',
   '4kdownloader',
   'other']
 );
@@ -8759,6 +8854,48 @@ function deriveChannelFromUrl(platform, url) {
     if (m) return m[1];
     const m2 = u.match(/aznudefeet\.com\/([^\/\?#]+)/i);
     if (m2) return m2[1];
+  }
+
+  if (platform === 'darknessporn') {
+    try {
+      const parsed = new URL(u);
+      const segs = String(parsed.pathname || '').replace(/\/page\/\d+\/?$/i, '/').split('/').filter(Boolean);
+      // /<id>-<slug>/ → single video: 'video_<id>'
+      if (segs.length === 1 && /^\d+-/.test(segs[0])) {
+        const m = segs[0].match(/^(\d+)-/);
+        return m ? `video_${m[1]}` : segs[0];
+      }
+      // /tag/<id>-<slug>/, /category/<slug>/, /search/<q>/ → '<type>_<value>'
+      if (segs.length >= 2) return `${segs[0]}_${segs[1]}`;
+      if (segs.length === 1) return segs[0];
+    } catch (e) {}
+  }
+
+  if (platform === 'footstockings' || platform === 'heavyfetish') {
+    try {
+      const parsed = new URL(u);
+      const segs = String(parsed.pathname || '').split('/').filter(Boolean);
+      // /videos/<id>/<slug>/ → slug (bv. 'flexible-feet')
+      // /albums/<id>/<slug>/ → slug
+      if ((segs[0] === 'videos' || segs[0] === 'albums') && segs.length >= 3) return segs[2];
+      // /models/<name>/, /categories/<cat>/, /channels/<c>/, /playlists/<id>/, /search/<q>/
+      if (segs.length >= 2) return `${segs[0]}_${segs[1]}`;
+      if (segs.length === 1) return segs[0];
+    } catch (e) {}
+  }
+
+  if (platform === 'keep2share') {
+    // /file/<hash>/<filename>  → filename zonder ext als channel (bv. 'NudeBeach1151')
+    // /file/<hash>            → 'k2s_<hash-prefix>' als fallback
+    // Hierdoor voorkomen we 'keep2share/unknown/https___k2s.cc_file_<hash>' folders
+    // voor directe K2S URLs zonder forum-context (vipergirls etc. blijven hun thread_id krijgen via metadata).
+    const m = u.match(/k2s\.(?:cc|io)\/file\/[a-f0-9]+\/([^/?#]+)/i);
+    if (m && m[1]) {
+      const base = decodeURIComponent(m[1]).replace(/\.[^.]+$/, '').replace(/[^\w.-]+/g, '_');
+      if (base) return base.slice(0, 60);
+    }
+    const idm = u.match(/k2s\.(?:cc|io)\/file\/([a-f0-9]+)/i);
+    if (idm && idm[1]) return `k2s_${idm[1].slice(0, 12)}`;
   }
 
   if (platform === 'telegram') {
