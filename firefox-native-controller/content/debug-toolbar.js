@@ -13,6 +13,11 @@
     'pictoa.com', 'tubesafari.com', 'pornzog.com', 'alohatube.com', 'usersporn.com',
     'nakedneighbour.com', 'pornkai.com', 'xfree.com', 'zzztube.com',
     'favoyeurtube.net', 'spycamhub.net', 'sexygirlspics.com', 'porncoven.com',
+    // 2026-05-24 — vipergirls migreerde naar nieuwe webdl-core stack
+    // (sites/vipergirls.js gebruikt /api/jobs). debug-toolbar laat dit
+    // over aan site-engine. Oude vipergirls-handlers blijven in deze
+    // file als legacy code maar worden niet meer aangeroepen op deze hosts.
+    'vipergirls.to', 'viper.to',
   ]);
   try {
     const host = String((window && window.location && window.location.hostname) || '').toLowerCase();

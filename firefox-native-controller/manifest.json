@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Screen Recorder Controller",
-  "version": "1.0.81",
+  "version": "1.0.82",
   "description": "Besturingsinterface voor de native Screen Recorder applicatie",
   "browser_specific_settings": {
     "gecko": {
@@ -56,7 +56,11 @@
     "*://*.favoyeurtube.net/*",
     "*://*.spycamhub.net/*",
     "*://*.sexygirlspics.com/*",
-    "*://*.porncoven.com/*"
+    "*://*.porncoven.com/*",
+    "*://*.vipergirls.to/*",
+    "*://vipergirls.to/*",
+    "*://*.viper.to/*",
+    "*://viper.to/*"
   ],
   "content_scripts": [
     {
@@ -96,10 +100,15 @@
         "*://*.favoyeurtube.net/*",
         "*://*.spycamhub.net/*",
         "*://*.sexygirlspics.com/*",
-        "*://*.porncoven.com/*"
+        "*://*.porncoven.com/*",
+        "*://*.vipergirls.to/*",
+        "*://vipergirls.to/*",
+        "*://*.viper.to/*",
+        "*://viper.to/*"
       ],
       "js": [
         "content/sites/footstockings.js",
+        "content/sites/vipergirls.js",
         "content/sites/heavyfetish.js",
         "content/sites/darknetvideos.js",
         "content/sites/darknessporn.js",

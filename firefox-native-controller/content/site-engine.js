@@ -444,11 +444,144 @@
     return btn;
   }
 
+  // ───────────────────────────────────────────────────────────────────
+  // JOBS-MODE — voor sites die ARCHITECTURE.md nieuwe stack gebruiken
+  // (cfg.useJobsApi === true). POSTt naar /api/jobs server-side, polt
+  // /api/jobs/:id voor live progress. Geen per-item POST /download.
+  // ───────────────────────────────────────────────────────────────────
+
+  async function startJob(intent) {
+    const url = window.location.href.split('#')[0];
+    try {
+      const res = await fetch(`${SERVER}/api/jobs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ intent, url }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!data.success) return { ok: false, error: data.error || `HTTP ${res.status}` };
+      return { ok: true, jobId: data.jobId, channel: data.channel };
+    } catch (e) {
+      return { ok: false, error: String(e && e.message || e) };
+    }
+  }
+
+  async function pollJob(jobId) {
+    try {
+      const res = await fetch(`${SERVER}/api/jobs/${jobId}`);
+      const data = await res.json();
+      if (!data.success) return null;
+      return data.job;
+    } catch (_) { return null; }
+  }
+
+  function makeJobsHandler(intent, label) {
+    return async (btn) => {
+      if (STATE.busy) return;
+      STATE.busy = true;
+      btn.disabled = true;
+      const original = btn.textContent;
+      btn.textContent = `⏳ Job starten...`;
+
+      const start = await startJob(intent);
+      if (!start.ok) {
+        btn.textContent = `✗ ${start.error}`;
+        setTimeout(() => { btn.disabled = false; btn.textContent = original; STATE.busy = false; }, 5000);
+        return;
+      }
+
+      btn.textContent = `▶ Job #${start.jobId} loopt...`;
+      const channelHint = panel.querySelector('.webdl-job-channel');
+      if (channelHint) channelHint.textContent = `→ channel: ${start.channel}`;
+
+      // Polling loop — elke 2s status updaten in panel
+      const startTs = Date.now();
+      let stopped = false;
+      const tick = async () => {
+        if (stopped) return;
+        const j = await pollJob(start.jobId);
+        if (!j) {
+          btn.textContent = `? job verloren`;
+          setTimeout(() => { btn.disabled = false; btn.textContent = original; STATE.busy = false; }, 5000);
+          stopped = true;
+          return;
+        }
+        const elapsed = Math.round((Date.now() - startTs) / 1000);
+        const pages = j.pagesTotal > 1 ? ` · page ${j.pagesScanned}/${j.pagesTotal}` : '';
+        if (j.status === 'running' || j.status === 'queued') {
+          btn.textContent = `⏳ ${j.itemsDispatched}/${j.itemsTotal}${pages} · ${elapsed}s`;
+          setTimeout(tick, 2000);
+        } else if (j.status === 'done') {
+          btn.textContent = `✓ ${j.itemsDispatched}/${j.itemsTotal} klaar (${elapsed}s${pages})`;
+          setTimeout(() => { btn.disabled = false; btn.textContent = original; STATE.busy = false; }, 12000);
+          stopped = true;
+        } else if (j.status === 'error') {
+          btn.textContent = `✗ ${j.error || 'fout'}`;
+          setTimeout(() => { btn.disabled = false; btn.textContent = original; STATE.busy = false; }, 8000);
+          stopped = true;
+        } else {
+          setTimeout(tick, 2000);
+        }
+      };
+      setTimeout(tick, 500);
+    };
+  }
+
+  let panel = null; // referentie zodat handlers status-elementen kunnen vinden
+
+  function renderJobsPanel(type) {
+    panel = document.createElement('div');
+    panel.id = 'webdl-site-panel';
+    Object.assign(panel.style, {
+      position: 'fixed', top: '12px', right: '12px',
+      zIndex: '2147483646',
+      background: 'rgba(20,20,30,0.94)', color: '#fff',
+      padding: '8px', borderRadius: '8px',
+      fontFamily: 'system-ui, -apple-system, sans-serif',
+      fontSize: '13px', boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
+      minWidth: '300px',
+      display: 'flex', flexDirection: 'column', gap: '4px',
+    });
+
+    const header = document.createElement('div');
+    header.textContent = `⚡ WEBDL · ${cfg.label} · jobs-mode`;
+    Object.assign(header.style, {
+      fontSize: '11px', opacity: '0.7', padding: '2px 4px',
+      textTransform: 'uppercase', letterSpacing: '0.5px',
+    });
+    panel.appendChild(header);
+
+    if (type === 'single') {
+      panel.appendChild(makeButton('⬇ Download dit item', '#2196F3', makeJobsHandler('single', 'single')));
+    } else if (type === 'listing') {
+      panel.appendChild(makeButton('📄 Deze pagina', '#1565C0', makeJobsHandler('page', 'page')));
+      panel.appendChild(makeButton('🧵 Hele thread (alle pages)', '#0ea5e9', makeJobsHandler('whole-thread', 'whole-thread')));
+    } else if (type === 'forum') {
+      panel.appendChild(makeButton('📚 Forum-scan (alle threads)', '#7c3aed', makeJobsHandler('forum-scan', 'forum-scan')));
+    }
+
+    const hint = document.createElement('div');
+    hint.className = 'webdl-job-channel';
+    hint.textContent = `→ channel: ${cfg.deriveChannel(window.location.href)}`;
+    Object.assign(hint.style, { fontSize: '10px', opacity: '0.6', padding: '2px 4px' });
+    panel.appendChild(hint);
+
+    document.body.appendChild(panel);
+  }
+
+  // ───────────────────────────────────────────────────────────────────
+
   function renderPanel() {
     const existing = document.getElementById('webdl-site-panel');
     if (existing) existing.remove();
     const type = pageType();
     if (!type) return;
+
+    // Jobs-mode: nieuwe stack
+    if (cfg.useJobsApi) {
+      renderJobsPanel(type);
+      return;
+    }
 
     const wrap = document.createElement('div');
     wrap.id = 'webdl-site-panel';
