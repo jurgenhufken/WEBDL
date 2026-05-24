@@ -8798,6 +8798,7 @@ function detectPlatform(url) {
   if (/favoyeurtube\.net/i.test(u)) return 'favoyeurtube';
   if (/spycamhub\.net/i.test(u)) return 'spycamhub';
   if (/sexygirlspics\.com/i.test(u)) return 'sexygirlspics';
+  if (/porncoven\.com/i.test(u)) return 'porncoven';
 
   try {
     const host = new URL(u).hostname.toLowerCase();
@@ -8869,6 +8870,7 @@ const KNOWN_PLATFORMS = new Set([
   'favoyeurtube',
   'spycamhub',
   'sexygirlspics',
+  'porncoven',
   '4kdownloader',
   'other']
 );
@@ -9081,6 +9083,23 @@ function deriveChannelFromUrl(platform, url) {
       if ((segs[0] === 'tag' || segs[0] === 'tags') && segs[1]) return `tag_${segs[1]}`;
       if (segs[0] === 'pornstar' && segs[1]) return `pornstar_${segs[1]}`;
       if (segs.length === 1 && /^\d+$/.test(segs[0])) return `video_${segs[0]}`;
+      if (segs.length >= 2) return `${segs[0]}_${segs[1]}`;
+      if (segs.length === 1) return segs[0];
+    } catch (e) {}
+  }
+
+  if (platform === 'porncoven') {
+    try {
+      const parsed = new URL(u);
+      const segs = String(parsed.pathname || '').split('/').filter(Boolean);
+      if (segs[0] === 'threads' && segs[1]) {
+        const m = segs[1].match(/^(\d+)/);
+        if (m) return `thread_${m[1]}`;
+      }
+      if (segs[0] === 'forums' && segs[1]) {
+        const m = segs[1].match(/^(\d+)/);
+        if (m) return `forum_${m[1]}`;
+      }
       if (segs.length >= 2) return `${segs[0]}_${segs[1]}`;
       if (segs.length === 1) return segs[0];
     } catch (e) {}

@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Screen Recorder Controller",
-  "version": "1.0.74",
+  "version": "1.0.75",
   "description": "Besturingsinterface voor de native Screen Recorder applicatie",
   "browser_specific_settings": {
     "gecko": {
@@ -83,6 +83,7 @@
         "content/sites/favoyeurtube.js",
         "content/sites/spycamhub.js",
         "content/sites/sexygirlspics.js",
+        "content/sites/porncoven.js",
         "content/site-engine.js"
       ],
       "run_at": "document_end"
