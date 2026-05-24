@@ -2582,6 +2582,23 @@ const updateDownloadStatus = {
             const q = `INSERT INTO download_tags (download_id, tag) VALUES ${placeholders.join(', ')} ON CONFLICT ON CONSTRAINT download_tags_download_id_tag_key DO NOTHING`;
             await (db.readPool || db.pool || db).query ? (db.readPool || db.pool).query({ text: q, values }) : db.prepare(q).run(...values);
           }
+
+          // Auto-detect duration via ffprobe for video files
+          if (d.filepath && /\.(mp4|mkv|webm|avi|mov)$/i.test(d.filepath)) {
+            const { execFile } = require('child_process');
+            execFile('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', d.filepath], { timeout: 15000 }, (err, stdout) => {
+              if (!err && stdout) {
+                const secs = parseFloat(stdout.trim());
+                if (Number.isFinite(secs) && secs > 0) {
+                  const m = Math.floor(secs / 60);
+                  const s = Math.floor(secs % 60);
+                  const dur = `${m}:${String(s).padStart(2, '0')}`;
+                  const pool = db.readPool || db.pool;
+                  if (pool && pool.query) pool.query(`UPDATE downloads SET duration = $1 WHERE id = $2 AND (duration IS NULL OR duration = '' OR duration = '0:00')`, [dur, d.id]).catch(() => {});
+                }
+              }
+            });
+          }
         }
       } catch (e) {
         console.error('[AUTO-TAG] Error in live auto-tag hook:', e.message);
