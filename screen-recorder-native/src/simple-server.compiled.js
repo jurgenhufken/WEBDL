@@ -1404,55 +1404,20 @@ async function getKeep2ShareWebAccessToken(cookieHeader = '', preferredHost = ''
     ''
   ).trim();
   if (direct) return { token: direct, source: 'env' };
-  const cookieSource = String(options.cookieSource || '').trim();
-  if (!cookieHeader && keep2ShareWebAccessTokenCache.token && keep2ShareWebAccessTokenCache.expiresAt > Date.now() + 60000) {
-    return { token: keep2ShareWebAccessTokenCache.token, source: keep2ShareWebAccessTokenCache.source };
-  }
 
-  const baseHeaders = {
-    'Accept': 'application/json, text/plain, */*',
-    'Origin': 'https://k2s.cc',
-    'Referer': 'https://k2s.cc/',
-    'User-Agent': keep2ShareUserAgentFromEnv(),
-  };
-  if (cookieHeader) baseHeaders.Cookie = cookieHeader;
-  const xbc = keep2ShareXbcFromEnv();
-  if (xbc) baseHeaders['X-BC'] = xbc;
-
-  if (cookieHeader) {
-    try {
-      const res = await fetch('https://api.k2s.cc/v1/auth/token', { method: 'GET', headers: baseHeaders });
-      const text = await res.text();
-      let json = null;
-      try { json = JSON.parse(text); } catch (e) { }
-      if (res.ok && json && json.access_token) {
-        keep2ShareWebAccessTokenCache = { token: String(json.access_token), expiresAt: Date.now() + 30 * 60 * 1000, source: cookieSource || 'cookie' };
-        return { token: keep2ShareWebAccessTokenCache.token, source: keep2ShareWebAccessTokenCache.source };
-      }
-    } catch (e) { }
-  }
-
+  // Use Firefox accessToken cookie directly as Bearer token — no API calls.
+  // The K2S SPA does the same: it reads the accessToken from cookies and uses it as Bearer.
+  // API calls to auth/token trigger abuse/CAPTCHA flags, so we skip them entirely.
   const firefoxAuth = await loadKeep2ShareFirefoxWebAuth(preferredHost);
   if (firefoxAuth.token) return { token: firefoxAuth.token, source: firefoxAuth.source, cookieHeader: firefoxAuth.cookieHeader };
 
-  try {
-    const res = await fetch('https://api.k2s.cc/v1/auth/token', {
-      method: 'POST',
-      headers: { ...baseHeaders, 'Content-Type': 'text/plain;charset=UTF-8' },
-      body: JSON.stringify({
-        grant_type: 'client_credentials',
-        client_id: 'k2s_web_app',
-        client_secret: 'pjc8pyZv7vhscexepFNzmu4P',
-      }),
-    });
-    const text = await res.text();
-    let json = null;
-    try { json = JSON.parse(text); } catch (e) { }
-    if (res.ok && json && json.access_token) {
-      keep2ShareWebAccessTokenCache = { token: String(json.access_token), expiresAt: Date.now() + 30 * 60 * 1000, source: 'client' };
-      return { token: keep2ShareWebAccessTokenCache.token, source: 'client' };
+  // Fallback: extract accessToken from cookie header if provided
+  if (cookieHeader) {
+    const accessToken = cookieValueFromHeader(cookieHeader, 'accessToken');
+    if (accessToken) {
+      return { token: accessToken, source: String(options.cookieSource || 'cookie') };
     }
-  } catch (e) { }
+  }
 
   return { token: '', source: '' };
 }
