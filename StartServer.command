@@ -380,7 +380,7 @@ ensure_postgres_running
        echo "Dependencies webdl-hub installeren..."
        npm install
    fi
-   npm run dev
+       NODE_OPTIONS="--max-old-space-size=4096" npm run dev
  ) &
  HUB_PID=$!
 

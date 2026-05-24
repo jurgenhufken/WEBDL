@@ -1213,7 +1213,9 @@ async function getKeep2ShareAuthToken() {
     keep2ShareAuthTokenCache = { token: String(json.auth_token), expiresAt: Date.now() + 6 * 3600 * 1000 };
     return keep2ShareAuthTokenCache.token;
   }
-  throw new Error(`Keep2Share login faalde: ${json.message || json.error || json.status || 'onbekend'}`);
+  // Bij CAPTCHA-block of andere login-fout: return '' zodat access_token fallback gebruikt kan worden
+  console.warn(`[K2S] Login faalde (${json.message || json.errorCode || 'onbekend'}), fallback naar access_token...`);
+  return '';
 }
 
 function keep2ShareApiErrorMessage(json, fallback = 'onbekend') {
@@ -1554,7 +1556,10 @@ async function resolveKeep2ShareDirectUrl(input, metadata = null) {
       error: `${webResolved.error || 'Keep2Share premium auth ontbreekt'}. Zet K2S_COOKIE/K2S_X_BC of WEBDL_KEEP2SHARE_AUTH_TOKEN/K2S_AUTH_TOKEN of WEBDL_KEEP2SHARE_USERNAME/PASSWORD in .env.`
     };
   }
-  const body = authToken ? { auth_token: authToken, file_id: fileId } : { access_token: accessToken, file_id: fileId };
+  // K2S JWT tokens werken alleen als auth_token, niet als access_token
+  const body = authToken
+    ? { auth_token: authToken, file_id: fileId }
+    : { auth_token: accessToken, file_id: fileId };
   const json = await postKeep2ShareApi('getUrl', body);
   if (json.status === 'success' && json.url) return { url: String(json.url), error: '' };
   const webResolved = await resolveKeep2ShareWebDirectUrl(input, metadata);
@@ -12055,7 +12060,14 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
   }
 
   if (isKeep2ShareUrl(url)) {
-    return startDirectFileDownload(downloadId, url, platform, channel, title, metadata);
+    // Ensure K2S downloads always have source_sites metadata
+    const k2sMeta = metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? { ...metadata } : {};
+    if (!Array.isArray(k2sMeta.source_sites) || !k2sMeta.source_sites.length) {
+      const fromVipergirls = platform === 'vipergirls' || /vipergirls/i.test(String(k2sMeta.url || k2sMeta.source_url || (k2sMeta.origin_thread && k2sMeta.origin_thread.url) || channel || ''));
+      k2sMeta.source_sites = fromVipergirls ? ['vipergirls', 'keep2share'] : ['keep2share'];
+      if (!k2sMeta.source_site) k2sMeta.source_site = fromVipergirls ? 'vipergirls' : 'keep2share';
+    }
+    return startDirectFileDownload(downloadId, url, platform, channel, title, k2sMeta);
   }
 
   if (isKnownHtmlWrapperUrl(url)) {
@@ -13593,6 +13605,10 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
     }
 
     if (isKeep2ShareUrl(url)) {
+      // Parse metadata if it's a JSON string (e.g. from DB rehydrate)
+      if (typeof metadata === 'string' && metadata) {
+        try { metadata = JSON.parse(metadata); } catch (_) { metadata = {}; }
+      }
       try {
         const originalK2sUrl = url;
         const resolved = await resolveKeep2ShareDirectUrl(originalK2sUrl, metadata);
@@ -13604,6 +13620,12 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
           const nextMeta = metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? { ...metadata } : {};
           nextMeta.webdl_input_url = nextMeta.webdl_input_url || originalK2sUrl;
           nextMeta.webdl_resolved_url = resolved.url;
+          // Ensure source_sites is always set for K2S downloads
+          if (!Array.isArray(nextMeta.source_sites) || !nextMeta.source_sites.length) {
+            const fromVG = platform === 'vipergirls' || /vipergirls/i.test(String(nextMeta.url || nextMeta.source_url || channel || ''));
+            nextMeta.source_sites = fromVG ? ['vipergirls', 'keep2share'] : ['keep2share'];
+            if (!nextMeta.source_site) nextMeta.source_site = fromVG ? 'vipergirls' : 'keep2share';
+          }
           try { await updateDownloadUrl.run(resolved.url, downloadId); } catch (e) { }
           url = resolved.url;
           metadata = nextMeta;

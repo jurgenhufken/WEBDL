@@ -15,12 +15,50 @@ const DATABASE_URL = process.env.DATABASE_URL || 'postgres://localhost/webdl';
 const FFMPEG_BIN = process.env.FFMPEG_BIN || 'ffmpeg';
 const FFPROBE_BIN = process.env.FFPROBE_BIN || 'ffprobe';
 
+// ─── Performance: file-existence cache ─────────────────────────────────────
+// fs.existsSync op externe schijven is de #1 bottleneck (~40-60s per gallery load).
+// Cache resultaten 5 minuten; bij ~200K items scheelt dit enorm.
+const FILE_EXISTS_TTL_MS = 5 * 60 * 1000;
+const FILE_EXISTS_MAX_ENTRIES = 50000;
+const _fileExistsCache = new Map();
+function cachedFileExists(fp) {
+  const cached = _fileExistsCache.get(fp);
+  if (cached && (Date.now() - cached.t) < FILE_EXISTS_TTL_MS) return cached.v;
+  const exists = fs.existsSync(fp);
+  if (_fileExistsCache.size >= FILE_EXISTS_MAX_ENTRIES) {
+    // Verwijder oudste 20% als cache vol is
+    const entries = [..._fileExistsCache.entries()];
+    entries.sort((a, b) => a[1].t - b[1].t);
+    const removeCount = Math.floor(FILE_EXISTS_MAX_ENTRIES * 0.2);
+    for (let i = 0; i < removeCount; i++) _fileExistsCache.delete(entries[i][0]);
+  }
+  _fileExistsCache.set(fp, { v: exists, t: Date.now() });
+  return exists;
+}
+
+// ─── Performance: API response cache ──────────────────────────────────────
+// platforms/channels/tags veranderen zelden en duren 30-75s om te berekenen.
+const API_CACHE_TTL_MS = 30 * 1000;  // 30 seconden — snel genoeg om nieuwe downloads te tonen
+const _apiCache = new Map();
+let _lastKnownCompletedCount = -1;
+function apiCacheGet(key) {
+  const cached = _apiCache.get(key);
+  if (cached && (Date.now() - cached.t) < API_CACHE_TTL_MS) return cached.v;
+  return null;
+}
+function apiCacheSet(key, value) {
+  _apiCache.set(key, { v: value, t: Date.now() });
+}
+function apiCacheInvalidate() {
+  _apiCache.clear();
+}
+
 const pool = new Pool({
   connectionString: DATABASE_URL,
-  max: 8,                         // begrens gallery-load; voorkomt query-stapeling bij meerdere tabs
+  max: 20,                        // page-load fires 4+ concurrent queries; 8 was te weinig bij 200K+ rows
   idleTimeoutMillis: 30000,       // idle verbindingen na 30s sluiten
-  connectionTimeoutMillis: 5000,  // max 5s wachten op verbinding uit pool
-  statement_timeout: 30000,       // startup/indexchecks mogen niet afkappen onder IO-load
+  connectionTimeoutMillis: 20000, // max 20s wachten op verbinding uit pool
+  statement_timeout: 120000,      // 120s statement timeout; /api/channels kan 40s+ duren
 });
 
 const app = express();
@@ -952,12 +990,13 @@ async function rowHasPlayableMedia(row) {
   if (rowReferencesImxThumbnail(row)) return false;
   if (rowReferencesViprLowQualityImage(row)) return false;
   const isImage = IMAGE_EXTS.includes(ext);
-  // Trust DB for images: skip disk check if thumb-ready or filesize known
-  if (isImage && (row.is_thumb_ready === true || Number(row.filesize || 0) > 0)) return true;
+  const isVideo = VIDEO_EXTS.includes(ext);
+  // Trust DB: skip disk check if thumb-ready or filesize known (images AND videos)
+  if (row.is_thumb_ready === true || Number(row.filesize || 0) > 0) return true;
   // For everything else, verify on disk
-  if (!fs.existsSync(fp)) return false;
+  if (!cachedFileExists(fp)) return false;
   if (mediaFileLooksLikeHotlinkPlaceholder(fp, row)) return false;
-  if (!VIDEO_EXTS.includes(ext)) return true;
+  if (!isVideo) return true;
   if (Number(row.filesize || 0) > 0 && Number(row.filesize || 0) < 128 * 1024) return false;
   if (row.is_thumb_ready === true) return true;
   return hasVideoStream(fp);
@@ -1738,7 +1777,12 @@ function buildItemFilters({ req, params, fileExpr, extExpr, ratingExpr, includeC
   const qPlatformAlias = !platformValues.length && q ? platformSearchAlias(q) : '';
 
   const where = [`${fileExpr} IS NOT NULL`, `${fileExpr} <> ''`];
-  if (platformValues.length) { params.push(platformValues); where.push(`${platformGroupSql('d')} = ANY($${params.length}::text[])`); }
+  if (platformValues.length) {
+    params.push(platformValues);
+    const pidx = params.length;
+    // Match platform OR any of the requested platforms appearing in source_sites metadata
+    where.push(`(${platformGroupSql('d')} = ANY($${pidx}::text[]) OR LOWER(COALESCE(d.metadata, '')) LIKE ANY(ARRAY(SELECT '%"' || unnest($${pidx}::text[]) || '"%')))`);
+  }
   else if (qPlatformAlias) { params.push([qPlatformAlias]); where.push(`${platformGroupSql('d')} = ANY($${params.length}::text[])`); }
   if (includeChannel && channelValues.length) {
     const siteChannels = channelValues.filter((value) => String(value).startsWith('site:'));
@@ -2368,6 +2412,8 @@ app.get('/api/platforms', async (req, res) => {
   try {
     const scoped = Boolean(req.query.platform || req.query.channel || req.query.q || req.query.min_rating || req.query.media_type || req.query.tag_id || req.query.source_thread_url || req.query.source_thread_title || req.query.source_post_url || req.query.source_model_key || req.query.source_model_title);
     if (!scoped) {
+      const cached = apiCacheGet('platforms:unscoped');
+      if (cached) return res.json(cached);
       const params = [];
       const where = buildItemFilters({
         req, params,
@@ -2416,7 +2462,9 @@ app.get('/api/platforms', async (req, res) => {
           ) combined
          GROUP BY platform
          ORDER BY count DESC`, params);
-      return res.json({ platforms: rows });
+      const result = { platforms: rows };
+      apiCacheSet('platforms:unscoped', result);
+      return res.json(result);
     }
 
     const params = [];
@@ -2505,6 +2553,9 @@ app.get('/api/channels', async (req, res) => {
         : 'latest_ts DESC NULLS LAST, count DESC';
     const scoped = Boolean(req.query.platform || req.query.channel || req.query.q || req.query.min_rating || req.query.media_type || req.query.tag_id || req.query.source_thread_url || req.query.source_thread_title || req.query.source_post_url || req.query.source_model_key || req.query.source_model_title);
     if (!scoped) {
+      const cacheKey = `channels:${channelSort}`;
+      const cached = apiCacheGet(cacheKey);
+      if (cached) return res.json(cached);
       const params = [];
       const where = buildItemFilters({
         req, params,
@@ -2558,7 +2609,9 @@ app.get('/api/channels', async (req, res) => {
           ) channel_items
          ORDER BY ${orderBy}
          LIMIT 10000`, params);
-      return res.json({ channels: rows });
+      const result = { channels: rows };
+      apiCacheSet(cacheKey, result);
+      return res.json(result);
     }
 
     const params = [];
@@ -2857,6 +2910,8 @@ app.get('/thumb/:id', async (req, res) => {
 // ─── Tags CRUD ─────────────────────────────────────────────────────────────
 app.get('/api/tags', async (_req, res) => {
   try {
+    const cached = apiCacheGet('tags');
+    if (cached) return res.json(cached);
     const { rows } = await pool.query(`
       SELECT t.id, t.name, t.is_favorite,
              COALESCE(t.user_use_count, 0)::int AS user_use_count,
@@ -2886,7 +2941,9 @@ app.get('/api/tags', async (_req, res) => {
                 COALESCE(t.user_use_count, 0) DESC,
                 t.last_used_at DESC NULLS LAST,
                 t.name ASC`);
-    res.json({ tags: rows.filter((r) => !isJunkTagName(r.name)) });
+    const result = { tags: rows.filter((r) => !isJunkTagName(r.name)) };
+    apiCacheSet('tags', result);
+    res.json(result);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -3348,5 +3405,19 @@ const server = app.listen(PORT, () => {
       warmThumbBacklog('timer').catch((e) => console.warn('[thumb-warm] failed:', e.message));
     }, THUMB_WARM_INTERVAL_MS).unref();
   }
+  // ─── Auto-invalidate API cache when new completed downloads arrive ─────
+  setInterval(async () => {
+    try {
+      const { rows } = await pool.query(
+        "SELECT count(*) AS n FROM downloads WHERE status = 'completed'"
+      );
+      const n = Number(rows[0].n);
+      if (_lastKnownCompletedCount >= 0 && n !== _lastKnownCompletedCount) {
+        console.log(`[cache-invalidate] completed count changed ${_lastKnownCompletedCount} → ${n}, clearing cache`);
+        apiCacheInvalidate();
+      }
+      _lastKnownCompletedCount = n;
+    } catch (_) {}
+  }, 15000).unref();
 });
 global.__webdlGalleryServer = server;
