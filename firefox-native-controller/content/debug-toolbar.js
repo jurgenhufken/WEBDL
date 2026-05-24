@@ -8651,11 +8651,30 @@
     }
   }
 
+  // Guard tegen dubbele Hele-thread/Giga scans. User klacht: "hele thread
+  // scans zorgen onzichtbaar voor problemen" — als 2× wordt geklikt loopt
+  // er parallel een scan, met dubbele HTTP-requests naar Cloudflare-host
+  // (ban-risico) + dubbele POSTs naar hub (queue-overload).
+  let WHOLE_THREAD_SCAN_RUNNING = false;
+  const guardedRunBatchFromWholeThread = async (btn, opts, ev) => {
+    if (WHOLE_THREAD_SCAN_RUNNING) {
+      console.warn('[WEBDL] scan al actief — klik genegeerd');
+      try { showNotification('⏳ Vorige scan loopt nog — wacht tot deze klaar is', true); } catch (_) {}
+      return;
+    }
+    WHOLE_THREAD_SCAN_RUNNING = true;
+    try {
+      await runBatchFromWholeThread(btn, opts, ev);
+    } finally {
+      WHOLE_THREAD_SCAN_RUNNING = false;
+    }
+  };
+
   threadBatchDownloadBtn.addEventListener('click', async function(e) {
     console.log('[WEBDL] 🧵 Hele thread knop geklikt', { url: window.location.href });
     const force = !!(e && (e.shiftKey || e.altKey));
     try {
-      await runBatchFromWholeThread(threadBatchDownloadBtn, { force }, e);
+      await guardedRunBatchFromWholeThread(threadBatchDownloadBtn, { force }, e);
     } catch (err) {
       console.error('[WEBDL] Hele thread fout:', err);
       try { showNotification(`Hele thread fout: ${err && err.message ? err.message : String(err)}`, true); } catch (_) {}
@@ -8666,7 +8685,7 @@
     console.log('[WEBDL] ⚡ Giga knop geklikt', { url: window.location.href });
     const force = !!(e && (e.shiftKey || e.altKey));
     try {
-      await runBatchFromWholeThread(gigaDownloadBtn, { force, forceGiga: true }, e);
+      await guardedRunBatchFromWholeThread(gigaDownloadBtn, { force, forceGiga: true }, e);
     } catch (err) {
       console.error('[WEBDL] Giga fout:', err);
       try { showNotification(`Giga fout: ${err && err.message ? err.message : String(err)}`, true); } catch (_) {}
