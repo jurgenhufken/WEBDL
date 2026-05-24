@@ -6957,6 +6957,163 @@ expressApp.post('/api/erome/album', (req, res) => {
   }
 });
 
+// GET /api/sites — overzicht van alle ondersteunde sites met DB-stats.
+// Leest sites/*.js files en parsed label/platform/itemTypes per site.
+// Combineert met DB-counts per platform.
+expressApp.get('/api/sites', async (req, res) => {
+  try {
+    const sitesDir = path.join(__dirname, '..', '..', 'firefox-native-controller', 'content', 'sites');
+    const files = fs.existsSync(sitesDir) ? fs.readdirSync(sitesDir).filter((f) => f.endsWith('.js')) : [];
+    const sites = [];
+    for (const f of files) {
+      const filepath = path.join(sitesDir, f);
+      const text = fs.readFileSync(filepath, 'utf8');
+      const host = (text.match(/window\.WEBDL_SITES\['([^']+)'\]\s*=/) || [])[1] || f.replace(/\.js$/, '');
+      const label = (text.match(/label:\s*'([^']+)'/) || [])[1] || host;
+      const platform = (text.match(/platform:\s*'([^']+)'/) || [])[1] || '';
+      const itemTypeMatches = [...text.matchAll(/name:\s*'([^']+)'/g)].map((m) => m[1]);
+      const endpoints = [...new Set([...text.matchAll(/endpoint:\s*'([^']+)'/g)].map((m) => m[1]))];
+      const hasResolveUrl = /resolveUrl[\s\(]/.test(text);
+      const hasDetectMaxPage = /detectMaxPage\s*\(/.test(text);
+      sites.push({
+        host, label, platform,
+        itemTypes: itemTypeMatches,
+        endpoints,
+        features: {
+          resolveUrl: hasResolveUrl,
+          detectMaxPage: hasDetectMaxPage,
+        },
+        configPath: `firefox-native-controller/content/sites/${f}`,
+      });
+    }
+    // DB-stats per platform
+    let stats = {};
+    try {
+      const rows = await new Promise((resolve, reject) => {
+        const psql = spawn('psql', ['-d', 'webdl', '-t', '-A', '-F', '|', '-c',
+          `SELECT platform, status, COUNT(*) as n, MAX(updated_at) as last FROM public.downloads WHERE platform IS NOT NULL GROUP BY platform, status ORDER BY platform, status;`]);
+        let out = ''; psql.stdout.on('data', (d) => out += d);
+        psql.on('close', () => resolve(out.trim().split('\n').filter(Boolean)));
+        psql.on('error', reject);
+      });
+      for (const line of rows) {
+        const [plat, status, n, last] = line.split('|');
+        if (!stats[plat]) stats[plat] = { total: 0, byStatus: {}, last: null };
+        const count = parseInt(n, 10) || 0;
+        stats[plat].total += count;
+        stats[plat].byStatus[status] = count;
+        if (last && (!stats[plat].last || last > stats[plat].last)) stats[plat].last = last;
+      }
+    } catch (e) {
+      stats = { _error: String(e.message || e) };
+    }
+    // Voeg stats toe per site
+    for (const s of sites) {
+      s.stats = stats[s.platform] || null;
+    }
+    res.json({
+      success: true,
+      count: sites.length,
+      sites,
+      generatedAt: new Date().toISOString(),
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e.message || e) });
+  }
+});
+
+// GET /sites — simple HTML dashboard
+expressApp.get('/sites', (req, res) => {
+  res.type('html').send(`<!DOCTYPE html>
+<html lang="nl"><head>
+<meta charset="utf-8">
+<title>WEBDL · Sites Dashboard</title>
+<style>
+body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #e2e8f0; padding: 20px; margin: 0; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+.sub { color: #94a3b8; font-size: 13px; margin-bottom: 20px; }
+table { width: 100%; border-collapse: collapse; background: #1e293b; border-radius: 8px; overflow: hidden; }
+th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #334155; font-size: 13px; }
+th { background: #0f172a; color: #94a3b8; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; }
+tr:hover td { background: #2d3b53; }
+.platform { font-weight: 600; color: #60a5fa; }
+.host { color: #94a3b8; font-size: 11px; }
+.endpoint { background: #334155; padding: 2px 6px; border-radius: 4px; font-size: 11px; margin-right: 4px; display: inline-block; }
+.endpoint.video { background: #1e3a5f; color: #93c5fd; }
+.endpoint.album { background: #4c1d95; color: #c4b5fd; }
+.feature { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; margin-right: 4px; background: #064e3b; color: #6ee7b7; }
+.types { color: #cbd5e1; font-size: 12px; }
+.stat-total { font-weight: 600; color: #facc15; }
+.stat-completed { color: #4ade80; }
+.stat-error { color: #f87171; }
+.stat-pending { color: #94a3b8; }
+.last { color: #94a3b8; font-size: 11px; }
+.loading { text-align: center; padding: 40px; color: #94a3b8; }
+.search { padding: 8px 12px; background: #1e293b; border: 1px solid #334155; color: #e2e8f0; border-radius: 6px; font-size: 14px; width: 300px; margin-bottom: 12px; }
+</style>
+</head><body>
+<h1>⚡ WEBDL · Sites Dashboard</h1>
+<div class="sub" id="sub">Loading...</div>
+<input class="search" id="q" placeholder="Filter op naam/platform/host...">
+<table id="t"><thead><tr>
+  <th>Platform</th><th>Host</th><th>Item types</th><th>Endpoints</th><th>Features</th>
+  <th>Total</th><th>Completed</th><th>Pending</th><th>Error</th><th>Last activity</th>
+</tr></thead><tbody><tr><td colspan="10" class="loading">Loading sites...</td></tr></tbody></table>
+<script>
+async function load() {
+  const r = await fetch('/api/sites');
+  const d = await r.json();
+  if (!d.success) { document.getElementById('sub').textContent = 'Error: ' + d.error; return; }
+  document.getElementById('sub').textContent = d.count + ' sites · ' + new Date(d.generatedAt).toLocaleString('nl-NL');
+  window._sites = d.sites;
+  render(d.sites);
+}
+function render(sites) {
+  const tb = document.querySelector('#t tbody');
+  tb.innerHTML = '';
+  for (const s of sites.sort((a,b) => a.label.localeCompare(b.label))) {
+    const tr = document.createElement('tr');
+    const types = s.itemTypes.length ? s.itemTypes.join(', ') : '<i>geen</i>';
+    const eps = s.endpoints.map((e) => {
+      const cls = e.includes('album') ? 'album' : 'video';
+      return '<span class="endpoint ' + cls + '">' + e + '</span>';
+    }).join('');
+    const feats = [];
+    if (s.features.resolveUrl) feats.push('<span class="feature">resolveUrl</span>');
+    if (s.features.detectMaxPage) feats.push('<span class="feature">maxPage</span>');
+    const st = s.stats || {};
+    const total = st.total || 0;
+    const completed = (st.byStatus && st.byStatus.completed) || 0;
+    const pending = ((st.byStatus && st.byStatus.pending) || 0) + ((st.byStatus && st.byStatus.queued) || 0);
+    const errors = (st.byStatus && st.byStatus.error) || 0;
+    const last = st.last ? new Date(st.last).toLocaleString('nl-NL', { dateStyle: 'short', timeStyle: 'short' }) : '-';
+    tr.innerHTML =
+      '<td><span class="platform">' + (s.label || '-') + '</span></td>' +
+      '<td><span class="host">' + (s.host || '-') + '</span></td>' +
+      '<td><span class="types">' + types + '</span></td>' +
+      '<td>' + eps + '</td>' +
+      '<td>' + (feats.join('') || '-') + '</td>' +
+      '<td><span class="stat-total">' + total.toLocaleString('nl-NL') + '</span></td>' +
+      '<td><span class="stat-completed">' + completed.toLocaleString('nl-NL') + '</span></td>' +
+      '<td><span class="stat-pending">' + pending.toLocaleString('nl-NL') + '</span></td>' +
+      '<td><span class="stat-error">' + errors.toLocaleString('nl-NL') + '</span></td>' +
+      '<td><span class="last">' + last + '</span></td>';
+    tb.appendChild(tr);
+  }
+}
+document.getElementById('q').addEventListener('input', (e) => {
+  const q = e.target.value.toLowerCase();
+  if (!q) return render(window._sites || []);
+  const filtered = (window._sites || []).filter((s) =>
+    (s.label || '').toLowerCase().includes(q) ||
+    (s.host || '').toLowerCase().includes(q) ||
+    (s.platform || '').toLowerCase().includes(q));
+  render(filtered);
+});
+load();
+</script></body></html>`);
+});
+
 // pictoa.com /albums/<slug>-<id>.html OR listing — spawn scripts/pictoa_dl.py async.
 expressApp.post('/api/pictoa/album', (req, res) => {
   try {
