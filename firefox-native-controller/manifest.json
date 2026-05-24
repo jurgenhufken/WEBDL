@@ -1,13 +1,15 @@
 {
   "manifest_version": 2,
   "name": "Screen Recorder Controller",
-  "version": "1.0.57",
+  "version": "1.0.61",
   "description": "Besturingsinterface voor de native Screen Recorder applicatie",
   "browser_specific_settings": {
     "gecko": {
       "id": "webdl-screen-recorder-controller@local",
       "data_collection_permissions": {
-        "required": ["none"]
+        "required": [
+          "none"
+        ]
       }
     }
   },
@@ -32,21 +34,40 @@
     "*://*.xvideos-cdn.com/*",
     "*://*.xv-cdn.com/*",
     "*://*.amateurvoyeurforum.com/*",
-    "*://*.elitebabes.com/*"
+    "*://*.elitebabes.com/*",
+    "*://*.footstockings.com/*"
   ],
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
+      "matches": [
+        "<all_urls>"
+      ],
       "exclude_matches": [
         "http://localhost/*",
         "http://127.0.0.1/*"
       ],
-      "js": ["background/browser-polyfill.js", "content/debug-toolbar.js"],
+      "js": [
+        "background/browser-polyfill.js",
+        "content/debug-toolbar.js"
+      ],
+      "run_at": "document_end"
+    },
+    {
+      "matches": [
+        "*://*.footstockings.com/*"
+      ],
+      "js": [
+        "content/footstockings.js"
+      ],
       "run_at": "document_end"
     }
   ],
   "background": {
-    "scripts": ["background/browser-polyfill.js", "background/socket.io.min.js", "background/simple-background.js"]
+    "scripts": [
+      "background/browser-polyfill.js",
+      "background/socket.io.min.js",
+      "background/simple-background.js"
+    ]
   },
   "web_accessible_resources": [
     "icons/*.svg",

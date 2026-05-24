@@ -8600,6 +8600,7 @@ function detectPlatform(url) {
   if (/erome\.com/i.test(u)) return 'erome';
   if (/imagefap\.com/i.test(u)) return 'imagefap';
   if (/keep2share\.cc|k2s\.cc/i.test(u)) return 'keep2share';
+  if (/footstockings\.com/i.test(u)) return 'footstockings';
 
   try {
     const host = new URL(u).hostname.toLowerCase();
@@ -8651,6 +8652,7 @@ const KNOWN_PLATFORMS = new Set([
   'erome',
   'imagefap',
   'keep2share',
+  'footstockings',
   '4kdownloader',
   'other']
 );
@@ -8759,6 +8761,33 @@ function deriveChannelFromUrl(platform, url) {
     if (m) return m[1];
     const m2 = u.match(/aznudefeet\.com\/([^\/\?#]+)/i);
     if (m2) return m2[1];
+  }
+
+  if (platform === 'footstockings') {
+    try {
+      const parsed = new URL(u);
+      const segs = String(parsed.pathname || '').split('/').filter(Boolean);
+      // /videos/<id>/<slug>/ → slug (bv. 'flexible-feet')
+      // /albums/<id>/<slug>/ → slug
+      if ((segs[0] === 'videos' || segs[0] === 'albums') && segs.length >= 3) return segs[2];
+      // /models/<name>/, /categories/<cat>/, /channels/<c>/, /playlists/<id>/, /search/<q>/
+      if (segs.length >= 2) return `${segs[0]}_${segs[1]}`;
+      if (segs.length === 1) return segs[0];
+    } catch (e) {}
+  }
+
+  if (platform === 'keep2share') {
+    // /file/<hash>/<filename>  → filename zonder ext als channel (bv. 'NudeBeach1151')
+    // /file/<hash>            → 'k2s_<hash-prefix>' als fallback
+    // Hierdoor voorkomen we 'keep2share/unknown/https___k2s.cc_file_<hash>' folders
+    // voor directe K2S URLs zonder forum-context (vipergirls etc. blijven hun thread_id krijgen via metadata).
+    const m = u.match(/k2s\.(?:cc|io)\/file\/[a-f0-9]+\/([^/?#]+)/i);
+    if (m && m[1]) {
+      const base = decodeURIComponent(m[1]).replace(/\.[^.]+$/, '').replace(/[^\w.-]+/g, '_');
+      if (base) return base.slice(0, 60);
+    }
+    const idm = u.match(/k2s\.(?:cc|io)\/file\/([a-f0-9]+)/i);
+    if (idm && idm[1]) return `k2s_${idm[1].slice(0, 12)}`;
   }
 
   if (platform === 'telegram') {
