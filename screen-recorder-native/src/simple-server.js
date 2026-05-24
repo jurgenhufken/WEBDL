@@ -6822,6 +6822,47 @@ expressApp.post('/api/queue/resume', async (req, res) => {
   }
 });
 
+// darknetvideos.com /video.php?id=N OR search-page — spawn
+// scripts/darknet_dl.py async (parse JSON-LD VideoObject → contentUrl).
+expressApp.post('/api/darknetvideos/video', (req, res) => {
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const url = String(body.url || '').trim();
+    const channel = String(body.channel || '').trim();
+    if (!url || !/^https?:\/\/(?:www\.)?darknetvideos\.com\//i.test(url)) {
+      return res.status(400).json({ success: false, error: 'url moet darknetvideos.com URL zijn' });
+    }
+    const script = path.join(__dirname, '..', '..', 'scripts', 'darknet_dl.py');
+    if (!fs.existsSync(script)) {
+      return res.status(500).json({ success: false, error: `script ontbreekt: ${script}` });
+    }
+    const args = [script, url];
+    if (channel) args.push('--channel-override', channel);
+    const child = spawn('/usr/bin/python3', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: false,
+      env: { ...process.env },
+    });
+    const pid = child.pid;
+    let stderr = '';
+    child.stderr.on('data', (d) => { stderr += d.toString().slice(0, 4096); });
+    child.on('close', (code) => {
+      console.log(`[darknet_dl pid=${pid}] exit ${code}`);
+      if (code !== 0) console.warn(`[darknet_dl pid=${pid}] stderr: ${stderr.slice(0, 500)}`);
+    });
+    child.unref();
+    return res.json({
+      success: true,
+      url,
+      channel: channel || '(auto)',
+      pid,
+      message: 'darknet_dl.py gestart op achtergrond',
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: String(e && e.message ? e.message : e) });
+  }
+});
+
 // footstockings.com /albums/<id>/<slug>/ — spawn scripts/foot_album_dl.py
 // async, return meteen, script schrijft zelf files + DB-rows.
 //

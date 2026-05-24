@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Screen Recorder Controller",
-  "version": "1.0.65",
+  "version": "1.0.66",
   "description": "Besturingsinterface voor de native Screen Recorder applicatie",
   "browser_specific_settings": {
     "gecko": {
@@ -36,7 +36,8 @@
     "*://*.amateurvoyeurforum.com/*",
     "*://*.elitebabes.com/*",
     "*://*.footstockings.com/*",
-    "*://*.heavyfetish.com/*"
+    "*://*.heavyfetish.com/*",
+    "*://*.darknetvideos.com/*"
   ],
   "content_scripts": [
     {
@@ -60,6 +61,15 @@
       ],
       "js": [
         "content/tube-engine.js"
+      ],
+      "run_at": "document_end"
+    },
+    {
+      "matches": [
+        "*://*.darknetvideos.com/*"
+      ],
+      "js": [
+        "content/darknetvideos.js"
       ],
       "run_at": "document_end"
     }
