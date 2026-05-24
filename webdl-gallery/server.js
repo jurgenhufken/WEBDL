@@ -2013,6 +2013,23 @@ app.get('/api/active-items', async (_req, res) => {
 // ─── Items: gepagineerde media ─────────────────────────────────────────────
 app.get('/api/items', async (req, res) => {
   const startedAt = Date.now();
+  const itemsCacheKey = '/api/items:' + JSON.stringify(req.query);
+  const skipItemsCache = req.query.nocache === '1';
+  if (!skipItemsCache) {
+    const cached = apiCacheGet(itemsCacheKey);
+    if (cached) {
+      res.set('X-Cache', 'HIT');
+      return res.json(cached);
+    }
+    const _origJson = res.json.bind(res);
+    res.json = (data) => {
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        apiCacheSet(itemsCacheKey, data);
+        res.set('X-Cache', 'MISS');
+      }
+      return _origJson(data);
+    };
+  }
   try {
     const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 100));
     const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
