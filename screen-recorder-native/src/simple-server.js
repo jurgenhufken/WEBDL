@@ -6909,6 +6909,93 @@ expressApp.post('/api/footstockings/album', (req, res) => {
   }
 });
 
+// erome.com /a/<ID> OR search/profile — spawn scripts/erome_dl.py async
+// (parse <source mp4> + data-src jpeg, downloads + DB-register).
+expressApp.post('/api/erome/album', (req, res) => {
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const url = String(body.url || '').trim();
+    const channel = String(body.channel || '').trim();
+    const pages = Number(body.pages) > 0 ? Math.floor(Number(body.pages)) : 1;
+    if (!url || !/^https?:\/\/(?:www\.)?erome\.com\//i.test(url)) {
+      return res.status(400).json({ success: false, error: 'url moet erome.com URL zijn' });
+    }
+    const script = path.join(__dirname, '..', '..', 'scripts', 'erome_dl.py');
+    if (!fs.existsSync(script)) {
+      return res.status(500).json({ success: false, error: `script ontbreekt: ${script}` });
+    }
+    const args = [script, url];
+    if (channel) args.push('--channel-override', channel);
+    if (pages > 1) args.push('--pages', String(pages));
+    const child = spawn('/usr/bin/python3', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: false,
+      env: { ...process.env },
+    });
+    const pid = child.pid;
+    let stderr = '';
+    child.stderr.on('data', (d) => { stderr += d.toString().slice(0, 4096); });
+    child.on('close', (code) => {
+      console.log(`[erome_dl pid=${pid}] exit ${code}`);
+      if (code !== 0) console.warn(`[erome_dl pid=${pid}] stderr: ${stderr.slice(0, 500)}`);
+    });
+    child.unref();
+    return res.json({
+      success: true,
+      url,
+      channel: channel || '(auto)',
+      pages,
+      pid,
+      message: 'erome_dl.py gestart op achtergrond',
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: String(e && e.message ? e.message : e) });
+  }
+});
+
+// pictoa.com /albums/<slug>-<id>.html OR listing — spawn scripts/pictoa_dl.py async.
+expressApp.post('/api/pictoa/album', (req, res) => {
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const url = String(body.url || '').trim();
+    const channel = String(body.channel || '').trim();
+    const pages = Number(body.pages) > 0 ? Math.floor(Number(body.pages)) : 1;
+    if (!url || !/^https?:\/\/(?:www\.)?pictoa\.com\//i.test(url)) {
+      return res.status(400).json({ success: false, error: 'url moet pictoa.com URL zijn' });
+    }
+    const script = path.join(__dirname, '..', '..', 'scripts', 'pictoa_dl.py');
+    if (!fs.existsSync(script)) {
+      return res.status(500).json({ success: false, error: `script ontbreekt: ${script}` });
+    }
+    const args = [script, url];
+    if (channel) args.push('--channel-override', channel);
+    if (pages > 1) args.push('--pages', String(pages));
+    const child = spawn('/usr/bin/python3', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: false,
+      env: { ...process.env },
+    });
+    const pid = child.pid;
+    let stderr = '';
+    child.stderr.on('data', (d) => { stderr += d.toString().slice(0, 4096); });
+    child.on('close', (code) => {
+      console.log(`[pictoa_dl pid=${pid}] exit ${code}`);
+      if (code !== 0) console.warn(`[pictoa_dl pid=${pid}] stderr: ${stderr.slice(0, 500)}`);
+    });
+    child.unref();
+    return res.json({
+      success: true,
+      url,
+      channel: channel || '(auto)',
+      pages,
+      pid,
+      message: 'pictoa_dl.py gestart op achtergrond',
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: String(e && e.message ? e.message : e) });
+  }
+});
+
 // Global priority mode — when ON, new downloads get priority=1
 let globalPriorityMode = false;
 expressApp.get('/api/settings/priority', (req, res) => {
@@ -8691,6 +8778,11 @@ function detectPlatform(url) {
   if (/heavyfetish\.com/i.test(u)) return 'heavyfetish';
   if (/darknessporn\.com/i.test(u)) return 'darknessporn';
   if (/darknetvideos\.com/i.test(u)) return 'darknetvideos';
+  if (/spankbang\.com/i.test(u)) return 'spankbang';
+  if (/xnxx\.com/i.test(u)) return 'xnxx';
+  if (/tnaflix\.com/i.test(u)) return 'tnaflix';
+  if (/redtube\.com/i.test(u)) return 'redtube';
+  if (/pictoa\.com/i.test(u)) return 'pictoa';
 
   try {
     const host = new URL(u).hostname.toLowerCase();
@@ -8746,6 +8838,11 @@ const KNOWN_PLATFORMS = new Set([
   'heavyfetish',
   'darknessporn',
   'darknetvideos',
+  'spankbang',
+  'xnxx',
+  'tnaflix',
+  'redtube',
+  'pictoa',
   '4kdownloader',
   'other']
 );
@@ -8880,6 +8977,102 @@ function deriveChannelFromUrl(platform, url) {
       if ((segs[0] === 'videos' || segs[0] === 'albums') && segs.length >= 3) return segs[2];
       // /models/<name>/, /categories/<cat>/, /channels/<c>/, /playlists/<id>/, /search/<q>/
       if (segs.length >= 2) return `${segs[0]}_${segs[1]}`;
+      if (segs.length === 1) return segs[0];
+    } catch (e) {}
+  }
+
+  if (platform === 'erome') {
+    try {
+      const parsed = new URL(u);
+      const segs = String(parsed.pathname || '').split('/').filter(Boolean);
+      // /a/<ID> → album_<ID>
+      if (segs[0] === 'a' && segs[1]) return `album_${segs[1]}`;
+      // /search?q=<X> → search_<X>
+      if (segs[0] === 'search') {
+        const q = parsed.searchParams.get('q') || '';
+        if (q) return `search_${q.replace(/\s+/g, '-')}`;
+        return 'erome_search';
+      }
+      // /<username>
+      if (segs.length === 1) return `user_${segs[0]}`;
+    } catch (e) {}
+  }
+
+  if (platform === 'spankbang') {
+    try {
+      const parsed = new URL(u);
+      const segs = String(parsed.pathname || '').split('/').filter(Boolean);
+      if (segs[0] === 's' && segs[1]) return `search_${segs[1]}`;
+      if (segs[0] === 'tag' && segs[1]) return `tag_${segs[1]}`;
+      if (segs[0] === 'pornstar' && segs[1]) return `pornstar_${segs[1]}`;
+      if (segs[0] === 'category' && segs[1]) return `category_${segs[1]}`;
+      // single /<id>/video/<slug>
+      if (segs.length >= 3 && segs[1] === 'video') return `video_${segs[0]}`;
+      if (segs.length >= 2) return `${segs[0]}_${segs[1]}`;
+      if (segs.length === 1) return segs[0];
+    } catch (e) {}
+  }
+
+  if (platform === 'xnxx') {
+    try {
+      const parsed = new URL(u);
+      const segs = String(parsed.pathname || '').split('/').filter(Boolean);
+      if (segs[0] === 'search' && segs[1]) return `search_${segs[1]}`;
+      if (segs[0] === 'tags' && segs[1]) return `tag_${segs[1]}`;
+      if (segs[0] === 'porn' && segs[1]) return `porn_${segs[1]}`;
+      const m = segs[0] && segs[0].match(/^video-([a-z0-9]+)$/i);
+      if (m) return `video_${m[1]}`;
+      if (segs.length >= 2) return `${segs[0]}_${segs[1]}`;
+      if (segs.length === 1) return segs[0];
+    } catch (e) {}
+  }
+
+  if (platform === 'tnaflix') {
+    try {
+      const parsed = new URL(u);
+      const segs = String(parsed.pathname || '').split('/').filter(Boolean);
+      // /search?what=<q>
+      if (segs[0] === 'search' || parsed.pathname === '/search') {
+        const q = (parsed.searchParams.get('what') || parsed.searchParams.get('q') || '').trim();
+        return q ? `search_${q.replace(/\s+/g, '-')}` : 'tnaflix_search';
+      }
+      // /<cat>/<slug>/video<id>
+      const last = segs[segs.length - 1] || '';
+      const vm = last.match(/^video(\d+)$/i);
+      if (vm) return `video_${vm[1]}`;
+      if (segs.length >= 2) return `${segs[0]}_${segs[1]}`;
+      if (segs.length === 1) return segs[0];
+    } catch (e) {}
+  }
+
+  if (platform === 'redtube') {
+    try {
+      const parsed = new URL(u);
+      const segs = String(parsed.pathname || '').split('/').filter(Boolean);
+      const q = (parsed.searchParams.get('search') || '').trim();
+      if (q) return `search_${q.replace(/\s+/g, '-')}`;
+      if (segs[0] === 'category' && segs[1]) return `category_${segs[1]}`;
+      if ((segs[0] === 'tag' || segs[0] === 'tags') && segs[1]) return `tag_${segs[1]}`;
+      if (segs[0] === 'pornstar' && segs[1]) return `pornstar_${segs[1]}`;
+      if (segs.length === 1 && /^\d+$/.test(segs[0])) return `video_${segs[0]}`;
+      if (segs.length >= 2) return `${segs[0]}_${segs[1]}`;
+      if (segs.length === 1) return segs[0];
+    } catch (e) {}
+  }
+
+  if (platform === 'pictoa') {
+    try {
+      const parsed = new URL(u);
+      const segs = String(parsed.pathname || '').split('/').filter(Boolean);
+      // /albums/<slug>-<id>.html → album_<id>
+      if (segs[0] === 'albums' && segs[segs.length - 1].endsWith('.html')) {
+        const m = segs[segs.length - 1].match(/-(\d+)\.html$/);
+        if (m) return `album_${m[1]}`;
+      }
+      if (segs[0] === 's' && segs[1]) return `search_${segs[1]}`;
+      if (segs[0] === 'pornstar' && segs[1]) return `pornstar_${segs[1]}`;
+      if ((segs[0] === 'category' || segs[0] === 'categories') && segs[1]) return `category_${segs[1]}`;
+      if ((segs[0] === 'tag' || segs[0] === 'tags') && segs[1]) return `tag_${segs[1]}`;
       if (segs.length === 1) return segs[0];
     } catch (e) {}
   }

@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Screen Recorder Controller",
-  "version": "1.0.69",
+  "version": "1.0.73",
   "description": "Besturingsinterface voor de native Screen Recorder applicatie",
   "browser_specific_settings": {
     "gecko": {
@@ -38,7 +38,13 @@
     "*://*.footstockings.com/*",
     "*://*.heavyfetish.com/*",
     "*://*.darknetvideos.com/*",
-    "*://*.darknessporn.com/*"
+    "*://*.darknessporn.com/*",
+    "*://*.erome.com/*",
+    "*://*.xnxx.com/*",
+    "*://*.tnaflix.com/*",
+    "*://*.spankbang.com/*",
+    "*://*.redtube.com/*",
+    "*://*.pictoa.com/*"
   ],
   "content_scripts": [
     {
@@ -58,28 +64,28 @@
     {
       "matches": [
         "*://*.footstockings.com/*",
-        "*://*.heavyfetish.com/*"
+        "*://*.heavyfetish.com/*",
+        "*://*.darknetvideos.com/*",
+        "*://*.darknessporn.com/*",
+        "*://*.erome.com/*",
+        "*://*.xnxx.com/*",
+        "*://*.tnaflix.com/*",
+        "*://*.spankbang.com/*",
+        "*://*.redtube.com/*",
+        "*://*.pictoa.com/*"
       ],
       "js": [
-        "content/tube-engine.js"
-      ],
-      "run_at": "document_end"
-    },
-    {
-      "matches": [
-        "*://*.darknetvideos.com/*"
-      ],
-      "js": [
-        "content/darknetvideos.js"
-      ],
-      "run_at": "document_end"
-    },
-    {
-      "matches": [
-        "*://*.darknessporn.com/*"
-      ],
-      "js": [
-        "content/darknessporn.js"
+        "content/sites/footstockings.js",
+        "content/sites/heavyfetish.js",
+        "content/sites/darknetvideos.js",
+        "content/sites/darknessporn.js",
+        "content/sites/erome.js",
+        "content/sites/xnxx.js",
+        "content/sites/tnaflix.js",
+        "content/sites/spankbang.js",
+        "content/sites/redtube.js",
+        "content/sites/pictoa.js",
+        "content/site-engine.js"
       ],
       "run_at": "document_end"
     }
@@ -95,6 +101,7 @@
     "icons/*.svg",
     "content/*.css",
     "content/*.js",
+    "content/sites/*.js",
     "background/*.js"
   ]
 }
