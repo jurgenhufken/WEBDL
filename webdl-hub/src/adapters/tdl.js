@@ -34,7 +34,7 @@ function plan(url, opts = {}) {
   args.push('--parallel', String(parallel));
   if (mediaLimit) args.push('--media-limit', String(mediaLimit));
   if (opts.telegramWithLinked || opts.withLinked) args.push('--with-linked');
-  return { cmd: python, args, cwd: opts.cwd, env: {}, logStdout: true };
+  return { cmd: python, args, cwd: opts.cwd, env: { ...process.env }, logStdout: true };
 }
 
 const PROG_RE = /(?:PROG\s+)?pct=(\d+(?:\.\d+)?)%?(?:\s+speed=([^\s]+))?/i;
