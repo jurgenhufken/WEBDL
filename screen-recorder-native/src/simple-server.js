@@ -6822,6 +6822,52 @@ expressApp.post('/api/queue/resume', async (req, res) => {
   }
 });
 
+// footstockings.com /albums/<id>/<slug>/ — spawn scripts/foot_album_dl.py
+// async, return meteen, script schrijft zelf files + DB-rows.
+//
+// Body: { url, channel } — channel wordt --channel-override (verplicht
+// voor groepering onder listing-context, anders valt 'ie terug op slug).
+expressApp.post('/api/footstockings/album', (req, res) => {
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const url = String(body.url || '').trim();
+    const channel = String(body.channel || '').trim();
+    if (!url || !/^https?:\/\/(?:www\.)?footstockings\.com\/albums\/\d+\/[^/]+\/?$/i.test(url)) {
+      return res.status(400).json({ success: false, error: 'url moet footstockings album-URL zijn' });
+    }
+    const script = path.join(__dirname, '..', '..', 'scripts', 'foot_album_dl.py');
+    if (!fs.existsSync(script)) {
+      return res.status(500).json({ success: false, error: `script ontbreekt: ${script}` });
+    }
+    const args = [script, url];
+    if (channel) args.push('--channel-override', channel);
+    const child = spawn('/usr/bin/python3', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: false,
+      env: { ...process.env },
+    });
+    const pid = child.pid;
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => { stdout += d.toString().slice(0, 4096); });
+    child.stderr.on('data', (d) => { stderr += d.toString().slice(0, 4096); });
+    child.on('close', (code) => {
+      console.log(`[foot_album_dl pid=${pid}] exit ${code}`);
+      if (code !== 0) console.warn(`[foot_album_dl pid=${pid}] stderr: ${stderr.slice(0, 500)}`);
+    });
+    child.unref();
+    return res.json({
+      success: true,
+      url,
+      channel: channel || '(slug)',
+      pid,
+      message: 'foot_album_dl.py gestart op achtergrond — gallery refresht binnen 1-2 min',
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: String(e && e.message ? e.message : e) });
+  }
+});
+
 // Global priority mode — when ON, new downloads get priority=1
 let globalPriorityMode = false;
 expressApp.get('/api/settings/priority', (req, res) => {

@@ -1,21 +1,34 @@
-// WEBDL footstockings.com helper — eigen knop-paneel rechtsboven met
-// 3 actie-knoppen die qua logica spiegelen wat de hoofdtoolbar voor
-// andere sites doet:
+// WEBDL footstockings.com helper — v4
 //
-//   ⬇ Huidige media    : op /videos/<id>/<slug>/ of /albums/<id>/<slug>/
-//                        → POST 1 URL naar /download
-//   📄 Deze pagina      : op listing-page → scrape page 1
-//                        .list-videos én .list-albums hoofdcontainers
-//   🧵 Hele thread      : op listing-page → loop pages 1..N
-//                        (auto stop bij 404 of leeg/herhalend resultaat)
+// LOGICA: één knop, contextueel. Op single-item pages: download dat
+// ene item. Op listing-pages (search/models/categories/etc.): download
+// ALLES wat bij dat thema hoort — alle videos én alle albums over alle
+// pagination-pages, allemaal onder ÉÉN channel (de listing-context)
+// zodat ze als 1 groep in de gallery verschijnen.
 //
-// Listing-types: /search/, /categories/, /models/, /channels/,
-// /playlists/, /latest-updates/, /most-popular/,
-// /albums/, /albums/categories/
+// Pagination: footstockings doet ?from_videos=N&from_albums=N waarbij
+// elke "page" 36 videos + albums teruggeeft tot er geen meer zijn.
 //
-// Scope-bewust: pakt ALLEEN media-links uit de hoofdcontainers
-// (.list-videos en .list-albums) — geen "related" / sidebar /
-// footer-suggesties.
+// Routing:
+//   /videos/<id>/<slug>/ (single)  → POST /download  (yt-dlp via hub)
+//   /albums/<id>/<slug>/ (single)  → POST /api/footstockings/album
+//                                    (spawnt scripts/foot_album_dl.py
+//                                     server-side)
+//
+// Channel-strategie (= groepering in gallery):
+//   single-item     → listing-context als hij bekend is, anders slug
+//   listing-batch   → listing-context (ALLE items in 1 groep)
+//
+// Listing-context-naming:
+//   /search/<q>/                 → 'search_<q>'
+//   /models/<naam>/              → 'models_<naam>'
+//   /categories/<cat>/           → 'categories_<cat>'
+//   /channels/<chan>/            → 'channels_<chan>'
+//   /playlists/<id>/             → 'playlists_<id>'
+//   /albums/                     → 'albums_index'
+//   /albums/categories/<cat>/    → 'albums_categories_<cat>'
+//   /latest-updates/             → 'latest-updates'
+//   /most-popular/               → 'most-popular'
 (function () {
   'use strict';
 
@@ -23,63 +36,70 @@
   if (host !== 'footstockings.com') return;
 
   const SERVER = 'http://localhost:35729';
-  const MAX_PAGES_HELE_THREAD = 50;        // hard cap voor "Hele thread"
-  const SINGLE_MEDIA_RE = /^\/(videos|albums)\/\d+\/[^/]+\/?$/;
+  const MAX_PAGES = 50;                          // hard cap multi-page
+  const SINGLE_VIDEO_RE = /^\/videos\/\d+\/[^/]+\/?$/;
+  const SINGLE_ALBUM_RE = /^\/albums\/\d+\/[^/]+\/?$/;
   const LISTING_PREFIXES = [
     '/search/', '/categories/', '/models/', '/channels/',
-    '/playlists/', '/latest-updates', '/most-popular', '/albums',
+    '/playlists/', '/latest-updates', '/most-popular',
+    '/albums/categories/', '/albums/',
   ];
-  // Hoofdcontainers met de echte listing-resultaten.
-  // Negeert "related" / sidebar / footer-suggesties zodat alleen de
-  // content op het thema van de pagina opgepakt wordt.
+  // Hoofdcontainers met de echte resultaten — geen related/sidebar.
   const MEDIA_LINK_SEL = [
     'div.list-videos a[href*="/videos/"]',
     'div.list-albums a[href*="/albums/"]',
   ].join(', ');
-  const MEDIA_PATH_RE = /^\/(videos|albums)\/\d+\/[^/]+\/?$/;
   const STATE = { busy: false };
 
+  // ─── Page-type detectie ────────────────────────────────────────────
   function pageType() {
     const path = String(window.location.pathname || '');
-    if (SINGLE_MEDIA_RE.test(path)) return 'single';
-    if (LISTING_PREFIXES.some((p) => path.startsWith(p))) return 'listing';
+    if (SINGLE_VIDEO_RE.test(path)) return 'single_video';
+    if (SINGLE_ALBUM_RE.test(path)) return 'single_album';
+    for (const p of LISTING_PREFIXES) {
+      if (path.startsWith(p)) return 'listing';
+    }
     return null;
   }
 
-  function deriveChannelFromUrl(url) {
+  function isVideoPath(p) { return /^\/videos\/\d+\/[^/]+\/?$/.test(p); }
+  function isAlbumPath(p) { return /^\/albums\/\d+\/[^/]+\/?$/.test(p); }
+
+  // ─── Channel-derivation ────────────────────────────────────────────
+  function deriveChannel(url) {
     try {
       const u = new URL(url, window.location.href);
       const segs = String(u.pathname || '').split('/').filter(Boolean);
-      // /videos/<id>/<slug>/ of /albums/<id>/<slug>/ → '<type>_<slug>'
+      // /videos/<id>/<slug>/  →  videos_<slug>
+      // /albums/<id>/<slug>/  →  albums_<slug>
       if ((segs[0] === 'videos' || segs[0] === 'albums') && segs.length >= 3) {
         return `${segs[0]}_${segs[2]}`;
       }
-      // /search/<q>/, /categories/<cat>/, /models/<name>/, /albums/categories/<cat>/
+      // /albums/categories/<cat>/  →  albums_categories_<cat>
+      if (segs[0] === 'albums' && segs[1] === 'categories' && segs[2]) {
+        return `albums_categories_${segs[2]}`;
+      }
+      // /<type>/<value>/  →  <type>_<value>   (search, models, etc.)
       if (segs.length >= 2) return `${segs[0]}_${segs[1]}`;
       if (segs.length === 1) return segs[0];
     } catch (_) {}
-    return 'footstockings_listing';
+    return 'footstockings';
   }
 
-  function deriveTitleFromDoc(doc) {
-    const t = (doc && doc.title) || document.title || '';
-    return String(t).replace(/\s*-\s*footstockings\.com.*$/i, '').trim();
-  }
-
+  // ─── URL scraping ──────────────────────────────────────────────────
   function mediaUrlsFromDoc(doc) {
     const seen = new Set();
     const urls = [];
-    const root = (doc || document);
+    const root = doc || document;
     for (const a of root.querySelectorAll(MEDIA_LINK_SEL)) {
       const href = a.getAttribute('href') || '';
       if (!href) continue;
       let abs;
       try { abs = new URL(href, doc?.baseURI || window.location.href).toString(); }
       catch (_) { continue; }
-      try {
-        const p = new URL(abs).pathname;
-        if (!MEDIA_PATH_RE.test(p)) continue;
-      } catch (_) { continue; }
+      let p;
+      try { p = new URL(abs).pathname; } catch (_) { continue; }
+      if (!isVideoPath(p) && !isAlbumPath(p)) continue;
       if (seen.has(abs)) continue;
       seen.add(abs);
       urls.push(abs);
@@ -87,12 +107,15 @@
     return urls;
   }
 
+  // Footstockings pagination: ?from_videos=N&from_albums=N geeft de
+  // N-de page van resultaten terug. Pages zijn 2-cijferig (02, 03, …).
   function paginationUrl(baseHref, page) {
     if (page <= 1) return baseHref;
     try {
       const u = new URL(baseHref, window.location.href);
-      const path = u.pathname.replace(/\/+$/, '');
-      u.pathname = `${path}/${page}/`;
+      const pp = String(page).padStart(2, '0');
+      u.searchParams.set('from_videos', pp);
+      u.searchParams.set('from_albums', pp);
       return u.toString();
     } catch (_) { return baseHref; }
   }
@@ -108,94 +131,17 @@
     return new DOMParser().parseFromString(html, 'text/html');
   }
 
-  async function postDownload(url, channel, title) {
-    const body = JSON.stringify({ url, platform: 'footstockings', channel, title });
-    try {
-      const res = await fetch(`${SERVER}/download`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body,
-      });
-      const ct = res.headers.get('content-type') || '';
-      if (ct.includes('json')) {
-        const j = await res.json();
-        return { ok: res.ok, ...j };
-      }
-      const txt = await res.text();
-      return { ok: res.ok, error: txt.slice(0, 200) };
-    } catch (e) {
-      return { ok: false, error: String(e && e.message || e) };
-    }
-  }
-
-  async function runBatch(btn, urls, channel) {
-    let nieuw = 0, dup = 0, fail = 0;
-    for (let i = 0; i < urls.length; i++) {
-      btn.textContent = `⏳ ${i + 1}/${urls.length}…`;
-      const res = await postDownload(urls[i], channel, '');
-      if (res.ok && res.success) {
-        if (res.duplicate) dup++; else nieuw++;
-      } else {
-        fail++;
-      }
-    }
-    return { nieuw, dup, fail };
-  }
-
-  async function handleSingle(btn) {
-    if (STATE.busy) return;
-    STATE.busy = true;
-    btn.disabled = true;
-    const original = btn.textContent;
-    btn.textContent = '⏳ Bezig…';
-    const url = window.location.href.split('#')[0].split('?')[0];
-    const title = deriveTitleFromDoc(document);
-    const channel = deriveChannelFromUrl(url);
-    const res = await postDownload(url, channel, title);
-    btn.textContent = (res.ok && res.success)
-      ? (res.duplicate ? '✓ Al gedownload' : '✓ In queue')
-      : `✗ ${res.error || 'fout'}`;
-    setTimeout(() => { btn.disabled = false; btn.textContent = original; STATE.busy = false; }, 4000);
-  }
-
-  async function handleDezePagina(btn) {
-    if (STATE.busy) return;
-    STATE.busy = true;
-    btn.disabled = true;
-    const original = btn.textContent;
-    const urls = mediaUrlsFromDoc(document);
-    if (urls.length === 0) {
-      btn.textContent = '✗ Geen videos gevonden';
-      setTimeout(() => { btn.disabled = false; btn.textContent = original; STATE.busy = false; }, 3000);
-      return;
-    }
-    const channel = deriveChannelFromUrl(window.location.href);
-    const { nieuw, dup, fail } = await runBatch(btn, urls, channel);
-    btn.textContent = `✓ ${nieuw} nieuw, ${dup} dup, ${fail} fout`;
-    setTimeout(() => { btn.disabled = false; btn.textContent = original; STATE.busy = false; }, 6000);
-  }
-
-  async function handleHeleThread(btn) {
-    if (STATE.busy) return;
-    STATE.busy = true;
-    btn.disabled = true;
-    const original = btn.textContent;
-    const baseHref = window.location.href.split('#')[0].split('?')[0];
-    const channel = deriveChannelFromUrl(baseHref);
-
-    // Verzamel URLs over pages tot we 404 of een leeg/herhalend resultaat krijgen.
+  async function collectAllPages(baseHref) {
     const allSeen = new Set();
     const allUrls = [];
-    for (let page = 1; page <= MAX_PAGES_HELE_THREAD; page++) {
-      btn.textContent = `⏳ Page ${page} scannen…`;
+    let lastAdded = -1;
+    for (let page = 1; page <= MAX_PAGES; page++) {
       let doc;
       try {
         doc = page === 1 ? document : await fetchPageDoc(paginationUrl(baseHref, page));
       } catch (e) {
         if (e.status === 404) break;
-        btn.textContent = `✗ Page ${page} fout (${e.message})`;
-        await new Promise((r) => setTimeout(r, 1500));
-        break;
+        throw e;
       }
       const found = mediaUrlsFromDoc(doc);
       if (found.length === 0) break;
@@ -203,24 +149,101 @@
       for (const u of found) {
         if (!allSeen.has(u)) { allSeen.add(u); allUrls.push(u); added++; }
       }
-      // Als deze page niets nieuws toevoegt → footstockings herhaalt page 1 (einde).
+      // Geen nieuwe content meer = einde (footstockings herhaalt soms page 1).
       if (added === 0) break;
+      lastAdded = page;
     }
+    return { urls: allUrls, pagesScanned: lastAdded };
+  }
 
-    if (allUrls.length === 0) {
-      btn.textContent = '✗ Geen videos gevonden';
+  // ─── HTTP naar simple-server ───────────────────────────────────────
+  async function postJson(path, body) {
+    try {
+      const res = await fetch(`${SERVER}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const ct = res.headers.get('content-type') || '';
+      if (ct.includes('json')) return { ok: res.ok, ...(await res.json()) };
+      return { ok: res.ok, text: (await res.text()).slice(0, 200) };
+    } catch (e) {
+      return { ok: false, error: String(e && e.message || e) };
+    }
+  }
+
+  function postVideo(url, channel, title) {
+    return postJson('/download', { url, platform: 'footstockings', channel, title });
+  }
+  function postAlbum(url, channel) {
+    return postJson('/api/footstockings/album', { url, channel });
+  }
+
+  async function dispatchOne(url, channel) {
+    let p;
+    try { p = new URL(url).pathname; } catch (_) { p = ''; }
+    if (isAlbumPath(p)) return postAlbum(url, channel);
+    if (isVideoPath(p)) return postVideo(url, channel, '');
+    return { ok: false, error: 'onbekend URL-type' };
+  }
+
+  // ─── Knop-handlers ─────────────────────────────────────────────────
+  async function handleSingle(btn) {
+    if (STATE.busy) return;
+    STATE.busy = true;
+    btn.disabled = true;
+    const original = btn.textContent;
+    btn.textContent = '⏳ Bezig…';
+    const url = window.location.href.split('#')[0].split('?')[0];
+    const channel = deriveChannel(url);
+    const res = await dispatchOne(url, channel);
+    btn.textContent = (res.ok && (res.success || res.pid))
+      ? (res.duplicate ? '✓ Al gedownload' : '✓ In queue')
+      : `✗ ${res.error || 'fout'}`;
+    setTimeout(() => { btn.disabled = false; btn.textContent = original; STATE.busy = false; }, 4000);
+  }
+
+  async function handleBatch(btn) {
+    if (STATE.busy) return;
+    STATE.busy = true;
+    btn.disabled = true;
+    const original = btn.textContent;
+    const baseHref = window.location.href.split('#')[0].split('?')[0];
+    const channel = deriveChannel(baseHref);
+    btn.textContent = '⏳ Pages scannen…';
+    let urls, pagesScanned;
+    try {
+      ({ urls, pagesScanned } = await collectAllPages(baseHref));
+    } catch (e) {
+      btn.textContent = `✗ Scan fout: ${e.message}`;
+      setTimeout(() => { btn.disabled = false; btn.textContent = original; STATE.busy = false; }, 5000);
+      return;
+    }
+    if (urls.length === 0) {
+      btn.textContent = '✗ Geen items gevonden';
       setTimeout(() => { btn.disabled = false; btn.textContent = original; STATE.busy = false; }, 3000);
       return;
     }
-    btn.textContent = `⏳ ${allUrls.length} videos inschieten…`;
-    const { nieuw, dup, fail } = await runBatch(btn, allUrls, channel);
-    btn.textContent = `✓ ${nieuw} nieuw, ${dup} dup, ${fail} fout (${allUrls.length} totaal)`;
-    setTimeout(() => { btn.disabled = false; btn.textContent = original; STATE.busy = false; }, 8000);
+    const videoCount = urls.filter((u) => isVideoPath(new URL(u).pathname)).length;
+    const albumCount = urls.filter((u) => isAlbumPath(new URL(u).pathname)).length;
+    let nieuw = 0, dup = 0, fail = 0;
+    for (let i = 0; i < urls.length; i++) {
+      btn.textContent = `⏳ ${i + 1}/${urls.length} (${pagesScanned}p, ${videoCount}v+${albumCount}a → ${channel})`;
+      const res = await dispatchOne(urls[i], channel);
+      if (res.ok && (res.success || res.pid)) {
+        if (res.duplicate) dup++; else nieuw++;
+      } else {
+        fail++;
+      }
+    }
+    btn.textContent = `✓ ${nieuw} nieuw, ${dup} dup, ${fail} fout (${pagesScanned}p)`;
+    setTimeout(() => { btn.disabled = false; btn.textContent = original; STATE.busy = false; }, 10000);
   }
 
+  // ─── UI render ─────────────────────────────────────────────────────
   function makeButton(text, color, onClick) {
     const btn = document.createElement('button');
-    btn.style.cssText = `background:${color};color:#fff;border:0;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;margin:2px 0;width:100%;text-align:left;`;
+    btn.style.cssText = `background:${color};color:#fff;border:0;padding:8px 14px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;width:100%;text-align:left;`;
     btn.textContent = text;
     btn.addEventListener('click', () => onClick(btn));
     return btn;
@@ -229,7 +252,6 @@
   function renderPanel() {
     const existing = document.getElementById('webdl-foot-panel');
     if (existing) existing.remove();
-
     const type = pageType();
     if (!type) return;
 
@@ -242,7 +264,7 @@
       padding: '8px', borderRadius: '8px',
       fontFamily: 'system-ui, -apple-system, sans-serif',
       fontSize: '13px', boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
-      minWidth: '220px',
+      minWidth: '260px',
       display: 'flex', flexDirection: 'column', gap: '4px',
     });
 
@@ -254,22 +276,25 @@
     });
     wrap.appendChild(header);
 
-    if (type === 'single') {
-      // Detecteer of we op een video- of album-page zijn voor label-detail
-      const path = String(window.location.pathname || '');
-      const isAlbum = /^\/albums\//.test(path);
-      const label = isAlbum ? '⬇ Huidige album' : '⬇ Huidige video';
-      wrap.appendChild(makeButton(label, '#2196F3', handleSingle));
+    if (type === 'single_video') {
+      wrap.appendChild(makeButton('⬇ Download deze video', '#2196F3', handleSingle));
+    } else if (type === 'single_album') {
+      wrap.appendChild(makeButton('⬇ Download dit album', '#7c3aed', handleSingle));
     } else {
-      const urls = mediaUrlsFromDoc(document);
-      const videoCount = urls.filter((u) => /\/videos\//.test(u)).length;
-      const albumCount = urls.filter((u) => /\/albums\//.test(u)).length;
-      let label = `📄 Deze pagina (${urls.length})`;
-      if (videoCount > 0 && albumCount > 0) label = `📄 Deze pagina (${videoCount}v + ${albumCount}a)`;
-      else if (videoCount > 0) label = `📄 Deze pagina (${videoCount} videos)`;
-      else if (albumCount > 0) label = `📄 Deze pagina (${albumCount} albums)`;
-      wrap.appendChild(makeButton(label, '#1565C0', handleDezePagina));
-      wrap.appendChild(makeButton('🧵 Alle pages (multi-page)', '#0ea5e9', handleHeleThread));
+      // Listing: één grote knop voor "alles in dit thema".
+      const onPage = mediaUrlsFromDoc(document);
+      const v = onPage.filter((u) => isVideoPath(new URL(u).pathname)).length;
+      const a = onPage.filter((u) => isAlbumPath(new URL(u).pathname)).length;
+      const onPageLabel = (v && a) ? `${v}v + ${a}a` : v ? `${v} videos` : a ? `${a} albums` : 'leeg';
+      wrap.appendChild(makeButton(
+        `⬇ Download ALLES van dit thema (${onPageLabel} op page 1, multi-page)`,
+        '#0ea5e9',
+        handleBatch,
+      ));
+      const hint = document.createElement('div');
+      hint.textContent = `→ channel: ${deriveChannel(window.location.href)}`;
+      Object.assign(hint.style, { fontSize: '10px', opacity: '0.6', padding: '2px 4px' });
+      wrap.appendChild(hint);
     }
 
     document.body.appendChild(wrap);
@@ -281,7 +306,6 @@
     } else {
       renderPanel();
     }
-    // Re-render later: site laadt .list-videos soms lazy.
     setTimeout(renderPanel, 1500);
     setTimeout(renderPanel, 4000);
   }

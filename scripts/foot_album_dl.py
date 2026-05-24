@@ -89,14 +89,19 @@ def main():
     p.add_argument('--dry-run', action='store_true', help='alleen tellen, niet downloaden')
     p.add_argument('--no-db', action='store_true', help='sla DB-registratie over (alleen disk-download)')
     p.add_argument('--db', default='dbname=webdl', help='Postgres conn string (default: dbname=webdl)')
+    p.add_argument('--channel-override', default=None,
+                   help='overschrijf de slug-derived channel met deze waarde (voor groepering '
+                        'onder listing-context, bv. "search_flexible-feet-joi")')
     args = p.parse_args()
 
     album_id, slug = parse_album_url(args.url)
-    out_dir = args.output_dir or os.path.join(DEFAULT_BASE_DIR, 'footstockings', slug, f'{album_id}_{slug}')
+    channel = args.channel_override or slug
+    out_dir = args.output_dir or os.path.join(DEFAULT_BASE_DIR, 'footstockings', channel, f'{album_id}_{slug}')
 
     print(f"Album    : {args.url}")
     print(f"Album-id : {album_id}")
     print(f"Slug     : {slug}")
+    print(f"Channel  : {channel}{' (override)' if args.channel_override else ' (slug)'}")
     print(f"Output   : {out_dir}")
     print(f"Mode     : {'DRY-RUN' if args.dry_run else 'DOWNLOAD'}")
     print()
@@ -213,7 +218,7 @@ def main():
             'source_url': args.url,
             'source_thread_url': args.url,
             'source_thread_title': slug,
-            'indexed_channel': slug,
+            'indexed_channel': channel,
             '_imported_at': now.isoformat(),
             '_import_source': 'foot_album_dl.py',
         }
@@ -230,7 +235,7 @@ def main():
                 """,
                 (
                     image_url, args.url,
-                    'footstockings', slug, title[:200],
+                    'footstockings', channel, title[:200],
                     f'{num}.jpg', target,
                     stat.st_size, 'jpg', 'completed', 100,
                     json.dumps(meta),
@@ -247,7 +252,7 @@ def main():
             db_fail += 1
             print(f"  DB ERROR {target}: {e}")
     print(f"DB klaar. Inserted: {inserted}, skip-bestaand: {db_skip}, fout: {db_fail}")
-    print(f"Gallery filter: platform=footstockings channel={slug}")
+    print(f"Gallery filter: platform=footstockings channel={channel}")
 
 
 if __name__ == '__main__':
