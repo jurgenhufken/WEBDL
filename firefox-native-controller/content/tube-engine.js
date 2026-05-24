@@ -39,10 +39,11 @@
   if (!SITE) return;
 
   const SERVER = 'http://localhost:35729';
-  // Geen artificiële cap — scraper loopt tot de echte detectMaxPage(),
-  // 404, of 2× achter elkaar lege pages. Voor brede zoektermen kan
-  // dit honderden pages en duizenden items zijn — dat is bewust.
-  const MAX_PAGES = 10000;
+  // GEEN cap. Stop alleen bij:
+  //   - detectMaxPage() bereikt (de echte LAST-page uit pagination-HTML)
+  //   - 404
+  //   - 2× achter elkaar lege pages
+  // User-policy: 'ik wil geen maximum sowieso niet'.
   const SINGLE_VIDEO_RE = /^\/videos\/\d+\/[^/]+\/?$/;
   const SINGLE_ALBUM_RE = /^\/albums\/\d+\/[^/]+\/?$/;
   const LISTING_PREFIXES = [
@@ -143,7 +144,7 @@
   async function collectAllPages(baseHref) {
     const allSeen = new Set();
     const allUrls = [];
-    const maxPage = Math.min(MAX_PAGES, detectMaxPage(document));
+    const maxPage = detectMaxPage(document) || Infinity;
     let consecutiveEmpty = 0;
     let pagesScanned = 0;
     for (let page = 1; page <= maxPage; page++) {

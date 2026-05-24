@@ -21,8 +21,7 @@
   if (host !== 'darknetvideos.com') return;
 
   const SERVER = 'http://localhost:35729';
-  // Geen cap — loopt door tot 404 of 2× lege pages (echte einde).
-  const MAX_PAGES = 10000;
+  // Geen cap. Stop alleen bij 404 of 2× lege pages.
   const VIDEO_LINK_SEL = 'div.videobox a[href*="video.php?id="]';
   const STATE = { busy: false };
 
@@ -90,7 +89,7 @@
     const allUrls = [];
     let consecutiveEmpty = 0;
     let pagesScanned = 0;
-    for (let page = 1; page <= MAX_PAGES; page++) {
+    for (let page = 1; ; page++) {
       let doc;
       try {
         doc = page === 1 ? document : await fetchPageDoc(paginationUrl(baseHref, page));

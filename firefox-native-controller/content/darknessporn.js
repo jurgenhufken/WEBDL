@@ -22,8 +22,7 @@
   if (host !== 'darknessporn.com') return;
 
   const SERVER = 'http://localhost:35729';
-  // Geen cap — loopt door tot 404 of 2× lege pages.
-  const MAX_PAGES = 10000;
+  // Geen cap. Stop alleen bij 404 of 2× lege pages.
   const SINGLE_URL_RE = /^\/\d+-[a-z0-9-]+\/?$/i;
   // Pagination /page/N/ kan op het EIND of in midden
   const PAGE_PATH_RE = /\/page\/\d+\/?$/i;
@@ -112,7 +111,7 @@
     const allUrls = [];
     let consecutiveEmpty = 0;
     let pagesScanned = 0;
-    for (let page = 1; page <= MAX_PAGES; page++) {
+    for (let page = 1; ; page++) {
       let doc;
       try {
         if (page === 1 && cleanBase.replace(/\/$/, '') === window.location.href.split('?')[0].replace(/\/page\/\d+\/?$/, '').replace(/\/$/, '')) {
