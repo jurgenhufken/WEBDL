@@ -1958,7 +1958,13 @@
     else if (VIPERGIRLS_URL_RE.test(url)) {
       meta.platform = 'vipergirls';
       const tm = url.match(VIPERGIRLS_THREAD_RE);
-      if (tm && tm[1]) meta.channel = `thread_${tm[1]}`;
+      if (tm && tm[1]) {
+        // Channel = thread_<id>_<slug-truncated> zodat user thread kan
+        // herkennen in gallery. Slug naar lowercase + max 40 chars +
+        // strip trailing dashes voor leesbaarheid.
+        const slugRaw = String(tm[2] || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/-+/g, '-').slice(0, 40).replace(/-+$/, '');
+        meta.channel = slugRaw ? `thread_${tm[1]}_${slugRaw}` : `thread_${tm[1]}`;
+      }
       if (tm && tm[2]) {
         const name = tm[2].replace(/[-_]+/g, ' ').trim();
         if (name) meta.title = name;
@@ -1968,6 +1974,17 @@
       else if (/vipergirls\.to\/forum\.php(?:[?#]|$)/i.test(url)) meta.channel = 'forum_index';
       const heading = pickFirstMatchingText('h1, .threadtitle, .title, .page-title');
       if (heading && heading.text) meta.title = heading.text;
+
+      // Voeg page-nummer toe aan metadata zodat gallery toont van welke
+      // thread-pagina items komen (en je later kan filteren/sorteren).
+      try {
+        const u = new URL(url);
+        const pageNum = parseInt(u.searchParams.get('page') || '1', 10);
+        if (Number.isFinite(pageNum) && pageNum > 0) {
+          meta.webdl_thread_page = pageNum;
+          meta.webdl_thread_url_root = `${u.protocol}//${u.host}${u.pathname}`;
+        }
+      } catch (e) {}
     }
 
     else if (/amateurvoyeurforum\.com/i.test(url)) {
