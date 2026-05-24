@@ -13,11 +13,10 @@
     'pictoa.com', 'tubesafari.com', 'pornzog.com', 'alohatube.com', 'usersporn.com',
     'nakedneighbour.com', 'pornkai.com', 'xfree.com', 'zzztube.com',
     'favoyeurtube.net', 'spycamhub.net', 'sexygirlspics.com', 'porncoven.com',
-    // 2026-05-24 — vipergirls migreerde naar nieuwe webdl-core stack
-    // (sites/vipergirls.js gebruikt /api/jobs). debug-toolbar laat dit
-    // over aan site-engine. Oude vipergirls-handlers blijven in deze
-    // file als legacy code maar worden niet meer aangeroepen op deze hosts.
-    'vipergirls.to', 'viper.to',
+    // 2026-05-24 — vipergirls NIET in skip-set: debug-toolbar heeft nog
+    // veel andere knoppen (K2S-batch, single video, screenshot, recording).
+    // De NIEUWE jobs-mode panel rechtsboven komt NAAST de debug-toolbar.
+    // Pas slopen als alle debug-toolbar features ook in site-engine zitten.
   ]);
   try {
     const host = String((window && window.location && window.location.hostname) || '').toLowerCase();

@@ -84,22 +84,44 @@ function createJob({ intent, url, source, parentJobId = undefined }) {
 
 /**
  * Submit een item naar de bestaande /download endpoint.
+ * BELANGRIJK: /download leest platform/channel uit `metadata.X`, niet top-level.
+ * Plus: voor items van een forum-scan (zoals vipergirls/imagebam), MOET de
+ * source-URL (thread-page) en pin-flags meegegeven worden, anders detectt
+ * de server platform=imagebam en derived channel uit URL.
+ *
  * @param {Item} item
- * @param {string} channel
- * @param {string} platform
- * @param {string} downloadEndpoint  bv. 'http://127.0.0.1:35729/download'
+ * @param {string} channel       Gallery-channel (bv. 'thread_5271987_...')
+ * @param {string} platform      Source-platform (bv. 'vipergirls')
+ * @param {string} sourceUrl     Parent page-URL (thread/forum-page)
+ * @param {string} downloadEndpoint
  * @returns {Promise<{ok: boolean, error?: string}>}
  */
-async function dispatchItem(item, channel, platform, downloadEndpoint) {
+async function dispatchItem(item, channel, platform, sourceUrl, downloadEndpoint) {
   try {
     const resp = await fetch(downloadEndpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         url: item.url,
-        platform,
-        channel,
-        title: item.title || '',
+        metadata: {
+          // /download handler leest deze velden uit `metadata.X`:
+          platform,
+          channel,
+          title: item.title || '',
+          url: sourceUrl,                  // parent context — thread page
+          // Pin-flags: server moet onze platform+channel respecteren,
+          // niet detectPlatform(item.url) (zou imagebam returnen).
+          webdl_pin_context: true,
+          original_platform: platform,
+          original_channel: channel,
+          // Source-context wordt door pickSourceContextForUrl gebruikt:
+          source_context: {
+            url: sourceUrl,
+            platform,
+            channel,
+            title: item.title || '',
+          },
+        },
       }),
     });
     if (!resp.ok) return { ok: false, error: `HTTP ${resp.status}` };
@@ -144,7 +166,7 @@ async function runSingleOrPage(job, source, downloadEndpoint) {
 
   for (let i = 0; i < result.items.length; i++) {
     const item = result.items[i];
-    const res = await dispatchItem(item, job.channel, source.id, downloadEndpoint);
+    const res = await dispatchItem(item, job.channel, source.id, job.sourceUrl, downloadEndpoint);
     if (res.ok) job.itemsDispatched++;
     else { job.itemsError++; jobLog(job, `dispatch FAIL ${item.url.slice(0, 80)}: ${res.error}`); }
     job.updatedAt = new Date().toISOString();
@@ -178,20 +200,24 @@ async function runWholeThread(job, source, downloadEndpoint) {
   job.channel = first.channel || job.channel;
   const allPages = (first.paginationUrls && first.paginationUrls.length) ? first.paginationUrls : [job.sourceUrl];
   job.pagesTotal = allPages.length;
+  // pagesScanned = "currently working on" zodat UI direct iets toont.
+  // Het is meer 'pagesInProgress' dan 'pagesDone' — duidelijker voor user.
+  job.pagesScanned = 1;
   jobLog(job, `pages discovered: ${job.pagesTotal}, items page 1: ${first.items.length}`);
 
   // Dispatch page-1 items meteen
   job.itemsTotal += first.items.length;
   for (const item of first.items) {
-    const res = await dispatchItem(item, job.channel, source.id, downloadEndpoint);
+    const res = await dispatchItem(item, job.channel, source.id, job.sourceUrl, downloadEndpoint);
     if (res.ok) job.itemsDispatched++;
     else { job.itemsError++; jobLog(job, `dispatch FAIL: ${res.error}`); }
     job.updatedAt = new Date().toISOString();
   }
-  job.pagesScanned = 1;
 
   // Walk pages 2..N
   for (let i = 1; i < allPages.length; i++) {
+    job.pagesScanned = i + 1; // update VOOR scan zodat UI ziet welke page bezig is
+    job.updatedAt = new Date().toISOString();
     const pageUrl = allPages[i];
     let pageResult;
     try {
@@ -202,12 +228,13 @@ async function runWholeThread(job, source, downloadEndpoint) {
     }
     job.itemsTotal += pageResult.items.length;
     for (const item of pageResult.items) {
-      const res = await dispatchItem(item, job.channel, source.id, downloadEndpoint);
+      // sourceUrl = job.sourceUrl (root thread, niet pageUrl) zodat alle items
+      // van deze whole-thread scan in hetzelfde channel komen.
+      const res = await dispatchItem(item, job.channel, source.id, job.sourceUrl, downloadEndpoint);
       if (res.ok) job.itemsDispatched++;
       else { job.itemsError++; }
       job.updatedAt = new Date().toISOString();
     }
-    job.pagesScanned = i + 1;
     jobLog(job, `page ${i + 1}/${allPages.length}: +${pageResult.items.length} items`);
     // Rate-limit: niet hammeren
     if (source.features.rateLimitPerMin && source.features.rateLimitPerMin > 0) {
@@ -217,7 +244,7 @@ async function runWholeThread(job, source, downloadEndpoint) {
   }
 
   job.status = 'done';
-  jobLog(job, `whole-thread done: ${job.pagesScanned}p, ${job.itemsDispatched} ok, ${job.itemsError} fail`);
+  jobLog(job, `whole-thread done: ${allPages.length}p gescand, ${job.itemsDispatched} ok, ${job.itemsError} fail`);
 }
 
 /**
