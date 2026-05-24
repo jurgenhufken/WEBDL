@@ -22,7 +22,8 @@
   if (host !== 'darknessporn.com') return;
 
   const SERVER = 'http://localhost:35729';
-  const MAX_PAGES = 30;
+  // Geen cap — loopt door tot 404 of 2× lege pages.
+  const MAX_PAGES = 10000;
   const SINGLE_URL_RE = /^\/\d+-[a-z0-9-]+\/?$/i;
   // Pagination /page/N/ kan op het EIND of in midden
   const PAGE_PATH_RE = /\/page\/\d+\/?$/i;
@@ -271,7 +272,7 @@
     } else {
       const n = videoUrlsFromDoc(document).length;
       wrap.appendChild(makeButton(`📄 Deze pagina (${n} videos)`, '#1565C0', handleThisPage));
-      wrap.appendChild(makeButton(`🧵 Alle pages (max ${MAX_PAGES})`, '#0ea5e9', handleAllPages));
+      wrap.appendChild(makeButton('🧵 Alle pages (tot einde)', '#0ea5e9', handleAllPages));
       const hint = document.createElement('div');
       hint.textContent = `→ channel: ${deriveChannel()}`;
       Object.assign(hint.style, { fontSize: '10px', opacity: '0.6', padding: '2px 4px' });

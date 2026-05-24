@@ -21,7 +21,8 @@
   if (host !== 'darknetvideos.com') return;
 
   const SERVER = 'http://localhost:35729';
-  const MAX_PAGES = 30;
+  // Geen cap — loopt door tot 404 of 2× lege pages (echte einde).
+  const MAX_PAGES = 10000;
   const VIDEO_LINK_SEL = 'div.videobox a[href*="video.php?id="]';
   const STATE = { busy: false };
 
@@ -240,7 +241,7 @@
     } else {
       const n = videoUrlsFromPage().length;
       wrap.appendChild(makeButton(`📄 Deze pagina (${n} videos)`, '#1565C0', handleThisPage));
-      wrap.appendChild(makeButton(`🧵 Alle pages (max ${MAX_PAGES})`, '#0ea5e9', handleAllPages));
+      wrap.appendChild(makeButton('🧵 Alle pages (tot einde)', '#0ea5e9', handleAllPages));
       const hint = document.createElement('div');
       hint.textContent = `→ channel: ${deriveChannel()}`;
       Object.assign(hint.style, { fontSize: '10px', opacity: '0.6', padding: '2px 4px' });
