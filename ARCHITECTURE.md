@@ -1,0 +1,314 @@
+# WEBDL — Architectuur (target + migratie)
+
+**Datum:** 2026-05-24
+**Status:** voorstel · klaar voor goedkeuring
+**Probleem:** Jürgen — "het is allemaal aan elkaar geregen zonder architectuur, dat wil ik nu wel"
+
+---
+
+## 1. Wat we nu hebben (de "geregen" toestand)
+
+### Componenten
+
+| Component | Locatie | Rol | Pijnpunt |
+|---|---|---|---|
+| `simple-server.js` | `screen-recorder-native/src/` | HTTP API, lane-scheduler, download dispatch, K2S auth, channel-derivation, /api/sites, /api/recommendations | **16k regels** monolith — geen module-splitsing |
+| `webdl-hub` | `webdl-hub/src/` | Tweede HTTP service voor Reddit BDFR, gallery-sync triggers | Loopt apart, eigen DB-pool, eigen schema |
+| `webdl-gallery` | `webdl-gallery/` | Read-only UI op DB | 3k+ regels, cache wordt elke 15s geïnvalideerd |
+| `debug-toolbar.js` | `firefox-native-controller/content/` | Browser-side: forum-scans, vipergirls, K2S batch, screenshots, recording | **9415 regels**, oude+nieuwe flows naast elkaar |
+| `site-engine.js` | `firefox-native-controller/content/` | Browser-side: generieke UI voor 22 sites/*.js | Nieuw, klein, maar mist Source-abstractie |
+| `sites/*.js` (22 stuks) | `firefox-native-controller/content/sites/` | Per-site config (URL-patterns, selectors, channel) | Logica zit alleen in browser — niet herbruikbaar server-side |
+| Python scrapers | `scripts/` | `erome_dl.py`, `pictoa_dl.py`, `darknet_dl.py`, `foot_album_dl.py` | **Spawn direct vanuit endpoint, omzeilt lane-scheduler** |
+| PostgreSQL `webdl` | local | 1 platte `downloads` tabel met JSON-metadata-kolom | Ad-hoc velden, geen typed kolommen voor lane/source_url/parent_job |
+
+### Data-flow nu
+
+```
+Firefox add-on (browser)
+  ├─ debug-toolbar.js (9415 regels)
+  │   • scant forum-pages in browser
+  │   • dedupet 1000en URLs in browser
+  │   • POST grote batch naar simple-server
+  │
+  └─ site-engine.js + sites/*.js
+      • detecteert page-type
+      • POST per item naar simple-server
+
+           ↓
+simple-server.js (:35729)
+  • /download accepteert {url, platform, channel, title}
+  • detectLane() → heavy of light
+  • startDownload() → spawn yt-dlp child
+  • UPDATE downloads tabel met status
+
+  • /api/erome/album, /api/pictoa/album, /api/darknetvideos/video,
+    /api/footstockings/album → DIRECT spawn python script
+    (BYPASS van lane-scheduler — bug)
+
+           ↓
+yt-dlp processen        Python processen
+  (lane-managed)          (NIET lane-managed)
+
+           ↓
+Postgres `downloads` tabel
+  (alle download-state in 1 platte tabel + JSON metadata)
+
+           ↓
+webdl-gallery (:35731)
+  • leest tabel
+  • slow query op format-extensie regex (seq-scan)
+  • cache wordt elke 15s gewist
+```
+
+### De 7 fundamentele pijnpunten
+
+1. **Geen contracten** — `/download` body is vrij format, geen schema, geen versie. Elke caller (extensie / scraper / hub) heeft eigen variant.
+2. **Channel/platform-derivation gedupliceerd op 3 plekken** — extensie, simple-server, Python scrapers. Wijzigingen moeten 3× gemaakt.
+3. **Browser doet zwaar werk** — 100 pages scrapen + dedupen in Firefox = blokt UI, scan-state verloren bij tab-close, geen progress voor user.
+4. **Twee toolbar-implementaties** in extensie — debug-toolbar (oud) + site-engine (nieuw). Guard heen-en-weer ipv één weg.
+5. **Geen visibility** — user klikt knop, ziet geen terugkoppeling wat in queue kwam. Eigen klacht: "ik krijg geen terugkoppeling".
+6. **Geen typed queue** — geen `jobs` tabel, alleen `downloads` met inconsistente metadata. Kan niet rapporteren "deze 113 items horen bij thread-scan X".
+7. **Lanes zijn JS-arrays + globale teller** — geen per-host rate-limit (vipergirls vs k2s), geen runtime-config voor specifieke platforms, geen audit-trail.
+
+---
+
+## 2. Target-architectuur
+
+### Componenten
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Firefox add-on (THIN client — ~500 regels totaal)          │
+│  • UI: 3 knoppen per pagina (Single / Page / Whole-thread)  │
+│  • POST /jobs {intent, url}                                 │
+│  • Toont status van laatste batch (poll /jobs/:id)          │
+└────────────────────────┬────────────────────────────────────┘
+                         │ HTTP
+                         ▼
+┌─────────────────────────────────────────────────────────────┐
+│  webdl-core  (NIEUWE module, ~3-5k regels totaal)           │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐   │
+│  │ sources/     │  │ jobs/        │  │ workers/         │   │
+│  │ — 1 file per │  │ — Job-type   │  │ — yt-dlp         │   │
+│  │   host       │  │ — scheduler  │  │ — python-spawn   │   │
+│  │ — inspect()  │  │ — lanes      │  │ — fetch          │   │
+│  │ — listItems()│  │ — rate-limit │  │ — uniform contract│  │
+│  │ — paginate() │  │   per host   │  │                  │   │
+│  └──────────────┘  └──────────────┘  └──────────────────┘   │
+└─────────┬──────────────────┬──────────────────┬─────────────┘
+          │ reads/writes     │                  │ spawns
+          ▼                  ▼                  ▼
+   ┌──────────────┐   ┌─────────────┐    ┌─────────────────┐
+   │ Postgres     │   │ FileStore   │    │ yt-dlp / python │
+   │ (zie schema) │   │ /Volumes/.. │    │                 │
+   └──────┬───────┘   └─────────────┘    └─────────────────┘
+          │ reads only
+          ▼
+   ┌──────────────┐
+   │ webdl-gallery│
+   │ — query-only │
+   │ — geen muts. │
+   └──────────────┘
+```
+
+### Database-schema
+
+**Nieuwe tabellen** (bestaande `downloads` blijft, krijgt extra kolommen):
+
+```sql
+-- 1. SOURCES: registry van ondersteunde hosts
+CREATE TABLE sources (
+  id            TEXT PRIMARY KEY,           -- 'heavyfetish', 'vipergirls', ...
+  display_name  TEXT NOT NULL,
+  default_lane  TEXT NOT NULL,              -- 'heavy' | 'middle' | 'light'
+  rate_limit    INT,                         -- max requests/min naar deze host
+  config        JSONB,                       -- selectors, paginatie-pattern, etc.
+  created_at    TIMESTAMPTZ DEFAULT now()
+);
+
+-- 2. LANES: runtime-configurabel
+CREATE TABLE lanes (
+  id              TEXT PRIMARY KEY,         -- 'heavy', 'middle', 'light'
+  max_concurrent  INT NOT NULL,
+  description     TEXT,
+  updated_at      TIMESTAMPTZ DEFAULT now()
+);
+
+-- 3. JOBS: alle scans/batches (boven downloads)
+CREATE TABLE jobs (
+  id            BIGSERIAL PRIMARY KEY,
+  intent        TEXT NOT NULL,              -- 'single' | 'page' | 'whole-thread' | 'forum-scan'
+  source_id     TEXT REFERENCES sources(id),
+  source_url    TEXT NOT NULL,
+  parent_job_id BIGINT REFERENCES jobs(id),
+  status        TEXT NOT NULL,              -- 'queued' | 'running' | 'done' | 'error'
+  items_total   INT DEFAULT 0,
+  items_done    INT DEFAULT 0,
+  items_error   INT DEFAULT 0,
+  metadata      JSONB,
+  created_at    TIMESTAMPTZ DEFAULT now(),
+  updated_at    TIMESTAMPTZ DEFAULT now()
+);
+
+-- 4. DOWNLOADS uitbreiden:
+ALTER TABLE downloads ADD COLUMN lane TEXT;
+ALTER TABLE downloads ADD COLUMN job_id BIGINT REFERENCES jobs(id);
+ALTER TABLE downloads ADD COLUMN host TEXT;     -- voor per-host rate-limit
+ALTER TABLE downloads ADD COLUMN worker_type TEXT;  -- 'ytdlp' | 'python' | 'fetch'
+```
+
+### Contracten (TypeScript-stijl)
+
+```ts
+// 1. SOURCE — implementeert per host
+interface Source {
+  id: string;                                              // 'heavyfetish'
+  matches(url: string): boolean;
+  detectPageType(url: string): 'single' | 'listing' | null;
+  inspect(url: string): Promise<{                          // server-side scan
+    items: Item[];
+    paginationUrls?: string[];                             // voor whole-thread
+    channel: string;
+    title?: string;
+  }>;
+  paginate(baseUrl: string, page: number): string;
+  deriveChannel(url: string): string;
+}
+
+interface Item {
+  url: string;                                             // direct download URL
+  type: 'video' | 'image' | 'archive';
+  metadata?: Record<string, any>;
+}
+
+// 2. JOB — wat in DB komt
+interface Job {
+  id: number;
+  intent: 'single' | 'page' | 'whole-thread' | 'forum-scan';
+  sourceId: string;
+  sourceUrl: string;
+  parentJobId?: number;
+  status: 'queued' | 'running' | 'done' | 'error';
+  itemsTotal: number;
+  itemsDone: number;
+  itemsError: number;
+}
+
+// 3. WORKER — uniform contract voor downloaders
+interface Worker {
+  type: 'ytdlp' | 'python-script' | 'fetch';
+  canHandle(item: Item, source: Source): boolean;
+  download(item: Item, channel: string, onProgress: (pct: number) => void): Promise<{
+    filepath: string;
+    size: number;
+    duration?: number;
+  }>;
+}
+
+// 4. LANE-POLICY — uit DB-tabel
+interface LanePolicy {
+  id: 'heavy' | 'middle' | 'light';
+  maxConcurrent: number;
+  hostRateLimits: Map<string, number>;                     // per-host requests/min
+}
+```
+
+### Hoe het werkt — voorbeeld
+
+```
+1. User klikt "🧵 Whole thread" op vipergirls.to/threads/X
+2. Extensie POST /jobs { intent: 'whole-thread', url: 'vipergirls.to/threads/X' }
+3. webdl-core/jobs.create():
+   • INSERT INTO jobs (id=42, intent='whole-thread', source_id='vipergirls', ...)
+   • Source.inspect(url) → { items: [], paginationUrls: [page1..page99] }
+   • Voor elke pagination-URL: create child job (intent='page', parent_job_id=42)
+4. Scheduler pakt child-jobs op:
+   • page-jobs gaan naar middle/light lane (alleen scrape, geen download)
+   • Per page: Source.inspect() → items[]
+   • Voor elke item: INSERT downloads (job_id=child, lane=detect, host=k2s.cc)
+5. Workers consumeren downloads-queue:
+   • Worker.canHandle? → dispatch
+   • Per-host rate-limit check (max N k2s.cc requests/min)
+   • Progress → UPDATE downloads + parent job items_done++
+6. Extensie polt /jobs/42 → ziet items_total/items_done/items_error
+   → user heeft EINDELIJK terugkoppeling
+```
+
+---
+
+## 3. Wat dit oplost (per pijnpunt uit §1)
+
+| Pijnpunt | Oplossing |
+|---|---|
+| 1. Geen contracten | TypeScript interfaces Source/Job/Worker, gevalideerd bij entry-point |
+| 2. Channel-derivation gedupliceerd | Alleen in `sources/<host>.ts`. Browser POST stuurt alleen URL, server derived |
+| 3. Browser doet zwaar werk | Extensie wordt thin client. Scans lopen op server, overleven tab-close, progress polbaar |
+| 4. Twee toolbars | debug-toolbar wordt gesloopt. site-engine wordt ook thin (UI only) |
+| 5. Geen visibility | `/jobs/:id` endpoint + polling = real-time progress per batch |
+| 6. Geen typed queue | `jobs` tabel met parent/child + status + counters |
+| 7. Lane-config hardcoded | `lanes` tabel + per-host rate-limit kolom |
+
+---
+
+## 4. Migratie-plan
+
+### Principe
+- **Strangler pattern** — bouw nieuwe stack naast oude. Migreer 1 site, valideer, migreer rest.
+- **Geen big-bang refactor** — oude code blijft draaien tot elke flow apart vervangen is.
+- **DB-schema additief eerst** — nieuwe kolommen/tabellen toegevoegd, oude blijven. Pas verwijderen na complete migratie.
+
+### Stappen (geschat 2-3 dagen, opbreekbaar in sessies van 2-4u)
+
+| # | Wat | Geschat | Risico |
+|---|---|---|---|
+| **1** | Nieuwe directory `webdl-core/` aanmaken. Definieer interfaces (sources.ts, jobs.ts, workers.ts) als TypeScript types, GEEN implementatie. | 1u | Geen |
+| **2** | DB-migratie 01-add-jobs-sources-lanes.sql — nieuwe tabellen, ALTER downloads. Backwards-compatible, oude code blijft werken. | 1u | Laag (additief) |
+| **3** | Implementeer 1 Source: `webdl-core/sources/heavyfetish.ts`. Identiek aan huidige `sites/heavyfetish.js` maar TypeScript + server-side runnable. | 2u | Geen |
+| **4** | Implementeer 1 Worker: `webdl-core/workers/ytdlp.ts`. Wrappt huidige startDownload-logica achter Worker interface. | 2u | Laag |
+| **5** | Implementeer jobs/scheduler: `webdl-core/jobs/scheduler.ts`. Pakt Job uit DB, vraagt Source.inspect, queue't downloads via Worker. | 4u | Middel |
+| **6** | Nieuwe endpoint `POST /jobs` in simple-server.js die `webdl-core` aanroept. Bestaande `/download` blijft. | 1u | Laag |
+| **7** | Extensie: feature-flag `useNewJobsApi` per site. Voor heavyfetish: stuur naar `/jobs` ipv `/download`. Test op echte site. | 2u | Middel (rollback = flag uit) |
+| **8** | Migreer overige 21 sites mechanisch — per site een Source + flag aan. | 4-6u | Laag (mechanisch) |
+| **9** | Sloop oude `detectLane`, `enqueueDownloadJob`, `startDownload` uit simple-server.js. Routes blijven. | 2u | Laag (alle traffic via nieuwe stack) |
+| **10** | Sloop forum-scan logic uit debug-toolbar.js (vipergirls, fff). Verplaats naar sources/. | 4-6u | Middel |
+| **11** | Per-host rate-limit toevoegen in scheduler (cloudflare-hosts max N/min). | 1u | Laag |
+| **12** | Documentatie + ARCHITECTURE.md updaten naar werkelijkheid. | 1u | Geen |
+
+**Totaal:** ~25-30u, verspreid over meerdere sessies.
+
+### Wat NIET wijzigt
+- `downloads` tabel blijft bestaan (krijgt alleen extra kolommen)
+- `webdl-gallery` blijft read-only op `downloads` — geen wijziging nodig
+- Bestaande Python scrapers blijven werken, worden alleen via Worker-laag aangeroepen ipv direct spawn
+
+---
+
+## 5. Beslissingen die nog open zijn
+
+| Beslissing | Opties | Aanbeveling |
+|---|---|---|
+| **Taal** voor webdl-core | TypeScript / JavaScript | TypeScript — type-safety bij Source/Job/Worker contracten essentieel |
+| **Runtime** | Node (zoals simple-server) / Deno / Bun | Node — al in stack, geen extra deps |
+| **Process model** | In-process (zelfde node) / Separate service | In-process eerst, splitsen later kan |
+| **DB-migration tool** | psql scripts / Prisma / Drizzle / Knex | psql scripts — al gebruikt in `migrations/`, bekend, geen runtime-overhead |
+| **Job-polling vs WebSocket** voor extensie | Polling elke 2s / SSE / WebSocket | SSE — eenvoudiger dan WebSocket, real-time genoeg |
+
+---
+
+## 6. Wat dit NIET aanpakt (apart traject)
+
+- **YouTube anti-throttle** (sleep-requests) — apart, niet architectuur-werk
+- **Gallery performance** (slow-query) — apart migratie-plan in `~/WEBDL/migrations/2026-05-24-gallery-perf/`
+- **K2S auth refresh** — apart traject
+- **Source-link bug** in gallery (channel-URL ipv video-URL) — apart fix
+
+---
+
+## 7. Hoe nu verder
+
+1. **Jij beslist:** ga ik op deze schets bouwen, of moeten er eerst dingen gewijzigd?
+2. Bij goedkeuring: ik start met stap 1 (interfaces) + stap 2 (DB-migratie) in deze sessie. Niets is dan nog risicovol — alleen nieuwe code naast oude.
+3. Stap 3-7 (1 site end-to-end migreren) is goede milestone voor 2e sessie — daarna weten we of het werkt.
+4. Stap 8-12 zijn herhaalbaar werk dat ook in achtergrond kan.
+
+**Eindstaat:** simple-server.js is ~3-4k regels (alleen HTTP routes), webdl-core is ~3-5k regels (echte logica), debug-toolbar.js is gesloopt, site-engine.js is ~200 regels, extensie wordt thin client, gallery onveranderd.
