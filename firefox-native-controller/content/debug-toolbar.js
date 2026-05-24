@@ -8635,13 +8635,25 @@
   }
 
   threadBatchDownloadBtn.addEventListener('click', async function(e) {
+    console.log('[WEBDL] 🧵 Hele thread knop geklikt', { url: window.location.href });
     const force = !!(e && (e.shiftKey || e.altKey));
-    await runBatchFromWholeThread(threadBatchDownloadBtn, { force }, e);
+    try {
+      await runBatchFromWholeThread(threadBatchDownloadBtn, { force }, e);
+    } catch (err) {
+      console.error('[WEBDL] Hele thread fout:', err);
+      try { showNotification(`Hele thread fout: ${err && err.message ? err.message : String(err)}`, true); } catch (_) {}
+    }
   });
 
   gigaDownloadBtn.addEventListener('click', async function(e) {
+    console.log('[WEBDL] ⚡ Giga knop geklikt', { url: window.location.href });
     const force = !!(e && (e.shiftKey || e.altKey));
-    await runBatchFromWholeThread(gigaDownloadBtn, { force, forceGiga: true }, e);
+    try {
+      await runBatchFromWholeThread(gigaDownloadBtn, { force, forceGiga: true }, e);
+    } catch (err) {
+      console.error('[WEBDL] Giga fout:', err);
+      try { showNotification(`Giga fout: ${err && err.message ? err.message : String(err)}`, true); } catch (_) {}
+    }
   });
 
   async function runVipergirlsKeep2ShareBatch(triggerBtn, clickEvent) {
