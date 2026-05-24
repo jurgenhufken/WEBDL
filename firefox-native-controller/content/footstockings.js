@@ -203,6 +203,32 @@
     setTimeout(() => { btn.disabled = false; btn.textContent = original; STATE.busy = false; }, 4000);
   }
 
+  async function handleThisPage(btn) {
+    if (STATE.busy) return;
+    STATE.busy = true;
+    btn.disabled = true;
+    const original = btn.textContent;
+    const channel = deriveChannel(window.location.href);
+    const urls = mediaUrlsFromDoc(document);
+    if (urls.length === 0) {
+      btn.textContent = '✗ Geen items op deze pagina';
+      setTimeout(() => { btn.disabled = false; btn.textContent = original; STATE.busy = false; }, 3000);
+      return;
+    }
+    let nieuw = 0, dup = 0, fail = 0;
+    for (let i = 0; i < urls.length; i++) {
+      btn.textContent = `⏳ ${i + 1}/${urls.length} → ${channel}`;
+      const res = await dispatchOne(urls[i], channel);
+      if (res.ok && (res.success || res.pid)) {
+        if (res.duplicate) dup++; else nieuw++;
+      } else {
+        fail++;
+      }
+    }
+    btn.textContent = `✓ ${nieuw} nieuw, ${dup} dup, ${fail} fout (1 page)`;
+    setTimeout(() => { btn.disabled = false; btn.textContent = original; STATE.busy = false; }, 8000);
+  }
+
   async function handleBatch(btn) {
     if (STATE.busy) return;
     STATE.busy = true;
@@ -281,13 +307,18 @@
     } else if (type === 'single_album') {
       wrap.appendChild(makeButton('⬇ Download dit album', '#7c3aed', handleSingle));
     } else {
-      // Listing: één grote knop voor "alles in dit thema".
+      // Listing: 2 knoppen — deze pagina vs alle pages
       const onPage = mediaUrlsFromDoc(document);
       const v = onPage.filter((u) => isVideoPath(new URL(u).pathname)).length;
       const a = onPage.filter((u) => isAlbumPath(new URL(u).pathname)).length;
       const onPageLabel = (v && a) ? `${v}v + ${a}a` : v ? `${v} videos` : a ? `${a} albums` : 'leeg';
       wrap.appendChild(makeButton(
-        `⬇ Download ALLES van dit thema (${onPageLabel} op page 1, multi-page)`,
+        `📄 Deze pagina (${onPageLabel})`,
+        '#1565C0',
+        handleThisPage,
+      ));
+      wrap.appendChild(makeButton(
+        '🧵 Alle pages van dit thema',
         '#0ea5e9',
         handleBatch,
       ));
