@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Screen Recorder Controller",
-  "version": "1.0.83",
+  "version": "1.0.86",
   "description": "Besturingsinterface voor de native Screen Recorder applicatie",
   "browser_specific_settings": {
     "gecko": {
@@ -60,7 +60,9 @@
     "*://*.vipergirls.to/*",
     "*://vipergirls.to/*",
     "*://*.viper.to/*",
-    "*://viper.to/*"
+    "*://viper.to/*",
+    "*://*.recu.me/*",
+    "*://recu.me/*"
   ],
   "content_scripts": [
     {
@@ -104,7 +106,9 @@
         "*://*.vipergirls.to/*",
         "*://vipergirls.to/*",
         "*://*.viper.to/*",
-        "*://viper.to/*"
+        "*://viper.to/*",
+        "*://*.recu.me/*",
+        "*://recu.me/*"
       ],
       "js": [
         "content/sites/footstockings.js",
@@ -130,6 +134,7 @@
         "content/sites/spycamhub.js",
         "content/sites/sexygirlspics.js",
         "content/sites/porncoven.js",
+        "content/sites/recu-me.js",
         "content/site-engine.js"
       ],
       "run_at": "document_end"

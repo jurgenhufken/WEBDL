@@ -13,6 +13,9 @@
     'pictoa.com', 'tubesafari.com', 'pornzog.com', 'alohatube.com', 'usersporn.com',
     'nakedneighbour.com', 'pornkai.com', 'xfree.com', 'zzztube.com',
     'favoyeurtube.net', 'spycamhub.net', 'sexygirlspics.com', 'porncoven.com',
+    // 2026-05-24 — recu.me NIET in skip-set: user wil de debug-toolbar (REC,
+    // Screenshot, K2S-knoppen) ook hier. Het site-engine paneel rechtsboven
+    // komt NAAST de debug-toolbar. Zelfde patroon als vipergirls.
     // 2026-05-24 — vipergirls NIET in skip-set: debug-toolbar heeft nog
     // veel andere knoppen (K2S-batch, single video, screenshot, recording).
     // De NIEUWE jobs-mode panel rechtsboven komt NAAST de debug-toolbar.

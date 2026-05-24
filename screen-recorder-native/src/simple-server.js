@@ -2819,7 +2819,16 @@ function shouldRunExpensiveMetadataReuseLookup(inputUrl) {
     if (keep2ShareFileIdFromUrl(raw)) return false;
     if (pixhostMediaKey(raw)) return false;
     if (!/^https?:\/\//i.test(raw)) return true;
-    if (isKnownHtmlWrapperUrl(raw)) return true;
+    // 2026-05-24: Skip de LIKE-on-metadata redmiddelcheck voor known wrapper
+    // hosts. Met 400k+ rows in downloads-tabel is `metadata LIKE '%<url>%'`
+    // een full table scan; bij parallel-dispatch (concurrency 10) van
+    // whole-thread scans (1000+ wrapper URLs zoals imx.to/imagebam) zat DB
+    // op slot. De snellere checks (url, source_url, k2s_file_id, pixhost-key)
+    // blijven bestaan; alleen de fuzzy metadata-text-match valt weg.
+    // Zet WEBDL_EXPENSIVE_WRAPPER_DEDUPE=1 voor oude gedrag.
+    if (isKnownHtmlWrapperUrl(raw)) {
+      return process.env.WEBDL_EXPENSIVE_WRAPPER_DEDUPE === '1';
+    }
     return false;
   } catch (e) {
     return false;
@@ -5933,14 +5942,17 @@ async function runDownloadScheduler() {
   // Postprocess-cap: als er al N jobs in 'postprocessing' zitten (merge/ffmpeg)
   // starten we geen nieuwe downloads tot die klaar zijn. Voorkomt dat meerdere
   // ffmpeg-merges gelijktijdig CPU/IO opslokken. Default N = 1.
+  // 2026-05-24: cap blokkeerde voorheen ALLE lanes (ook light), waardoor
+  // K2S/image downloads vastliepen achter youtube ffmpeg-merge. Nu pasen we
+  // de cap alleen toe op heavy/batch (yt-dlp ffmpeg-werk). Light is direct
+  // HTTP-download (geen ffmpeg), die mag altijd door.
+  let skipHeavyAndBatch = false;
   try {
     const counts = await getActiveDownloadStatusCounts.all();
     const ppRow = Array.isArray(counts) ? counts.find((r) => r && r.status === 'postprocessing') : null;
     const ppCount = ppRow ? Number(ppRow.n || ppRow.count || 0) : 0;
     if (Number.isFinite(ppCount) && ppCount >= POSTPROCESS_CONCURRENCY) {
-      // Nog postprocessing bezig — laat die eerst klaar worden.
-      // runDownloadSchedulerSoon() wordt aangeroepen zodra een job klaar is.
-      return;
+      skipHeavyAndBatch = true;
     }
   } catch (_e) { /* DB-hick: fall-through; niet fataal */ }
 
@@ -6189,7 +6201,16 @@ function scheduleAutoRehydrate() {
         queuedJobs.set(id, { downloadId: id, url, platform, channel, title, metadata, progress: 0 });
         jobLane.set(id, lane);
         jobPlatform.set(id, platform);
-        if (lane === 'light') queuedLight.push(id); else queuedHeavy.push(id);
+        // 2026-05-24: priority-aware queue-positie. Items met priority>0
+        // (bv. K2S retries die priority=10 hebben uit hub-slave-router) komen
+        // aan de KOP van de lane-queue zodat ze niet vastlopen achter een
+        // 1000+ items grote whole-thread scan. Default priority=0 → achterop.
+        const prio = Number(row.priority) || 0;
+        if (lane === 'light') {
+          if (prio > 0) queuedLight.unshift(id); else queuedLight.push(id);
+        } else {
+          if (prio > 0) queuedHeavy.unshift(id); else queuedHeavy.push(id);
+        }
         try { await db.prepare("UPDATE downloads SET status = 'queued' WHERE id = ?").run(id); } catch (e) {}
         loaded++;
       }
@@ -6430,8 +6451,13 @@ async function rehydrateDownloadQueueWithMode(modeRaw, maxRowsRaw) {
       queuedJobs.set(id, { downloadId: id, url, platform, channel, title, metadata, progress: initialProgress });
       jobLane.set(id, lane);
       jobPlatform.set(id, platform);
-      if (lane === 'light') queuedLight.push(id); else
-        queuedHeavy.push(id);
+      // Priority-aware queue-positie (zelfde logica als auto-rehydrate)
+      const prio = Number(row.priority) || 0;
+      if (lane === 'light') {
+        if (prio > 0) queuedLight.unshift(id); else queuedLight.push(id);
+      } else {
+        if (prio > 0) queuedHeavy.unshift(id); else queuedHeavy.push(id);
+      }
       queued++;
     }
 
@@ -17082,7 +17108,33 @@ expressApp.post('/download/:id/retry', async (req, res) => {
   // Set back to pending in DB so it rehydrates automatically
   await updateDownloadStatus.run('pending', 0, null, id);
   console.log(`🔄 Download #${id} herstart via retry`);
-  try { await rehydrateDownloadQueueWithMode('all', 0); } catch (e) { }
+
+  // 2026-05-24: voor retry pakken we het item DIRECT terug in de in-memory
+  // queue zodat het niet achter een grote rehydrate-batch verdwijnt. Mode-
+  // rehydrate sorteert op status-priority + created_at en kan ons item
+  // missen als de queue al vol staat met queued-items van een grote scan.
+  // Priority>0 → vooraan, anders achteraan.
+  try {
+    const row = await db.prepare('SELECT id, url, source_url, platform, channel, title, metadata, priority FROM downloads WHERE id = ?').get(id);
+    if (row && row.url) {
+      let parsedMeta = null;
+      try { if (row.metadata) parsedMeta = JSON.parse(row.metadata); } catch (e) {}
+      const ctx = queueContextFromDownloadRow(row, parsedMeta);
+      const lane = detectLane(ctx.platform, row.url, ctx.metadata);
+      queuedJobs.set(id, { downloadId: id, url: row.url, platform: ctx.platform, channel: ctx.channel, title: ctx.title, metadata: ctx.metadata, progress: 0 });
+      jobLane.set(id, lane);
+      jobPlatform.set(id, ctx.platform);
+      const prio = Number(row.priority) || 0;
+      const target = lane === 'light' ? queuedLight : lane === 'batch' ? queuedBatch : queuedHeavy;
+      if (prio > 0) target.unshift(id); else target.push(id);
+      try { await db.prepare("UPDATE downloads SET status = 'queued' WHERE id = ?").run(id); } catch (e) {}
+      console.log(`🔄 Retry #${id} → lane=${lane} prio=${prio} positie=${prio > 0 ? 'front' : 'back'}`);
+      runDownloadSchedulerSoon();
+    }
+  } catch (e) {
+    console.warn(`Retry #${id} direct-enqueue mislukt: ${e && e.message ? e.message : e}`);
+    try { await rehydrateDownloadQueueWithMode('all', 0); } catch (e2) {}
+  }
 
   return res.json({ success: true });
 });

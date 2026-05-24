@@ -164,13 +164,7 @@ async function runSingleOrPage(job, source, downloadEndpoint) {
     return;
   }
 
-  for (let i = 0; i < result.items.length; i++) {
-    const item = result.items[i];
-    const res = await dispatchItem(item, job.channel, source.id, job.sourceUrl, downloadEndpoint);
-    if (res.ok) job.itemsDispatched++;
-    else { job.itemsError++; jobLog(job, `dispatch FAIL ${item.url.slice(0, 80)}: ${res.error}`); }
-    job.updatedAt = new Date().toISOString();
-  }
+  await dispatchItemsParallel(result.items, job.channel, source.id, job.sourceUrl, downloadEndpoint, job);
   job.status = 'done';
   jobLog(job, `done: ${job.itemsDispatched} ok, ${job.itemsError} fail`);
 }
@@ -205,14 +199,9 @@ async function runWholeThread(job, source, downloadEndpoint) {
   job.pagesScanned = 1;
   jobLog(job, `pages discovered: ${job.pagesTotal}, items page 1: ${first.items.length}`);
 
-  // Dispatch page-1 items meteen
+  // Dispatch page-1 items in parallel chunks
   job.itemsTotal += first.items.length;
-  for (const item of first.items) {
-    const res = await dispatchItem(item, job.channel, source.id, job.sourceUrl, downloadEndpoint);
-    if (res.ok) job.itemsDispatched++;
-    else { job.itemsError++; jobLog(job, `dispatch FAIL: ${res.error}`); }
-    job.updatedAt = new Date().toISOString();
-  }
+  await dispatchItemsParallel(first.items, job.channel, source.id, job.sourceUrl, downloadEndpoint, job);
 
   // Walk pages 2..N
   for (let i = 1; i < allPages.length; i++) {
@@ -227,14 +216,9 @@ async function runWholeThread(job, source, downloadEndpoint) {
       continue;
     }
     job.itemsTotal += pageResult.items.length;
-    for (const item of pageResult.items) {
-      // sourceUrl = job.sourceUrl (root thread, niet pageUrl) zodat alle items
-      // van deze whole-thread scan in hetzelfde channel komen.
-      const res = await dispatchItem(item, job.channel, source.id, job.sourceUrl, downloadEndpoint);
-      if (res.ok) job.itemsDispatched++;
-      else { job.itemsError++; }
-      job.updatedAt = new Date().toISOString();
-    }
+    // sourceUrl = job.sourceUrl (root thread, niet pageUrl) zodat alle items
+    // van deze whole-thread scan in hetzelfde channel komen.
+    await dispatchItemsParallel(pageResult.items, job.channel, source.id, job.sourceUrl, downloadEndpoint, job);
     jobLog(job, `page ${i + 1}/${allPages.length}: +${pageResult.items.length} items`);
     // Rate-limit: niet hammeren
     if (source.features.rateLimitPerMin && source.features.rateLimitPerMin > 0) {
@@ -283,6 +267,34 @@ function get(id) {
  */
 function listRecent(limit = 50) {
   return Array.from(jobs.values()).sort((a, b) => b.id - a.id).slice(0, limit);
+}
+
+/**
+ * Dispatch items in parallel chunks i.p.v. sequentieel — voorkomt dat
+ * groot-thread scans (1000+ items/page) uren duren door per-item HTTP
+ * latency naar /download. Bij localhost is dispatch latency ~50-200ms per
+ * call (dedup-check + INSERT + enqueue). Concurrency 10 = ~10x speedup
+ * zonder /download endpoint te overspoelen.
+ * @param {Item[]} items
+ * @param {string} channel
+ * @param {string} platform
+ * @param {string} sourceUrl
+ * @param {string} downloadEndpoint
+ * @param {Job} job
+ * @param {number} [concurrency]
+ */
+async function dispatchItemsParallel(items, channel, platform, sourceUrl, downloadEndpoint, job, concurrency = 10) {
+  for (let offset = 0; offset < items.length; offset += concurrency) {
+    const chunk = items.slice(offset, offset + concurrency);
+    const results = await Promise.all(
+      chunk.map((item) => dispatchItem(item, channel, platform, sourceUrl, downloadEndpoint))
+    );
+    for (let i = 0; i < results.length; i++) {
+      if (results[i].ok) job.itemsDispatched++;
+      else { job.itemsError++; }
+    }
+    job.updatedAt = new Date().toISOString();
+  }
 }
 
 module.exports = { start, get, listRecent, /** @internal */ _jobs: jobs };

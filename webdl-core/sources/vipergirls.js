@@ -38,6 +38,11 @@ const MEDIA_HOST_PATTERNS = [
 const DIRECT_FILE_RE = /\.(jpe?g|png|gif|webp|bmp|avif|mp4|mov|m4v|webm|mkv|zip|rar|7z)(?:[?#]|$)/i;
 const JUNK_PATH_RE = /\/(?:thumb|thumbs|thumbnail|icon|sprite|avatar|emoji|smilie|smiley)\b/i;
 const JUNK_TEXT_RE = /\b(?:avatar|emoji|emote|smilie|smiley|reaction|logo|icon|banner|sprite)\b/i;
+// 2026-05-24: imagebam-style video-preview thumbnails (1-10KB jpgs) zoals
+// th_<hex>_NudeBeach056.wmv.v2_123_383lo.jpg — bijna 75% van forum-scans.
+// User wil ze niet in de gallery. Filter ze hier zodat ze niet eens
+// gedispatcht worden naar /download.
+const VIDEO_PREVIEW_THUMB_RE = /\/?(?:th_)?[0-9a-f]{6,}_[^/]+\.(?:wmv|avi|mp4|mkv|mov|webm|flv|m4v)\.v\d+_/i;
 
 /**
  * @param {string} url
@@ -115,6 +120,9 @@ function isMediaCandidate(url) {
     const path = u.pathname.toLowerCase();
     if (!/^https?:$/i.test(u.protocol)) return false;
     if (JUNK_PATH_RE.test(path)) return false;
+    // Skip imagebam-style video-preview thumbnails (`th_<hex>_name.wmv.v2_*.jpg`).
+    // User klacht: 75% van forum-scans waren deze 1-10KB previews, niet de echte videos.
+    if (VIDEO_PREVIEW_THUMB_RE.test(path) || VIDEO_PREVIEW_THUMB_RE.test(u.pathname)) return false;
     // Direct file extension
     if (DIRECT_FILE_RE.test(path)) return true;
     // Media-host wrapper page
@@ -170,6 +178,10 @@ function extractItemsFromHtml(html, baseUrl) {
 
 /**
  * Detecteer hoogste page-nummer uit pagination-links in HTML.
+ * Vipergirls (vBulletin) toont pagination zowel als ?page=N URLs ALS als
+ * "Page X of N" tekst-marker. Tweede was eerder niet gepakt, waardoor
+ * whole-thread alleen page 1 walkte op grote threads (123-page Big Boobs Land
+ * vond 1017 items uit page 1; werkelijk totaal vanaf 100k+).
  * @param {string} html
  * @returns {number}
  */
@@ -178,6 +190,19 @@ function detectMaxPageFromHtml(html) {
   const PAGE_RE = /[?&]page=(\d+)/gi;
   let m;
   while ((m = PAGE_RE.exec(html)) !== null) {
+    const n = parseInt(m[1], 10);
+    if (Number.isFinite(n) && n > max) max = n;
+  }
+  // vBulletin: "Page 1 of 123" — pak de N uit "of N"
+  const OF_RE = /Page\s+\d+\s+of\s+(\d+)/i;
+  const ofMatch = html.match(OF_RE);
+  if (ofMatch) {
+    const n = parseInt(ofMatch[1], 10);
+    if (Number.isFinite(n) && n > max) max = n;
+  }
+  // Bonus: 'pagebutton42' / 'pagenumber=42' / 'data-page="42"' style markup
+  const ATTR_RE = /(?:pagebutton|pagenumber=|data-page=\"|data-page=')(\d+)/gi;
+  while ((m = ATTR_RE.exec(html)) !== null) {
     const n = parseInt(m[1], 10);
     if (Number.isFinite(n) && n > max) max = n;
   }
