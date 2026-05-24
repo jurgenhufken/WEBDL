@@ -5809,11 +5809,14 @@ function detectLane(platform, url = '', metadata = null) {
   const p = String(platform || '').toLowerCase();
   const u = String(url || '').toLowerCase();
 
+  // K2S files first: ook .rar/.zip — premium-resolve + http-download,
+  // geen ffmpeg-merge. Hoort niet achter heavy yt-dlp video-queue te wachten.
+  if (/(?:keep2share\.cc|k2s\.cc|k2s\.io)\/file\//i.test(u)) return 'light';
+
   if (isArchiveDownloadLike(url, metadata)) return 'heavy';
 
   // Direct transfers without postprocessing must never sit behind video jobs.
   if (isImageUrlLike(u) || isDirectVideoUrlLike(u) || isImageHostPageUrlLike(u)) return 'light';
-  if (/(?:keep2share\.cc|k2s\.cc|k2s\.io)\/file\//i.test(u)) return 'light';
 
   // If this is a live stream or explicitly a video, definitely heavy
   if (u.includes('is_live=true') || u.includes('/live/') || u.includes('tiktok.com/@') && !u.includes('/photo/')) {

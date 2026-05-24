@@ -65,6 +65,11 @@ function hostnameFromUrl(raw) {
 function canonicalPlatformAlias(value) {
   const raw = String(value || '').trim().toLowerCase().replace(/^www\./, '');
   if (!raw) return '';
+  // 'unknown' is een placeholder, geen echte waarde — laat de fallback-chain
+  // door zodat de gedetecteerde platform (bv. 'keep2share' via isSlaveUrl)
+  // wint. Anders blijft platform='unknown' staan in DB ondanks dat we weten
+  // dat het keep2share is. Zie delegateToSlave fallback-chain hieronder.
+  if (raw === 'unknown') return '';
   if (raw === 'k2s' || raw === 'k2scc' || raw === '_keep2share') return 'keep2share';
   if (raw === 'keep2share.cc' || raw === 'k2s.cc' || raw === 'k2s.io') return 'keep2share';
   if (raw.endsWith('.keep2share.cc') || raw.endsWith('.k2s.cc') || raw.endsWith('.k2s.io')) return 'keep2share';
