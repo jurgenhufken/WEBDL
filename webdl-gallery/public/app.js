@@ -334,19 +334,20 @@
     const sourceText = String(it.source_site || '').trim();
     const showSource = shouldShowSourceSite(platformText, sourceText);
     const badgeTitle = displayPlatformBadge(it);
-    // Build extra source badges from source_sites array (excluding platform and source_site to avoid duplication)
-    const platformKey = comparableSiteKey(platformText);
-    const sourceKey = comparableSiteKey(sourceText);
-    const extraSites = (Array.isArray(it.source_sites) ? it.source_sites : [])
-      .map(s => String(s || '').trim())
-      .filter(s => {
-        const k = comparableSiteKey(s);
-        return k && k !== platformKey && k !== sourceKey;
-      });
+    // Build a unified set of all sites this item comes from (deduped, consistent order)
+    const allSites = new Map();
+    // Add platform first
+    if (platformText && platformText !== '?') allSites.set(comparableSiteKey(platformText), platformText);
+    // Add source_site
+    if (sourceText) allSites.set(comparableSiteKey(sourceText), sourceText);
+    // Add source_sites array
+    (Array.isArray(it.source_sites) ? it.source_sites : []).forEach(s => {
+      const st = String(s || '').trim();
+      if (st) allSites.set(comparableSiteKey(st), st);
+    });
+    const siteLabels = [...allSites.values()].map(s => canonicalSiteLabel(s) || s);
     const badge = `<div class="card-badge-stack" title="${escHtml(badgeTitle)}">
-        <span class="card-badge">${escHtml(platformText)}</span>
-        ${showSource ? `<span class="card-badge card-badge-source">via ${escHtml(canonicalSiteLabel(sourceText) || sourceText)}</span>` : ''}
-        ${extraSites.map(s => `<span class="card-badge card-badge-source">${escHtml(canonicalSiteLabel(s) || s)}</span>`).join('')}
+        ${siteLabels.map((s, i) => `<span class="card-badge${i > 0 ? ' card-badge-source' : ''}">${escHtml(s)}</span>`).join('')}
       </div>`;
     const mediaLabel = mediaTypeLabel(it);
     const mediaMark = mediaLabel ? `<span class="card-media-mark">${mediaLabel}</span>` : '';
