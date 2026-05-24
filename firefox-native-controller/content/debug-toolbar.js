@@ -8380,8 +8380,14 @@
       let maxItems = WEBDL_UNLIMITED;
       let maxForumPages = WEBDL_UNLIMITED;
 
-      // Worker-tab background scan: only when user explicitly clicks "Giga Archief"
-      if (options.forceGiga === true && (isForumPage || isThreadPage)) {
+      // Worker-tab background scan voor FFF forums/threads:
+      // - default: AUTO background (zoals vóór commit 1e7c924). User kan verder
+      //   werken, scan overleeft tab-close, progress via notifications.
+      // - Cmd/Ctrl-klik: foreground scan (advanced, voor debugging in DevTools).
+      // - forceGiga (⚡ Giga knop): blijft background, andere label.
+      const useFffBackgroundWorker = (isForumPage || isThreadPage)
+        && (options.forceGiga === true || !(clickEvent && (clickEvent.metaKey || clickEvent.ctrlKey)));
+      if (useFffBackgroundWorker) {
         const startUrl = String(window.location.href || '').replace(/#.*$/, '');
         const initialThreadLinks = isForumPage
           ? collectFootFetishForumThreadLinksFromForumDocument(document, startUrl, WEBDL_UNLIMITED)
