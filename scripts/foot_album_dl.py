@@ -13,20 +13,29 @@ maakt zelf een sessie (haalt homepage → krijg cookies → fetch album).
 Usage:
   python3 foot_album_dl.py <album-url> [output-dir]
 
-Output-dir default: ~/WEBDL/footstockings/<channel>/<id>_<slug>/
+Output-dir default: <BASE_DIR>/footstockings/<channel>/<id>_<slug>/
 
-Geen schrijven naar DB — dit script schrijft alleen files naar disk.
-Voor gallery-zichtbaarheid: run scripts/foot_album_import.py daarna,
-of laat simple-server's auto-import scanner het oppakken.
+Schrijft per image een rij naar public.downloads zodat het album in de
+gallery verschijnt (platform=footstockings, channel=<slug>, status=
+completed, is_thumb_ready=true). Dedup op filepath; rerun is veilig.
+
+Bij --no-db slaat DB-registratie over (alleen disk).
 """
 import argparse
+import json
 import os
 import re
 import sys
 import time
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from http.cookiejar import CookieJar
+
+try:
+    import psycopg2
+except ImportError:
+    psycopg2 = None
 
 
 UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:120.0) Gecko/20100101 Firefox/120.0'
@@ -78,6 +87,8 @@ def main():
     p.add_argument('output_dir', nargs='?', default=None, help='target folder (default per channel/album)')
     p.add_argument('--throttle-ms', type=int, default=200, help='ms tussen image-downloads (default 200)')
     p.add_argument('--dry-run', action='store_true', help='alleen tellen, niet downloaden')
+    p.add_argument('--no-db', action='store_true', help='sla DB-registratie over (alleen disk-download)')
+    p.add_argument('--db', default='dbname=webdl', help='Postgres conn string (default: dbname=webdl)')
     args = p.parse_args()
 
     album_id, slug = parse_album_url(args.url)
@@ -154,8 +165,89 @@ def main():
             time.sleep(args.throttle_ms / 1000)
 
     print()
-    print(f"Klaar. Nieuw: {ok}, skip: {skip}, fout: {fail}, totaal: {len(pairs)}")
+    print(f"Disk klaar. Nieuw: {ok}, skip: {skip}, fout: {fail}, totaal: {len(pairs)}")
     print(f"Files in: {out_dir}")
+
+    if args.no_db:
+        return
+
+    if psycopg2 is None:
+        print()
+        print("WARN: psycopg2 niet beschikbaar — DB-registratie overgeslagen.")
+        print("      Install: pip3 install psycopg2-binary")
+        return
+
+    print()
+    print("Inserteren in public.downloads voor gallery-zichtbaarheid…")
+    conn = psycopg2.connect(args.db)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT filepath FROM public.downloads WHERE filepath LIKE %s",
+        (f'{out_dir}/%',),
+    )
+    existing = {r[0] for r in cur.fetchall()}
+    now = datetime.now(tz=timezone.utc)
+    inserted, db_skip, db_fail = 0, 0, 0
+    for i, (aid, num) in enumerate(pairs, 1):
+        target = os.path.join(out_dir, f'{num}.jpg')
+        if not os.path.exists(target):
+            continue
+        if target in existing:
+            db_skip += 1
+            continue
+        try:
+            stat = os.stat(target)
+        except OSError:
+            db_fail += 1
+            continue
+        image_url = f'https://footstockings.com/contents/albums/sources/0/{aid}/{num}.jpg'
+        title = f'{slug} #{num}'
+        meta = {
+            'adapter': 'foot_album_dl',
+            'platform': 'footstockings',
+            'kind': 'album_image',
+            'album_id': aid,
+            'album_slug': slug,
+            'album_url': args.url,
+            'image_id': num,
+            'source_url': args.url,
+            'source_thread_url': args.url,
+            'source_thread_title': slug,
+            'indexed_channel': slug,
+            '_imported_at': now.isoformat(),
+            '_import_source': 'foot_album_dl.py',
+        }
+        try:
+            cur.execute(
+                """
+                INSERT INTO public.downloads
+                  (url, source_url, platform, channel, title, filename, filepath,
+                   filesize, format, status, progress, metadata,
+                   created_at, updated_at, finished_at, is_thumb_ready, priority)
+                VALUES
+                  (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                   %s, %s, %s, %s, %s)
+                """,
+                (
+                    image_url, args.url,
+                    'footstockings', slug, title[:200],
+                    f'{num}.jpg', target,
+                    stat.st_size, 'jpg', 'completed', 100,
+                    json.dumps(meta),
+                    now, now,
+                    datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc),
+                    True,  # is_thumb_ready (image is z'n eigen thumb)
+                    0,
+                ),
+            )
+            conn.commit()
+            inserted += 1
+        except Exception as e:
+            conn.rollback()
+            db_fail += 1
+            print(f"  DB ERROR {target}: {e}")
+    print(f"DB klaar. Inserted: {inserted}, skip-bestaand: {db_skip}, fout: {db_fail}")
+    print(f"Gallery filter: platform=footstockings channel={slug}")
 
 
 if __name__ == '__main__':
