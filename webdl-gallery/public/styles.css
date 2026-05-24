@@ -425,28 +425,29 @@ input[type="range"]:disabled { opacity: 0.35; cursor: default; }
   z-index: 2;
 }
 .card-badge { 
-  background: color-mix(in srgb, var(--bg-elevated) 35%, transparent); color: var(--text-secondary); 
+  background: var(--bg-elevated); color: var(--text-secondary); 
   border: 1px solid var(--border);
   padding: 3px 8px; border-radius: 999px; font-size: 10px; 
   letter-spacing: 0; font-weight: 600; text-transform: lowercase;
-  backdrop-filter: blur(8px);
+  backdrop-filter: blur(6px);
+  opacity: .85;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .card-badge-source {
-  background: color-mix(in srgb, var(--bg-elevated) 25%, transparent);
   color: var(--accent);
   border-color: var(--accent-soft);
 }
 .card-media-mark,
 .card-video-mark { 
   position: absolute; top: 8px; right: 8px; 
-  background: color-mix(in srgb, var(--bg-elevated) 35%, transparent); border: 1px solid var(--border);
+  background: var(--bg-elevated); border: 1px solid var(--border);
   padding: 3px 8px; border-radius: 999px; font-size: 10px; color: var(--text-secondary); font-weight: 600;
   text-transform: lowercase;
-  backdrop-filter: blur(8px);
+  backdrop-filter: blur(6px);
+  opacity: .85;
 }
 .card-duration {
   position: absolute;
