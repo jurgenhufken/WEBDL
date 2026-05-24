@@ -7022,6 +7022,142 @@ expressApp.get('/api/sites', async (req, res) => {
   }
 });
 
+// GET /api/recommendations — mood-based + collection-driven site-suggesties.
+// Analyseert DB-collectie (top platforms/channels/themes) en matched met
+// curated obscure-site-lijst per thema. Doel: serendipity — sites waar
+// user "nooit op zou komen".
+expressApp.get('/api/recommendations', async (req, res) => {
+  try {
+    // Pre-curated obscure sites per thema (mood)
+    const CURATED = {
+      'voet-candid-voyeur': [
+        { name: 'candidfeet.tv', why: 'Pure candid feet, niche forum + dump' },
+        { name: 'candid-board.com', why: 'Candid voyeur forum, beach/sandals' },
+        { name: 'voyeurweb.com/feet', why: 'Oude tube, gecategoriseerd voyeur' },
+        { name: 'upskirt.tv', why: 'Candid voyeur uploads (feet-tag)' },
+      ],
+      'voet-creator-paid': [
+        { name: 'manyvids.com/Categories/Foot-Fetish', why: 'Creator clips, trailers vrij' },
+        { name: 'clips4sale.com/studio/category/115/feet', why: 'Preview-clips van studios' },
+        { name: 'iwantclips.com/categories/foot-fetish', why: 'Idem, andere creators' },
+        { name: 'feetfinder.com', why: 'Paid platform, profielen public' },
+      ],
+      'voet-celebrity': [
+        { name: 'wikifeet.com', why: 'Celebrity feet database, gratis downloads' },
+        { name: 'wikifeetx.com', why: 'Explicit variant van wikifeet' },
+        { name: 'aznudefeet.com', why: 'Asian celebrities + feet (al in collectie)' },
+      ],
+      'voet-tube-niche': [
+        { name: 'worldsex.com/feet', why: 'Oude tube-aggregator, motherless-stijl MP4' },
+        { name: 'eporner.com/cat/foot-fetish', why: 'yt-dlp ondersteund' },
+        { name: '4tube.com/categories/foot-fetish', why: 'yt-dlp ondersteund' },
+        { name: 'tnaflix.com/foot-fetish-porn', why: 'Al in jouw config' },
+        { name: 'txxx.com/categories/foot-fetish', why: 'Cloudflare via Firefox' },
+      ],
+      'voet-forum-dump': [
+        { name: 'phun.org (feet-subforum)', why: 'Heb je al 951 items van — meer uitbreiden' },
+        { name: 'vipergirls.to (feet-section)', why: 'Heb je al 2k van — meer uitbreiden' },
+        { name: 'forum.sex.com/feet', why: 'Kleiner, pure candid' },
+        { name: 'bdsmlr.com/tag/feet', why: 'Tumblr-clone met feet-tag, vergeten hoek' },
+      ],
+      'voet-rare-russian': [
+        { name: 'imgsrc.ru', why: 'Feet-albums, RU-side, weinig EN-indexering' },
+        { name: 'cosplayfeet.club', why: 'Cosplay + feet niche-aggregator' },
+      ],
+      'voet-onlyfans-mirror': [
+        { name: 'coomer.party', why: 'OnlyFans/Fansly mirrors, gratis re-uploads' },
+        { name: 'kemono.party', why: 'Patreon/Fansly mirror' },
+      ],
+      'tiktok-feet': [
+        { name: 'feetfinder.com', why: 'TikTok-style feet content' },
+        { name: 'instagram.com/explore/tags/feetlovers', why: 'IG hashtag, via gallery-dl' },
+      ],
+    };
+
+    // Helpers voor psql-queries
+    const runPsql = (sql) => new Promise((resolve, reject) => {
+      const psql = spawn('psql', ['-d', 'webdl', '-t', '-A', '-F', '|', '-c', sql]);
+      let out = ''; psql.stdout.on('data', (d) => out += d);
+      psql.on('close', () => resolve(out.trim().split('\n').filter(Boolean)));
+      psql.on('error', reject);
+    });
+
+    const THEME_KEYWORDS = {
+      'voet-candid-voyeur': ['candid', 'voyeur', 'beach', 'spy', 'public', 'hidden', 'cam'],
+      'voet-creator-paid': ['onlyfans', 'manyvids', 'patreon', 'clips4sale', 'fansly'],
+      'voet-celebrity': ['wikifeet', 'celebrity', 'famous', 'actress'],
+      'voet-tube-niche': ['tube', 'heavyfetish', 'footstockings'],
+      'voet-forum-dump': ['forum', 'phun', 'viper', 'thread'],
+      'voet-onlyfans-mirror': ['coomer', 'kemono'],
+      'tiktok-feet': ['tiktok', 'tik tok', 'ayak'],
+    };
+
+    // Per-thema count via SQL (veel sneller dan title-scan in JS)
+    const themes = {};
+    for (const [theme, keys] of Object.entries(THEME_KEYWORDS)) {
+      const pattern = keys.map((k) => k.replace(/'/g, "''")).join('|');
+      const rows = await runPsql(
+        `SELECT COUNT(*) FROM public.downloads WHERE status='completed' AND (lower(title) ~ '${pattern}' OR lower(channel) ~ '${pattern}');`);
+      const n = parseInt(rows[0] || '0', 10);
+      if (n > 0) themes[theme] = n;
+    }
+
+    // Top platforms
+    const platRows = await runPsql(
+      `SELECT platform, COUNT(*) FROM public.downloads WHERE status='completed' AND platform IS NOT NULL GROUP BY platform ORDER BY 2 DESC LIMIT 20;`);
+    const platforms = {};
+    for (const line of platRows) {
+      const [v, n] = line.split('|');
+      platforms[v] = parseInt(n, 10) || 0;
+    }
+
+    // Top channels
+    const chanRows = await runPsql(
+      `SELECT channel, COUNT(*) FROM public.downloads WHERE status='completed' AND channel IS NOT NULL AND channel != 'unknown' GROUP BY channel ORDER BY 2 DESC LIMIT 20;`);
+    const channels = {};
+    for (const line of chanRows) {
+      const [v, n] = line.split('|');
+      channels[v] = parseInt(n, 10) || 0;
+    }
+
+    // Top platforms/channels
+    const topPlatforms = Object.entries(platforms).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([name, n]) => ({ name, n }));
+    const topChannels = Object.entries(channels).sort((a, b) => b[1] - a[1]).slice(0, 15).map(([name, n]) => ({ name, n }));
+    const topThemes = Object.entries(themes).sort((a, b) => b[1] - a[1]).map(([name, n]) => ({ name, n }));
+
+    // Recommendations: pak top themes en bied curated sites die NIET al in collectie zitten
+    const knownPlatformsSet = new Set(Object.keys(platforms));
+    const recommendations = [];
+    for (const t of topThemes.slice(0, 4)) {
+      const sites = (CURATED[t.name] || []).map((s) => ({
+        ...s,
+        alreadyInCollection: [...knownPlatformsSet].some((p) => s.name.toLowerCase().includes(p.toLowerCase())),
+      }));
+      recommendations.push({ theme: t.name, matchScore: t.n, sites });
+    }
+    // Bonus: random obscure suggestie uit elke andere theme die niet matched
+    const bonusThemes = Object.keys(CURATED).filter((t) => !topThemes.find((x) => x.name === t));
+    const bonusSuggestions = bonusThemes.map((t) => ({
+      theme: t,
+      site: CURATED[t][Math.floor(Math.random() * CURATED[t].length)],
+    }));
+
+    res.json({
+      success: true,
+      collectionSummary: {
+        topPlatforms,
+        topChannels,
+        detectedThemes: topThemes,
+      },
+      recommendations,
+      bonusSuggestions,
+      generatedAt: new Date().toISOString(),
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e.message || e) });
+  }
+});
+
 // GET /sites — simple HTML dashboard
 expressApp.get('/sites', (req, res) => {
   res.type('html').send(`<!DOCTYPE html>
@@ -7054,6 +7190,9 @@ tr:hover td { background: #2d3b53; }
 </head><body>
 <h1>⚡ WEBDL · Sites Dashboard</h1>
 <div class="sub" id="sub">Loading...</div>
+
+<div id="recs" style="margin-bottom: 24px;"></div>
+
 <input class="search" id="q" placeholder="Filter op naam/platform/host...">
 <table id="t"><thead><tr>
   <th>Platform</th><th>Host</th><th>Item types</th><th>Endpoints</th><th>Features</th>
@@ -7101,6 +7240,56 @@ function render(sites) {
     tb.appendChild(tr);
   }
 }
+async function loadRecs() {
+  const r = await fetch('/api/recommendations');
+  const d = await r.json();
+  if (!d.success) return;
+  const root = document.getElementById('recs');
+  const cs = d.collectionSummary;
+  let html = '<div style="background:#1e293b;border-radius:8px;padding:16px;">';
+  html += '<h2 style="margin:0 0 12px;font-size:16px;color:#facc15;">🎯 Voor jou (op basis van je collectie)</h2>';
+
+  if (d.recommendations.length) {
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;">';
+    for (const rec of d.recommendations) {
+      html += '<div style="background:#0f172a;padding:10px;border-radius:6px;border-left:3px solid #60a5fa;">';
+      html += '<div style="font-size:11px;color:#94a3b8;text-transform:uppercase;letter-spacing:0.5px;">'
+        + rec.theme + ' · ' + rec.matchScore + ' hits</div>';
+      for (const s of rec.sites) {
+        const opacity = s.alreadyInCollection ? '0.5' : '1';
+        const tag = s.alreadyInCollection ? ' <span style="color:#4ade80;font-size:10px;">✓ al in collectie</span>' : '';
+        html += '<div style="margin-top:6px;opacity:' + opacity + ';"><a href="https://' + s.name.replace(/\\s.*$/, '') + '" target="_blank" style="color:#60a5fa;text-decoration:none;font-weight:600;">'
+          + s.name + '</a>' + tag + '<div style="font-size:11px;color:#cbd5e1;">' + s.why + '</div></div>';
+      }
+      html += '</div>';
+    }
+    html += '</div>';
+  }
+
+  if (d.bonusSuggestions && d.bonusSuggestions.length) {
+    html += '<div style="margin-top:14px;padding-top:14px;border-top:1px solid #334155;">';
+    html += '<div style="font-size:11px;color:#94a3b8;margin-bottom:6px;">🎲 SERENDIPITY — random sites uit niet-gematchte thema\\'s (waar je nooit op zou komen)</div>';
+    for (const b of d.bonusSuggestions) {
+      html += '<div style="display:inline-block;margin:4px 8px 0 0;padding:6px 10px;background:#0f172a;border-radius:6px;">';
+      html += '<span style="color:#94a3b8;font-size:10px;">' + b.theme + '</span> · ';
+      html += '<a href="https://' + b.site.name.replace(/\\s.*$/, '') + '" target="_blank" style="color:#60a5fa;">' + b.site.name + '</a>';
+      html += '<div style="font-size:10px;color:#cbd5e1;">' + b.site.why + '</div>';
+      html += '</div>';
+    }
+    html += '</div>';
+  }
+
+  // Collection summary inline
+  if (cs.detectedThemes.length) {
+    html += '<div style="margin-top:14px;padding-top:14px;border-top:1px solid #334155;font-size:11px;color:#94a3b8;">';
+    html += 'Gedetecteerde thema\\'s in je collectie: ' + cs.detectedThemes.map((t) => t.name + ' (' + t.n + ')').join(' · ');
+    html += '</div>';
+  }
+  html += '</div>';
+  root.innerHTML = html;
+}
+loadRecs();
+
 document.getElementById('q').addEventListener('input', (e) => {
   const q = e.target.value.toLowerCase();
   if (!q) return render(window._sites || []);
