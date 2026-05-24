@@ -137,17 +137,46 @@ async def collect_topic_titles(client, entity):
             topics[message.id] = str(title)
     return topics
 
-def write_sidecar(file_path, entity, message, chat_title, topic_titles=None):
+def write_sidecar(file_path, entity, message, chat_title, topic_titles=None, channel_info=None):
     if not file_path:
         return
     try:
         topic_titles = topic_titles or {}
+        channel_info = channel_info or {}
         topic_id = topic_id_for_message(message)
         topic_title = topic_titles.get(topic_id, '') if topic_id else ''
         source_url = message_source_url(entity, message)
         channel_title = topic_title or chat_title
         uploader_url = f"https://t.me/{getattr(entity, 'username', '')}" if getattr(entity, 'username', None) else ''
         title = message_title(message, file_path, channel_title)
+
+        # File metadata
+        file_obj = getattr(message, 'file', None)
+        file_name = getattr(file_obj, 'name', None) or os.path.basename(str(file_path))
+        file_size = getattr(file_obj, 'size', None) or (os.path.getsize(file_path) if os.path.exists(file_path) else None)
+        mime_type = getattr(file_obj, 'mime_type', None) or ''
+        duration = getattr(file_obj, 'duration', None)
+        width = getattr(file_obj, 'width', None)
+        height = getattr(file_obj, 'height', None)
+
+        # Media type
+        ext = os.path.splitext(str(file_path))[1].lower()
+        if ext in ('.mp4', '.mkv', '.webm', '.avi', '.mov'):
+            media_type = 'video'
+        elif ext in ('.jpg', '.jpeg', '.png', '.gif', '.webp'):
+            media_type = 'image'
+        else:
+            media_type = 'document'
+
+        # Message metadata
+        caption = str(getattr(message, 'message', '') or '').strip()
+        views = getattr(message, 'views', None)
+        forwards = getattr(message, 'forwards', None)
+        edit_date = getattr(message, 'edit_date', None)
+
+        # Entity type
+        entity_type = type(entity).__name__  # Channel, Chat, User, etc.
+
         metadata = {
             'extractor_key': 'telegram',
             'platform': 'telegram',
@@ -156,15 +185,31 @@ def write_sidecar(file_path, entity, message, chat_title, topic_titles=None):
             'playlist_title': chat_title,
             'channel_id': str(getattr(entity, 'id', '') or ''),
             'channel_url': uploader_url,
+            'channel_username': getattr(entity, 'username', None),
+            'channel_type': entity_type,
+            'channel_subscribers': channel_info.get('subscribers'),
+            'channel_about': channel_info.get('about'),
+            'channel_photo': channel_info.get('has_photo', False),
             'uploader_id': str(getattr(entity, 'id', '') or ''),
             'uploader_url': uploader_url,
             'fulltitle': title,
             'title': title,
-            'filename': os.path.basename(str(file_path)),
+            'description': caption if caption else None,
+            'filename': file_name,
+            'filesize': file_size,
+            'mime_type': mime_type,
+            'media_type': media_type,
+            'duration': duration,
+            'width': width,
+            'height': height,
             'webpage_url': source_url,
             'original_url': source_url,
             'url': source_url,
             'timestamp': int(message.date.timestamp()) if getattr(message, 'date', None) else None,
+            'upload_date': message.date.strftime('%Y%m%d') if getattr(message, 'date', None) else None,
+            'modified_date': int(edit_date.timestamp()) if edit_date else None,
+            'view_count': views,
+            'forward_count': forwards,
             'source_site': 'telegram',
             'source_thread_title': chat_title,
             'source_post_title': title,
@@ -175,6 +220,8 @@ def write_sidecar(file_path, entity, message, chat_title, topic_titles=None):
             'telegram_topic_title': topic_title,
             'telegram_topic_id': topic_id,
         }
+        # Remove None values for cleaner JSON
+        metadata = {k: v for k, v in metadata.items() if v is not None}
         with open(str(file_path) + '.json', 'w', encoding='utf-8') as fh:
             json.dump(metadata, fh, ensure_ascii=False, indent=2)
     except Exception as e:
@@ -187,7 +234,7 @@ async def download_message(client, message, output_dir, semaphore, stats, entity
             path = await message.download_media(file=output_dir)
             if path:
                 if entity is not None:
-                    write_sidecar(path, entity, message, stats.get('chat_title') or '', topic_titles=topic_titles)
+                    write_sidecar(path, entity, message, stats.get('chat_title') or '', topic_titles=topic_titles, channel_info=stats.get('channel_info'))
                 stats['count'] += 1
                 total = stats.get('total') or 0
                 if total:
@@ -219,13 +266,30 @@ async def download_entity(client, chat_id, output_dir, message_limit=None, paral
 
     os.makedirs(output_dir, exist_ok=True)
 
+    # Collect channel info
+    channel_info = {}
+    try:
+        if isinstance(entity, Channel):
+            full = await client(GetFullChannelRequest(entity))
+            fc = full.full_chat
+            channel_info = {
+                'subscribers': getattr(fc, 'participants_count', None),
+                'about': getattr(fc, 'about', None) or '',
+                'has_photo': bool(getattr(entity, 'photo', None)),
+            }
+            print(f"ℹ️  Channel info: {channel_info.get('subscribers', '?')} subscribers")
+            if channel_info.get('about'):
+                print(f"📝 About: {channel_info['about'][:100]}")
+    except Exception as e:
+        print(f"⚠️  Could not fetch channel info: {e}")
+
     topic_titles = await collect_topic_titles(client, entity)
     if topic_titles:
         print("🧵 Topics: " + ", ".join(sorted(set(topic_titles.values()))))
 
     download_tasks = []
     semaphore = asyncio.Semaphore(parallel)
-    stats = {'count': 0, 'chat_title': title}
+    stats = {'count': 0, 'chat_title': title, 'channel_info': channel_info}
 
     async for message in client.iter_messages(entity, limit=message_limit):
         if message.media and isinstance(message.media, (MessageMediaPhoto, MessageMediaDocument)):
