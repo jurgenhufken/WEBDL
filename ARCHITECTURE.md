@@ -285,13 +285,105 @@ interface LanePolicy {
 
 ## 5. Beslissingen die nog open zijn
 
-| Beslissing | Opties | Aanbeveling |
+| Beslissing | Opties | Aanbeveling | Status |
+|---|---|---|---|
+| **Taal** voor webdl-core | TypeScript / JavaScript | TypeScript — type-safety bij contracten essentieel | **Open** — Jürgen: "TS toevoegen is bewuste keuze, eerst bespreken" |
+| **Runtime** | Node / Deno / Bun | Node — al in stack | Aanbeveling |
+| **Process model** | In-process / Separate service | In-process eerst, splitsen later | Aanbeveling |
+| **DB-migration tool** | psql scripts / Prisma / Drizzle | psql scripts — al in `migrations/` | Aanbeveling |
+| **Job-polling vs WebSocket** | Polling 2s / SSE / WebSocket | SSE — simpler dan WS, real-time genoeg | Aanbeveling |
+| **Sites-migratie aanpak** | Mechanisch 1:1 / Per-site met feature-flags | Feature-flags (zie §4.3) | **Bevestigd** — niet mechanisch |
+
+### 5.1 TypeScript-beslissing — argumenten
+
+**Voor TS in webdl-core:**
+- Source/Job/Worker contracten zijn waardevol om typed te hebben
+- Auto-complete + refactor-safety bij wijzigingen
+- Runtime-validatie via Zod o.i.d. is dubbel werk
+
+**Tegen:**
+- Build-stap toevoegen aan project dat nu pure JS draait
+- Mentale switch + dep-installs (tsc / ts-node / esbuild)
+- Overige codebase blijft JS — context-switch per file
+
+**Alternatieven:**
+- JSDoc-types met `// @ts-check` — type-safety zonder build-stap
+- Pure JS met runtime-validation via Zod — type-safety alleen at boundary
+
+**Vraag aan Jürgen:** TS / JSDoc+ts-check / pure JS + Zod / iets anders?
+
+## 6. Sites-migratie — feature-flag aanpak (niet mechanisch)
+
+**Inzicht (van Jürgen):** "21 sites mechanisch migreren werkt niet — elke site heeft eigen rariteit."
+
+Voorbeelden van rariteiten:
+- **FFF (FootFetishForum)** — `upload.footfetishforum.com/image/<id>` wrapper-URL die client-side opgelost moet via Chevereto-fetch
+- **K2S** — JWT-resolve via accessToken OR cookie-fallback, file-specifieke errors, abuse-flag handling
+- **X/Twitter** — eigen target-detection (post / profile / hashtag), guest-token flow
+- **Reddit** — BDFR fallback, subreddit vs user vs post mode
+- **Vipergirls** — whole-thread + thread-context + viper.to alias normalisatie
+- **Cloudflare-hosts** — challenge-detect, cookie-from-firefox
+
+### Per-site featurevector
+
+Elke Source moet declareren welke features hij ondersteunt:
+
+```ts
+interface Source {
+  // ... bestaande methods ...
+  features: {
+    paginate?: boolean;          // multi-page support
+    wholeThread?: boolean;       // forum thread-walking
+    forumScan?: boolean;         // subforum → thread-discovery
+    wrapperResolve?: boolean;    // bv. Chevereto image-page → direct image
+    cloudflareCookie?: boolean;  // vereist cookies-from-firefox
+    authToken?: boolean;         // bv. K2S accessToken
+    rateLimit?: number;          // requests/min naar deze host
+  };
+}
+```
+
+### Migratie per site = 3 stappen
+
+1. **Source-file maken** met huidige selectors + URL-patterns
+2. **Eigen rariteiten als features declareren** (paginate, wholeThread, wrapperResolve, etc.)
+3. **Test live** — feature-flag aan, oude flow blijft fallback. Pas weghalen na bevestiging.
+
+### Volgorde van migratie (van laag → hoog complexiteit)
+
+| Fase | Sites | Reden |
 |---|---|---|
-| **Taal** voor webdl-core | TypeScript / JavaScript | TypeScript — type-safety bij Source/Job/Worker contracten essentieel |
-| **Runtime** | Node (zoals simple-server) / Deno / Bun | Node — al in stack, geen extra deps |
-| **Process model** | In-process (zelfde node) / Separate service | In-process eerst, splitsen later kan |
-| **DB-migration tool** | psql scripts / Prisma / Drizzle / Knex | psql scripts — al gebruikt in `migrations/`, bekend, geen runtime-overhead |
-| **Job-polling vs WebSocket** voor extensie | Polling elke 2s / SSE / WebSocket | SSE — eenvoudiger dan WebSocket, real-time genoeg |
+| **Fase A** (simpel, ~30min/site) | xnxx, tnaflix, spankbang, redtube, darknetvideos, footstockings, heavyfetish, erome, pictoa | yt-dlp native of simple scraper, weinig rariteiten |
+| **Fase B** (medium, ~1u/site) | darknessporn, tubesafari, pornzog, alohatube, usersporn, pornkai, xfree, zzztube, favoyeurtube, spycamhub, sexygirlspics, nakedneighbour | Site-engine sites, mogelijk Cloudflare |
+| **Fase C** (complex, ~2-4u/site) | porncoven, vipergirls, footfetishforum, amateurvoyeurforum, foot-fetish.club, phun | Forum-rariteiten (whole-thread, attachment-wrappers, dedupe-context) |
+| **Fase D** (specialistisch, ~3-6u/site) | x.com/twitter, reddit, xvideos, k2s, redgifs, instagram, onlyfans | Eigen scrapers met auth/token/extractor-specifieke flows |
+
+**Totaal:** 22+ sites × gemiddeld 1.5u = ~30-40u, niet mechanisch. Verdeeld over sessies.
+
+## 7. Rollback-strategie
+
+Geen big-bang. Elke stap heeft eigen rollback-pad.
+
+| Stap | Rollback |
+|---|---|
+| DB-migratie (nieuwe tabellen/kolommen) | `migrations/.../99-rollback.sql` — DROP nieuwe objecten, downloads-kolommen worden DROP'd |
+| Source-implementatie | Niet ingeschakeld via flag → oude flow blijft draaien. Source-file delete = stap terug |
+| `/jobs` endpoint live | Feature-flag `useNewJobsApi` per site UIT → extensie POST'st naar `/download` zoals voorheen |
+| Per-site feature-flag aan | Flag UIT → oude debug-toolbar / site-engine pad weer actief |
+| `debug-toolbar.js` deels gesloopt | **Hier wordt rollback duur** — daarom: pas slopen NA 2 weken stabiel draaien op alle flags AAN |
+| Lane-policy uit DB | Default-waarden fallback in code als DB-rij ontbreekt |
+
+**Rollback-vereisten per stap:**
+- Elke commit raakt **één laag** (DB / core / endpoint / extensie). Geen mengsel.
+- Elke nieuwe code zit achter een feature-flag die default OFF is.
+- Migratie-script heeft een spiegel-rollback in zelfde directory.
+- "Geen rollback meer mogelijk" punt: pas NA verwijdering oude code uit debug-toolbar.js. Dat is fase 6, geschat 6-8 weken na start.
+
+### Gevaarlijke punten
+
+1. **Stap 9 (oude code uit simple-server slopen)** — onomkeerbaar zonder git-revert. Beslis pas na bewijs dat alle sites via nieuwe stack werken (1 week monitoring).
+2. **Stap 10 (forum-scan uit debug-toolbar)** — vipergirls/FFF werken al jaren, bestaande user-gewoontes. Eerst nieuwe flow live + 2 weken parallel, dan pas oude weghalen.
+3. **DB-kolom DROP** — nooit doen zonder backup + read-only window. Hou downloads-kolommen 30 dagen na laatste write.
 
 ---
 
