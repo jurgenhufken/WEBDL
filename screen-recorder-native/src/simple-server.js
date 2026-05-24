@@ -8647,6 +8647,7 @@ function detectPlatform(url) {
   if (/imagefap\.com/i.test(u)) return 'imagefap';
   if (/keep2share\.cc|k2s\.cc/i.test(u)) return 'keep2share';
   if (/footstockings\.com/i.test(u)) return 'footstockings';
+  if (/heavyfetish\.com/i.test(u)) return 'heavyfetish';
 
   try {
     const host = new URL(u).hostname.toLowerCase();
@@ -8699,6 +8700,7 @@ const KNOWN_PLATFORMS = new Set([
   'imagefap',
   'keep2share',
   'footstockings',
+  'heavyfetish',
   '4kdownloader',
   'other']
 );
@@ -8809,7 +8811,7 @@ function deriveChannelFromUrl(platform, url) {
     if (m2) return m2[1];
   }
 
-  if (platform === 'footstockings') {
+  if (platform === 'footstockings' || platform === 'heavyfetish') {
     try {
       const parsed = new URL(u);
       const segs = String(parsed.pathname || '').split('/').filter(Boolean);

@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Screen Recorder Controller",
-  "version": "1.0.64",
+  "version": "1.0.65",
   "description": "Besturingsinterface voor de native Screen Recorder applicatie",
   "browser_specific_settings": {
     "gecko": {
@@ -35,7 +35,8 @@
     "*://*.xv-cdn.com/*",
     "*://*.amateurvoyeurforum.com/*",
     "*://*.elitebabes.com/*",
-    "*://*.footstockings.com/*"
+    "*://*.footstockings.com/*",
+    "*://*.heavyfetish.com/*"
   ],
   "content_scripts": [
     {
@@ -54,10 +55,11 @@
     },
     {
       "matches": [
-        "*://*.footstockings.com/*"
+        "*://*.footstockings.com/*",
+        "*://*.heavyfetish.com/*"
       ],
       "js": [
-        "content/footstockings.js"
+        "content/tube-engine.js"
       ],
       "run_at": "document_end"
     }
