@@ -171,11 +171,155 @@
         continue;
       }
       consecutiveEmpty = 0;
+      let added = 0;
       for (const it of found) {
-        if (!allSeen.has(it.url)) { allSeen.add(it.url); allItems.push(it); }
+        if (!allSeen.has(it.url)) { allSeen.add(it.url); allItems.push(it); added++; }
+      }
+      // Geen nieuwe items op deze pagina = pagination werkt niet (zelfde page
+      // returned). 2× achter elkaar = stoppen, anders oneindig loop op sites
+      // zonder werkende ?page=N pagination.
+      if (added === 0) {
+        consecutiveEmpty += 1;
+        if (consecutiveEmpty >= 2) break;
       }
     }
     return { items: allItems, pagesScanned, maxPage };
+  }
+
+  // ─── Batch preview modal ──────────────────────────────────────────
+  // Toont alle gevonden items met checkboxes vóór queue. User kan
+  // filteren, deselecteren, en bevestigen. Default: alles geselecteerd.
+  // Returnt array van geselecteerde items, of [] bij annuleren.
+  function showBatchPreview(items, channel, contextLabel) {
+    return new Promise((resolve) => {
+      const existing = document.getElementById('webdl-batch-preview');
+      if (existing) existing.remove();
+
+      const overlay = document.createElement('div');
+      overlay.id = 'webdl-batch-preview';
+      Object.assign(overlay.style, {
+        position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+        background: 'rgba(0,0,0,0.7)', zIndex: '2147483647',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        fontFamily: 'system-ui, -apple-system, sans-serif',
+      });
+
+      const panel = document.createElement('div');
+      Object.assign(panel.style, {
+        background: '#1e293b', color: '#e2e8f0',
+        borderRadius: '8px', width: '720px', maxWidth: '90vw',
+        maxHeight: '80vh', display: 'flex', flexDirection: 'column',
+        boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
+      });
+      overlay.appendChild(panel);
+
+      // Header
+      const header = document.createElement('div');
+      header.style.cssText = 'padding:14px 16px;border-bottom:1px solid #334155;display:flex;justify-content:space-between;align-items:center;';
+      const title = document.createElement('div');
+      title.innerHTML = `<div style="font-weight:600;font-size:14px;">📥 Preview · ${items.length} items klaar voor download</div>
+        <div style="font-size:11px;color:#94a3b8;margin-top:2px;">${contextLabel} → channel: <b>${channel}</b></div>`;
+      header.appendChild(title);
+      const closeBtn = document.createElement('button');
+      closeBtn.textContent = '✕';
+      closeBtn.style.cssText = 'background:transparent;border:0;color:#94a3b8;font-size:20px;cursor:pointer;padding:0 8px;';
+      closeBtn.onclick = () => { overlay.remove(); resolve([]); };
+      header.appendChild(closeBtn);
+      panel.appendChild(header);
+
+      // Bulk-acties
+      const bulk = document.createElement('div');
+      bulk.style.cssText = 'padding:8px 16px;border-bottom:1px solid #334155;display:flex;gap:6px;flex-wrap:wrap;align-items:center;';
+      const mkBulk = (label, fn) => {
+        const b = document.createElement('button');
+        b.textContent = label;
+        b.style.cssText = 'background:#334155;color:#e2e8f0;border:0;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px;';
+        b.onclick = fn;
+        return b;
+      };
+      // Filter-input
+      const search = document.createElement('input');
+      search.placeholder = 'Filter URL...';
+      search.style.cssText = 'background:#0f172a;border:1px solid #334155;color:#e2e8f0;padding:4px 8px;border-radius:4px;font-size:12px;width:160px;margin-left:auto;';
+      bulk.appendChild(mkBulk('☑ Alles', () => updateChecks(() => true)));
+      bulk.appendChild(mkBulk('☐ Niets', () => updateChecks(() => false)));
+      // Per type
+      const types = [...new Set(items.map((it) => it.type.name))];
+      for (const t of types) {
+        bulk.appendChild(mkBulk(`Alleen ${t}`, () => updateChecks((it) => it.type.name === t)));
+      }
+      bulk.appendChild(search);
+      panel.appendChild(bulk);
+
+      // Lijst (scrollable)
+      const listWrap = document.createElement('div');
+      listWrap.style.cssText = 'flex:1;overflow:auto;padding:8px 16px;font-size:12px;';
+      const list = document.createElement('div');
+      listWrap.appendChild(list);
+      panel.appendChild(listWrap);
+
+      const rows = items.map((it, idx) => {
+        const row = document.createElement('label');
+        row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid #2d3b53;cursor:pointer;';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = true;
+        cb.dataset.idx = String(idx);
+        const tag = document.createElement('span');
+        tag.textContent = it.type.name;
+        tag.style.cssText = 'background:#334155;padding:1px 6px;border-radius:3px;font-size:10px;color:#94a3b8;flex-shrink:0;';
+        const url = document.createElement('span');
+        url.textContent = it.url;
+        url.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#cbd5e1;font-family:monospace;';
+        url.title = it.url;
+        row.appendChild(cb);
+        row.appendChild(tag);
+        row.appendChild(url);
+        list.appendChild(row);
+        return { row, cb, item: it };
+      });
+
+      const counter = document.createElement('div');
+      counter.style.cssText = 'padding:8px 16px;border-top:1px solid #334155;font-size:12px;color:#94a3b8;';
+      panel.appendChild(counter);
+      const updateCounter = () => {
+        const sel = rows.filter((r) => r.cb.checked).length;
+        counter.textContent = `${sel} van ${items.length} geselecteerd`;
+      };
+      const updateChecks = (predicate) => {
+        for (const r of rows) r.cb.checked = predicate(r.item);
+        updateCounter();
+        applyFilter();
+      };
+      const applyFilter = () => {
+        const q = search.value.toLowerCase();
+        for (const r of rows) r.row.style.display = (!q || r.item.url.toLowerCase().includes(q)) ? '' : 'none';
+      };
+      search.addEventListener('input', applyFilter);
+      list.addEventListener('change', updateCounter);
+      updateCounter();
+
+      // Footer met Start/Cancel
+      const footer = document.createElement('div');
+      footer.style.cssText = 'padding:12px 16px;border-top:1px solid #334155;display:flex;gap:8px;justify-content:flex-end;';
+      const cancel = document.createElement('button');
+      cancel.textContent = 'Annuleer';
+      cancel.style.cssText = 'background:#475569;color:#e2e8f0;border:0;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:13px;';
+      cancel.onclick = () => { overlay.remove(); resolve([]); };
+      const start = document.createElement('button');
+      start.textContent = '⬇ Start downloads';
+      start.style.cssText = 'background:#2196F3;color:#fff;border:0;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;';
+      start.onclick = () => {
+        const selected = rows.filter((r) => r.cb.checked).map((r) => r.item);
+        overlay.remove();
+        resolve(selected);
+      };
+      footer.appendChild(cancel);
+      footer.appendChild(start);
+      panel.appendChild(footer);
+
+      document.body.appendChild(overlay);
+    });
   }
 
   async function postOne(item, channel) {
@@ -230,14 +374,22 @@
       setTimeout(() => { btn.disabled = false; btn.textContent = original; STATE.busy = false; }, 3000);
       return;
     }
+    // Preview-modal: user moet expliciet bevestigen voordat queue start
+    btn.textContent = '👁 Preview...';
+    const selected = await showBatchPreview(items, channel, 'Deze pagina');
+    if (selected.length === 0) {
+      btn.textContent = '✗ Geannuleerd';
+      setTimeout(() => { btn.disabled = false; btn.textContent = original; STATE.busy = false; }, 2000);
+      return;
+    }
     let nieuw = 0, dup = 0, fail = 0;
-    for (let i = 0; i < items.length; i++) {
-      btn.textContent = `⏳ ${i + 1}/${items.length} → ${channel}`;
-      const res = await postOne(items[i], channel);
+    for (let i = 0; i < selected.length; i++) {
+      btn.textContent = `⏳ ${i + 1}/${selected.length} → ${channel}`;
+      const res = await postOne(selected[i], channel);
       if (res.ok && (res.success || res.pid)) { if (res.duplicate) dup++; else nieuw++; }
       else fail++;
     }
-    btn.textContent = `✓ ${nieuw} nieuw${dup ? `, ${dup} dup` : ''}, ${fail} fout (1 page)`;
+    btn.textContent = `✓ ${nieuw} nieuw${dup ? `, ${dup} dup` : ''}, ${fail} fout`;
     setTimeout(() => { btn.disabled = false; btn.textContent = original; STATE.busy = false; }, 8000);
   }
 
@@ -263,10 +415,18 @@
       return;
     }
     const maxLabel = Number.isFinite(maxPage) ? `${pagesScanned}/${maxPage}p` : `${pagesScanned}p`;
+    // Preview-modal: user moet expliciet bevestigen voordat queue start
+    btn.textContent = `👁 Preview (${items.length})...`;
+    const selected = await showBatchPreview(items, channel, `Alle pages (${maxLabel})`);
+    if (selected.length === 0) {
+      btn.textContent = '✗ Geannuleerd';
+      setTimeout(() => { btn.disabled = false; btn.textContent = original; STATE.busy = false; }, 2000);
+      return;
+    }
     let nieuw = 0, dup = 0, fail = 0;
-    for (let i = 0; i < items.length; i++) {
-      btn.textContent = `⏳ ${i + 1}/${items.length} (${maxLabel})`;
-      const res = await postOne(items[i], channel);
+    for (let i = 0; i < selected.length; i++) {
+      btn.textContent = `⏳ ${i + 1}/${selected.length} (${maxLabel})`;
+      const res = await postOne(selected[i], channel);
       if (res.ok && (res.success || res.pid)) { if (res.duplicate) dup++; else nieuw++; }
       else fail++;
     }

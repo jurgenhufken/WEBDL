@@ -1,8 +1,29 @@
 // WEBDL Toolbar - Video downloader & screenshot tool
 (function() {
+  // 2026-05-24 — Hosts waarvoor de nieuwe site-engine (content/sites/*.js +
+  // content/site-engine.js) een eigen toolbar rendert. Op deze hosts laat
+  // debug-toolbar.js z'n eigen UI achterwege om dubbele knoppen te voorkomen.
+  // Hardcoded omdat content_scripts ordering tussen manifest-blokken niet
+  // gegarandeerd is — een runtime check op window.WEBDL_SITES kan te vroeg
+  // komen en dan alsnog beide toolbars renderen.
+  // NB: bij toevoegen van een nieuwe sites/<host>.js óók hier opnemen.
+  const SITE_ENGINE_HOSTS = new Set([
+    'footstockings.com', 'heavyfetish.com', 'darknetvideos.com', 'darknessporn.com',
+    'erome.com', 'xnxx.com', 'tnaflix.com', 'spankbang.com', 'redtube.com',
+    'pictoa.com', 'tubesafari.com', 'pornzog.com', 'alohatube.com', 'usersporn.com',
+    'nakedneighbour.com', 'pornkai.com', 'xfree.com', 'zzztube.com',
+    'favoyeurtube.net', 'spycamhub.net', 'sexygirlspics.com', 'porncoven.com',
+  ]);
   try {
     const host = String((window && window.location && window.location.hostname) || '').toLowerCase();
     if (host === 'localhost' || host === '127.0.0.1') return;
+    const hostNoWww = host.replace(/^www\./, '');
+    if (SITE_ENGINE_HOSTS.has(hostNoWww)) return;
+    // Belt-and-braces: als WEBDL_SITES toch eerder geladen is, ook respecteren.
+    if (typeof window !== 'undefined' && window.WEBDL_SITES
+        && (window.WEBDL_SITES[host] || window.WEBDL_SITES[hostNoWww])) {
+      return;
+    }
   } catch (e) {}
 
   const WEBDL_BUILD = 'debug-toolbar-2026-05-15-aznudefeet-dedupe-imagefap';
