@@ -6369,7 +6369,7 @@ async function rehydrateDownloadQueueWithMode(modeRaw, maxRowsRaw) {
           "('postprocessing')" :
           "('downloading', 'postprocessing')";
     const rows = await db.prepare(
-      `SELECT id, url, source_url, platform, channel, title, metadata, status
+      `SELECT id, url, source_url, platform, channel, title, metadata, status, progress
        FROM downloads
        WHERE status IN ${statusList}
        ORDER BY
@@ -6415,8 +6415,8 @@ async function rehydrateDownloadQueueWithMode(modeRaw, maxRowsRaw) {
 
       let initialProgress = 0;
       if (row.status === 'downloading' || row.status === 'postprocessing') {
-        const dbProg = await getDatabaseProgress(id);
-        if (dbProg != null) initialProgress = dbProg;
+        const dbProg = Number(row.progress);
+        if (Number.isFinite(dbProg)) initialProgress = dbProg;
       }
 
       const lane = detectLane(platform, url, metadata);
