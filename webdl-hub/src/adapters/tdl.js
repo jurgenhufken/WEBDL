@@ -25,7 +25,7 @@ function matches(url) {
 
 function plan(url, opts = {}) {
   const script = process.env.WEBDL_TELEGRAM_SCRIPT || DEFAULT_SCRIPT;
-  const python = process.env.WEBDL_PYTHON || 'python3';
+  const python = process.env.WEBDL_PYTHON || '/usr/bin/python3';
   const args = [script, url, opts.cwd];
   const messageLimit = pickPositiveInt(opts.telegramMessageLimit, opts.messageLimit, opts.limit, process.env.WEBDL_TELEGRAM_MESSAGE_LIMIT);
   const parallel = pickPositiveInt(opts.telegramParallel, opts.parallel, process.env.WEBDL_TELEGRAM_PARALLEL) || 8;
