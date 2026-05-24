@@ -33,6 +33,7 @@ let reconnectAttempt = 0;
 let lastHeartbeatAt = 0;
 const activeTabs = new Set();
 const activeFffBackgroundScans = new Map();
+const activeXvideosBrowserBatches = new Map();
 let probeInFlight = null;
 let consecutiveProbeFailures = 0;
 
@@ -60,12 +61,6 @@ function getHubCandidates() {
   return out;
 }
 
-function requestErrorMessage(error, label) {
-  const msg = error && error.message ? error.message : String(error || '');
-  if (/aborted/i.test(msg)) return `Timeout bij ${label || 'request'} (${HTTP_TIMEOUT_MS}ms)`;
-  return msg || `${label || 'request'} mislukt`;
-}
-
 async function getHubJson(endpoint) {
   const cleanEndpoint = String(endpoint || '').replace(/^\/+/, '');
   let lastError = null;
@@ -88,7 +83,7 @@ async function getHubJson(endpoint) {
       }
       return data;
     } catch (e) {
-      lastError = requestErrorMessage(e, 'hub health');
+      lastError = e && e.message ? e.message : String(e);
     }
   }
   return { success: false, error: lastError || 'Hub niet bereikbaar' };
@@ -116,7 +111,7 @@ async function postJson(endpoint, body) {
       }
       return data;
     } catch (e) {
-      lastError = requestErrorMessage(e, 'server request');
+      lastError = e && e.message ? e.message : String(e);
     }
   }
   return { success: false, error: lastError || 'Server niet bereikbaar' };
@@ -128,60 +123,53 @@ async function postHubJob(url, metadata = {}) {
   }
   let lastError = null;
   for (const base of getHubCandidates()) {
-    let timeout = null;
-    try {
-      const controller = new AbortController();
-      timeout = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
-      const response = await fetch(`${base}/api/jobs`, {
-        method: 'POST',
-        mode: 'cors',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          url,
-          ...(metadata && metadata.adapter ? { adapter: metadata.adapter } : {}),
-          priority: 10,
-          options: {
-            ...(metadata || {}),
-            queued_from: 'firefox-extension',
-          },
-        }),
-        signal: controller.signal,
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        lastError = data.error || `Hub fout: HTTP ${response.status}`;
-        continue;
-      }
-      return {
-        success: true,
-        downloadId: data.simple_server_download_id || data.id || data.groupId || null,
-        hubJobId: data.id || null,
-        simpleServerDownloadId: data.simple_server_download_id || null,
-        hub: true,
-        expanded: !!data.expanded,
-        total: Number.isFinite(Number(data.total)) ? Number(data.total) : undefined,
-        queued: Number.isFinite(Number(data.queued)) ? Number(data.queued) : undefined,
-        duplicates: Number.isFinite(Number(data.duplicates)) ? Number(data.duplicates) : undefined,
-        errors: Number.isFinite(Number(data.errors)) ? Number(data.errors) : undefined,
-        skipped: Number.isFinite(Number(data.skipped)) ? Number(data.skipped) : undefined,
-        paused: Number.isFinite(Number(data.paused)) ? Number(data.paused) : undefined,
-        duplicate: !!data.duplicate,
-        delegated: !!data.delegated,
-        message: data.expanded ? 'Expanded in WebDL-Hub' : 'Added to WebDL-Hub',
-        raw: data,
-      };
-    } catch (e) {
-      lastError = requestErrorMessage(e, 'hub job');
-    } finally {
-      if (timeout) clearTimeout(timeout);
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
+    const response = await fetch(`${base}/api/jobs`, {
+      method: 'POST',
+      mode: 'cors',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url,
+        ...(metadata && metadata.adapter ? { adapter: metadata.adapter } : {}),
+        priority: 10,
+        options: {
+          ...(metadata || {}),
+          queued_from: 'firefox-extension',
+        },
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      lastError = data.error || `Hub fout: HTTP ${response.status}`;
+      continue;
     }
+    return {
+      success: true,
+      downloadId: data.simple_server_download_id || data.id || data.groupId || null,
+      hubJobId: data.id || null,
+      simpleServerDownloadId: data.simple_server_download_id || null,
+      hub: true,
+      expanded: !!data.expanded,
+      total: Number.isFinite(Number(data.total)) ? Number(data.total) : undefined,
+      queued: Number.isFinite(Number(data.queued)) ? Number(data.queued) : undefined,
+      duplicates: Number.isFinite(Number(data.duplicates)) ? Number(data.duplicates) : undefined,
+      errors: Number.isFinite(Number(data.errors)) ? Number(data.errors) : undefined,
+      skipped: Number.isFinite(Number(data.skipped)) ? Number(data.skipped) : undefined,
+      paused: Number.isFinite(Number(data.paused)) ? Number(data.paused) : undefined,
+      duplicate: !!data.duplicate,
+      delegated: !!data.delegated,
+      message: data.expanded ? 'Expanded in WebDL-Hub' : 'Added to WebDL-Hub',
+      raw: data,
+    };
+  } catch (e) {
+    lastError = e && e.message ? e.message : String(e);
   }
-  const fallback = await postJson('download', { url, metadata });
-  if (fallback && fallback.success) return fallback;
-  return {
-    success: false,
-    error: `${lastError || 'Hub niet bereikbaar'}; fallback server: ${(fallback && fallback.error) || 'mislukt'}`
-  };
+  }
+  return { success: false, error: lastError || 'Hub niet bereikbaar' };
 }
 
 async function postHubBatch(urls, metadata = {}, force = false) {
@@ -285,7 +273,6 @@ function traceFffBackgroundStart(scanId, phase, data = {}) {
 
 async function sendTabMessageWithRetry(tabId, message, attempts = 30, delayMs = 500) {
   let lastError = null;
-  let injected = false;
   for (let i = 0; i < attempts; i++) {
     try {
       const response = await browser.tabs.sendMessage(tabId, message);
@@ -295,15 +282,6 @@ async function sendTabMessageWithRetry(tabId, message, attempts = 30, delayMs = 
       return response || { success: true };
     } catch (e) {
       lastError = e;
-      if (!injected && i >= 2) {
-        injected = true;
-        try {
-          await browser.tabs.executeScript(tabId, { file: 'background/browser-polyfill.js', runAt: 'document_end' });
-        } catch (_) {}
-        try {
-          await browser.tabs.executeScript(tabId, { file: 'content/debug-toolbar.js', runAt: 'document_end' });
-        } catch (_) {}
-      }
       await sleep(delayMs);
     }
   }
@@ -439,6 +417,109 @@ function startFffBackgroundScanWatchdog() {
 }
 
 startFffBackgroundScanWatchdog();
+
+async function runXvideosBrowserBatch(batchId, payload = {}) {
+  const urls = Array.isArray(payload.urls)
+    ? payload.urls.map((url) => String(url || '').trim()).filter(Boolean)
+    : [];
+  const metadata = payload.metadata && typeof payload.metadata === 'object' ? payload.metadata : {};
+  const stats = { total: urls.length, done: 0, imported: 0, duplicates: 0, errors: 0 };
+  activeXvideosBrowserBatches.set(batchId, {
+    batchId,
+    status: 'running',
+    startedAt: Date.now(),
+    stats,
+    currentUrl: '',
+  });
+  for (let i = 0; i < urls.length; i++) {
+    const url = urls[i];
+    let tab = null;
+    try {
+      activeXvideosBrowserBatches.set(batchId, {
+        ...(activeXvideosBrowserBatches.get(batchId) || { batchId }),
+        status: 'loading',
+        currentUrl: url,
+        index: i + 1,
+        stats,
+        updatedAt: Date.now(),
+      });
+      tab = await browser.tabs.create({ url, active: false });
+      await waitForTabComplete(tab.id, 60000);
+      activeXvideosBrowserBatches.set(batchId, {
+        ...(activeXvideosBrowserBatches.get(batchId) || { batchId }),
+        status: 'downloading',
+        tabId: tab.id,
+        currentUrl: url,
+        index: i + 1,
+        stats,
+        updatedAt: Date.now(),
+      });
+      const result = await sendTabMessageWithRetry(tab.id, {
+        action: 'runXvideosBrowserDownload',
+        payload: {
+          batchId,
+          url,
+          index: i + 1,
+          total: urls.length,
+          metadata: {
+            ...metadata,
+            webdl_batch_kind: metadata.webdl_batch_kind || 'xvideos_browser_batch',
+          },
+        },
+      }, 60, 1000);
+      stats.done++;
+      if (result && result.duplicate) stats.duplicates++;
+      else stats.imported++;
+    } catch (e) {
+      stats.done++;
+      stats.errors++;
+      activeXvideosBrowserBatches.set(batchId, {
+        ...(activeXvideosBrowserBatches.get(batchId) || { batchId }),
+        status: 'running',
+        currentUrl: url,
+        lastError: e && e.message ? e.message : String(e),
+        stats,
+        updatedAt: Date.now(),
+      });
+    } finally {
+      if (tab && tab.id) {
+        try { await browser.tabs.remove(tab.id); } catch (_) {}
+      }
+    }
+    await sleep(500);
+  }
+  activeXvideosBrowserBatches.set(batchId, {
+    ...(activeXvideosBrowserBatches.get(batchId) || { batchId }),
+    status: stats.errors ? 'done-with-errors' : 'done',
+    stats,
+    finishedAt: Date.now(),
+    updatedAt: Date.now(),
+  });
+}
+
+async function startXvideosBrowserBatch(payload = {}) {
+  const urls = Array.isArray(payload.urls)
+    ? payload.urls.map((url) => String(url || '').trim()).filter(Boolean)
+    : [];
+  if (!urls.length) return { success: false, error: 'Geen XVideos URLs voor browser-batch' };
+  const batchId = `xv-bg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  activeXvideosBrowserBatches.set(batchId, {
+    batchId,
+    status: 'queued',
+    startedAt: Date.now(),
+    stats: { total: urls.length, done: 0, imported: 0, duplicates: 0, errors: 0 },
+  });
+  runXvideosBrowserBatch(batchId, payload).catch((e) => {
+    activeXvideosBrowserBatches.set(batchId, {
+      ...(activeXvideosBrowserBatches.get(batchId) || { batchId }),
+      status: 'error',
+      error: e && e.message ? e.message : String(e),
+      finishedAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+  });
+  return { success: true, accepted: true, batchId, total: urls.length };
+}
 
 async function getJson(endpoint) {
   const candidates = getServerCandidates();
@@ -823,27 +904,6 @@ browser.contextMenus.onClicked.addListener(async (info, tab) => {
   }
 
   metadata.sourceUrl = url;
-
-  try {
-    if (tab && tab.id != null) {
-      const handled = await browser.tabs.sendMessage(tab.id, {
-        action: 'webdlContextDownload',
-        url,
-        metadata
-      }).catch(() => null);
-      if (handled && handled.handled) {
-        if (!handled.success) {
-          await browser.tabs.sendMessage(tab.id, {
-            action: 'webdlDownloadQueued',
-            success: false,
-            error: handled.error || 'Rechtsklik download mislukt',
-            url
-          }).catch(() => {});
-        }
-        return;
-      }
-    }
-  } catch (e) {}
   
   const resp = await postHubJob(url, metadata);
 
@@ -945,6 +1005,18 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .then(sendResponse)
       .catch(e => sendResponse({ success: false, error: e && e.message ? e.message : String(e) }));
     return true;
+  }
+
+  if (action === 'startXvideosBrowserBatch') {
+    startXvideosBrowserBatch((message && message.payload) || {})
+      .then(sendResponse)
+      .catch(e => sendResponse({ success: false, error: e && e.message ? e.message : String(e) }));
+    return true;
+  }
+
+  if (action === 'xvideosBrowserBatchStatus') {
+    sendResponse({ success: true, batches: Array.from(activeXvideosBrowserBatches.values()) });
+    return false;
   }
 
   if (action === 'fffBackgroundScanStatus') {

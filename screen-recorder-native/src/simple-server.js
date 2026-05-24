@@ -6957,6 +6957,75 @@ expressApp.post('/api/erome/album', (req, res) => {
   }
 });
 
+// ───────────────────────────────────────────────────────────────────────
+// NIEUWE STACK — ARCHITECTURE.md fase 1-4 (Source + Scheduler)
+// ───────────────────────────────────────────────────────────────────────
+const webdlSources = require('../../webdl-core/sources');
+const webdlScheduler = require('../../webdl-core/jobs/scheduler');
+
+// POST /api/jobs — start een nieuwe job (single/page/whole-thread)
+expressApp.post('/api/jobs', (req, res) => {
+  try {
+    const body = (req.body && typeof req.body === 'object') ? req.body : {};
+    const intent = String(body.intent || 'page').toLowerCase();
+    const url = String(body.url || '').trim();
+    if (!url) return res.status(400).json({ success: false, error: 'url is vereist' });
+    if (!['single', 'page', 'whole-thread', 'forum-scan'].includes(intent)) {
+      return res.status(400).json({ success: false, error: `intent moet single|page|whole-thread|forum-scan zijn` });
+    }
+    const source = webdlSources.findForUrl(url);
+    if (!source) {
+      return res.status(404).json({
+        success: false,
+        error: `geen Source voor ${url}. Geregistreerd: ${webdlSources.listAll().map((s) => s.id).join(', ')}`,
+      });
+    }
+    if (intent === 'whole-thread' && !source.features.wholeThread) {
+      return res.status(400).json({ success: false, error: `source ${source.id} ondersteunt geen whole-thread` });
+    }
+    const job = webdlScheduler.start({ intent, url, source });
+    return res.json({
+      success: true,
+      jobId: job.id,
+      sourceId: source.id,
+      channel: job.channel,
+      status: job.status,
+      pollUrl: `/api/jobs/${job.id}`,
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: String((e && e.message) || e) });
+  }
+});
+
+// GET /api/jobs/:id — live status van een job (voor polling)
+expressApp.get('/api/jobs/:id', (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) return res.status(400).json({ success: false, error: 'id moet number zijn' });
+  const job = webdlScheduler.get(id);
+  if (!job) return res.status(404).json({ success: false, error: `job ${id} niet gevonden` });
+  res.json({ success: true, job });
+});
+
+// GET /api/jobs — recente jobs (voor dashboard)
+expressApp.get('/api/jobs', (req, res) => {
+  const limit = Math.max(1, Math.min(200, parseInt(req.query.limit || '50', 10)));
+  res.json({ success: true, jobs: webdlScheduler.listRecent(limit) });
+});
+
+// GET /api/sources — welke Sources zijn beschikbaar
+expressApp.get('/api/sources', (req, res) => {
+  res.json({
+    success: true,
+    sources: webdlSources.listAll().map((s) => ({
+      id: s.id,
+      displayName: s.displayName,
+      features: s.features,
+    })),
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────
+
 // GET /api/sites — overzicht van alle ondersteunde sites met DB-stats.
 // Leest sites/*.js files en parsed label/platform/itemTypes per site.
 // Combineert met DB-counts per platform.
@@ -13134,15 +13203,9 @@ function isSiteInfrastructureUrl(url) {
 
 function isKnownExternalMediaWrapperHost(hostname) {
   try {
-    const host = String(hostname || '').toLowerCase().replace(/^www\./, '');
+    const host = String(hostname || '').toLowerCase();
     if (!host) return false;
-    const suffixes = [
-      'pixhost.to', 'postimages.org', 'postimg.cc', 'imagebam.com', 'imgvb.com',
-      'ibb.co', 'imgbox.com', 'imagevenue.com', 'imgchest.com',
-      'turboimagehost.com', 'imx.to', 'vipr.im', 'pixeldrain.com',
-      'cyberfile.me', 'jpg.pet', 'gofile.io', 'img.kiwi'
-    ];
-    if (suffixes.some((suffix) => host === suffix || host.endsWith(`.${suffix}`))) return true;
+    if (/^(?:www\.)?(?:pixhost\.to|postimages\.org|postimg\.cc|imagebam\.com|imgvb\.com|ibb\.co|imgbox\.com|imagevenue\.com|imgchest\.com|turboimagehost\.com|imx\.to|vipr\.im|pixeldrain\.com|cyberfile\.me|jpg\.pet|gofile\.io|img\.kiwi)$/.test(host)) return true;
     if (isBunkrHost(host)) return true;
     return false;
   } catch (e) {

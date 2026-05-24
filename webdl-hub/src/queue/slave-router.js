@@ -10,7 +10,6 @@
 const SLAVE_PLATFORMS = [
   { match: /footfetishforum\.com/i,       platform: 'footfetishforum' },
   { match: /flc\.nyc3\.digitaloceanspaces\.com\/data\/(?:attachments|video)\//i, platform: 'footfetishforum' },
-  { match: /(?:forum\.)?phun\.org/i,      platform: 'phun' },
   { match: /wikifeet\.com/i,              platform: 'wikifeet' },
   { match: /aznudefeet\.com/i,            platform: 'aznudefeet' },
   { match: /amateurvoyeurforum\.com/i,    platform: 'amateurvoyeurforum' },

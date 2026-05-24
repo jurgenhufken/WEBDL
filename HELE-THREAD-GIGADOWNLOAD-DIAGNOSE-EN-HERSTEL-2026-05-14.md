@@ -1622,7 +1622,7 @@ Het herstel is klaar wanneer:
 
 ## Actuele herstelchecklist na GIGA-regressie
 
-Laatst bijgewerkt: 2026-05-14 tijdens vervolg op commit `86f1676`.
+Laatst bijgewerkt: 2026-05-14 na commit `86f1676`.
 
 ### Vastgelegd op GitHub
 
@@ -1640,18 +1640,12 @@ Laatst bijgewerkt: 2026-05-14 tijdens vervolg op commit `86f1676`.
 - De add-on XPI is opnieuw gepackt.
 - Gallery en simple-server zijn herstart en reageerden na de herstelactie weer.
 - Runtime-status na herstel: geen actieve downloads en geen queued downloads; alleen een oude TikTok `pending` recording uit 2026-05-01 bleef in de DB staan.
-- Phun.org/XenForo-achtige fora hebben een generieke browser-scanroute voor `threads/...` en `forums/...`, inclusief uitsluiting van forumactie-links zoals like/report/goto.
-- De generieke forumroute is begrensd zodat bestaande gespecialiseerde routes voor ViperGirls, FootFetishForum en Foot-Fetish.Club niet worden onderschept.
-- Batch-preview maakt archieven, K2S en andere filehosts optioneel; bij normale scans staan ze standaard uit, bij de aparte K2S-route staan K2S-links standaard aan.
-- De add-on XPI is opnieuw gepackt met build `debug-toolbar-2026-05-14-forum-viper-k2s-preview`.
-- ImageVenue en vergelijkbare imagehost-subdomeinen zoals `img243.imagevenue.com` worden nu als HTML-wrapper herkend door simple-server en de toolbar-preview, zodat ze via de directe wrapper-resolver lopen in plaats van via `yt-dlp`.
-- De add-on XPI is opnieuw gepackt met build `debug-toolbar-2026-05-14-forum-viper-k2s-imagevenue`.
 
 ### Nog open
 
 - Controleren of Firefox daadwerkelijk de nieuwe `firefox-debug-controller.xpi` actief gebruikt.
-- Phun.org/forum.phun ondersteuning in Firefox opnieuw testen op `forum.phun.org/threads/...` en `forum.phun.org/forums/...`, inclusief ImageVenue wrapper-links.
-- Generieke forum-basisfallback testen op onbekende XenForo/vBulletin-achtige fora.
+- Phun.org/forum.phun ondersteuning bouwen voor `forum.phun.org/threads/...`.
+- Generieke forum-basisfallback bouwen zodat onbekende fora niet volledig onbegrepen blijven.
 - XVideos pagina-scan / thread-achtige scan verifiëren en zo nodig uitbreiden.
 - `Bestaat al` meldingen bij rechtsklik, batch en duplicate skip eenduidiger maken.
 - YouTube apart oplossen: recente jobs falen op `n challenge solving failed`; dit is los van de batch-knop timeout.
