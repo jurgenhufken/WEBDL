@@ -269,7 +269,7 @@
       else if (videoCount > 0) label = `📄 Deze pagina (${videoCount} videos)`;
       else if (albumCount > 0) label = `📄 Deze pagina (${albumCount} albums)`;
       wrap.appendChild(makeButton(label, '#1565C0', handleDezePagina));
-      wrap.appendChild(makeButton('🧵 Hele thread (alle pages)', '#0ea5e9', handleHeleThread));
+      wrap.appendChild(makeButton('🧵 Alle pages (multi-page)', '#0ea5e9', handleHeleThread));
     }
 
     document.body.appendChild(wrap);
