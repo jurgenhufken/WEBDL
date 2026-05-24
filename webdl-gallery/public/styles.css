@@ -443,10 +443,10 @@ input[type="range"]:disabled { opacity: 0.35; cursor: default; }
 .card-media-mark,
 .card-video-mark { 
   position: absolute; top: 8px; right: 8px; 
-  background: var(--bg-elevated); border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-elevated) 60%, transparent); border: 1px solid var(--border);
   padding: 3px 8px; border-radius: 999px; font-size: 10px; color: var(--text-secondary); font-weight: 600;
   text-transform: lowercase;
-  backdrop-filter: blur(6px);
+  backdrop-filter: blur(8px);
 }
 .card-duration {
   position: absolute;
