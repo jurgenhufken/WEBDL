@@ -1532,56 +1532,15 @@ async function resolveKeep2ShareWebDirectUrl(input, metadata = null) {
 async function resolveKeep2ShareDirectUrl(input, metadata = null) {
   const fileId = keep2ShareFileIdFromUrl(input);
   if (!fileId) return { url: '', error: 'Keep2Share file-id ontbreekt in URL' };
-  const authToken = await getKeep2ShareAuthToken();
-  let accessTokenSource = 'env';
-  let accessToken = String(
-    process.env.WEBDL_KEEP2SHARE_ACCESS_TOKEN ||
-    process.env.KEEP2SHARE_ACCESS_TOKEN ||
-    process.env.K2S_ACCESS_TOKEN ||
-    ''
-  ).trim();
-  if (!authToken && !accessToken) {
-    try {
-      const host = new URL(String(input || '')).hostname.toLowerCase();
-      const cookieAuth = await loadKeep2ShareCookieAuth(host, null);
-      accessToken = cookieValueFromHeader(cookieAuth.cookieHeader, 'accessToken');
-      if (accessToken) accessTokenSource = cookieAuth.source || 'cookie';
-    } catch (e) { }
-  }
-  if (!authToken && !accessToken) {
-    const webResolved = await resolveKeep2ShareWebDirectUrl(input, metadata);
-    if (webResolved.url) return webResolved;
-    return {
-      url: '',
-      error: `${webResolved.error || 'Keep2Share premium auth ontbreekt'}. Zet K2S_COOKIE/K2S_X_BC of WEBDL_KEEP2SHARE_AUTH_TOKEN/K2S_AUTH_TOKEN of WEBDL_KEEP2SHARE_USERNAME/PASSWORD in .env.`
-    };
-  }
-  // K2S JWT tokens werken alleen als auth_token, niet als access_token
-  const body = authToken
-    ? { auth_token: authToken, file_id: fileId }
-    : { auth_token: accessToken, file_id: fileId };
-  const json = await postKeep2ShareApi('getUrl', body);
-  if (json.status === 'success' && json.url) return { url: String(json.url), error: '' };
+  // Skip K2S API entirely — API calls trigger CAPTCHA blocks.
+  // Go directly to web-cookie download path using Firefox session cookies.
   const webResolved = await resolveKeep2ShareWebDirectUrl(input, metadata);
   if (webResolved.url) return webResolved;
-  if (!authToken && accessTokenSource === 'firefox-cookie') {
-    return {
-      url: '',
-      error: `Firefox K2S-login gevonden, maar de K2S API accepteert deze browser-token niet voor getUrl: ${keep2ShareApiErrorMessage(json)}. Web-cookie fallback: ${webResolved.error || 'geen downloadlink'}. Zet K2S_COOKIE/K2S_X_BC of een permanent K2S API-token in .env.`
-    };
-  }
-  if (!authToken && accessTokenSource) {
-    const sourceLabel = accessTokenSource === 'env-cookie'
-      ? 'K2S accessToken uit .env-cookie'
-      : accessTokenSource === 'metadata-cookie'
-        ? 'K2S accessToken uit meegegeven cookie'
-        : 'K2S accessToken';
-    return {
-      url: '',
-      error: `${sourceLabel} werd niet geaccepteerd voor getUrl: ${keep2ShareApiErrorMessage(json)}. Web-cookie fallback: ${webResolved.error || 'geen downloadlink'}`
-    };
-  }
-  return { url: '', error: `Keep2Share getUrl faalde: ${keep2ShareApiErrorMessage(json)}. Web-cookie fallback: ${webResolved.error || 'geen downloadlink'}` };
+  // Web-cookie fallback failed too — report error
+  return {
+    url: '',
+    error: `K2S web-cookie download faalde: ${webResolved.error || 'geen downloadlink'}. Zorg dat je ingelogd bent op k2s.cc in Firefox.`
+  };
 }
 
 function redactKeep2ShareDiagnosticText(value) {
@@ -1625,14 +1584,9 @@ function keep2SharePreflightFailure(preflight) {
 
 async function assertKeep2ShareFilePreflight(url) {
   if (!isKeep2ShareUrl(url)) return null;
-  const preflight = await keep2ShareRemotePreflight(url);
-  if (!preflight || !preflight.remoteAcceptance || preflight.remoteAcceptance.accepted !== true) {
-    const err = new Error(`Keep2Share file is niet resolvebaar met huidige auth: ${keep2SharePreflightFailure(preflight)}`);
-    err.httpStatus = 409;
-    err.preflight = preflight;
-    throw err;
-  }
-  return preflight;
+  // Skip preflight API check entirely — it triggers CAPTCHA and blocks downloads
+  // that work fine via web-cookie path. Return accepted to let download proceed.
+  return { remoteAcceptance: { checked: false, accepted: true, status: 'skipped', meaning: 'Preflight overgeslagen — web-cookie download wordt gebruikt.' } };
 }
 
 function summarizeKeep2ShareJson(json) {
