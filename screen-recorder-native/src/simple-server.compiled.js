@@ -5821,10 +5821,14 @@ function detectLane(platform, url = '', metadata = null) {
   }
 
   // Media that downloads without ffmpeg merge/transcode gets the fast lane.
+  // Forums + image-galleries hier — video-tubes (heavyfetish, darknessporn,
+  // redtube, xnxx, spankbang, tnaflix, xvideos) blijven heavy.
   const lightPlatforms = [
     'footfetishforum', 'forum-area', 'imagetwist', 'imagebam', 'imgbox', 'imagevenue', 'imgchest', 'imgvb',
     'imx', 'vipr', 'turboimagehost', 'imgkiwi', 'pixhost', 'postimg', 'bunkr', 'jpg', 'aznudefeet', 'pornpics',
-    'kinky', 'wikifeet', 'wikifeetx', 'elitebabes', 'erome', 'keep2share', 'twitter'
+    'kinky', 'wikifeet', 'wikifeetx', 'elitebabes', 'erome', 'keep2share', 'twitter',
+    // 2026-05-24 toegevoegd — forums + image-galleries die nu nog heavy waren:
+    'vipergirls', 'phun', 'amateurvoyeurforum', 'pictoa', 'imagefap',
   ];
 
   if (lightPlatforms.includes(p)) return 'light';
@@ -8783,6 +8787,17 @@ function detectPlatform(url) {
   if (/tnaflix\.com/i.test(u)) return 'tnaflix';
   if (/redtube\.com/i.test(u)) return 'redtube';
   if (/pictoa\.com/i.test(u)) return 'pictoa';
+  if (/tubesafari\.com/i.test(u)) return 'tubesafari';
+  if (/pornzog\.com/i.test(u)) return 'pornzog';
+  if (/alohatube\.com/i.test(u)) return 'alohatube';
+  if (/usersporn\.com/i.test(u)) return 'usersporn';
+  if (/nakedneighbour\.com/i.test(u)) return 'nakedneighbour';
+  if (/pornkai\.com/i.test(u)) return 'pornkai';
+  if (/xfree\.com/i.test(u)) return 'xfree';
+  if (/zzztube\.com/i.test(u)) return 'zzztube';
+  if (/favoyeurtube\.net/i.test(u)) return 'favoyeurtube';
+  if (/spycamhub\.net/i.test(u)) return 'spycamhub';
+  if (/sexygirlspics\.com/i.test(u)) return 'sexygirlspics';
 
   try {
     const host = new URL(u).hostname.toLowerCase();
@@ -8843,6 +8858,17 @@ const KNOWN_PLATFORMS = new Set([
   'tnaflix',
   'redtube',
   'pictoa',
+  'tubesafari',
+  'pornzog',
+  'alohatube',
+  'usersporn',
+  'nakedneighbour',
+  'pornkai',
+  'xfree',
+  'zzztube',
+  'favoyeurtube',
+  'spycamhub',
+  'sexygirlspics',
   '4kdownloader',
   'other']
 );

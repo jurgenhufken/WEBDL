@@ -36,8 +36,57 @@
 
   const host = String(window?.location?.hostname || '').toLowerCase().replace(/^www\./, '');
   const SITES = window.WEBDL_SITES || {};
-  const cfg = SITES[host];
-  if (!cfg) return;
+  let cfg = SITES[host];
+
+  // Universal fallback: als geen specifieke config bestaat, probeer of dit
+  // een tube/listing-site is via heuristiek (>= 5 video-link-kandidaten in
+  // DOM, of een <video> element). Zo ja → gebruik generieke config zodat
+  // user OOK op onbekende sites kan downloaden.
+  if (!cfg) {
+    const sample = document.querySelectorAll(
+      'a[href*="/video/"], a[href*="/v/"], a[href*="/watch"], a[href*="/play/"], a[href*="/episode"], a[href*="/clip"]'
+    ).length;
+    const hasVideoEl = !!document.querySelector('video, source[src*=".mp4"]');
+    if (sample < 5 && !hasVideoEl) return; // geen download-context
+
+    cfg = {
+      label: host + ' (universal)',
+      platform: host.replace(/\./g, '_').replace(/[^a-z0-9_-]+/g, '').slice(0, 30),
+      pageType: (path) => {
+        if (hasVideoEl) return 'single';
+        return 'listing';
+      },
+      itemTypes: [{
+        name: 'video',
+        match: () => true, // sample-genereer alle gevonden links
+        selector: 'a[href*="/video/"], a[href*="/v/"], a[href*="/watch"], a[href*="/play/"], a[href*="/episode"], a[href*="/clip"]',
+        endpoint: '/download',
+        buildBody(url, channel) { return { url, channel, title: '' }; },
+        singleLabel: '⬇ Download deze video',
+        listingNoun: 'videos',
+        color: '#9333ea', // paars = universal
+      }],
+      paginationUrl(baseHref, page) {
+        if (page <= 1) return baseHref;
+        try {
+          const u = new URL(baseHref, window.location.href);
+          u.searchParams.set('page', String(page));
+          return u.toString();
+        } catch (_) { return baseHref; }
+      },
+      deriveChannel(url) {
+        try {
+          const u = new URL(url, window.location.href);
+          const segs = String(u.pathname || '').split('/').filter(Boolean);
+          const q = (u.searchParams.get('q') || u.searchParams.get('s') || u.searchParams.get('search') || '').trim();
+          if (q) return `search_${q.replace(/\s+/g, '-')}`;
+          if (segs.length >= 2) return `${segs[0]}_${segs[1]}`;
+          if (segs.length === 1) return segs[0];
+        } catch (_) {}
+        return host.replace(/\./g, '_');
+      },
+    };
+  }
 
   const SERVER = 'http://localhost:35729';
   const STATE = { busy: false };
@@ -73,6 +122,13 @@
         if (!href) continue;
         let abs;
         try { abs = new URL(href, baseHref).toString(); } catch (_) { continue; }
+        // Optionele transformatie: bv. /feedback?ref=<URL> → <URL>, of
+        // /ktm/view.cgi?u=<URL> → <URL>. resolveUrl returnt de echte
+        // dispatchbare URL of null als deze href moet worden overgeslagen.
+        if (t.resolveUrl) {
+          abs = t.resolveUrl(abs, baseHref);
+          if (!abs) continue;
+        }
         const path = pathnameOf(abs);
         if (!t.match(path)) continue;
         if (seen.has(abs)) continue;
