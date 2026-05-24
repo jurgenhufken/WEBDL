@@ -30,6 +30,12 @@ import urllib.request
 
 UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:120.0) Gecko/20100101 Firefox/120.0'
 VIDEO_LINK_RE = re.compile(r'href="(https://footstockings\.com/videos/\d+/[^"]+/)"')
+# Hoofdcontainer met de echte zoek-/listing-resultaten — voorkomt dat
+# "related videos" of sidebar-suggesties worden opgepakt.
+MAIN_CONTAINER_RE = re.compile(
+    r'<div\s+class="list-videos[^"]*">(.*?)</div>\s*</div>\s*</div>',
+    re.DOTALL,
+)
 SIMPLE_SERVER_DOWNLOAD = 'http://localhost:35729/download'
 
 LISTING_PATTERNS = [
@@ -52,10 +58,21 @@ def fetch_page(url):
 
 
 def extract_video_urls(html):
-    """Pak unieke /videos/<id>/<slug>/ links, bewaar volgorde."""
+    """Pak unieke /videos/<id>/<slug>/ links uit de .list-videos hoofdcontainer.
+
+    Negeert "related videos" / sidebar / footer-suggesties zodat we alleen
+    het echte zoek-/listing-resultaat krijgen — niet wat de site er omheen
+    promoot.
+    """
+    main_blocks = MAIN_CONTAINER_RE.findall(html)
+    if not main_blocks:
+        # Fallback: hele pagina (voor URL-types zonder .list-videos container)
+        scope = html
+    else:
+        scope = '\n'.join(main_blocks)
     seen = set()
     out = []
-    for url in VIDEO_LINK_RE.findall(html):
+    for url in VIDEO_LINK_RE.findall(scope):
         if url not in seen:
             seen.add(url)
             out.append(url)
