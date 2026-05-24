@@ -8689,6 +8689,8 @@ function detectPlatform(url) {
   if (/keep2share\.cc|k2s\.cc/i.test(u)) return 'keep2share';
   if (/footstockings\.com/i.test(u)) return 'footstockings';
   if (/heavyfetish\.com/i.test(u)) return 'heavyfetish';
+  if (/darknessporn\.com/i.test(u)) return 'darknessporn';
+  if (/darknetvideos\.com/i.test(u)) return 'darknetvideos';
 
   try {
     const host = new URL(u).hostname.toLowerCase();
@@ -8742,6 +8744,8 @@ const KNOWN_PLATFORMS = new Set([
   'keep2share',
   'footstockings',
   'heavyfetish',
+  'darknessporn',
+  'darknetvideos',
   '4kdownloader',
   'other']
 );
@@ -8850,6 +8854,21 @@ function deriveChannelFromUrl(platform, url) {
     if (m) return m[1];
     const m2 = u.match(/aznudefeet\.com\/([^\/\?#]+)/i);
     if (m2) return m2[1];
+  }
+
+  if (platform === 'darknessporn') {
+    try {
+      const parsed = new URL(u);
+      const segs = String(parsed.pathname || '').replace(/\/page\/\d+\/?$/i, '/').split('/').filter(Boolean);
+      // /<id>-<slug>/ → single video: 'video_<id>'
+      if (segs.length === 1 && /^\d+-/.test(segs[0])) {
+        const m = segs[0].match(/^(\d+)-/);
+        return m ? `video_${m[1]}` : segs[0];
+      }
+      // /tag/<id>-<slug>/, /category/<slug>/, /search/<q>/ → '<type>_<value>'
+      if (segs.length >= 2) return `${segs[0]}_${segs[1]}`;
+      if (segs.length === 1) return segs[0];
+    } catch (e) {}
   }
 
   if (platform === 'footstockings' || platform === 'heavyfetish') {

@@ -39,7 +39,11 @@
   if (!SITE) return;
 
   const SERVER = 'http://localhost:35729';
-  const MAX_PAGES = 100;
+  // Hard cap multi-page. Voor brede zoektermen geeft heavyfetish 500+
+  // pages aan — eindigt vaak met steeds losser-gerelateerde content.
+  // 30 pages = ~1380 items, redelijke balans tussen volledigheid en
+  // download-overweldiging.
+  const MAX_PAGES = 30;
   const SINGLE_VIDEO_RE = /^\/videos\/\d+\/[^/]+\/?$/;
   const SINGLE_ALBUM_RE = /^\/albums\/\d+\/[^/]+\/?$/;
   const LISTING_PREFIXES = [
@@ -327,7 +331,9 @@
       const maxP = detectMaxPage(document);
       const onPageLabel = (v && a) ? `${v}v + ${a}a` : v ? `${v} videos` : a ? `${a} albums` : 'leeg';
       wrap.appendChild(makeButton(`📄 Deze pagina (${onPageLabel})`, '#1565C0', handleThisPage));
-      wrap.appendChild(makeButton(`🧵 Alle pages (max ${maxP})`, '#0ea5e9', handleAllPages));
+      const cap = Math.min(MAX_PAGES, maxP);
+      const capLabel = maxP > MAX_PAGES ? `${cap} van ${maxP} pages` : `${cap} pages`;
+      wrap.appendChild(makeButton(`🧵 Alle pages (${capLabel})`, '#0ea5e9', handleAllPages));
       const hint = document.createElement('div');
       hint.textContent = `→ channel: ${deriveChannel(window.location.href)}`;
       Object.assign(hint.style, { fontSize: '10px', opacity: '0.6', padding: '2px 4px' });
