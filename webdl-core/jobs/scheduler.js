@@ -190,6 +190,11 @@ async function runWholeThread(job, source, downloadEndpoint) {
     jobLog(job, `inspect page 1 FAIL: ${job.error}`);
     return;
   }
+  if (job.cancelled) {
+    job.status = 'cancelled';
+    jobLog(job, `cancelled before page-1 dispatch`);
+    return;
+  }
   job.title = first.title || '';
   job.channel = first.channel || job.channel;
   const allPages = (first.paginationUrls && first.paginationUrls.length) ? first.paginationUrls : [job.sourceUrl];
@@ -205,6 +210,11 @@ async function runWholeThread(job, source, downloadEndpoint) {
 
   // Walk pages 2..N
   for (let i = 1; i < allPages.length; i++) {
+    if (job.cancelled) {
+      job.status = 'cancelled';
+      jobLog(job, `cancelled at page ${i + 1}/${allPages.length}`);
+      return;
+    }
     job.pagesScanned = i + 1; // update VOOR scan zodat UI ziet welke page bezig is
     job.updatedAt = new Date().toISOString();
     const pageUrl = allPages[i];
@@ -285,6 +295,7 @@ function listRecent(limit = 50) {
  */
 async function dispatchItemsParallel(items, channel, platform, sourceUrl, downloadEndpoint, job, concurrency = 10) {
   for (let offset = 0; offset < items.length; offset += concurrency) {
+    if (job && job.cancelled) return;
     const chunk = items.slice(offset, offset + concurrency);
     const results = await Promise.all(
       chunk.map((item) => dispatchItem(item, channel, platform, sourceUrl, downloadEndpoint))
@@ -297,4 +308,19 @@ async function dispatchItemsParallel(items, channel, platform, sourceUrl, downlo
   }
 }
 
-module.exports = { start, get, listRecent, /** @internal */ _jobs: jobs };
+/**
+ * Mark een job als cancelled. runWholeThread / runSingleOrPage / dispatchItemsParallel
+ * checken job.cancelled bij elke iteratie en stoppen netjes.
+ * @param {number} id
+ * @returns {boolean} true als job bestond + cancelled is gemarkeerd
+ */
+function cancel(id) {
+  const job = jobs.get(id);
+  if (!job) return false;
+  if (job.status === 'done' || job.status === 'cancelled' || job.status === 'error') return false;
+  job.cancelled = true;
+  jobLog(job, `cancel requested`);
+  return true;
+}
+
+module.exports = { start, get, listRecent, cancel, /** @internal */ _jobs: jobs };
