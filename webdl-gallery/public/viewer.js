@@ -1159,13 +1159,24 @@
     return navChain;
   }
 
+  // 2026-05-25: bij random navigatie ALLE items van de current filter laden
+  // (was 300-cap → kleine subset van grote filter-set). loadMoreViewerItems
+  // pakt 100 per cycle; doe het door tot vs.done. Maximaal 50 cycles
+  // (= 5000 items) als safety-net voor heel grote filters.
+  async function ensureAllItemsForRandom() {
+    let cycles = 0;
+    while (!vs.done && cycles < 50) {
+      const more = await loadMoreViewerItems();
+      cycles++;
+      if (!more) break;
+    }
+  }
+
   async function navNext() {
     return enqueueNavigation(async () => {
       let next;
       if (vs.random) {
-        if (!vs.done && vs.items.length < 300) {
-          await loadMoreViewerItems();
-        }
+        await ensureAllItemsForRandom();
         next = Math.floor(Math.random() * vs.items.length);
       } else {
         next = vs.idx + 1;
@@ -1177,9 +1188,7 @@
   async function navPrev() {
     return enqueueNavigation(async () => {
       if (vs.random) {
-        if (!vs.done && vs.items.length < 300) {
-          await loadMoreViewerItems();
-        }
+        await ensureAllItemsForRandom();
         await navTo(Math.floor(Math.random() * vs.items.length));
       } else {
         await navTo(vs.idx - 1);
