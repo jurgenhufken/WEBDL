@@ -908,7 +908,7 @@
   function channelsForPlatform(platform) {
     return (state.channelOptions || [])
       .filter((row) => String(row.platform || '') === String(platform || ''))
-      .filter((row) => row.channel && row.channel !== 'unknown' && !String(row.channel).startsWith('site:'))
+      .filter((row) => row.channel && row.channel !== 'unknown')
       .sort((a, b) => Number(b.count || 0) - Number(a.count || 0));
   }
 
@@ -919,8 +919,19 @@
     return `channel:${enc(platform)}:${enc(channel)}`;
   }
 
+  // Platforms die altijd bovenaan de tree komen, ongeacht count.
+  const PINNED_PLATFORMS = ['telegram'];
   function buildSourceTreeData(total) {
-    const platforms = (state.platformOptions || []).filter((row) => row.platform && row.platform !== 'unknown');
+    const rawPlatforms = (state.platformOptions || []).filter((row) => row.platform && row.platform !== 'unknown');
+    const pinned = [];
+    const rest = [];
+    for (const p of rawPlatforms) {
+      if (PINNED_PLATFORMS.includes(String(p.platform).toLowerCase())) pinned.push(p);
+      else rest.push(p);
+    }
+    // Pinned-volgorde = PINNED_PLATFORMS array-volgorde
+    pinned.sort((a, b) => PINNED_PLATFORMS.indexOf(String(a.platform).toLowerCase()) - PINNED_PLATFORMS.indexOf(String(b.platform).toLowerCase()));
+    const platforms = [...pinned, ...rest];
     const selectedPlatforms = new Set(splitFilterList(state.filters.platform));
     const selectedChannels = new Set(splitFilterList(state.filters.channel));
     const query = String(state.sourceTreeQuery || '').trim().toLowerCase();
@@ -946,9 +957,14 @@
         state: { opened, checked: platformChecked, disabled: state.sourceFilterBusy },
         children: visibleChildren.map((channelRow) => {
           const channel = String(channelRow.channel);
+          // Strip 'site:' prefix bij weergave (intern blijft 't channel-naam
+          // voor filtering, getoond als 'via X' label).
+          const displayLabel = channel.startsWith('site:')
+            ? `via ${channel.slice(5)}`
+            : channel;
           return {
             id: sourceTreeNodeId('channel', platform, channel),
-            text: `${channel} (${countForCurrentMediaType(channelRow)})`,
+            text: `${displayLabel} (${countForCurrentMediaType(channelRow)})`,
             data: { kind: 'channel', platform, channel },
             state: { checked: selectedChannels.has(channel), disabled: state.sourceFilterBusy },
           };
