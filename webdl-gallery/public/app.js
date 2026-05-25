@@ -11,10 +11,13 @@
     return fetch(url + sep + '_t=' + TAB_ID, options);
   }
 
+  // 2026-05-25: per-tab UI-state via sessionStorage zodat losse gallery-tabs
+  // elkaars source-tree-expansie niet overschrijven. DB-state (tags, items)
+  // blijft uiteraard shared via Postgres — dat is functioneel correct.
   const SOURCE_TREE_EXPANDED_KEY = 'webdl.gallery.sourceTree.expanded.v1';
   function loadSourceTreeExpanded() {
     try {
-      const raw = localStorage.getItem(SOURCE_TREE_EXPANDED_KEY);
+      const raw = sessionStorage.getItem(SOURCE_TREE_EXPANDED_KEY);
       if (!raw) return null;
       const values = JSON.parse(raw);
       return Array.isArray(values) ? new Set(values.map((v) => String(v || '').trim()).filter(Boolean)) : null;
@@ -25,7 +28,7 @@
   const initialSourceTreeExpanded = loadSourceTreeExpanded();
   function saveSourceTreeExpanded(values) {
     try {
-      localStorage.setItem(SOURCE_TREE_EXPANDED_KEY, JSON.stringify(Array.from(values || [])));
+      sessionStorage.setItem(SOURCE_TREE_EXPANDED_KEY, JSON.stringify(Array.from(values || [])));
     } catch (_) {}
   }
 
