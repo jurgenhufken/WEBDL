@@ -1788,8 +1788,10 @@
   function scheduleSlideshowTick() {
     if (!vs.slideshow) return;
     const v = el.vContent.querySelector('video');
-    // Als video-wait aan EN video nog bezig → wacht op 'ended' event (gebonden in showCurrent)
-    if (v && vs.videoWait && !v.ended && !v.paused) return;
+    // Als video-wait aan EN er IS een video → ALTIJD wachten op 'ended' event
+    // (gebonden in showCurrent). v.paused is true wanneer video nog niet eens
+    // gestart is — eerdere check `!v.paused` liet de timer dan tóch lopen.
+    if (v && vs.videoWait) return;
     vs.slideshowTimer = setTimeout(slideshowTick, vs.slideshowSec * 1000);
   }
 
