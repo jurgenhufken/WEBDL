@@ -1435,6 +1435,15 @@ async function getKeep2ShareWebAccessToken(cookieHeader = '', preferredHost = ''
   const firefoxAuth = await loadKeep2ShareFirefoxWebAuth(preferredHost);
   if (firefoxAuth.token) return { token: firefoxAuth.token, source: firefoxAuth.source, cookieHeader: firefoxAuth.cookieHeader };
 
+  // 2026-05-25: guest-mode client_credentials fallback UITGEZET. Die geeft
+  // K2S een 'anonieme' token waarmee elke download een captcha-challenge
+  // krijgt → IP raakt op de abuse-list. Beter: fail hard zodat user weet
+  // dat 'ie z'n K2S-cookie moet verversen, dan dat we abuse-flags oplopen.
+  // Zet WEBDL_K2S_ALLOW_GUEST=1 om dit pad alsnog toe te staan.
+  if (String(process.env.WEBDL_K2S_ALLOW_GUEST || '').trim() !== '1') {
+    return { token: '', source: '', error: 'K2S premium-auth ontbreekt (cookie/token); guest-fallback uitgezet om captcha te voorkomen' };
+  }
+
   try {
     const res = await fetch('https://api.k2s.cc/v1/auth/token', {
       method: 'POST',
@@ -6855,6 +6864,85 @@ expressApp.post('/api/queue/resume', async (req, res) => {
   }
 });
 
+// POST /api/import-file
+// Voor sites achter Cloudflare (zoals recu.me) waar de server zelf niet bij
+// kan: extensie downloadt het bestand via browser.downloads.download (browser
+// heeft geldige CF-sessie). Daarna POSTt extensie naar dit endpoint met de
+// resulting filepath + metadata. Server inserteert een 'completed' rij die
+// naar dat bestand wijst (geen download-werk meer aan onze kant).
+expressApp.post('/api/import-file', async (req, res) => {
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    let filepath = String(body.filepath || '').trim();
+    const sourceUrl = String(body.sourceUrl || body.url || '').trim();
+    const platform = String(body.platform || 'unknown').trim();
+    const channel = String(body.channel || 'unknown').trim();
+    const title = String(body.title || '').trim() || (filepath ? require('path').basename(filepath) : 'untitled');
+    const metadata = body.metadata && typeof body.metadata === 'object' ? body.metadata : {};
+
+    if (!filepath) return res.status(400).json({ success: false, error: 'filepath is vereist' });
+    if (!require('fs').existsSync(filepath)) {
+      return res.status(404).json({ success: false, error: `bestand bestaat niet: ${filepath}` });
+    }
+
+    // Move from Firefox Downloads folder to BASE_DIR (externe HDD)
+    // pattern: ~/Downloads/webdl/<host>/<channel>/<file> → BASE_DIR/<host>/<channel>/<file>
+    const HOME = process.env.HOME || require('os').homedir();
+    const downloadsRoot = require('path').join(HOME, 'Downloads', 'webdl');
+    if (filepath.startsWith(downloadsRoot + require('path').sep) || filepath.startsWith(downloadsRoot + '/')) {
+      try {
+        const rel = require('path').relative(downloadsRoot, filepath);
+        const dest = require('path').join(BASE_DIR, rel);
+        require('fs').mkdirSync(require('path').dirname(dest), { recursive: true });
+        if (require('fs').existsSync(dest)) {
+          // Suffix om collision te vermijden
+          const ext = require('path').extname(dest);
+          const stem = dest.slice(0, dest.length - ext.length);
+          let n = 1;
+          let alt = `${stem}_${n}${ext}`;
+          while (require('fs').existsSync(alt)) { n++; alt = `${stem}_${n}${ext}`; }
+          require('fs').renameSync(filepath, alt);
+          filepath = alt;
+        } else {
+          require('fs').renameSync(filepath, dest);
+          filepath = dest;
+        }
+        console.log(`📦 Verplaatst van Downloads naar ${filepath}`);
+      } catch (mvErr) {
+        console.warn(`⚠️ Move naar BASE_DIR mislukt (${mvErr.message}) — bestand blijft in Downloads.`);
+      }
+    }
+
+    const stat = require('fs').statSync(filepath);
+    const filename = require('path').basename(filepath);
+
+    // Dedup op filepath
+    const existing = await db.prepare('SELECT id FROM downloads WHERE filepath = ? LIMIT 1').get(filepath);
+    if (existing && existing.id) {
+      return res.json({ success: true, downloadId: existing.id, duplicate: true, message: `Bestand al geïmporteerd #${existing.id}`, filepath });
+    }
+
+    const fullMeta = {
+      ...metadata,
+      webdl_kind: 'browser_imported',
+      webdl_source_url: sourceUrl,
+      webdl_imported_at: new Date().toISOString(),
+    };
+
+    const ins = await insertDownload.run(sourceUrl || `file://${filepath}`, platform, channel, title);
+    const downloadId = ins.lastInsertRowid;
+    try {
+      await db.prepare(`UPDATE downloads SET status = 'completed', filepath = ?, filename = ?, filesize = ?, metadata = ?, source_url = ?, finished_at = now(), progress = 100 WHERE id = ?`)
+        .run(filepath, filename, stat.size, JSON.stringify(fullMeta), sourceUrl || null, downloadId);
+    } catch (e) {}
+    console.log(`📥 Imported file #${downloadId}: ${filepath}`);
+    return res.json({ success: true, downloadId, duplicate: false, filepath, size: stat.size });
+  } catch (e) {
+    console.error('Import-file error:', e && e.message ? e.message : e);
+    return res.status(500).json({ success: false, error: String(e && e.message ? e.message : e) });
+  }
+});
+
 // darknetvideos.com /video.php?id=N OR search-page — spawn
 // scripts/darknet_dl.py async (parse JSON-LD VideoObject → contentUrl).
 expressApp.post('/api/darknetvideos/video', (req, res) => {
@@ -7039,6 +7127,17 @@ expressApp.get('/api/jobs/:id', (req, res) => {
 expressApp.get('/api/jobs', (req, res) => {
   const limit = Math.max(1, Math.min(200, parseInt(req.query.limit || '50', 10)));
   res.json({ success: true, jobs: webdlScheduler.listRecent(limit) });
+});
+
+// POST /api/jobs/:id/cancel — markeer job als cancelled. De scheduler-loop
+// checkt job.cancelled bij elke page-boundary en stopt netjes. Reeds-
+// gedispatchte items blijven in DB (separate verwijdering nodig).
+expressApp.post('/api/jobs/:id/cancel', (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) return res.status(400).json({ success: false, error: 'id moet number zijn' });
+  const ok = webdlScheduler.cancel(id);
+  if (!ok) return res.status(404).json({ success: false, error: `job ${id} bestaat niet of is al afgerond` });
+  return res.json({ success: true, jobId: id, message: 'cancel gevraagd — stopt bij volgende page-boundary' });
 });
 
 // GET /api/sources — welke Sources zijn beschikbaar
@@ -10575,6 +10674,33 @@ expressApp.get('/status', async (req, res) => {
   } catch (e) {
     dbStatusError = (e && e.message) ? e.message : String(e);
   }
+  // 2026-05-25: Stale-postprocess GC. activePostprocessJobs kan blijven hangen
+  // als een postprocess-Promise nooit settled (worker-crash, race). Sync hier
+  // tegen DB-status: als job in DB 'completed'/'error'/'cancelled'/'pending',
+  // dan is 'ie zeker niet meer aan 't postprocessen → set + context opruimen.
+  try {
+    const ppIds = Array.from(activePostprocessJobs).map((x) => Number(x)).filter(Number.isFinite);
+    if (ppIds.length > 0) {
+      const pool = db.readPool || db.pool;
+      const r = pool ? await pool.query({
+        text: 'SELECT id, status FROM downloads WHERE id = ANY($1::bigint[])',
+        values: [ppIds],
+      }) : null;
+      const rows = (r && r.rows) || [];
+      const dbStatusById = new Map();
+      for (const row of rows) dbStatusById.set(Number(row.id), String(row.status || ''));
+      for (const id of ppIds) {
+        const st = dbStatusById.get(id);
+        if (!st || st === 'completed' || st === 'error' || st === 'cancelled' || st === 'pending') {
+          activePostprocessJobs.delete(id);
+          activePostprocessJobs.delete(String(id));
+          downloadActivityContextById.delete(id);
+          downloadActivityContextById.delete(String(id));
+        }
+      }
+    }
+  } catch (e) { /* niet-fataal */ }
+
   // Build active_items for the gallery's queue bar using real-time context
   const activeDownloadsList = [];
   try {
@@ -14342,6 +14468,21 @@ function rejectInvalidDirectDownload(url, filepath, filename, rawHeaders) {
       ? 'Keep2Share gaf een HTML/login-pagina terug in plaats van het videobestand; premium-cookie ontbreekt of is niet geldig'
       : 'Directe download gaf HTML terug in plaats van media';
   }
+  // 2026-05-25: hotlink-error placeholder detection. Bepaalde image-hosts
+  // (vipr.im / imagetwist) geven bij ontbrekende Referer of rate-limit een
+  // ~8KB JPG met "Imagetwist.com Error: Hotlinking is disabled" tekst.
+  // Fingerprint = exact 8346 bytes voor vipr.im. Wijs af zodat 'ie als error
+  // gemarkeerd wordt en niet als legitieme image in DB belandt.
+  try {
+    let host = '';
+    try { host = new URL(String(url || '')).hostname.toLowerCase(); } catch (_) {}
+    if (/(?:^|\.)(?:vipr\.im|imagetwist\.com)$/i.test(host)) {
+      const stat = fs.statSync(filepath);
+      if (stat.size === 8346) {
+        return 'Hotlink-error placeholder ontvangen i.p.v. echte image (vipr.im/imagetwist 8346b fingerprint)';
+      }
+    }
+  } catch (e) { /* niet-fataal */ }
   return '';
 }
 
@@ -14636,6 +14777,18 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
     if (!referer && platform === 'elitebabes') referer = 'https://www.elitebabes.com/';
     if (!referer && platform === 'erome') referer = 'https://www.erome.com/';
     if (!referer && platform === 'zishy') referer = 'https://www.zishy.com/';
+    // 2026-05-25: image-hosts die hotlink-protection hebben. Zonder Referer
+    // geven ze de error-JPG (8346b). Prefer metadata.source_url (vipergirls
+    // thread-page), anders host-self.
+    if (!referer) {
+      try {
+        const dlHost = new URL(String(url || '')).hostname.toLowerCase();
+        if (/(?:^|\.)(?:vipr\.im|imagetwist\.com|imagebam\.com|imagevenue\.com|imx\.to|pixhost\.(?:to|cc))$/i.test(dlHost)) {
+          const srcUrl = String((metadata && (metadata.source_url || metadata.sourceUrl || (metadata.source_context && metadata.source_context.url))) || '').trim();
+          referer = (srcUrl && /^https?:/i.test(srcUrl)) ? srcUrl : `https://${dlHost}/`;
+        }
+      } catch (_) {}
+    }
     let curlUserAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
     let curlHost = '';
     try {
@@ -16456,13 +16609,14 @@ async function importExistingVideosFromDisk(options = {}) {
 
         const sidecar = readImportSidecarMetadata(fp);
         const sourceUrl = String(sidecar.sourceUrl || '').trim();
-        const platform = inferPlatformFromImportedFile(fp, sourceUrl);
+        let platform = inferPlatformFromImportedFile(fp, sourceUrl);
         const fallbackTitle = path.basename(fp, ext) || path.basename(fp) || 'imported-video';
         const title = String(sidecar.title || '').trim() || fallbackTitle;
 
         // For 4K Downloader imports: use parent directory as channel name
         // Structure: _4KDownloader/ChannelName/VideoTitle.mkv
         let channelFromPath = '';
+        let platformFromPath = '';
         if (fp.includes('_4KDownloader') || fp.includes('_4kdownloader')) {
           const rel4k = fp.split(/_4[Kk][Dd]ownloader[\/\\]/)[1] || '';
           const pathParts = rel4k.split(/[\/\\]/).filter(Boolean);
@@ -16470,7 +16624,41 @@ async function importExistingVideosFromDisk(options = {}) {
             channelFromPath = pathParts[0]; // Parent dir = channel name
           }
         }
+        // 2026-05-25: generieke pad-detect voor `_Downloads/<platform>/<channel>/<file>`
+        // Voor tdl-imports: /_Downloads/telegram/empire-of-the-feet/<file>
+        //   → platform=telegram, channel=empire-of-the-feet
+        // Geldt ook voor andere adapters die zelf in subfolders schrijven.
+        if (!channelFromPath || !platformFromPath) {
+          const dlSplit = fp.split(/[\/\\]_Downloads[\/\\]/);
+          if (dlSplit.length > 1) {
+            const relParts = String(dlSplit[1] || '').split(/[\/\\]/).filter(Boolean);
+            if (relParts.length >= 3) {
+              // relParts = [platform-folder, channel-folder, ..., filename]
+              if (!platformFromPath) platformFromPath = relParts[0];
+              if (!channelFromPath) channelFromPath = relParts[1];
+            }
+          }
+        }
 
+        // Voor telegram-imports: probeer de echte channel-titel uit een eerdere
+        // download met dezelfde chat-id (filename pattern `<chat_id>_<msg_id>_...`)
+        if (platformFromPath === 'telegram' && channelFromPath) {
+          const m = path.basename(fp).match(/^(\d{6,15})_\d+_/);
+          if (m && m[1]) {
+            try {
+              const sameChat = await db.prepare(
+                `SELECT channel FROM downloads WHERE platform='telegram' AND metadata::jsonb->>'youtube_channel_id' = $1 AND channel IS NOT NULL AND channel <> '' LIMIT 1`
+              ).get(m[1]);
+              if (sameChat && sameChat.channel) channelFromPath = String(sameChat.channel);
+            } catch (e) { /* niet-fataal */ }
+          }
+        }
+
+        // Als inferPlatformFromImportedFile 'other' gaf maar het pad een
+        // bekende platform-folder bevat (_Downloads/<platform>/...), gebruik die.
+        if ((platform === 'other' || !platform) && platformFromPath) {
+          platform = platformFromPath;
+        }
         const channelFromUrl = sourceUrl ? deriveChannelFromUrl(platform, sourceUrl) || '' : '';
         const channel = String(sidecar.channel || '').trim() || channelFromPath || channelFromUrl || 'imported';
         const canonicalSource = sourceUrl ? sourceUrl : `file://${fp}`;
