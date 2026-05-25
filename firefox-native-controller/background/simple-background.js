@@ -879,11 +879,22 @@ function connectPersistentSocket() {
   }
 }
 
+// 2026-05-24: Cloudflare-blocked hosts moeten via browser.downloads.download
+// omdat de server zelf 403 krijgt. Browser heeft wel een geldige CF-sessie.
+// Voor andere hosts gebruikt de context-menu de bestaande hub-flow.
+const CLOUDFLARE_BROWSER_DL_HOSTS = /(?:^|\.)(?:recu\.me|chaturbate\.com|bongacams\.com)$/i;
+
 browser.contextMenus.onClicked.addListener(async (info, tab) => {
   if (!info || info.menuItemId !== CONTEXT_MENU_ID) return;
 
   const url = info.linkUrl || info.srcUrl || info.pageUrl;
   if (!url) return;
+
+  // Detecteer Cloudflare-hosts → browser-download pad
+  let urlHost = '';
+  try { urlHost = new URL(url).hostname.toLowerCase(); } catch (_) {}
+  const needsBrowserDl = CLOUDFLARE_BROWSER_DL_HOSTS.test(urlHost)
+    || (tab && tab.url && (() => { try { return CLOUDFLARE_BROWSER_DL_HOSTS.test(new URL(tab.url).hostname); } catch (_) { return false; } })());
 
   let metadata = null;
   try {
@@ -904,7 +915,101 @@ browser.contextMenus.onClicked.addListener(async (info, tab) => {
   }
 
   metadata.sourceUrl = url;
-  
+
+  // Browser-download pad: voor recu.me en andere CF-hosts.
+  if (needsBrowserDl) {
+    // Extract channel uit page-URL als content-script 'unknown' gaf.
+    // recu.me URLs: /<username>/video/<id>/play|download → username = channel
+    try {
+      const tabUrl = (tab && tab.url) || '';
+      const m = tabUrl.match(/^https?:\/\/(?:www\.)?(recu\.me|chaturbate\.com|bongacams\.com)\/([a-z0-9_-]+)\/(?:video|vod)\//i);
+      if (m && m[2] && (!metadata.channel || metadata.channel === 'unknown')) {
+        metadata.channel = m[2];
+      }
+      // Plus platform fix
+      if (!metadata.platform || metadata.platform === 'unknown') {
+        if (m && m[1]) metadata.platform = m[1].replace(/\.[a-z]+$/, ''); // recu / chaturbate / bongacams
+      }
+    } catch (_) {}
+
+    try {
+      // Filename: subfolder webdl/<host>/<videoId>/ — minimal, alleen safe chars.
+      // Originele bestandsnaam wordt door Firefox uit Content-Disposition gehaald
+      // mits we GEEN file-naam-deel meegeven (alleen subfolder).
+      // Echter Firefox vereist altijd een filename. We genereren dus iets simpels.
+      let filename;
+      try {
+        const sanit = (s) => String(s || '').replace(/[^a-zA-Z0-9._-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 80);
+        const host = urlHost.replace(/^www\./, '').replace(/\.[a-z]+$/, '') || 'web';
+        const videoIdMatch = url.match(/\/(?:video|vod)\/(\d+)/);
+        const vid = videoIdMatch ? videoIdMatch[1] : Date.now().toString(36);
+        const ext = (url.match(/\.(mp4|mkv|webm|mov|avi|m4v)(?:[?#]|$)/i) || [, 'mp4'])[1].toLowerCase();
+        const ch = sanit(metadata.channel) || 'unknown';
+        filename = `webdl/${host}/${ch}/${vid}.${ext}`;
+      } catch (_) {
+        filename = `webdl/dl_${Date.now()}.mp4`;
+      }
+
+      const downloadId = await browser.downloads.download({
+        url,
+        filename,
+        conflictAction: 'uniquify',
+        saveAs: false,
+      });
+      console.log(`[WEBDL] context-menu browserDownload id=${downloadId} for ${url.slice(0, 80)} (host=${urlHost})`);
+
+      // Wacht op complete → POST naar /api/import-file
+      const onChanged = (delta) => {
+        if (delta.id !== downloadId) return;
+        if (delta.state && delta.state.current === 'complete') {
+          browser.downloads.onChanged.removeListener(onChanged);
+          browser.downloads.search({ id: downloadId }).then((items) => {
+            const item = items && items[0];
+            if (!item || !item.filename) return;
+            const importBody = {
+              filepath: item.filename,
+              sourceUrl: url,
+              platform: metadata.platform || urlHost.replace(/\.[^.]+$/, '') || 'unknown',
+              channel: metadata.channel || 'unknown',
+              title: metadata.title || '',
+              metadata: { ...metadata, webdl_browser_download_id: downloadId },
+            };
+            fetch(`${SERVER_URL}/api/import-file`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(importBody),
+            })
+              .then((r) => r.json())
+              .then((r) => console.log(`[WEBDL] context-menu import-file:`, r))
+              .catch((e) => console.warn(`[WEBDL] context-menu import-file fout:`, e));
+          });
+        } else if (delta.state && delta.state.current === 'interrupted') {
+          browser.downloads.onChanged.removeListener(onChanged);
+          console.warn(`[WEBDL] context-menu download #${downloadId} interrupted`);
+        }
+      };
+      browser.downloads.onChanged.addListener(onChanged);
+
+      try {
+        if (tab && tab.id != null) {
+          await browser.tabs.sendMessage(tab.id, {
+            action: 'webdlDownloadQueued',
+            success: true,
+            downloadId,
+            duplicate: false,
+            serverMessage: 'Browser-download gestart',
+            url,
+            browserDownload: true,
+          }).catch(() => {});
+        }
+      } catch (e) {}
+      return;
+    } catch (err) {
+      console.error(`[WEBDL] context-menu browserDownload fout:`, err);
+      // Val terug op de hub-flow
+    }
+  }
+
   const resp = await postHubJob(url, metadata);
 
   try {
@@ -989,6 +1094,66 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const url = payload.url;
     const metadata = payload.metadata || payload;
     postHubJob(url, metadata).then(sendResponse);
+    return true;
+  }
+
+  // 2026-05-24: browser-side download voor sites achter Cloudflare (recu.me).
+  // Server kan niet zelf bij die URL (403), maar de browser heeft een geldige
+  // CF-sessie. browser.downloads.download streamt naar disk (geen blob-memory),
+  // werkt voor files van GB-formaat. Daarna POSTen we de filepath naar
+  // /api/import-file zodat het in de gallery verschijnt.
+  if (action === 'browserDownload') {
+    const payload = (message && message.payload) || {};
+    const url = String(payload.url || '').trim();
+    const filename = String(payload.filename || '').trim() || undefined;
+    const meta = payload.metadata || {};
+    if (!url || !/^https?:/i.test(url)) {
+      sendResponse({ success: false, error: 'invalid url' });
+      return false;
+    }
+    const dlOpts = { url, conflictAction: 'uniquify', saveAs: false };
+    if (filename) dlOpts.filename = filename.replace(/[\/\\:*?"<>|]/g, '_');
+    browser.downloads.download(dlOpts).then((downloadId) => {
+      console.log(`[WEBDL] browserDownload started id=${downloadId} for ${url.slice(0, 80)}`);
+      // Listen for completion to get the on-disk path
+      const onChanged = (delta) => {
+        if (delta.id !== downloadId) return;
+        if (delta.state && delta.state.current === 'complete') {
+          browser.downloads.onChanged.removeListener(onChanged);
+          browser.downloads.search({ id: downloadId }).then((items) => {
+            const item = items && items[0];
+            if (!item || !item.filename) {
+              console.warn(`[WEBDL] browserDownload #${downloadId} compleet maar geen filename`);
+              return;
+            }
+            const importBody = {
+              filepath: item.filename,
+              sourceUrl: url,
+              platform: meta.platform || 'unknown',
+              channel: meta.channel || 'unknown',
+              title: meta.title || '',
+              metadata: meta,
+            };
+            fetch(`${SERVER_URL}/api/import-file`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(importBody),
+            })
+              .then((r) => r.json())
+              .then((r) => console.log(`[WEBDL] /api/import-file response:`, r))
+              .catch((e) => console.warn(`[WEBDL] /api/import-file fout:`, e));
+          });
+        } else if (delta.state && delta.state.current === 'interrupted') {
+          browser.downloads.onChanged.removeListener(onChanged);
+          console.warn(`[WEBDL] browserDownload #${downloadId} interrupted:`, delta);
+        }
+      };
+      browser.downloads.onChanged.addListener(onChanged);
+      sendResponse({ success: true, downloadId });
+    }).catch((err) => {
+      console.error(`[WEBDL] browserDownload fout:`, err);
+      sendResponse({ success: false, error: String(err && err.message ? err.message : err) });
+    });
     return true;
   }
 

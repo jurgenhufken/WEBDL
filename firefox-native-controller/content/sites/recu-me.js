@@ -50,12 +50,35 @@ const RECU_CONFIG = {
       match: (p) => /^(?:\/[a-z0-9_-]+)?\/video\/\d+(?:\/play)?\/?$/i.test(p),
       selector: '',
       endpoint: '/download',
+      // 2026-05-24: recu.me staat achter Cloudflare → server-side fetch geeft
+      // 403. Browser heeft wel geldige CF-sessie, dus we laten de extensie
+      // zelf de file via browser.downloads.download() binnenhalen. Daarna
+      // POSTt background een filepath naar /api/import-file zodat de file
+      // in de gallery verschijnt. Zie firefox-native-controller/background/
+      // simple-background.js → action 'browserDownload'.
+      useBrowserDownload: true,
       buildBody: (_url, channel) => {
-        // Bij voorkeur de echte file-URL uit de "Download" knop, niet de HLS-
-        // stream — die laatste vereist HLS-mux + is geen origineel bestand.
-        // Probeer meerdere selectors voor de download-link/knop. Pak de href,
-        // data-url, of fetch het zelf via JS als 't een form/button is.
+        // Bij voorkeur de echte file-URL uit de "Full video" optie in de
+        // Download dropdown op recu.me. Niet de HLS-stream — die vereist
+        // HLS-mux + is geen origineel bestand. "Full video" is de standaard
+        // download zonder kwaliteits-keuze.
         function findDownloadUrl() {
+          // 1) Tekstuele "Full video" / "Download" knoppen (recu.me-specifiek)
+          //    Dropdown-items: <a>Full video</a> / <a>Cut fragment</a>
+          const textCandidates = [...document.querySelectorAll('a, button')]
+            .map((el) => ({ el, txt: (el.textContent || '').trim() }))
+            .filter(({ txt }) => /\b(full\s*video|download)\b/i.test(txt) && !/\bcut\s*fragment\b/i.test(txt));
+          // Sort: "full video" links eerst (primary), "download" labels daarna
+          textCandidates.sort((a, b) => {
+            const ar = /\bfull\s*video\b/i.test(a.txt) ? 0 : 1;
+            const br = /\bfull\s*video\b/i.test(b.txt) ? 0 : 1;
+            return ar - br;
+          });
+          for (const { el } of textCandidates) {
+            const u = el.href || el.dataset.downloadUrl || el.dataset.url || el.getAttribute('data-href') || '';
+            if (u && /^https?:/i.test(u)) return u;
+          }
+          // 2) Generieke selectors als fallback
           const selectors = [
             'a[href*=".mp4"]',
             'a[href*="/download"]',
@@ -74,13 +97,6 @@ const RECU_CONFIG = {
             const u = el.href || el.dataset.downloadUrl || el.dataset.url || el.getAttribute('data-href') || '';
             if (u && /^https?:/i.test(u) && /\.mp4(?:[?#]|$)/i.test(u)) return u;
             if (u && /^https?:/i.test(u) && /\/download/i.test(u)) return u;
-          }
-          // Tekstuele Download-knop: scan alle <a> en <button> die "Download" zeggen
-          const candidates = [...document.querySelectorAll('a, button')]
-            .filter((el) => /\bdownload\b/i.test((el.textContent || '').trim()));
-          for (const el of candidates) {
-            const u = el.href || el.dataset.downloadUrl || el.dataset.url || el.getAttribute('data-href') || '';
-            if (u && /^https?:/i.test(u)) return u;
           }
           return '';
         }
@@ -103,8 +119,15 @@ const RECU_CONFIG = {
           const h1 = document.querySelector('h1, .video-title');
           const title = (h1 && h1.textContent || document.title || '').trim() || `recu_${window.location.pathname.split('/').filter(Boolean).join('_')}`;
           const pageUrl = window.location.href.split('#')[0];
+          // Filename voor browser.downloads.download — channel/title als folder/naam.
+          // Sanitize: geen path-separators of speciale tekens.
+          const safeChan = (channel || 'recu').replace(/[\/\\:*?"<>|]/g, '_').slice(0, 60);
+          const safeTitle = String(title).replace(/[\/\\:*?"<>|]/g, '_').slice(0, 80) || 'video';
+          const videoId = (window.location.pathname.match(/\/video\/(\d+)/) || [])[1] || '';
+          const filename = `webdl/recu/${safeChan}/${safeTitle}${videoId ? '_' + videoId : ''}.mp4`;
           return {
             url: downloadUrl,
+            filename,
             metadata: {
               platform: 'recu',
               channel: channel || 'recu',

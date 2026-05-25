@@ -50,9 +50,31 @@ window.WEBDL_SITES['footstockings.com'] = {
   detectMaxPage(doc) {
     const root = doc || document;
     let max = 1;
+    // Variant 1 (oud): data-parameters="from_videos+from_albums:N"
     for (const a of root.querySelectorAll('a[data-parameters]')) {
       const m = (a.getAttribute('data-parameters') || '').match(/from_videos\+from_albums:(\d+)/);
       if (m) { const n = parseInt(m[1], 10); if (n > max) max = n; }
+    }
+    // Variant 2: <a href> met ?from_videos=NN of ?from_albums=NN
+    for (const a of root.querySelectorAll('a[href*="from_videos="], a[href*="from_albums="]')) {
+      const href = a.getAttribute('href') || '';
+      const m = href.match(/from_(?:videos|albums)=(\d+)/);
+      if (m) { const n = parseInt(m[1], 10); if (n > max) max = n; }
+    }
+    // Variant 3: footstockings huidige stijl — <a href="#videos">02</a>, <a>03</a>...
+    // page-nummer staat in textContent. JS-driven pagination, geen page in URL.
+    // Scope: alleen <a>'s in een pagination-container om random "08" cijfers
+    // op de page te vermijden.
+    const paginationContainers = root.querySelectorAll(
+      '.pagination, .pages, .pagi, nav.pagination, ul.pagination, div[class*="pagi"]'
+    );
+    const seedRoots = paginationContainers.length ? paginationContainers : [root];
+    for (const cont of seedRoots) {
+      for (const a of cont.querySelectorAll('a')) {
+        const txt = (a.textContent || '').trim();
+        const m = txt.match(/^0?(\d{1,4})$/);
+        if (m) { const n = parseInt(m[1], 10); if (n > max && n < 10000) max = n; }
+      }
     }
     return max;
   },

@@ -148,13 +148,16 @@
     return new DOMParser().parseFromString(await res.text(), 'text/html');
   }
 
-  async function collectAllPages(baseHref) {
+  async function collectAllPages(baseHref, onProgress) {
     const maxPage = detectMaxPage(document) || Infinity;
     const allSeen = new Set();
     const allItems = [];
     let consecutiveEmpty = 0;
     let pagesScanned = 0;
     for (let page = 1; page <= maxPage; page++) {
+      if (typeof onProgress === 'function') {
+        try { onProgress({ page, maxPage, items: allItems.length, phase: 'fetching' }); } catch (_) {}
+      }
       let doc;
       try {
         doc = page === 1 ? document : await fetchPageDoc(cfg.paginationUrl(baseHref, page));
@@ -174,6 +177,9 @@
       let added = 0;
       for (const it of found) {
         if (!allSeen.has(it.url)) { allSeen.add(it.url); allItems.push(it); added++; }
+      }
+      if (typeof onProgress === 'function') {
+        try { onProgress({ page, maxPage, items: allItems.length, phase: 'collected', added }); } catch (_) {}
       }
       // Geen nieuwe items op deze pagina = pagination werkt niet (zelfde page
       // returned). 2× achter elkaar = stoppen, anders oneindig loop op sites
@@ -325,6 +331,27 @@
   async function postOne(item, channel) {
     const t = item.type;
     const body = t.buildBody(item.url, channel);
+    // 2026-05-24: voor sites achter Cloudflare (recu.me) gebruikt de itemType
+    // useBrowserDownload:true — extension downloadt zelf via background.
+    if (t.useBrowserDownload === true && body && body.url) {
+      try {
+        const result = await browser.runtime.sendMessage({
+          action: 'browserDownload',
+          payload: {
+            url: body.url,
+            filename: body.filename || null,
+            metadata: body.metadata || {},
+          },
+        });
+        return { ok: !!(result && result.success), ...result };
+      } catch (e) {
+        return { ok: false, error: String(e && e.message || e) };
+      }
+    }
+    // Body kan een sentinel-error object terugsturen
+    if (body && body.__webdlError) {
+      return { ok: false, error: body.__webdlError };
+    }
     try {
       const res = await fetch(`${SERVER}${t.endpoint}`, {
         method: 'POST',
@@ -403,7 +430,10 @@
     btn.textContent = '⏳ Pages scannen…';
     let items, pagesScanned, maxPage;
     try {
-      ({ items, pagesScanned, maxPage } = await collectAllPages(baseHref));
+      ({ items, pagesScanned, maxPage } = await collectAllPages(baseHref, (p) => {
+        const total = Number.isFinite(p.maxPage) ? `/${p.maxPage}` : '';
+        btn.textContent = `⏳ page ${p.page}${total} · ${p.items} items`;
+      }));
     } catch (e) {
       btn.textContent = `✗ Scan fout: ${e.message}`;
       setTimeout(() => { btn.disabled = false; btn.textContent = original; STATE.busy = false; }, 5000);
@@ -544,7 +574,8 @@
     });
 
     const header = document.createElement('div');
-    header.textContent = `⚡ WEBDL · ${cfg.label} · jobs-mode`;
+    const _ver = (() => { try { return (browser.runtime.getManifest() || {}).version || ''; } catch (_) { return ''; } })();
+    header.textContent = `⚡ WEBDL${_ver ? ' v' + _ver : ''} · ${cfg.label} · jobs-mode`;
     Object.assign(header.style, {
       fontSize: '11px', opacity: '0.7', padding: '2px 4px',
       textTransform: 'uppercase', letterSpacing: '0.5px',
@@ -571,15 +602,127 @@
 
   // ───────────────────────────────────────────────────────────────────
 
+  // 2026-05-25: persist panel-state (collapsed + custom positie) per host
+  // zodat refresh hetzelfde resultaat geeft. User-klacht: "panel staat altijd
+  // in de weg en springt terug bij refresh".
+  const PANEL_STATE_KEY = `webdl_panel_state_${window.location.hostname}`;
+  function loadPanelState() {
+    try { return JSON.parse(localStorage.getItem(PANEL_STATE_KEY) || '{}'); }
+    catch (_) { return {}; }
+  }
+  function savePanelState(patch) {
+    try {
+      const cur = loadPanelState();
+      const next = { ...cur, ...patch };
+      localStorage.setItem(PANEL_STATE_KEY, JSON.stringify(next));
+    } catch (_) {}
+  }
+
+  // Wikkel een panel-element in collapse + drag-functionaliteit.
+  // Drukt panel terug naar een tiny ⚡ badge bij collapse. State per host
+  // bewaard zodat refresh dezelfde toestand geeft.
+  function wrapPanelControls(panel, label) {
+    const state = loadPanelState();
+    // Positie restore
+    if (state.left != null && state.top != null) {
+      panel.style.left = state.left + 'px';
+      panel.style.top = state.top + 'px';
+      panel.style.right = 'auto';
+    }
+
+    // Collapse-knop in header
+    const ctrl = document.createElement('div');
+    Object.assign(ctrl.style, {
+      position: 'absolute', top: '4px', right: '4px',
+      display: 'flex', gap: '4px', fontSize: '12px',
+    });
+    const collapseBtn = document.createElement('span');
+    collapseBtn.textContent = '−';
+    collapseBtn.title = 'Inklappen (klik op badge om weer te tonen)';
+    Object.assign(collapseBtn.style, {
+      cursor: 'pointer', padding: '0 6px', borderRadius: '3px',
+      background: 'rgba(255,255,255,0.1)', userSelect: 'none',
+    });
+    collapseBtn.addEventListener('click', (e) => { e.stopPropagation(); collapse(); });
+    ctrl.appendChild(collapseBtn);
+    panel.style.position = 'fixed';
+    panel.style.paddingTop = '20px';
+    panel.appendChild(ctrl);
+
+    // Drag-handle: het panel zelf is sleepbaar
+    let dragStart = null;
+    panel.addEventListener('mousedown', (e) => {
+      if (e.target.tagName === 'BUTTON' || e.target.tagName === 'SPAN') return;
+      const r = panel.getBoundingClientRect();
+      dragStart = { x: e.clientX, y: e.clientY, l: r.left, t: r.top };
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', (e) => {
+      if (!dragStart) return;
+      const newL = dragStart.l + (e.clientX - dragStart.x);
+      const newT = dragStart.t + (e.clientY - dragStart.y);
+      panel.style.left = newL + 'px';
+      panel.style.top = newT + 'px';
+      panel.style.right = 'auto';
+    });
+    document.addEventListener('mouseup', () => {
+      if (dragStart) {
+        const r = panel.getBoundingClientRect();
+        savePanelState({ left: r.left, top: r.top });
+      }
+      dragStart = null;
+    });
+
+    function collapse() {
+      panel.style.display = 'none';
+      const badge = document.createElement('div');
+      badge.id = 'webdl-site-badge';
+      badge.title = `WEBDL · ${label} (klik om uit te klappen)`;
+      Object.assign(badge.style, {
+        position: 'fixed', top: '8px', right: '8px',
+        zIndex: '2147483646',
+        width: '28px', height: '28px',
+        borderRadius: '50%',
+        background: 'rgba(20,20,30,0.85)', color: '#0ea5e9',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        fontSize: '14px', cursor: 'pointer',
+        boxShadow: '0 2px 6px rgba(0,0,0,0.4)',
+      });
+      const st = loadPanelState();
+      if (st.badgeLeft != null && st.badgeTop != null) {
+        badge.style.left = st.badgeLeft + 'px';
+        badge.style.top = st.badgeTop + 'px';
+        badge.style.right = 'auto';
+      }
+      badge.textContent = '⚡';
+      badge.addEventListener('click', () => {
+        badge.remove();
+        panel.style.display = 'flex';
+        savePanelState({ collapsed: false });
+      });
+      document.body.appendChild(badge);
+      savePanelState({ collapsed: true });
+    }
+
+    if (state.collapsed) {
+      // Wacht 1 tick zodat panel in DOM zit
+      setTimeout(collapse, 0);
+    }
+  }
+
   function renderPanel() {
     const existing = document.getElementById('webdl-site-panel');
     if (existing) existing.remove();
+    const existingBadge = document.getElementById('webdl-site-badge');
+    if (existingBadge) existingBadge.remove();
     const type = pageType();
     if (!type) return;
 
     // Jobs-mode: nieuwe stack
     if (cfg.useJobsApi) {
       renderJobsPanel(type);
+      const p = document.getElementById('webdl-site-panel');
+      if (p) wrapPanelControls(p, `${cfg.label} · jobs`);
       return;
     }
 
@@ -597,7 +740,8 @@
     });
 
     const header = document.createElement('div');
-    header.textContent = `⚡ WEBDL · ${cfg.label}`;
+    const _ver = (() => { try { return (browser.runtime.getManifest() || {}).version || ''; } catch (_) { return ''; } })();
+    header.textContent = `⚡ WEBDL${_ver ? ' v' + _ver : ''} · ${cfg.label}`;
     Object.assign(header.style, {
       fontSize: '11px', opacity: '0.7', padding: '2px 4px',
       textTransform: 'uppercase', letterSpacing: '0.5px',
