@@ -456,7 +456,7 @@
       'vBtnReverse','vSpeedSelect','vSpeedDown','vSpeedUp',
       'vBtnMuteBottom','vBottomVol','vBtnMainProgress','vBtnFullscreen',
       'vBtnTags','vBtnLog','vBtnLocateGallery','vClose',
-      'vSlideshow2','vRandom2',
+      'vSlideshow2','vRandom2','vSlideshowSec2','vVideoWait2',
       'vStage','vContent','vPrev','vNext','vHudLeft','vHudRight',
       'vProgressBar','vProgressFill','vProgressHandle',
       'vBottomControls','vBtnPlayPause','vTimeLabel','vBtnRotateBottom','vBtnRotateStage','vBtnCaptureStage',
@@ -776,6 +776,10 @@
     if (el.vVideoWait) {
       el.vVideoWait.textContent = `⏳ Wacht: ${vs.videoWait ? 'aan' : 'uit'}`;
       el.vVideoWait.classList.toggle('active', vs.videoWait);
+    }
+    if (el.vVideoWait2) {
+      el.vVideoWait2.textContent = `⏳ Wacht: ${vs.videoWait ? 'aan' : 'uit'}`;
+      el.vVideoWait2.classList.toggle('active', vs.videoWait);
     }
     if (el.vChannelScope) {
       const all = vs.channelScope === 'all';
@@ -3882,6 +3886,7 @@
 
     el.vSlideshowSec.addEventListener('change', () => {
       vs.slideshowSec = Number(el.vSlideshowSec.value);
+      if (el.vSlideshowSec2) el.vSlideshowSec2.value = el.vSlideshowSec.value;
     });
 
     el.vWrap.addEventListener('click', () => {
@@ -3930,6 +3935,19 @@
         el.vRandom.textContent = `🔀 Rand: ${vs.random ? 'aan' : 'uit'}`;
         el.vRandom.classList.toggle('active', vs.random);
         syncTopbarButtons();
+      });
+    }
+    // 2026-05-25: topbar slideshow-interval + video-wait knoppen spiegelen sidebar
+    if (el.vSlideshowSec2) {
+      el.vSlideshowSec2.addEventListener('change', () => {
+        vs.slideshowSec = Number(el.vSlideshowSec2.value);
+        if (el.vSlideshowSec) el.vSlideshowSec.value = el.vSlideshowSec2.value;
+      });
+    }
+    if (el.vVideoWait2) {
+      el.vVideoWait2.addEventListener('click', () => {
+        vs.videoWait = !vs.videoWait;
+        syncViewerModeControls();
       });
     }
 

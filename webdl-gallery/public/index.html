@@ -157,7 +157,18 @@
           <button id="vBtnHelp" class="vtop-btn" title="Sneltoetsen & bediening (?)">❓</button>
           <input id="vZoomRange" class="vzoom-hidden" type="range" min="100" max="600" step="10" value="100" aria-hidden="true" tabindex="-1">
           <button id="vZoomReset" class="vzoom-hidden" aria-hidden="true" tabindex="-1">Reset</button>
-          <button id="vSlideshow2" class="vzoom-hidden" aria-hidden="true" tabindex="-1">▶ Dia</button>
+          <button id="vSlideshow2" class="vtop-btn" title="Slideshow aan/uit">▶ Dia</button>
+          <select id="vSlideshowSec2" class="vtop-btn" title="Interval slideshow" style="padding:2px 4px;">
+            <option value="2">2s</option>
+            <option value="4" selected>4s</option>
+            <option value="7">7s</option>
+            <option value="10">10s</option>
+            <option value="15">15s</option>
+            <option value="30">30s</option>
+            <option value="60">1m</option>
+            <option value="300">5m</option>
+          </select>
+          <button id="vVideoWait2" class="vtop-btn active" title="Videos uitspelen of meteen door">⏳ Wacht: aan</button>
           <button id="vRandom2" class="vtop-btn" title="Random navigatie aan/uit (R)">🔀 Rand</button>
           <button id="vClose" class="vtop-close" title="Viewer sluiten (Esc)">✕</button>
         </div>
