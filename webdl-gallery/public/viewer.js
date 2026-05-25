@@ -1159,15 +1159,12 @@
     return navChain;
   }
 
-  // 2026-05-25: bij random navigatie ALLE items van de current filter laden
-  // (was 300-cap → kleine subset van grote filter-set). loadMoreViewerItems
-  // pakt 100 per cycle; doe het door tot vs.done. Maximaal 50 cycles
-  // (= 5000 items) als safety-net voor heel grote filters.
+  // 2026-05-25: bij random navigatie ALLE items van de current filter laden,
+  // geen cap. Bij grote filters kan dit even duren (per cycle 100 items),
+  // maar random pickt dan écht uit het volledige resultaat.
   async function ensureAllItemsForRandom() {
-    let cycles = 0;
-    while (!vs.done && cycles < 50) {
+    while (!vs.done) {
       const more = await loadMoreViewerItems();
-      cycles++;
       if (!more) break;
     }
   }
