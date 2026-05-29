@@ -470,7 +470,6 @@
             total += 1;
             const tname = (it.type && it.type.name) || 'item';
             byType[tname] = (byType[tname] || 0) + 1;
-            // korte hint voor user: laatste item dat NU verstuurd wordt
             const lbl = String(it.url || '').split('/').filter(Boolean).pop() || '';
             lastQueued = `→ ${tname}: ${lbl.slice(0, 30)}`;
             btn.textContent = `⏳ p${pagesScanned || 1}${Number.isFinite(maxPage) ? '/' + maxPage : ''} · ${total}q${typeBreakdown()} · ${nieuw}n ${dup}d ${fail}f · ${lastQueued}`;
@@ -479,6 +478,10 @@
               if (res.duplicate) dup += 1; else nieuw += 1;
             } else {
               fail += 1;
+              // 2026-05-30: laatste-fout zichtbaar in counter zodat user weet WAAROM.
+              // Duplicates komen NIET hier — die zitten in res.duplicate met res.ok=true.
+              const errSrc = (res && (res.error || res.text || res.message)) || 'unknown';
+              lastQueued = `⚠ ${String(errSrc).slice(0, 50)}`;
             }
           }
         }
