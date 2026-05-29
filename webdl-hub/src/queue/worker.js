@@ -638,11 +638,19 @@ async function syncToGallery(job, outputFiles, logger, repo) {
       const forumThreadChannel = forumInfo?.sourceThreadTitle
         ? String(forumInfo.sourceThreadTitle).trim().toLowerCase()
         : '';
+      // 2026-05-30 A.7-fix: voor YouTube wint fileInfo.channel altijd over
+      // forumThreadChannel/batch-titel. Was: forumThreadChannel (lowercase
+      // "a stunning boat trip - aegean sea coasts") overschreed fileInfo.channel
+      // ("KingGreatWhiteShark" uit info.json data.channel). Resultaat: alle
+      // YT-batch items uit één kanaal kregen de playlist-titel als channel.
+      const fileInfoIsYouTube = String(fileInfo?.platform || '').toLowerCase().startsWith('youtube');
       let channel = isTelegram
         ? (fileInfo?.channel || job.options?.channel || 'telegram')
-        : (forumThreadChannel || (pinnedVipergirls
-          ? pinnedTarget.channel
-          : (fileInfo?.channel || job.options?.channel || job.options?.playlistTitle || '')));
+        : (fileInfoIsYouTube && fileInfo?.channel
+          ? fileInfo.channel
+          : (forumThreadChannel || (pinnedVipergirls
+            ? pinnedTarget.channel
+            : (fileInfo?.channel || job.options?.channel || job.options?.playlistTitle || ''))));
       let realPlatform = isTelegram
         ? 'telegram'
         : (pinnedVipergirls
