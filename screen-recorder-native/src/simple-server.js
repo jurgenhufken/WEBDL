@@ -1541,6 +1541,17 @@ async function resolveKeep2ShareWebDirectUrl(input, metadata = null) {
 async function resolveKeep2ShareDirectUrl(input, metadata = null) {
   const fileId = keep2ShareFileIdFromUrl(input);
   if (!fileId) return { url: '', error: 'Keep2Share file-id ontbreekt in URL' };
+
+  // 2026-05-30 Spoor 1.5: web-cookie flow EERST proberen (bewezen werkend voorheen
+  // per vorige sessie). JWT-token-flow valt vaak met "File not found" terug op
+  // verlopen/geweigerde tokens. Web-first bespaart die round-trip.
+  // Opt-out via env K2S_AUTH_MODE=token om de oude JWT-eerst flow te herstellen.
+  if (process.env.K2S_AUTH_MODE !== 'token') {
+    const webFirst = await resolveKeep2ShareWebDirectUrl(input, metadata);
+    if (webFirst.url) return webFirst;
+    // Web-fallback faalde — sla door naar JWT-flow als laatste poging.
+  }
+
   const authToken = await getKeep2ShareAuthToken();
   let accessTokenSource = 'env';
   let accessToken = String(
@@ -6117,7 +6128,15 @@ async function runDownloadScheduler() {
 }
 
 let autoRehydrateTimer = null;
+// 2026-05-29: idempotent back-off voor auto-rehydrate. Vorige bug: setInterval(5s)
+// triggerde elke 5s een 250-rows DB-query + 250x JSON.parse(metadata), zelfs als
+// alle 250 rows al in activeProcesses/queuedJobs zaten (loaded=0). Resultaat:
+// hot-loop, heap groeide 27MB/min, OOM-crash op 8GB en op 16GB heap.
+// Fix: tel consecutive zero-loads, skip ticks met exponentiele back-off.
+let consecutiveZeroLoads = 0;
+let nextRehydrateAllowedAt = 0;
 function shouldAutoRehydrate() {
+  if (Date.now() < nextRehydrateAllowedAt) return false;
   const heavyLimit = Math.max(0, HEAVY_DOWNLOAD_CONCURRENCY);
   const lightLimit = Math.max(0, LIGHT_DOWNLOAD_CONCURRENCY);
   const batchLimit = Math.max(0, BATCH_DOWNLOAD_CONCURRENCY);
@@ -6176,16 +6195,41 @@ function scheduleAutoRehydrate() {
       const needBatch = batchLimit > 0 && queuedBatch.length === 0 && activeLaneCount('batch') < batchLimit;
       if (!needHeavy && !needLight && !needBatch) return;
 
-      const rows = await db.prepare(
-        `SELECT id, url, source_url, platform, channel, title, metadata, status
-         FROM downloads
-         WHERE status = 'pending'
+      // 2026-05-30 Spoor 1.2 v3: starvation-fix via inline-literal IN-clause.
+      // v2 met $1-placeholders crashte ("there is no parameter $1") — db.prepare
+      // hier accepteert geen parameter-binding voor IN-lijst. Nu: hardcoded inline
+      // SQL-string van quoted-literals. Garandeert lane-balance: 125 light-platforms
+      // + 125 heavy-platforms parallel opgehaald, geen wederzijdse starvation.
+      const LIGHT_PLATFORM_HINTS = [
+        'footfetishforum','forum-area','imagetwist','imagebam','imgbox','imagevenue','imgchest','imgvb',
+        'imx','vipr','turboimagehost','imgkiwi','pixhost','postimg','bunkr','jpg','aznudefeet','pornpics',
+        'kinky','wikifeet','wikifeetx','elitebabes','erome','keep2share','twitter',
+        'vipergirls','phun','amateurvoyeurforum','pictoa','imagefap',
+      ];
+      const lightLiteral = LIGHT_PLATFORM_HINTS.map(p => `'${p}'`).join(',');
+      const baseFilter = `status = 'pending'
            AND url NOT LIKE 'recording:%'
            AND COALESCE(CAST(metadata AS TEXT), '') NOT LIKE '%"webdl_kind":"recording"%'
-           AND COALESCE(CAST(metadata AS TEXT), '') NOT LIKE '%"webdl_kind": "recording"%'
-         ORDER BY COALESCE(priority, 0) DESC, id ASC
-         LIMIT 250`
-      ).all();
+           AND COALESCE(CAST(metadata AS TEXT), '') NOT LIKE '%"webdl_kind": "recording"%'`;
+      const [lightRowsRaw, heavyRowsRaw] = await Promise.all([
+        db.prepare(
+          `SELECT id, url, source_url, platform, channel, title, metadata, status
+           FROM downloads
+           WHERE ${baseFilter}
+             AND lower(COALESCE(platform,'')) IN (${lightLiteral})
+           ORDER BY COALESCE(priority, 0) DESC, id ASC
+           LIMIT 125`
+        ).all(),
+        db.prepare(
+          `SELECT id, url, source_url, platform, channel, title, metadata, status
+           FROM downloads
+           WHERE ${baseFilter}
+             AND lower(COALESCE(platform,'')) NOT IN (${lightLiteral})
+           ORDER BY COALESCE(priority, 0) DESC, id ASC
+           LIMIT 125`
+        ).all(),
+      ]);
+      const rows = [...(lightRowsRaw || []), ...(heavyRowsRaw || [])];
       if (!rows || rows.length === 0) return;
       console.log(`🔁 Auto-rehydrate: loading ${rows.length} pending items into queue...`);
       let loaded = 0;
@@ -6226,6 +6270,19 @@ function scheduleAutoRehydrate() {
       if (loaded > 0) {
         console.log(`🔁 Auto-rehydrate: ${loaded} items geladen, scheduler starten...`);
         runDownloadSchedulerSoon();
+        consecutiveZeroLoads = 0;
+        nextRehydrateAllowedAt = 0;
+      } else {
+        // Geen items geladen — alle 250 zaten al in active/queued/starting.
+        // Verhoog back-off om hot-loop te voorkomen (5s → 30s → 2m → 5m → 5m max).
+        consecutiveZeroLoads += 1;
+        const backoffMs = consecutiveZeroLoads === 1 ? 30 * 1000
+                       : consecutiveZeroLoads === 2 ? 2 * 60 * 1000
+                       : 5 * 60 * 1000;
+        nextRehydrateAllowedAt = Date.now() + backoffMs;
+        if (consecutiveZeroLoads <= 3) {
+          console.log(`🔁 Auto-rehydrate: 0 nieuwe items in ${rows.length} pending (alle al in queue/active). Back-off ${Math.round(backoffMs/1000)}s.`);
+        }
       }
     } catch (e) {
       console.error('Auto-rehydrate error:', e.message);

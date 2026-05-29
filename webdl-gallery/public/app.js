@@ -174,7 +174,7 @@
     }
     const title = String(it && it.title || '').trim();
     if (title && title.toLowerCase() !== 'untitled' && !looksLikeFilenameTitle(title)) return title;
-    const pageTitle = String(it && (it.source_thread_title || it.channel) || '').trim();
+    const pageTitle = String(it && (it.source_thread_title || humanizeChannelKey(it.channel)) || '').trim();
     if (pageTitle && pageTitle.toLowerCase() !== 'unknown' && !looksLikeFilenameTitle(pageTitle)) return pageTitle;
     return '';
   }
@@ -360,7 +360,7 @@
     const title = escHtml(titleText);
     const sourceSite = String(it.source_site || '').trim();
     const channel = (it.channel && it.channel !== 'unknown') ? String(it.channel) : '';
-    const pageTitle = String(it.source_thread_title || channel || '').trim();
+    const pageTitle = String(it.source_thread_title || humanizeChannelKey(channel) || '').trim();
     const subSource = shouldShowSourceSite(platformText, sourceSite) ? (canonicalSiteLabel(sourceSite) || sourceSite) : '';
     const sub = pageTitle && pageTitle !== titleText
       ? pageTitle
@@ -922,6 +922,21 @@
     return `channel:${enc(platform)}:${enc(channel)}`;
   }
 
+  // 2026-05-30 Spoor 0.2: thread_<id>_<slug> → "Slug In Titlecase".
+  // Lost B-rommel "thread namen zijn codes" op zonder server- of DB-wijziging.
+  // Channels zonder thread_-prefix blijven onveranderd (telegram chat_, forum_, etc.).
+  function humanizeChannelKey(channel) {
+    if (!channel) return '';
+    const s = String(channel);
+    const m = s.match(/^thread_\d+_(.+)$/);
+    if (!m || !m[1]) return s;
+    return m[1]
+      .replace(/-/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .replace(/\b\w/g, (c) => c.toUpperCase());
+  }
+
   // Platforms die altijd bovenaan de tree komen, ongeacht count.
   const PINNED_PLATFORMS = ['telegram'];
   function buildSourceTreeData(total) {
@@ -962,9 +977,10 @@
           const channel = String(channelRow.channel);
           // Strip 'site:' prefix bij weergave (intern blijft 't channel-naam
           // voor filtering, getoond als 'via X' label).
+          // 2026-05-30: thread_<id>_<slug> wordt leesbare titlecase via humanizeChannelKey.
           const displayLabel = channel.startsWith('site:')
             ? `via ${channel.slice(5)}`
-            : channel;
+            : humanizeChannelKey(channel);
           return {
             id: sourceTreeNodeId('channel', platform, channel),
             text: `${displayLabel} (${countForCurrentMediaType(channelRow)})`,

@@ -1529,8 +1529,9 @@ function bind() {
     });
   });
 
-  // Auto-refresh
-  setInterval(() => refreshCurrentSource().catch(() => {}), 5000);
+  // Auto-refresh — 2026-05-30 Spoor 0.3: 5s→2s zodat post-actie UI sneller bijwerkt
+  // (WebSocket geeft live state, deze poll is fallback voor sync van currentSource)
+  setInterval(() => refreshCurrentSource().catch(() => {}), 2000);
 }
 
 (async function boot() {

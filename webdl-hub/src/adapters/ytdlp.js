@@ -334,9 +334,19 @@ function plan(url, opts = {}) {
       idleTimeoutMs: Number.parseInt(process.env.WEBDL_DIRECT_MEDIA_IDLE_TIMEOUT_MS || String(90 * 1000), 10),
     };
   }
-  const quality = opts.quality || (isMergeVideoUrl(plannedUrl) ? 'bv*+ba/best' : 'best');
   const isYoutube = /(?:youtube\.com|youtu\.be)/i.test(String(plannedUrl || ''));
   const isTikTok = isTikTokUrl(plannedUrl);
+  // 2026-05-30 Spoor A.8: Jürgen heeft YouTube Premium → optimale kwaliteit garanderen.
+  // - YouTube: cap 4K (height<=2160) zodat 8K-randgevallen geen schijf vol pompen,
+  //   maar 4K WEL wordt gepakt als beschikbaar. Premium-streams (hogere bitrate
+  //   1080p/4K) worden via cookies-from-browser herkend en gerouteerd.
+  // - Format-sort: prefer hoogste resolutie, dan bitrate, dan moderne codecs
+  //   (AV1 > VP9 > H.264, opus > m4a). yt-dlp 2024+ ondersteunt dit native.
+  // - Andere merge-hosts: bv*+ba/best blijft (vimeo etc. hebben geen Premium-tier).
+  const quality = opts.quality
+    || (isYoutube ? 'bv*[height<=2160]+ba/b'
+        : isMergeVideoUrl(plannedUrl) ? 'bv*+ba/best'
+        : 'best');
   const args = [
     '--no-colors',
     '--newline',                // progress per regel i.p.v. \r-updates
@@ -345,10 +355,15 @@ function plan(url, opts = {}) {
     '-f', quality,
     '-o', OUTPUT_TEMPLATE,
     '--ffmpeg-location', FFMPEG_LOCATION,  // Fix postprocessing / audio merge
-    '--cookies-from-browser', 'firefox',   // Fix age verification
+    '--cookies-from-browser', 'firefox',   // Fix age verification + YT Premium auth
     '--write-info-json',                   // Metadata voor gallery sync
     '--no-playlist',                       // NOOIT een hele playlist in 1 job
   ];
+  if (isYoutube) {
+    // Prefereer hogere resolutie, dan hogere bitrate (Premium HD-streams),
+    // dan moderne codecs voor efficiëntie + filesize.
+    args.push('--format-sort', 'res,br,codec:av01:vp9.2:vp9:avc1,acodec:opus:m4a');
+  }
   if (isTikTok) {
     args.push(
       '--impersonate', process.env.WEBDL_TIKTOK_IMPERSONATE || 'chrome',

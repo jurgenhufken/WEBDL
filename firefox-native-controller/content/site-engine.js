@@ -652,9 +652,14 @@
     // Drag-handle: het panel zelf is sleepbaar
     let dragStart = null;
     panel.addEventListener('mousedown', (e) => {
-      if (e.target.tagName === 'BUTTON' || e.target.tagName === 'SPAN') return;
+      // 2026-05-30: was `=== 'SPAN'` blokkeerde ALLE drag — paneel-header bevat
+      // span-elementen voor label/icoon (niet-interactief). Skip alleen echt
+      // interactieve elementen zodat drag werkt op header + tussen-knoppen-witruimte.
+      const tag = e.target.tagName;
+      if (tag === 'BUTTON' || tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || tag === 'A') return;
       const r = panel.getBoundingClientRect();
       dragStart = { x: e.clientX, y: e.clientY, l: r.left, t: r.top };
+      panel.style.cursor = 'grabbing';
       e.preventDefault();
     });
     document.addEventListener('mousemove', (e) => {
@@ -669,6 +674,7 @@
       if (dragStart) {
         const r = panel.getBoundingClientRect();
         savePanelState({ left: r.left, top: r.top });
+        panel.style.cursor = '';
       }
       dragStart = null;
     });

@@ -157,7 +157,7 @@ const MEDIA_EXT_SQL = MEDIA_EXTS.map(e => `'${e}'`).join(',');
 const IMAGE_EXT_SQL = IMAGE_EXTS.map(e => `'${e}'`).join(',');
 const VIDEO_EXT_SQL = VIDEO_EXTS.map(e => `'${e}'`).join(',');
 const ACTIVE_DB_STATUSES = ['downloading', 'postprocessing'];
-const HIDDEN_GALLERY_STATUSES = ['pending', 'queued', 'downloading', 'postprocessing', 'superseded'];
+const HIDDEN_GALLERY_STATUSES = ['pending', 'queued', 'downloading', 'postprocessing', 'superseded', 'error', 'cancelled'];
 const HIDDEN_FILE_PARENT_STATUSES = ['pending', 'queued', 'downloading', 'postprocessing', 'cancelled'];
 const KEEP2SHARE_DIR = path.join(BASE_DIR, '_Keep2Share');
 const JDOWNLOADER_CFG_DIR = process.env.JDOWNLOADER_CFG_DIR || path.join(process.env.HOME || '/Users/jurgen', 'Library/Application Support/JDownloader 2/cfg');
@@ -3383,6 +3383,87 @@ app.delete('/api/items/:id/tags/:tagId', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ─── /jobs route: stopgezette/error/superseded items beheer ────────────────
+// Spoor 6A error-classificatie (2026-05-30): clustering via regex op error-veld.
+const ERROR_CLUSTER_SQL = `
+  CASE
+    WHEN error ILIKE '%captcha%' THEN 'captcha_required'
+    WHEN error ILIKE '%Hotlink%' OR error ILIKE '%hotlink%' THEN 'hotlink_protected'
+    WHEN error ILIKE '%Unsupported URL%' THEN 'wrapper_unresolved'
+    WHEN error ILIKE '%Truncated%' OR error ILIKE '%CRC%' OR error ILIKE '%Archive uitpakken%' THEN 'archive_corrupt'
+    WHEN error ILIKE '%Connection reset%' OR error ILIKE '%timeout%' THEN 'network_flaky'
+    WHEN error ILIKE '%404%' OR error ILIKE '%not found%' OR error ILIKE '%File not found%' THEN 'source_or_file_gone'
+    WHEN error ILIKE '%K2S%' THEN 'k2s_auth_or_404'
+    WHEN error ILIKE '%no-duration%' OR error ILIKE '%no-audio%' THEN 'no_audio_or_duration'
+    WHEN error ILIKE '%poster-jpg%' OR error ILIKE '%type-mismatch%' THEN 'type_mismatch'
+    WHEN error ILIKE '%aborted%' OR error ILIKE '%cancel%' THEN 'aborted_or_cancelled'
+    WHEN error ILIKE '%cookie%' OR error ILIKE '%auth%' OR error ILIKE '%token%' THEN 'auth_problem'
+    ELSE 'uncategorized'
+  END
+`;
+
+app.get('/api/jobs/errors/summary', async (_req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT ${ERROR_CLUSTER_SQL} AS cluster,
+             COUNT(*) AS total,
+             COUNT(*) FILTER (WHERE updated_at > NOW() - INTERVAL '1 hour') AS last_hour,
+             COUNT(*) FILTER (WHERE updated_at > NOW() - INTERVAL '24 hours') AS last_day,
+             MAX(updated_at) AS most_recent
+      FROM downloads
+      WHERE status='error' AND error IS NOT NULL AND error<>''
+      GROUP BY 1
+      ORDER BY 2 DESC
+    `);
+    res.json({ clusters: rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/jobs/errors/items', async (req, res) => {
+  try {
+    const cluster = String(req.query.cluster || '').trim();
+    const limit = Math.min(200, Math.max(10, parseInt(req.query.limit || '50', 10) || 50));
+    if (!cluster) return res.status(400).json({ error: 'cluster query param required' });
+    const { rows } = await pool.query(`
+      SELECT id, platform, channel, title, filename, filesize, error, updated_at, url
+      FROM downloads
+      WHERE status='error' AND error IS NOT NULL AND error<>''
+        AND ${ERROR_CLUSTER_SQL} = $1
+      ORDER BY updated_at DESC
+      LIMIT $2
+    `, [cluster, limit]);
+    res.json({ cluster, items: rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/jobs/cancelled', async (req, res) => {
+  try {
+    const limit = Math.min(500, Math.max(10, parseInt(req.query.limit || '100', 10) || 100));
+    const { rows } = await pool.query(`
+      SELECT id, platform, channel, title, filename, filesize, error, updated_at, priority
+      FROM downloads
+      WHERE status='cancelled'
+      ORDER BY updated_at DESC
+      LIMIT $1
+    `, [limit]);
+    res.json({ items: rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/jobs/superseded', async (req, res) => {
+  try {
+    const limit = Math.min(500, Math.max(10, parseInt(req.query.limit || '100', 10) || 100));
+    const { rows } = await pool.query(`
+      SELECT id, platform, channel, title, filename, filesize, error, updated_at
+      FROM downloads
+      WHERE status='superseded'
+      ORDER BY updated_at DESC
+      LIMIT $1
+    `, [limit]);
+    res.json({ items: rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ─── Finder: open bestand in macOS Finder ──────────────────────────────────
 app.post('/api/finder', async (req, res) => {
   try {
@@ -3423,18 +3504,30 @@ const server = app.listen(PORT, () => {
     }, THUMB_WARM_INTERVAL_MS).unref();
   }
   // ─── Auto-invalidate API cache when new completed downloads arrive ─────
+  // 2026-05-30 Spoor 1.1: was 15s invalidate-on-any-change → cache thrashing
+  // tijdens actief downloaden (4-12 completed/min = invalidate elke tick).
+  // Nu: 60s interval + threshold (>= 5 nieuwe items OF >= 90s zonder invalidate)
+  // zodat cache warm blijft tussen batches en UI snel response krijgt.
+  let _lastInvalidateAt = Date.now();
+  const CACHE_INVALIDATE_DELTA_THRESHOLD = 5;
+  const CACHE_INVALIDATE_FORCED_AFTER_MS = 90 * 1000;
   setInterval(async () => {
     try {
       const { rows } = await pool.query(
         "SELECT count(*) AS n FROM downloads WHERE status = 'completed'"
       );
       const n = Number(rows[0].n);
-      if (_lastKnownCompletedCount >= 0 && n !== _lastKnownCompletedCount) {
-        console.log(`[cache-invalidate] completed count changed ${_lastKnownCompletedCount} → ${n}, clearing cache`);
+      const delta = _lastKnownCompletedCount >= 0 ? Math.abs(n - _lastKnownCompletedCount) : 0;
+      const ageMs = Date.now() - _lastInvalidateAt;
+      const shouldInvalidate = delta >= CACHE_INVALIDATE_DELTA_THRESHOLD
+        || (delta > 0 && ageMs >= CACHE_INVALIDATE_FORCED_AFTER_MS);
+      if (_lastKnownCompletedCount >= 0 && shouldInvalidate) {
+        console.log(`[cache-invalidate] +${delta} completed in ${Math.round(ageMs/1000)}s (now ${n}), clearing cache`);
         apiCacheInvalidate();
+        _lastInvalidateAt = Date.now();
       }
       _lastKnownCompletedCount = n;
     } catch (_) {}
-  }, 15000).unref();
+  }, 60000).unref();
 });
 global.__webdlGalleryServer = server;
