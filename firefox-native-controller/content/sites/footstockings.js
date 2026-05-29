@@ -79,6 +79,29 @@ window.WEBDL_SITES['footstockings.com'] = {
         if (m) { const n = parseInt(m[1], 10); if (n > max && n < 10000) max = n; }
       }
     }
+    // 2026-05-30: fallback via "Last"-link tekst — footstockings pagination
+    // toont "First ... 09 10 11 ... Last" en "Last" heeft soms href met page.
+    for (const a of root.querySelectorAll('a')) {
+      const txt = (a.textContent || '').trim().toLowerCase();
+      if (txt !== 'last' && txt !== '»' && txt !== '>>') continue;
+      const href = a.getAttribute('href') || '';
+      const m = href.match(/(?:from_videos|from_albums|page)=(\d+)/i);
+      if (m) { const n = parseInt(m[1], 10); if (n > max) max = n; }
+    }
+    // 2026-05-30 NIEUW: heuristic via pagina-titel "X's Videos (N)" — N is totaal
+    // items, gedeeld door ~30 per page = geschatte max. Pakt het echte aantal
+    // ipv alleen zichtbare pagination-window. Werkt voor /members/ + listings.
+    const bodyText = (root.body?.textContent || root.textContent || '');
+    const itemsPerPage = 30; // footstockings standaard
+    let estMax = 0;
+    for (const m of bodyText.matchAll(/(?:Videos|Albums)\s*\((\d+(?:[\s,]\d+)*)\)/gi)) {
+      const total = parseInt(String(m[1]).replace(/[\s,]/g, ''), 10);
+      if (Number.isFinite(total) && total > 0) {
+        const pages = Math.ceil(total / itemsPerPage);
+        if (pages > estMax) estMax = pages;
+      }
+    }
+    if (estMax > max) max = estMax;
     return max;
   },
 
