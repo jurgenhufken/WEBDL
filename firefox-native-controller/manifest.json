@@ -108,9 +108,12 @@
         "*://*.viper.to/*",
         "*://viper.to/*",
         "*://*.recu.me/*",
-        "*://recu.me/*"
+        "*://recu.me/*",
+        "*://*.chaturbate.com/*",
+        "*://chaturbate.com/*"
       ],
       "js": [
+        "content/sites/chaturbate.js",
         "content/sites/footstockings.js",
         "content/sites/vipergirls.js",
         "content/sites/heavyfetish.js",

@@ -779,6 +779,38 @@
       wrap.appendChild(hint);
     }
 
+    // 2026-05-30: extraButtons support — site-config kan custom action-knoppen
+    // declareren die geen download zijn (bv. "open elders", "open dashboard").
+    // Pattern: cfg.extraButtons = [{ label, color, onClick(ctx) }]
+    // waar ctx = { url, channel, pageType, type }.
+    if (Array.isArray(cfg.extraButtons)) {
+      for (const xb of cfg.extraButtons) {
+        if (!xb || !xb.label || typeof xb.onClick !== 'function') continue;
+        if (xb.match && typeof xb.match === 'function') {
+          try { if (!xb.match(type, window.location.href)) continue; } catch (_) { continue; }
+        }
+        const btn = makeButton(xb.label, xb.color || '#7c3aed', async (b) => {
+          if (STATE.busy) return;
+          STATE.busy = true; b.disabled = true;
+          const orig = b.textContent;
+          try {
+            const ctx = {
+              url: window.location.href.split('#')[0],
+              channel: cfg.deriveChannel(window.location.href),
+              pageType: type,
+            };
+            const r = await xb.onClick(ctx);
+            b.textContent = (r && r.text) || '✓';
+          } catch (e) {
+            b.textContent = '✗ ' + (e && e.message || 'fout');
+          } finally {
+            setTimeout(() => { b.disabled = false; b.textContent = orig; STATE.busy = false; }, 2500);
+          }
+        });
+        wrap.appendChild(btn);
+      }
+    }
+
     document.body.appendChild(wrap);
   }
 
