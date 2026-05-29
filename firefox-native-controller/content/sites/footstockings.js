@@ -7,8 +7,11 @@ window.WEBDL_SITES['footstockings.com'] = {
   pageType(path /*, search */) {
     if (/^\/videos\/\d+\/[^/]+\/?$/.test(path)) return 'single';
     if (/^\/albums\/\d+\/[^/]+\/?$/.test(path)) return 'single';
+    // 2026-05-30: /members/<page>/<username> toegevoegd — gebruiker-pagina
+    // met videos + albums + channels + playlists secties tegelijk.
     const listingPrefixes = ['/search/', '/categories/', '/models/', '/channels/',
-      '/playlists/', '/latest-updates', '/most-popular', '/albums/categories/', '/albums/'];
+      '/playlists/', '/latest-updates', '/most-popular', '/albums/categories/',
+      '/albums/', '/members/'];
     for (const p of listingPrefixes) if (path.startsWith(p)) return 'listing';
     return null;
   },
@@ -83,6 +86,16 @@ window.WEBDL_SITES['footstockings.com'] = {
     try {
       const u = new URL(url, window.location.href);
       const segs = String(u.pathname || '').split('/').filter(Boolean);
+      // 2026-05-30: /members/<page>/<username> → channel = member_<username>
+      // zodat downloads gegroepeerd worden onder de member, niet de
+      // pagina-volgorde.
+      if (segs[0] === 'members' && segs.length >= 3 && segs[2]) {
+        return `member_${segs[2]}`;
+      }
+      if (segs[0] === 'members' && segs.length >= 2 && segs[1]) {
+        // Soms /members/<username> direct zonder page-nummer
+        return `member_${segs[1]}`;
+      }
       if ((segs[0] === 'videos' || segs[0] === 'albums') && segs.length >= 3) return `${segs[0]}_${segs[2]}`;
       if (segs[0] === 'albums' && segs[1] === 'categories' && segs[2]) return `albums_categories_${segs[2]}`;
       if (segs.length >= 2) return `${segs[0]}_${segs[1]}`;
