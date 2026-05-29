@@ -148,7 +148,11 @@
     return new DOMParser().parseFromString(await res.text(), 'text/html');
   }
 
-  async function collectAllPages(baseHref, onProgress) {
+  async function collectAllPages(baseHref, onProgress, onPageItems) {
+    // 2026-05-30 stream-mode: optionele 3e arg `onPageItems(newItems[])` callback
+    // wordt per page aangeroepen met items die NET zijn gevonden + nog niet eerder
+    // gezien. Caller kan dispatchen-tijdens-scan zonder eerst alle pages te wachten.
+    // Backwards compatible — als niet meegegeven blijft oude batch-flow werken.
     const maxPage = detectMaxPage(document) || Infinity;
     const allSeen = new Set();
     const allItems = [];
@@ -175,8 +179,14 @@
       }
       consecutiveEmpty = 0;
       let added = 0;
+      const freshThisPage = [];
       for (const it of found) {
-        if (!allSeen.has(it.url)) { allSeen.add(it.url); allItems.push(it); added++; }
+        if (!allSeen.has(it.url)) { allSeen.add(it.url); allItems.push(it); freshThisPage.push(it); added++; }
+      }
+      if (typeof onPageItems === 'function' && freshThisPage.length) {
+        try { await onPageItems(freshThisPage, { page, maxPage }); } catch (e) {
+          console.warn(`[WEBDL ${cfg.label}] onPageItems page ${page}: ${e.message}`);
+        }
       }
       if (typeof onProgress === 'function') {
         try { onProgress({ page, maxPage, items: allItems.length, phase: 'collected', added }); } catch (_) {}
@@ -418,6 +428,8 @@
     }
     btn.textContent = `✓ ${nieuw} nieuw${dup ? `, ${dup} dup` : ''}, ${fail} fout`;
     setTimeout(() => { btn.disabled = false; btn.textContent = original; STATE.busy = false; }, 8000);
+    // tab mag weer ge-discard na korte tijd zodra resultaat zichtbaar is
+    try { browser.runtime.sendMessage({ action: 'allowAutoDiscard' }).catch(() => {}); } catch (_) {}
   }
 
   async function handleAllPages(btn) {
@@ -427,41 +439,53 @@
     const original = btn.textContent;
     const baseHref = window.location.href.split('#')[0];
     const channel = cfg.deriveChannel(baseHref);
-    btn.textContent = '⏳ Pages scannen…';
-    let items, pagesScanned, maxPage;
+    btn.textContent = '⏳ Start streamen…';
+    // 2026-05-30 Jürgen: voorkom dat Firefox deze tab tijdens scan unloadt
+    try { browser.runtime.sendMessage({ action: 'preventAutoDiscard' }).catch(() => {}); } catch (_) {}
+
+    // 2026-05-30 Jürgen: stream-mode — items direct queuen per page i.p.v.
+    // eerst alle pages scannen + preview-modal. Voor grote scans (3000+ pages)
+    // begint download al na ~5s i.p.v. minuten/uren wachten. Geen preview want
+    // bij "Alle pages" is dat sowieso onpraktisch (1M+ items).
+    let nieuw = 0, dup = 0, fail = 0, total = 0;
+    let pagesScanned, maxPage;
     try {
-      ({ items, pagesScanned, maxPage } = await collectAllPages(baseHref, (p) => {
-        const total = Number.isFinite(p.maxPage) ? `/${p.maxPage}` : '';
-        btn.textContent = `⏳ page ${p.page}${total} · ${p.items} items`;
-      }));
+      ({ pagesScanned, maxPage } = await collectAllPages(
+        baseHref,
+        (p) => {
+          const totLabel = Number.isFinite(p.maxPage) ? `/${p.maxPage}` : '';
+          btn.textContent = `⏳ page ${p.page}${totLabel} · ${total}q · ${nieuw}n ${dup}d ${fail}f`;
+        },
+        async (newItems, info) => {
+          // Per-page direct dispatch. Sequentieel om server niet te overspoelen
+          // bij heavy pages; ~50-100ms per item is acceptabel.
+          for (const it of newItems) {
+            total += 1;
+            const res = await postOne(it, channel);
+            if (res && res.ok && (res.success || res.pid)) {
+              if (res.duplicate) dup += 1; else nieuw += 1;
+            } else {
+              fail += 1;
+            }
+          }
+        }
+      ));
     } catch (e) {
       btn.textContent = `✗ Scan fout: ${e.message}`;
       setTimeout(() => { btn.disabled = false; btn.textContent = original; STATE.busy = false; }, 5000);
-      return;
-    }
-    if (items.length === 0) {
-      btn.textContent = '✗ Geen items gevonden';
-      setTimeout(() => { btn.disabled = false; btn.textContent = original; STATE.busy = false; }, 3000);
+      try { browser.runtime.sendMessage({ action: 'allowAutoDiscard' }).catch(() => {}); } catch (_) {}
       return;
     }
     const maxLabel = Number.isFinite(maxPage) ? `${pagesScanned}/${maxPage}p` : `${pagesScanned}p`;
-    // Preview-modal: user moet expliciet bevestigen voordat queue start
-    btn.textContent = `👁 Preview (${items.length})...`;
-    const selected = await showBatchPreview(items, channel, `Alle pages (${maxLabel})`);
-    if (selected.length === 0) {
-      btn.textContent = '✗ Geannuleerd';
-      setTimeout(() => { btn.disabled = false; btn.textContent = original; STATE.busy = false; }, 2000);
+    if (total === 0) {
+      btn.textContent = '✗ Geen items gevonden';
+      setTimeout(() => { btn.disabled = false; btn.textContent = original; STATE.busy = false; }, 3000);
+      try { browser.runtime.sendMessage({ action: 'allowAutoDiscard' }).catch(() => {}); } catch (_) {}
       return;
     }
-    let nieuw = 0, dup = 0, fail = 0;
-    for (let i = 0; i < selected.length; i++) {
-      btn.textContent = `⏳ ${i + 1}/${selected.length} (${maxLabel})`;
-      const res = await postOne(selected[i], channel);
-      if (res.ok && (res.success || res.pid)) { if (res.duplicate) dup++; else nieuw++; }
-      else fail++;
-    }
-    btn.textContent = `✓ ${nieuw} nieuw${dup ? `, ${dup} dup` : ''}, ${fail} fout (${maxLabel})`;
+    btn.textContent = `✓ ${nieuw} nieuw${dup ? `, ${dup} dup` : ''}${fail ? `, ${fail} fout` : ''} (${maxLabel})`;
     setTimeout(() => { btn.disabled = false; btn.textContent = original; STATE.busy = false; }, 15000);
+    try { browser.runtime.sendMessage({ action: 'allowAutoDiscard' }).catch(() => {}); } catch (_) {}
   }
 
   // ─── Render ────────────────────────────────────────────────────────

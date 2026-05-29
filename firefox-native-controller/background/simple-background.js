@@ -1046,6 +1046,30 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
+  // 2026-05-30 Spoor 3-toolbar (Jürgen): voorkom dat Firefox een tab waarop
+  // een hele-thread / alle-pages scan draait wegontlaadt door auto-tab-discard
+  // (verliest dan poll-loop + paneel-state). Tab blijft vast tot user 'm sluit.
+  if (action === 'preventAutoDiscard' && sender.tab && sender.tab.id != null) {
+    try {
+      browser.tabs.update(sender.tab.id, { autoDiscardable: false })
+        .then(() => sendResponse({ success: true }))
+        .catch((e) => sendResponse({ success: false, error: e && e.message || String(e) }));
+    } catch (e) {
+      sendResponse({ success: false, error: e && e.message || String(e) });
+    }
+    return true; // async response
+  }
+  if (action === 'allowAutoDiscard' && sender.tab && sender.tab.id != null) {
+    try {
+      browser.tabs.update(sender.tab.id, { autoDiscardable: true })
+        .then(() => sendResponse({ success: true }))
+        .catch((e) => sendResponse({ success: false, error: e && e.message || String(e) }));
+    } catch (e) {
+      sendResponse({ success: false, error: e && e.message || String(e) });
+    }
+    return true;
+  }
+
   if (action === 'getStatus') {
     const stale = !lastHeartbeatAt || ((Date.now() - lastHeartbeatAt) > HEARTBEAT_STALE_MS);
     if (!isConnected || stale) {
