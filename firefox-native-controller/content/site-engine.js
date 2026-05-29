@@ -448,19 +448,32 @@
     // begint download al na ~5s i.p.v. minuten/uren wachten. Geen preview want
     // bij "Alle pages" is dat sowieso onpraktisch (1M+ items).
     let nieuw = 0, dup = 0, fail = 0, total = 0;
+    const byType = {};  // { video: N, album: N, image: N } per type-naam
+    let lastQueued = '';  // korte hint voor user — wat werd net gequeued
     let pagesScanned, maxPage;
+    function typeBreakdown() {
+      const parts = Object.entries(byType).map(([n, c]) => {
+        const ic = n === 'video' ? '🎬' : n === 'album' ? '📚' : n === 'image' ? '🖼' : '📄';
+        return `${ic}${c}`;
+      });
+      return parts.length ? ` (${parts.join(' ')})` : '';
+    }
     try {
       ({ pagesScanned, maxPage } = await collectAllPages(
         baseHref,
         (p) => {
           const totLabel = Number.isFinite(p.maxPage) ? `/${p.maxPage}` : '';
-          btn.textContent = `⏳ page ${p.page}${totLabel} · ${total}q · ${nieuw}n ${dup}d ${fail}f`;
+          btn.textContent = `⏳ p${p.page}${totLabel} · ${total}q${typeBreakdown()} · ${nieuw}n ${dup}d ${fail}f${lastQueued ? ' · ' + lastQueued : ''}`;
         },
         async (newItems, info) => {
-          // Per-page direct dispatch. Sequentieel om server niet te overspoelen
-          // bij heavy pages; ~50-100ms per item is acceptabel.
           for (const it of newItems) {
             total += 1;
+            const tname = (it.type && it.type.name) || 'item';
+            byType[tname] = (byType[tname] || 0) + 1;
+            // korte hint voor user: laatste item dat NU verstuurd wordt
+            const lbl = String(it.url || '').split('/').filter(Boolean).pop() || '';
+            lastQueued = `→ ${tname}: ${lbl.slice(0, 30)}`;
+            btn.textContent = `⏳ p${pagesScanned || 1}${Number.isFinite(maxPage) ? '/' + maxPage : ''} · ${total}q${typeBreakdown()} · ${nieuw}n ${dup}d ${fail}f · ${lastQueued}`;
             const res = await postOne(it, channel);
             if (res && res.ok && (res.success || res.pid)) {
               if (res.duplicate) dup += 1; else nieuw += 1;
@@ -483,7 +496,7 @@
       try { browser.runtime.sendMessage({ action: 'allowAutoDiscard' }).catch(() => {}); } catch (_) {}
       return;
     }
-    btn.textContent = `✓ ${nieuw} nieuw${dup ? `, ${dup} dup` : ''}${fail ? `, ${fail} fout` : ''} (${maxLabel})`;
+    btn.textContent = `✓ ${nieuw} nieuw${typeBreakdown()}${dup ? `, ${dup} dup` : ''}${fail ? `, ${fail} fout` : ''} (${maxLabel})`;
     setTimeout(() => { btn.disabled = false; btn.textContent = original; STATE.busy = false; }, 15000);
     try { browser.runtime.sendMessage({ action: 'allowAutoDiscard' }).catch(() => {}); } catch (_) {}
   }

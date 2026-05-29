@@ -30,9 +30,39 @@ window.WEBDL_SITES['sexygirlspics.com'] = {
     if (page <= 1) return baseHref;
     try {
       const u = new URL(baseHref, window.location.href);
-      u.searchParams.set('page', String(page));
+      // 2026-05-30: sexygirlspics gebruikt /page/N/ path-based pagination
+      // op search/category-pagina's. Strip eventuele bestaande /page/X/ en
+      // append /page/N/ aan pathname. Query (search-term) blijft staan.
+      const cleanPath = u.pathname.replace(/\/page\/\d+\/?$/, '').replace(/\/+$/, '');
+      u.pathname = `${cleanPath}/page/${page}/`;
       return u.toString();
     } catch (_) { return baseHref; }
+  },
+
+  // 2026-05-30: detectMaxPage ontbrak — defaultDetectMaxPage gaf Infinity,
+  // counter toonde geen "/N" + stream-mode brak vroeg bij consecutiveEmpty.
+  // Strategie: Last-link href + tekstuele page-numbers in pagination-zone.
+  detectMaxPage(doc) {
+    const root = doc || document;
+    let max = 1;
+    for (const a of root.querySelectorAll('a')) {
+      const href = a.getAttribute('href') || '';
+      const m = href.match(/\/page\/(\d+)\/?(?:[?#]|$)/) || href.match(/[?&]page=(\d+)/);
+      if (m) {
+        const n = parseInt(m[1], 10);
+        if (Number.isFinite(n) && n > max && n < 100000) max = n;
+      }
+    }
+    const containers = root.querySelectorAll('.pagination, .pages, .pagi, nav.pagination, ul.pagination, div[class*="pagi"]');
+    const seedRoots = containers.length ? containers : [root];
+    for (const cont of seedRoots) {
+      for (const el of cont.querySelectorAll('a, span')) {
+        const txt = (el.textContent || '').trim();
+        const m = txt.match(/^0?(\d{1,5})$/);
+        if (m) { const n = parseInt(m[1], 10); if (n > max && n < 100000) max = n; }
+      }
+    }
+    return max;
   },
 
   deriveChannel(url) {
