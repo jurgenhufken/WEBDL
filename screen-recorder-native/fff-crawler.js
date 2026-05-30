@@ -59,6 +59,13 @@ async function extractImageUrls(page) {
       if (/vipr\.im/i.test(h)) urls.add(h);
       if (/imx\.to/i.test(h)) urls.add(h);
       if (/imgbox\.com/i.test(h)) urls.add(h);
+      if (/imagetwist\.com/i.test(h)) urls.add(h);
+      if (/imagevenue\.com/i.test(h)) urls.add(h);
+      if (/turboimagehost\.com/i.test(h)) urls.add(h);
+      if (/postimg/i.test(h)) urls.add(h);
+      // 2026-05-30: extra hosts gezien in DB voor FFF
+      if (/flc\.nyc3\.digitaloceanspaces\.com/i.test(h)) urls.add(h);
+      if (/cdni\.pornpics\.com/i.test(h)) urls.add(h);
     });
     document.querySelectorAll('.message-body img[src], .bbWrapper img[src]').forEach(img => {
       const s = img.src || '';
@@ -143,6 +150,16 @@ async function crawlThread(page, threadUrl, meta) {
   });
   const page = await context.newPage();
 
+  // 2026-05-30: parse start-page uit FORUM_URL (bv. /page-3) zodat we daar
+  // BEGINNEN ipv proberen /page-3/page-2 te bouwen (vorige bug → 404).
+  const startPageMatch = FORUM_URL.match(/\/page-(\d+)\/?$/);
+  if (startPageMatch) {
+    stats.forumPages = parseInt(startPageMatch[1], 10) - 1; // -1 omdat ++ na fetch
+    console.log(`📍 Start vanaf forum page ${parseInt(startPageMatch[1], 10)}`);
+  }
+  // Base URL zonder /page-N (zodat we /page-N kunnen toevoegen)
+  const FORUM_BASE = FORUM_URL.replace(/\/page-\d+\/?$/, '/').replace(/\/$/, '');
+
   // Progressive: crawl forum pages, immediately process each batch of threads
   let forumUrl = FORUM_URL;
 
@@ -175,27 +192,21 @@ async function crawlThread(page, threadUrl, meta) {
         await page.waitForTimeout(THREAD_DELAY);
       }
 
-      forumUrl = await page.goto(forumUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
-        .then(() => getNextPage(page))
-        .catch(() => null);
-
-      // Re-navigate to forum to get next page link
-      if (stats.forumPages > 0) {
-        // We need to go back to forum page to get next link
-        const currentForumPage = FORUM_URL.replace(/\/$/, '') + `/page-${stats.forumPages + 1}`;
-        try {
-          await page.goto(currentForumPage, { waitUntil: 'domcontentloaded', timeout: 30000 });
-          await page.waitForTimeout(800);
-          const hasThreads = await getThreadLinks(page);
-          if (hasThreads.length === 0) {
-            console.log(`\n\n📋 Geen threads meer op pagina ${stats.forumPages + 1}, klaar met forum index.`);
-            forumUrl = null;
-          } else {
-            forumUrl = currentForumPage;
-          }
-        } catch (e) {
+      // 2026-05-30 fix: gebruik FORUM_BASE ipv FORUM_URL (die kan /page-N
+      // bevatten → vorige bug bouwde .../page-3/page-2 → 404).
+      const currentForumPage = FORUM_BASE + `/page-${stats.forumPages + 1}`;
+      try {
+        await page.goto(currentForumPage, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await page.waitForTimeout(800);
+        const hasThreads = await getThreadLinks(page);
+        if (hasThreads.length === 0) {
+          console.log(`\n\n📋 Geen threads meer op pagina ${stats.forumPages + 1}, klaar met forum index.`);
           forumUrl = null;
+        } else {
+          forumUrl = currentForumPage;
         }
+      } catch (e) {
+        forumUrl = null;
       }
     } catch (e) {
       console.error(`\n  Forum error: ${e.message}`);
