@@ -6452,6 +6452,26 @@ async function checkKeep2ShareHealth() {
 // Eerste check 30s na startup; daarna elke 10 min
 setTimeout(() => { checkKeep2ShareHealth().catch(() => {}); }, 30000);
 setInterval(() => { checkKeep2ShareHealth().catch(() => {}); }, K2S_HEALTH_INTERVAL_MS);
+
+// 2026-05-30 (Jürgen): auto-import telegram-channel-dirs naar DB elke 3 min.
+// telegram-channel-download.py schrijft files+sidecars naar disk, maar
+// tg_import_folder.py is nodig om ze als rows in `downloads` table te krijgen
+// zodat ze in de gallery verschijnen. Dit cron-pad doet dat zonder dat user
+// hoeft te wachten / handmatig te draaien. Dedup is veilig (script skipt
+// bestaande filepath + telegram_message_id).
+const TG_AUTO_IMPORT_SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'tg_auto_import.sh');
+function runTgAutoImport() {
+  try {
+    if (!fs.existsSync(TG_AUTO_IMPORT_SCRIPT)) return;
+    const proc = spawn('/bin/bash', [TG_AUTO_IMPORT_SCRIPT], { detached: true, stdio: 'ignore' });
+    proc.unref();
+  } catch (e) {
+    // niet fataal — script kan ontbreken op machine zonder telegram
+  }
+}
+// Eerste run 45s na startup; daarna elke 3 min
+setTimeout(runTgAutoImport, 45000);
+setInterval(runTgAutoImport, 3 * 60 * 1000);
 // Bij elke K2S-download-error: flush auth-caches + trigger health-check zodat
 // volgende download verse cookie ophaalt. Throttle 1×/min zodat we api.k2s.cc
 // niet bombarderen bij een burst aan failures.
@@ -7356,6 +7376,48 @@ expressApp.post('/api/erome/album', (req, res) => {
       pages,
       pid,
       message: 'erome_dl.py gestart op achtergrond',
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: String(e && e.message ? e.message : e) });
+  }
+});
+
+// mega.nz file/folder share-link → spawn scripts/mega_dl.py async.
+// URL moet `#KEY` fragment bevatten (encryption-key) — anders kan megatools
+// niet decrypten. We INSERTen direct een pending DB-row als source-of-truth
+// en spawnen mega_dl.py die later de row update naar completed.
+expressApp.post('/api/mega/download', (req, res) => {
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const url = String(body.url || '').trim();
+    if (!url || !/^https?:\/\/mega\.(?:nz|co\.nz)\/(?:file|folder)\/[A-Za-z0-9_-]+#[A-Za-z0-9_-]+/i.test(url)) {
+      return res.status(400).json({
+        success: false,
+        error: 'url moet mega.nz file/folder share-link met #KEY zijn (ingelogde account-URLs werken niet)',
+      });
+    }
+    const script = path.join(__dirname, '..', '..', 'scripts', 'mega_dl.py');
+    if (!fs.existsSync(script)) {
+      return res.status(500).json({ success: false, error: `script ontbreekt: ${script}` });
+    }
+    const child = spawn('/usr/bin/python3', [script, url], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: false,
+      env: { ...process.env },
+    });
+    const pid = child.pid;
+    let stderr = '';
+    child.stderr.on('data', (d) => { stderr += d.toString().slice(0, 4096); });
+    child.on('close', (code) => {
+      console.log(`[mega_dl pid=${pid}] exit ${code}`);
+      if (code !== 0) console.warn(`[mega_dl pid=${pid}] stderr: ${stderr.slice(0, 500)}`);
+    });
+    child.unref();
+    return res.json({
+      success: true,
+      url,
+      pid,
+      message: 'mega_dl.py gestart — folder kan een tijd duren afhankelijk van grootte',
     });
   } catch (e) {
     return res.status(500).json({ success: false, error: String(e && e.message ? e.message : e) });
@@ -15347,8 +15409,17 @@ async function startTdlDownload(downloadId, url, platform, channel, title, metad
       return;
     }
 
-    const args = [scriptPath, chatId, dir];
-    const proc = spawn('python3', args, { env: { ...process.env, TELEGRAM_PHONE: process.env.TELEGRAM_PHONE || '' } });
+    // 2026-05-30 (Jürgen "telegram langzaam"): --parallel 20 ipv default 5
+    // voor 3-4× snellere whole-channel downloads. Telegram rate-limit zit
+    // rond ~20 concurrent requests, dus 20 is tegen het plafond maar werkt
+    // bij empirische test (undergirlsfeetstudio ~16 MB/s → ~30+ MB/s).
+    //
+    // CRUCIAAL: gebruik /usr/bin/python3 (system Python 3.9 heeft telethon
+    // user-installed in ~/Library/Python/3.9/lib/...). Homebrew python3/3.11/3.12
+    // hebben telethon NIET → ModuleNotFoundError. Hardcoded pad lost dit op.
+    const args = [scriptPath, chatId, dir, '--parallel', '20'];
+    const PYTHON_WITH_TELETHON = fs.existsSync('/usr/bin/python3') ? '/usr/bin/python3' : 'python3';
+    const proc = spawn(PYTHON_WITH_TELETHON, args, { env: { ...process.env, TELEGRAM_PHONE: process.env.TELEGRAM_PHONE || '' } });
     activeProcesses.set(downloadId, proc);
     try { startingJobs.delete(downloadId); } catch (e) { }
     let stderr = '';

@@ -7382,6 +7382,48 @@ expressApp.post('/api/erome/album', (req, res) => {
   }
 });
 
+// mega.nz file/folder share-link → spawn scripts/mega_dl.py async.
+// URL moet `#KEY` fragment bevatten (encryption-key) — anders kan megatools
+// niet decrypten. We INSERTen direct een pending DB-row als source-of-truth
+// en spawnen mega_dl.py die later de row update naar completed.
+expressApp.post('/api/mega/download', (req, res) => {
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const url = String(body.url || '').trim();
+    if (!url || !/^https?:\/\/mega\.(?:nz|co\.nz)\/(?:file|folder)\/[A-Za-z0-9_-]+#[A-Za-z0-9_-]+/i.test(url)) {
+      return res.status(400).json({
+        success: false,
+        error: 'url moet mega.nz file/folder share-link met #KEY zijn (ingelogde account-URLs werken niet)',
+      });
+    }
+    const script = path.join(__dirname, '..', '..', 'scripts', 'mega_dl.py');
+    if (!fs.existsSync(script)) {
+      return res.status(500).json({ success: false, error: `script ontbreekt: ${script}` });
+    }
+    const child = spawn('/usr/bin/python3', [script, url], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: false,
+      env: { ...process.env },
+    });
+    const pid = child.pid;
+    let stderr = '';
+    child.stderr.on('data', (d) => { stderr += d.toString().slice(0, 4096); });
+    child.on('close', (code) => {
+      console.log(`[mega_dl pid=${pid}] exit ${code}`);
+      if (code !== 0) console.warn(`[mega_dl pid=${pid}] stderr: ${stderr.slice(0, 500)}`);
+    });
+    child.unref();
+    return res.json({
+      success: true,
+      url,
+      pid,
+      message: 'mega_dl.py gestart — folder kan een tijd duren afhankelijk van grootte',
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: String(e && e.message ? e.message : e) });
+  }
+});
+
 // ───────────────────────────────────────────────────────────────────────
 // NIEUWE STACK — ARCHITECTURE.md fase 1-4 (Source + Scheduler)
 // ───────────────────────────────────────────────────────────────────────
