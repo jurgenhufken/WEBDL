@@ -21,6 +21,7 @@ function initDispatcher(ctx) {
     'instagram':        'gallery-dl',
     'reddit':           'gallery-dl',
     'imgur':             'gallery-dl',
+    'imagefap':         'gallery-dl',
     'youtube':          'yt-dlp',
     'vimeo':            'yt-dlp',
     'twitch':           'yt-dlp',

@@ -1,3 +1,9 @@
+> ⚠️ **VEROUDERD per 2026-05-30** — laatst bijgewerkt 30 april. Voor actuele status zie:
+> - [STATUS-2026-05-24.md](STATUS-2026-05-24.md) — live document (laatst 2026-05-30)
+> - [ARCHITECTURE.md](ARCHITECTURE.md) — target architectuur
+> - [DOCS-INDEX.md](DOCS-INDEX.md) — overzicht alle docs
+> - Plan: `/Users/jurgen/.claude/plans/analyseer-dit-goed-denkk-starry-minsky.md`
+
 # WEBDL status - 30 april 2026
 
 ## Huidige conclusie

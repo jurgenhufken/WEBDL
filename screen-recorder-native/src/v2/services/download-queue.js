@@ -20,7 +20,7 @@ const LANE_LIMITS = {
 
 // Welke platforms zijn "heavy"?
 const HEAVY_PLATFORMS = new Set([
-  'youtube', 'vimeo', 'twitch', 'twitter', 'reddit',
+  'youtube', 'vimeo', 'twitch', 'reddit',
   'instagram', 'tiktok', 'onlyfans', 'patreon', 'telegram',
   'pornhub', 'xvideos', 'xhamster', 'wikifeet', 'wikifeetx',
   'kinky', 'footfetishforum', 'aznudefeet',

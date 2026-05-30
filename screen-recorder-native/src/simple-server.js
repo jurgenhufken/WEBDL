@@ -5,6 +5,7 @@ const http = require('http');
 const socketIO = require('socket.io');
 const os = require('os');
 const util = require('util');
+const crypto = require('crypto');
 const { exec, spawn } = require('child_process');
 
 // ═══ Event Loop Yield — prevents sync I/O from starving Express ═══
@@ -30,10 +31,11 @@ const getDashboardHTML = require('./views/dashboard');
 
 const {
   PORT, BASE_DIR, DB_PATH, POSTGRES_URL, DB_ENGINE, LOG_FILE, DIRECTORY_FILTER_CONFIG,
-  YT_DLP, FFMPEG, FFPROBE, OFSCRAPER, OFSCRAPER_CONFIG_DIR, GALLERY_DL, INSTALOADER, REDDIT_DL,
+  YT_DLP, FFMPEG, FFPROBE, OFSCRAPER, OFSCRAPER_CONFIG_DIR, GALLERY_DL, INSTALOADER, REDDIT_DL, REDDIT_BDFR, REDDIT_BACKEND,
   TDL, TDL_NAMESPACE, TDL_THREADS, TDL_CONCURRENCY,
   REDDIT_DL_CLIENT_ID, REDDIT_DL_CLIENT_SECRET, REDDIT_DL_USERNAME, REDDIT_DL_PASSWORD, REDDIT_DL_AUTH_FILE, REDDIT_INDEX_MAX_ITEMS, REDDIT_INDEX_MAX_PAGES,
   VIDEO_DEVICE, AUDIO_DEVICE, RECORDING_FPS, VIDEO_CODEC, VIDEO_BITRATE, LIBX264_PRESET, AUDIO_BITRATE, RECORDING_AUDIO_CODEC, RECORDING_INPUT_PIXEL_FORMAT, RECORDING_FPS_MODE,
+  RECORDING_MAX_ACTIVE, RECORDING_MAX_DURATION_MS, RECORDING_MIN_FREE_BYTES,
   FFMPEG_PROBESIZE, FFMPEG_ANALYZEDURATION, FFMPEG_THREAD_QUEUE_SIZE, FFMPEG_RTBUFSIZE, FFMPEG_MAX_MUXING_QUEUE_SIZE,
   MIN_SCREENSHOT_BYTES, MIN_THUMB_BYTES,
   FINALCUT_ENABLED, FINALCUT_VIDEO_CODEC, FINALCUT_X264_PRESET, FINALCUT_X264_CRF, FINALCUT_AUDIO_BITRATE,
@@ -43,6 +45,8 @@ const {
   STARTUP_REHYDRATE_DELAY_MS, STARTUP_REHYDRATE_MAX_ROWS, STARTUP_REHYDRATE_MODE,
   METADATA_BLOCKED_DOMAIN_SUFFIXES, getAutoImportMaxDepth
 } = config;
+
+const GIGASCAN_STATE_FILE = path.join(os.tmpdir(), `webdl-gigascan-state-${PORT}.json`);
 
 function tailTextFile(filePath, maxLines, maxBytes) {
   try {
@@ -211,6 +215,102 @@ function stripAnsiCodes(input) {
 const IMPORTABLE_VIDEO_EXTS = new Set([
   '.mp4', '.mov', '.m4v', '.webm', '.mkv', '.avi', '.wmv', '.flv', '.ts', '.m2ts']
 );
+const IMPORTABLE_IMAGE_EXTS = new Set([
+  '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.avif', '.heic', '.heif']
+);
+const IMPORTABLE_ARCHIVE_EXTS = new Set([
+  '.zip', '.rar', '.7z', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.cbz', '.cbr'
+]);
+
+function isImageUrlLike(input) {
+  try {
+    const u = new URL(String(input || ''));
+    const ext = String(path.extname(String(u.pathname || '')).toLowerCase() || '');
+    return IMPORTABLE_IMAGE_EXTS.has(ext);
+  } catch (e) {
+    const ext = String(path.extname(String(input || '').split(/[?#]/)[0]).toLowerCase() || '');
+    return IMPORTABLE_IMAGE_EXTS.has(ext);
+  }
+}
+
+function isDirectVideoUrlLike(input) {
+  try {
+    const u = new URL(String(input || ''));
+    const ext = String(path.extname(String(u.pathname || '')).toLowerCase() || '');
+    return IMPORTABLE_VIDEO_EXTS.has(ext);
+  } catch (e) {
+    const ext = String(path.extname(String(input || '').split(/[?#]/)[0]).toLowerCase() || '');
+    return IMPORTABLE_VIDEO_EXTS.has(ext);
+  }
+}
+
+function archiveExtFromUrlLike(input) {
+  const raw = String(input || '').trim();
+  if (!raw) return '';
+  const extFromName = (value) => {
+    const ext = String(path.extname(String(value || '').split(/[?#]/)[0]).toLowerCase() || '');
+    return IMPORTABLE_ARCHIVE_EXTS.has(ext) ? ext : '';
+  };
+  try {
+    const u = new URL(raw);
+    const pathExt = extFromName(decodeURIComponent(String(u.pathname || '')));
+    if (pathExt) return pathExt;
+    const filename = u.searchParams.get('filename') || u.searchParams.get('file') || '';
+    const queryExt = extFromName(filename);
+    if (queryExt) return queryExt;
+    const contentType = String(u.searchParams.get('content_type') || '').toLowerCase();
+    if (/rar|zip|7z|x-tar|gzip|bzip2|xz/.test(contentType)) return '.archive';
+  } catch (e) {
+    const rawExt = extFromName(raw);
+    if (rawExt) return rawExt;
+    const m = raw.match(/[?&](?:filename|file)=([^&#]+)/i);
+    if (m && m[1]) {
+      const queryExt = extFromName(decodeURIComponent(m[1]));
+      if (queryExt) return queryExt;
+    }
+  }
+  return '';
+}
+
+function archiveExtFromMetadata(metadata) {
+  let meta = metadata;
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch (e) { meta = null; }
+  }
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return '';
+  const keys = [
+    'filename', 'file_name', 'name', 'title',
+    'url', 'webdl_input_url', 'webdl_media_url', 'webdl_resolved_url',
+    'source_url', 'webdl_direct_hint'
+  ];
+  for (const key of keys) {
+    const ext = archiveExtFromUrlLike(meta[key]);
+    if (ext) return ext;
+  }
+  const contentType = String(meta.content_type || meta.contentType || meta.mime || meta.mime_type || '').toLowerCase();
+  if (/rar|zip|7z|x-tar|gzip|bzip2|xz/.test(contentType)) return '.archive';
+  return '';
+}
+
+function isArchiveDownloadLike(url, metadata) {
+  return !!(archiveExtFromUrlLike(url) || archiveExtFromMetadata(metadata));
+}
+
+function isImageHostPageUrlLike(input) {
+  try {
+    const u = new URL(String(input || ''));
+    const host = String(u.hostname || '').toLowerCase().replace(/^www\./, '');
+    const p = String(u.pathname || '').toLowerCase();
+    if (/^(?:imx\.to|vipr\.im|pixhost\.to|postimg\.cc|postimages\.org|imagebam\.com|imgbox\.com|imagevenue\.com|imgchest\.com|imgvb\.com|imagetwist\.com|turboimagehost\.com|img\.kiwi|ibb\.co|jpg\.(?:church|fish|pet|fishing))$/.test(host)) {
+      return true;
+    }
+    if (host.endsWith('.imx.to') || host.endsWith('.vipr.im') || host.endsWith('.pixhost.to') || host.endsWith('.imagebam.com') || host.endsWith('.imgbox.com') || host.endsWith('.imagevenue.com') || host.endsWith('.imgchest.com')) {
+      return true;
+    }
+    if (host === 'flc.nyc3.digitaloceanspaces.com' && /^\/data\/(?:attachments|video)\//i.test(p)) return true;
+  } catch (e) {}
+  return false;
+}
 
 // Auto-import settings en Startup rehydrate settings worden nu beheerd in src/config.js.
 // De variabelen zijn bovenaan via destructuring beschikbaar.
@@ -497,6 +597,55 @@ function toRedditDlTarget(input) {
   } catch (e) {
     return '';
   }
+}
+
+function commandPathLooksUsable(cmd) {
+  const value = String(cmd || '').trim();
+  if (!value) return false;
+  if (value.includes('/') || value.startsWith('.')) return fs.existsSync(value);
+  return true;
+}
+
+function redditBackendChoice() {
+  const requested = String(REDDIT_BACKEND || 'auto').trim().toLowerCase();
+  const bdfrOk = commandPathLooksUsable(REDDIT_BDFR);
+  const redditDlOk = commandPathLooksUsable(REDDIT_DL);
+  if (requested === 'bdfr') return bdfrOk ? 'bdfr' : '';
+  if (requested === 'reddit-dl' || requested === 'redditdl') return redditDlOk ? 'reddit-dl' : '';
+  if (bdfrOk) return 'bdfr';
+  if (redditDlOk) return 'reddit-dl';
+  return '';
+}
+
+function redditBdfrSourceArgs(input) {
+  const canonical = canonicalizeRedditCandidateUrl(input) || input;
+  const postId = extractRedditPostIdFromUrl(canonical);
+  if (postId) return ['--link', postId];
+  try {
+    const u = new URL(String(canonical || input || ''));
+    const p = String(u.pathname || '');
+    const subMatch = p.match(/^\/r\/([^\/\?#]+)/i);
+    if (subMatch && subMatch[1]) return ['--subreddit', decodeURIComponent(subMatch[1])];
+    const userMatch = p.match(/^\/(?:user|u)\/([^\/\?#]+)/i);
+    if (userMatch && userMatch[1]) return ['--user', decodeURIComponent(userMatch[1]), '--submitted'];
+  } catch (e) { }
+  return [];
+}
+
+function writeTempBdfrConfig(downloadId) {
+  if (!REDDIT_DL_CLIENT_ID || !REDDIT_DL_CLIENT_SECRET) return { path: '', created: false };
+  const cfgPath = path.join(os.tmpdir(), `webdl-bdfr-${process.pid}-${downloadId}.cfg`);
+  fs.writeFileSync(cfgPath, [
+    '[DEFAULT]',
+    `client_id = ${REDDIT_DL_CLIENT_ID}`,
+    `client_secret = ${REDDIT_DL_CLIENT_SECRET}`,
+    'scopes = identity, history, read, save, mysubreddits',
+    'backup_log_count = 3',
+    'max_wait_time = 120',
+    'time_format = ISO',
+    ''
+  ].join('\n'), 'utf8');
+  return { path: cfgPath, created: true };
 }
 
 function isLikelyRedditMediaPostData(data) {
@@ -814,6 +963,24 @@ function findFirefoxCookieSqliteFiles() {
   return out;
 }
 
+function findFirefoxProfileDirs() {
+  const roots = [
+    path.join(os.homedir(), 'Library/Application Support/Firefox/Profiles'),
+    path.join(os.homedir(), '.mozilla/firefox')
+  ];
+  const out = [];
+  for (const root of roots) {
+    try {
+      if (!fs.existsSync(root)) continue;
+      for (const entry of fs.readdirSync(root)) {
+        const p = path.join(root, entry);
+        if (fs.existsSync(path.join(p, 'cookies.sqlite')) || fs.existsSync(path.join(p, 'storage'))) out.push(p);
+      }
+    } catch (e) { }
+  }
+  return out;
+}
+
 function sqliteSingleQuote(value) {
   return String(value || '').replace(/'/g, "''");
 }
@@ -871,7 +1038,7 @@ async function loadCookiesForDomain(hostname) {
        OR host LIKE '%.${baseLit}'
      )
        AND (expiry IS NULL OR expiry = 0 OR expiry > strftime('%s','now') OR expiry > (strftime('%s','now') * 1000))
-     ORDER BY host DESC, name ASC;
+     ORDER BY host DESC, name ASC, expiry DESC;
   `;
   const cookies = new Map();
   for (const sqlitePath of findFirefoxCookieSqliteFiles()) {
@@ -882,13 +1049,799 @@ async function loadCookiesForDomain(hostname) {
         const parts = line.split('\t');
         const name = parts.shift();
         const value = parts.join('\t');
-        if (name) cookies.set(name, value || '');
+        if (name && !cookies.has(name)) cookies.set(name, value || '');
       }
     } catch (e) { }
   }
   const value = Array.from(cookies.entries()).map(([name, value]) => `${name}=${value}`).join('; ');
   browserCookieCache.set(host, { at: Date.now(), value });
   return value;
+}
+
+function cookieHeaderFromMetadataCookies(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return '';
+  const skip = new Set(['domain', 'path', 'expires', 'max-age', 'samesite']);
+  const cookies = [];
+  const seen = new Set();
+  for (const part of text.split(';')) {
+    const p = String(part || '').trim();
+    if (!p || !p.includes('=')) continue;
+    const idx = p.indexOf('=');
+    const name = p.slice(0, idx).trim();
+    const value = p.slice(idx + 1).trim();
+    const key = name.toLowerCase();
+    if (!name || skip.has(key) || seen.has(key)) continue;
+    if (key === 'secure' || key === 'httponly') continue;
+    seen.add(key);
+    cookies.push(`${name}=${value}`);
+  }
+  return cookies.join('; ');
+}
+
+function cookieValueFromHeader(header, name) {
+  const wanted = String(name || '').trim();
+  if (!wanted) return '';
+  for (const part of String(header || '').split(';')) {
+    const m = part.trim().match(/^([^=]+)=(.*)$/);
+    if (!m || m[1] !== wanted) continue;
+    const value = String(m[2] || '').trim();
+    try { return decodeURIComponent(value); } catch (e) { return value; }
+  }
+  return '';
+}
+
+function keep2ShareCookieAuthFromEnv() {
+  const cookieHeader = cookieHeaderFromMetadataCookies(
+    process.env.WEBDL_KEEP2SHARE_COOKIE ||
+    process.env.KEEP2SHARE_COOKIE ||
+    process.env.K2S_COOKIE ||
+    ''
+  );
+  return { cookieHeader, source: cookieHeader ? 'env-cookie' : '' };
+}
+
+function keep2ShareCookieFromEnv() {
+  return keep2ShareCookieAuthFromEnv().cookieHeader;
+}
+
+async function loadKeep2ShareCookieAuth(hostname, metadata) {
+  const metadataCookies = metadata && typeof metadata === 'object' ? cookieHeaderFromMetadataCookies(metadata.cookies) : '';
+  if (metadataCookies) return { cookieHeader: metadataCookies, source: 'metadata-cookie' };
+  const envCookieAuth = keep2ShareCookieAuthFromEnv();
+  if (envCookieAuth.cookieHeader) return envCookieAuth;
+  const host = String(hostname || '').toLowerCase();
+  const cookieHeader = await loadCookiesForDomain(host) || await loadCookiesForDomain('k2s.cc') || await loadCookiesForDomain('keep2share.cc');
+  return { cookieHeader, source: cookieHeader ? 'firefox-cookie' : '' };
+}
+
+async function loadKeep2ShareCookieHeader(hostname, metadata) {
+  const auth = await loadKeep2ShareCookieAuth(hostname, metadata);
+  return auth.cookieHeader;
+}
+
+function keep2ShareUserAgentFromEnv() {
+  return String(
+    process.env.WEBDL_KEEP2SHARE_USER_AGENT ||
+    process.env.KEEP2SHARE_USER_AGENT ||
+    process.env.K2S_USER_AGENT ||
+    FOOTFETISHFORUM_FIREFOX_UA
+  ).trim();
+}
+
+function keep2ShareXbcFromEnv() {
+  return String(
+    process.env.WEBDL_KEEP2SHARE_X_BC ||
+    process.env.KEEP2SHARE_X_BC ||
+    process.env.K2S_X_BC ||
+    process.env.WEBDL_KEEP2SHARE_XBC ||
+    process.env.KEEP2SHARE_XBC ||
+    process.env.K2S_XBC ||
+    ''
+  ).trim();
+}
+
+function isKeep2ShareUrl(input) {
+  try {
+    const u = new URL(String(input || ''));
+    const host = String(u.hostname || '').toLowerCase().replace(/^www\./, '');
+    return host === 'k2s.cc' || host === 'k2s.io' || host === 'keep2share.cc' ||
+      host.endsWith('.k2s.cc') || host.endsWith('.k2s.io') || host.endsWith('.keep2share.cc');
+  } catch (e) {
+    return false;
+  }
+}
+
+function keep2ShareFileIdFromUrl(input) {
+  try {
+    const u = new URL(String(input || ''));
+    const m = String(u.pathname || '').match(/^\/file\/([^\/?#]+)/i);
+    return m && m[1] ? decodeURIComponent(m[1]).trim() : '';
+  } catch (e) {
+    return '';
+  }
+}
+
+let keep2ShareAuthTokenCache = { token: '', expiresAt: 0 };
+let keep2ShareWebAccessTokenCache = { token: '', expiresAt: 0, source: '' };
+
+// 2026-05-30 Spoor K2S auto-refresh: laatste flush-event voor /api/k2s/status
+let _k2sLastRefresh = { at: null, reason: '', source: '' };
+
+function decodeJwtPayload(token) {
+  try {
+    const parts = String(token || '').split('.');
+    if (parts.length !== 3) return null;
+    return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+  } catch (e) {
+    return null;
+  }
+}
+
+// JWT geldigheid checken — true als token nog >= minRemainingMs geldig is.
+function isJwtTokenStillValid(token, minRemainingMs = 60000) {
+  const payload = decodeJwtPayload(token);
+  if (!payload || typeof payload.exp !== 'number') return false;
+  return payload.exp * 1000 > Date.now() + minRemainingMs;
+}
+
+// Flush K2S auth-caches zodat de volgende call een verse Firefox-cookie ophaalt
+// en een nieuw web-access-token aanvraagt bij api.k2s.cc. Reason wordt gelogd +
+// in /api/k2s/status getoond zodat we live zien wanneer/waarom een refresh triggerde.
+function flushKeep2ShareAuthCaches(reason = 'manual') {
+  const prevSource = keep2ShareFirefoxWebAuthCache && keep2ShareFirefoxWebAuthCache.source || keep2ShareWebAccessTokenCache.source || '';
+  keep2ShareWebAccessTokenCache = { token: '', expiresAt: 0, source: '' };
+  keep2ShareFirefoxWebAuthCache = { at: 0, token: '', cookieHeader: '', source: '' };
+  if (typeof browserCookieCache !== 'undefined' && browserCookieCache && typeof browserCookieCache.clear === 'function') {
+    try { browserCookieCache.clear(); } catch (_) {}
+  }
+  _k2sLastRefresh = { at: new Date().toISOString(), reason: String(reason || 'manual'), source: prevSource };
+  console.log(`🔑 K2S cache-flush reason="${reason}" prev-source="${prevSource}"`);
+}
+
+async function postKeep2ShareApi(pathname, body) {
+  const res = await fetch(`https://keep2share.cc/api/v2/${pathname}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+    },
+    body: JSON.stringify(body || {})
+  });
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch (e) { }
+  if (!json || typeof json !== 'object') {
+    throw new Error(`Keep2Share API gaf geen JSON terug (${res.status})`);
+  }
+  return json;
+}
+
+async function getKeep2ShareAuthToken() {
+  const direct = String(
+    process.env.WEBDL_KEEP2SHARE_AUTH_TOKEN ||
+    process.env.KEEP2SHARE_AUTH_TOKEN ||
+    process.env.K2S_AUTH_TOKEN ||
+    ''
+  ).trim();
+  if (direct) return direct;
+  if (keep2ShareAuthTokenCache.token && keep2ShareAuthTokenCache.expiresAt > Date.now() + 60000) return keep2ShareAuthTokenCache.token;
+
+  const username = String(process.env.WEBDL_KEEP2SHARE_USERNAME || process.env.KEEP2SHARE_USERNAME || process.env.K2S_USERNAME || '').trim();
+  const password = String(process.env.WEBDL_KEEP2SHARE_PASSWORD || process.env.KEEP2SHARE_PASSWORD || process.env.K2S_PASSWORD || '').trim();
+  if (!username || !password) return '';
+
+  const json = await postKeep2ShareApi('login', { username, password });
+  if (json.status === 'success' && json.auth_token) {
+    keep2ShareAuthTokenCache = { token: String(json.auth_token), expiresAt: Date.now() + 6 * 3600 * 1000 };
+    return keep2ShareAuthTokenCache.token;
+  }
+  // Bij CAPTCHA-block of andere login-fout: return '' zodat access_token fallback gebruikt kan worden
+  console.warn(`[K2S] Login faalde (${json.message || json.errorCode || 'onbekend'}), fallback naar access_token...`);
+  return '';
+}
+
+function keep2ShareApiErrorMessage(json, fallback = 'onbekend') {
+  if (!json || typeof json !== 'object') return fallback;
+  if (json.message) return String(json.message);
+  if (json.error) return typeof json.error === 'string' ? json.error : JSON.stringify(json.error);
+  if (json.errors) {
+    try {
+      const firstKey = Object.keys(json.errors)[0];
+      const first = firstKey ? json.errors[firstKey] : json.errors;
+      if (Array.isArray(first) && first[0]) return String(first[0].message || first[0]);
+      if (first) return String(first.message || first);
+    } catch (e) { }
+  }
+  if (json.status) return String(json.status);
+  return fallback;
+}
+
+function snappyUncompress(input) {
+  const src = Buffer.isBuffer(input) ? input : Buffer.from(input || []);
+  let pos = 0;
+  let len = 0;
+  let shift = 0;
+  while (pos < src.length) {
+    const b = src[pos++];
+    len |= (b & 0x7f) << shift;
+    if ((b & 0x80) === 0) break;
+    shift += 7;
+  }
+  if (!Number.isFinite(len) || len < 0 || len > 10 * 1024 * 1024) throw new Error('ongeldige Snappy lengte');
+  const out = Buffer.alloc(len);
+  let op = 0;
+  while (pos < src.length && op < out.length) {
+    const tag = src[pos++];
+    const type = tag & 3;
+    if (type === 0) {
+      let l = tag >>> 2;
+      if (l < 60) {
+        l += 1;
+      } else {
+        const bytes = l - 59;
+        l = 0;
+        for (let i = 0; i < bytes; i++) l |= src[pos++] << (8 * i);
+        l += 1;
+      }
+      src.copy(out, op, pos, pos + l);
+      pos += l;
+      op += l;
+    } else {
+      let l = 0;
+      let offset = 0;
+      if (type === 1) {
+        l = ((tag >>> 2) & 7) + 4;
+        offset = ((tag & 0xe0) << 3) | src[pos++];
+      } else if (type === 2) {
+        l = (tag >>> 2) + 1;
+        offset = src[pos] | (src[pos + 1] << 8);
+        pos += 2;
+      } else {
+        l = (tag >>> 2) + 1;
+        offset = (src[pos] | (src[pos + 1] << 8) | (src[pos + 2] << 16) | (src[pos + 3] << 24)) >>> 0;
+        pos += 4;
+      }
+      if (!offset || offset > op) throw new Error('ongeldige Snappy copy-offset');
+      for (let i = 0; i < l && op < out.length; i++) {
+        out[op] = out[op - offset];
+        op++;
+      }
+    }
+  }
+  return out;
+}
+
+function parseKeep2SharePersistAuth(valueHex, compressionType) {
+  try {
+    if (!valueHex) return null;
+    const raw = Buffer.from(String(valueHex || '').trim(), 'hex');
+    const text = Number(compressionType) === 1 ? snappyUncompress(raw).toString('utf8') : raw.toString('utf8');
+    const state = JSON.parse(text);
+    const token = JSON.parse(state.token || '{}');
+    return token && typeof token === 'object' ? token : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+let keep2ShareFirefoxWebAuthCache = { at: 0, token: '', cookieHeader: '', source: '' };
+async function loadKeep2ShareFirefoxWebAuth(preferredHost = '') {
+  const preferredBase = getRegistrableCookieDomain(preferredHost || 'k2s.cc') || 'k2s.cc';
+  if (keep2ShareFirefoxWebAuthCache.token && keep2ShareFirefoxWebAuthCache.preferredBase === preferredBase && Date.now() - keep2ShareFirefoxWebAuthCache.at < 60000) {
+    return keep2ShareFirefoxWebAuthCache;
+  }
+
+  for (const profileDir of findFirefoxProfileDirs()) {
+    try {
+      const cookieDb = path.join(profileDir, 'cookies.sqlite');
+      if (!fs.existsSync(cookieDb)) continue;
+
+      const authMetas = [];
+      for (const siteDir of ['https+++k2s.cc', 'https+++keep2share.cc']) {
+        const lsDb = path.join(profileDir, 'storage', 'default', siteDir, 'ls', 'data.sqlite');
+        if (!fs.existsSync(lsDb)) continue;
+        try {
+          const text = await runSqliteQuery(lsDb, "SELECT hex(value), compression_type FROM data WHERE key = 'persist:auth' LIMIT 1", 3000);
+          const parts = String(text || '').trim().split('\t');
+          const parsed = parseKeep2SharePersistAuth(parts[0] || '', parts[1] || '0');
+          if (parsed && parsed.jti) authMetas.push(parsed);
+        } catch (e) { }
+      }
+
+      const rowsText = await runSqliteQuery(cookieDb, `
+        SELECT host, name, value, expiry
+          FROM moz_cookies
+         WHERE (host LIKE '%.k2s.cc' OR host LIKE '%.keep2share.cc')
+           AND name IN ('accessToken', 'refreshToken', 'pcId', 'x-ec1jam0tc2vzc2lvbi1pza-id')
+           AND (expiry IS NULL OR expiry = 0 OR expiry > strftime('%s','now') OR expiry > (strftime('%s','now') * 1000))
+         ORDER BY expiry DESC;
+      `, 3000);
+      let rows = String(rowsText || '').split(/\r?\n/).filter(Boolean).map((line) => {
+        const parts = line.split('\t');
+        return {
+          host: parts.shift() || '',
+          name: parts.shift() || '',
+          value: parts.slice(0, -1).join('\t'),
+          expiry: Number(parts[parts.length - 1] || 0),
+        };
+      });
+      if (!rows.length) continue;
+      rows = rows.sort((a, b) => {
+        const aPreferred = String(a.host || '').replace(/^\./, '') === preferredBase ? 1 : 0;
+        const bPreferred = String(b.host || '').replace(/^\./, '') === preferredBase ? 1 : 0;
+        if (aPreferred !== bPreferred) return bPreferred - aPreferred;
+        return Number(b.expiry || 0) - Number(a.expiry || 0);
+      });
+
+      const authJtis = new Set(authMetas.map((m) => String(m.jti || '')).filter(Boolean));
+      const authOwners = new Set(authMetas.map((m) => String(m.ownerId || m.sub || '')).filter(Boolean));
+      let chosen = null;
+      for (const row of rows) {
+        if (row.name !== 'accessToken') continue;
+        const payload = decodeJwtPayload(row.value);
+        if (payload && authJtis.has(String(payload.jti || ''))) { chosen = row; break; }
+      }
+      if (!chosen) {
+        for (const row of rows) {
+          if (row.name !== 'accessToken') continue;
+          const payload = decodeJwtPayload(row.value);
+          if (payload && payload.aud === 'user' && authOwners.has(String(payload.ownerId || payload.sub || ''))) { chosen = row; break; }
+        }
+      }
+      if (!chosen) {
+        chosen = rows.find((row) => {
+          const payload = row.name === 'accessToken' ? decodeJwtPayload(row.value) : null;
+          return payload && payload.aud === 'user';
+        });
+      }
+      if (!chosen) continue;
+
+      const cookiePairs = [];
+      const seen = new Set();
+      for (const row of rows) {
+        if (!row.name || seen.has(row.name)) continue;
+        seen.add(row.name);
+        cookiePairs.push(`${row.name}=${row.value || ''}`);
+      }
+      keep2ShareFirefoxWebAuthCache = {
+        at: Date.now(),
+        token: chosen.value,
+        cookieHeader: cookiePairs.join('; '),
+        source: 'firefox-localstorage',
+        preferredBase,
+      };
+      return keep2ShareFirefoxWebAuthCache;
+    } catch (e) { }
+  }
+
+  keep2ShareFirefoxWebAuthCache = { at: Date.now(), token: '', cookieHeader: '', source: '', preferredBase };
+  return keep2ShareFirefoxWebAuthCache;
+}
+
+async function getKeep2ShareWebAccessToken(cookieHeader = '', preferredHost = '', options = {}) {
+  const direct = String(
+    process.env.WEBDL_KEEP2SHARE_WEB_ACCESS_TOKEN ||
+    process.env.KEEP2SHARE_WEB_ACCESS_TOKEN ||
+    process.env.K2S_WEB_ACCESS_TOKEN ||
+    ''
+  ).trim();
+  if (direct) return { token: direct, source: 'env' };
+  const cookieSource = String(options.cookieSource || '').trim();
+  // Cache-hit alleen geldig als JWT zelf nog >60s geldig is — anders is de TTL
+  // van onze cache misleidend (server geeft 30 min TTL maar de JWT zelf is al
+  // verlopen → next download faalt onverwacht). Reset bij stale exp.
+  if (!cookieHeader && keep2ShareWebAccessTokenCache.token && keep2ShareWebAccessTokenCache.expiresAt > Date.now() + 60000) {
+    if (isJwtTokenStillValid(keep2ShareWebAccessTokenCache.token, 60000)) {
+      return { token: keep2ShareWebAccessTokenCache.token, source: keep2ShareWebAccessTokenCache.source };
+    }
+    flushKeep2ShareAuthCaches('stale-exp-cached-token');
+  }
+
+  const baseHeaders = {
+    'Accept': 'application/json, text/plain, */*',
+    'Origin': 'https://k2s.cc',
+    'Referer': 'https://k2s.cc/',
+    'User-Agent': keep2ShareUserAgentFromEnv(),
+  };
+  if (cookieHeader) baseHeaders.Cookie = cookieHeader;
+  const xbc = keep2ShareXbcFromEnv();
+  if (xbc) baseHeaders['X-BC'] = xbc;
+
+  if (cookieHeader) {
+    try {
+      const res = await fetch('https://api.k2s.cc/v1/auth/token', { method: 'GET', headers: baseHeaders });
+      const text = await res.text();
+      let json = null;
+      try { json = JSON.parse(text); } catch (e) { }
+      if (res.ok && json && json.access_token) {
+        keep2ShareWebAccessTokenCache = { token: String(json.access_token), expiresAt: Date.now() + 30 * 60 * 1000, source: cookieSource || 'cookie' };
+        return { token: keep2ShareWebAccessTokenCache.token, source: keep2ShareWebAccessTokenCache.source };
+      }
+      // 401/403 op auth/token → cookie is dood. Flush Firefox-cache zodat de
+      // volgende loadKeep2ShareFirefoxWebAuth() opnieuw uit SQLite leest i.p.v.
+      // de 60s-cache uit te zitten (memo K2S keep-alive monitor).
+      if (res.status === 401 || res.status === 403) {
+        flushKeep2ShareAuthCaches(`auth-token-http-${res.status}`);
+      }
+    } catch (e) { }
+  }
+
+  const firefoxAuth = await loadKeep2ShareFirefoxWebAuth(preferredHost);
+  if (firefoxAuth.token && isJwtTokenStillValid(firefoxAuth.token, 60000)) {
+    return { token: firefoxAuth.token, source: firefoxAuth.source, cookieHeader: firefoxAuth.cookieHeader };
+  }
+  if (firefoxAuth.token && !isJwtTokenStillValid(firefoxAuth.token, 60000)) {
+    flushKeep2ShareAuthCaches('firefox-token-exp-stale');
+  }
+
+  // 2026-05-25: guest-mode client_credentials fallback UITGEZET. Die geeft
+  // K2S een 'anonieme' token waarmee elke download een captcha-challenge
+  // krijgt → IP raakt op de abuse-list. Beter: fail hard zodat user weet
+  // dat 'ie z'n K2S-cookie moet verversen, dan dat we abuse-flags oplopen.
+  // Zet WEBDL_K2S_ALLOW_GUEST=1 om dit pad alsnog toe te staan.
+  if (String(process.env.WEBDL_K2S_ALLOW_GUEST || '').trim() !== '1') {
+    return { token: '', source: '', error: 'K2S premium-auth ontbreekt (cookie/token); guest-fallback uitgezet om captcha te voorkomen' };
+  }
+
+  try {
+    const res = await fetch('https://api.k2s.cc/v1/auth/token', {
+      method: 'POST',
+      headers: { ...baseHeaders, 'Content-Type': 'text/plain;charset=UTF-8' },
+      body: JSON.stringify({
+        grant_type: 'client_credentials',
+        client_id: 'k2s_web_app',
+        client_secret: 'pjc8pyZv7vhscexepFNzmu4P',
+      }),
+    });
+    const text = await res.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch (e) { }
+    if (res.ok && json && json.access_token) {
+      keep2ShareWebAccessTokenCache = { token: String(json.access_token), expiresAt: Date.now() + 30 * 60 * 1000, source: 'client' };
+      return { token: keep2ShareWebAccessTokenCache.token, source: 'client' };
+    }
+  } catch (e) { }
+
+  return { token: '', source: '' };
+}
+
+async function fetchKeep2ShareWebApiJson(pathname, { filePageUrl = '', cookieHeader = '', cookieSource = '', metadata = null, _retry = false } = {}) {
+  let cookieAuth = cookieHeader
+    ? { cookieHeader, source: cookieSource || 'provided-cookie' }
+    : await loadKeep2ShareCookieAuth('k2s.cc', metadata);
+  let cookie = cookieAuth.cookieHeader;
+  const referer = String(filePageUrl || 'https://k2s.cc/').trim();
+  let preferredHost = 'k2s.cc';
+  try { preferredHost = new URL(referer).hostname || preferredHost; } catch (e) { }
+  const tokenInfo = await getKeep2ShareWebAccessToken(cookie, preferredHost, { cookieSource: cookieAuth.source });
+  if (!tokenInfo.token) return { json: null, status: 0, error: 'K2S web-access-token kon niet worden opgehaald' };
+  if (tokenInfo.cookieHeader) cookie = tokenInfo.cookieHeader;
+  if (tokenInfo.source === 'firefox-localstorage') cookie = '';
+  const url = new URL(`https://api.k2s.cc/v1/${String(pathname || '').replace(/^\/+/, '')}`);
+  if (referer) url.searchParams.set('referer', referer);
+  const headers = {
+    'Accept': 'application/json, text/plain, */*',
+    'Authorization': `Bearer ${tokenInfo.token}`,
+    'Origin': 'https://k2s.cc',
+    'Referer': referer,
+    'User-Agent': keep2ShareUserAgentFromEnv(),
+  };
+  if (cookie) headers.Cookie = cookie;
+  const xbc = keep2ShareXbcFromEnv();
+  if (xbc) headers['X-BC'] = xbc;
+  const res = await fetch(url.toString(), { method: 'GET', headers });
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch (e) { }
+  // 401/403 op web-API met onze cached token → token wordt door K2S geweigerd,
+  // ondanks dat de JWT-exp nog ok lijkt. Flush + retry 1× met verse cookie.
+  // Beperkt tot één retry zodat we niet in een loop draaien als de Firefox-
+  // sessie écht dood is.
+  if (!_retry && !cookieHeader && (res.status === 401 || res.status === 403)) {
+    flushKeep2ShareAuthCaches(`web-api-http-${res.status}`);
+    return fetchKeep2ShareWebApiJson(pathname, { filePageUrl, cookieHeader: '', cookieSource: '', metadata, _retry: true });
+  }
+  return { json, status: res.status, tokenSource: tokenInfo.source, error: json ? '' : `K2S web-API gaf geen JSON terug (${res.status}, auth=${tokenInfo.source || 'geen'})` };
+}
+
+function keep2ShareDownloadUrlFromJson(json) {
+  if (!json || typeof json !== 'object') return '';
+  const candidates = [
+    json.downloadUrl,
+    json.download_url,
+    json.videoStreamUrl,
+    json.video_stream_url,
+    json.url,
+    json.link,
+    json.data && json.data.downloadUrl,
+    json.data && json.data.download_url,
+    json.data && json.data.videoStreamUrl,
+    json.data && json.data.url,
+  ];
+  for (const value of candidates) {
+    const text = String(value || '').trim();
+    if (/^https?:\/\//i.test(text)) return text;
+  }
+  return '';
+}
+
+async function resolveKeep2ShareWebDirectUrl(input, metadata = null) {
+  const fileId = keep2ShareFileIdFromUrl(input);
+  if (!fileId) return { url: '', error: 'Keep2Share file-id ontbreekt in URL' };
+  const cookieAuth = await loadKeep2ShareCookieAuth('k2s.cc', metadata);
+  const cookieHeader = cookieAuth.cookieHeader;
+  if (!cookieHeader) return { url: '', error: 'Keep2Share cookie-auth ontbreekt' };
+  const filePageUrl = String(input || '').trim();
+  const result = await fetchKeep2ShareWebApiJson(`files/${encodeURIComponent(fileId)}/download`, { filePageUrl, cookieHeader, cookieSource: cookieAuth.source, metadata });
+  if (result.json) {
+    const downloadUrl = keep2ShareDownloadUrlFromJson(result.json);
+    if (downloadUrl) return { url: downloadUrl, error: '' };
+    const msg = keep2ShareApiErrorMessage(result.json, `HTTP ${result.status}`);
+    const authHint = result.tokenSource === 'client' && /captcha/i.test(msg)
+      ? 'De ingestelde cookie is niet als premiumsessie geaccepteerd; K2S valt terug naar gast/free en vraagt captcha.'
+      : '';
+    return { url: '', error: `Keep2Share web-download faalde: ${msg}${authHint ? ` ${authHint}` : ''}` };
+  }
+  return { url: '', error: result.error || `Keep2Share web-download faalde (HTTP ${result.status})` };
+}
+
+async function resolveKeep2ShareDirectUrl(input, metadata = null) {
+  const fileId = keep2ShareFileIdFromUrl(input);
+  if (!fileId) return { url: '', error: 'Keep2Share file-id ontbreekt in URL' };
+
+  // 2026-05-30 (Jürgen): K2S DMCA-takedown is normaal voor adult content.
+  // Vroege pre-check via lichtgewicht /v1/files/{id} (geen auth nodig) zodat
+  // we bij isDeleted/hasAbuse direct duidelijk falen zonder de zware
+  // getUrl + web-cookie flow te draaien. Voorkomt ook misleidende
+  // "accessToken werd niet geaccepteerd" foutmeldingen waar de echte oorzaak
+  // gewoon "K2S verwijderde dit bestand" is. Pre-check faalt stil (network
+  // hiccup) → val terug op normale flow.
+  try {
+    const infoRes = await fetch(`https://api.k2s.cc/v1/files/${encodeURIComponent(fileId)}`, {
+      headers: { 'Accept': 'application/json', 'Origin': 'https://k2s.cc', 'Referer': String(input || 'https://k2s.cc/') }
+    });
+    if (infoRes.ok) {
+      const info = await infoRes.json().catch(() => null);
+      if (info && info.isDeleted === true) {
+        return { url: '', error: `K2S file ${fileId} is verwijderd (DMCA/takedown of door eigenaar)`, deleted: true };
+      }
+      if (info && info.hasAbuse === true) {
+        return { url: '', error: `K2S file ${fileId} is geflagd voor abuse en kan niet worden gedownload`, abuse: true };
+      }
+    }
+  } catch (_) { /* network hiccup → ga door met normale flow */ }
+
+  // 2026-05-30 Spoor 1.5: web-cookie flow EERST proberen (bewezen werkend voorheen
+  // per vorige sessie). JWT-token-flow valt vaak met "File not found" terug op
+  // verlopen/geweigerde tokens. Web-first bespaart die round-trip.
+  // Opt-out via env K2S_AUTH_MODE=token om de oude JWT-eerst flow te herstellen.
+  if (process.env.K2S_AUTH_MODE !== 'token') {
+    const webFirst = await resolveKeep2ShareWebDirectUrl(input, metadata);
+    if (webFirst.url) return webFirst;
+    // Web-fallback faalde — sla door naar JWT-flow als laatste poging.
+  }
+
+  const authToken = await getKeep2ShareAuthToken();
+  let accessTokenSource = 'env';
+  let accessToken = String(
+    process.env.WEBDL_KEEP2SHARE_ACCESS_TOKEN ||
+    process.env.KEEP2SHARE_ACCESS_TOKEN ||
+    process.env.K2S_ACCESS_TOKEN ||
+    ''
+  ).trim();
+  if (!authToken && !accessToken) {
+    try {
+      const host = new URL(String(input || '')).hostname.toLowerCase();
+      const cookieAuth = await loadKeep2ShareCookieAuth(host, null);
+      accessToken = cookieValueFromHeader(cookieAuth.cookieHeader, 'accessToken');
+      if (accessToken) accessTokenSource = cookieAuth.source || 'cookie';
+    } catch (e) { }
+  }
+  if (!authToken && !accessToken) {
+    const webResolved = await resolveKeep2ShareWebDirectUrl(input, metadata);
+    if (webResolved.url) return webResolved;
+    return {
+      url: '',
+      error: `${webResolved.error || 'Keep2Share premium auth ontbreekt'}. Zet K2S_COOKIE/K2S_X_BC of WEBDL_KEEP2SHARE_AUTH_TOKEN/K2S_AUTH_TOKEN of WEBDL_KEEP2SHARE_USERNAME/PASSWORD in .env.`
+    };
+  }
+  // K2S JWT tokens werken alleen als auth_token, niet als access_token
+  const body = authToken
+    ? { auth_token: authToken, file_id: fileId }
+    : { auth_token: accessToken, file_id: fileId };
+  const json = await postKeep2ShareApi('getUrl', body);
+  if (json.status === 'success' && json.url) return { url: String(json.url), error: '' };
+  const webResolved = await resolveKeep2ShareWebDirectUrl(input, metadata);
+  if (webResolved.url) return webResolved;
+  if (!authToken && accessTokenSource === 'firefox-cookie') {
+    return {
+      url: '',
+      error: `Firefox K2S-login gevonden, maar de K2S API accepteert deze browser-token niet voor getUrl: ${keep2ShareApiErrorMessage(json)}. Web-cookie fallback: ${webResolved.error || 'geen downloadlink'}. Zet K2S_COOKIE/K2S_X_BC of een permanent K2S API-token in .env.`
+    };
+  }
+  if (!authToken && accessTokenSource) {
+    const sourceLabel = accessTokenSource === 'env-cookie'
+      ? 'K2S accessToken uit .env-cookie'
+      : accessTokenSource === 'metadata-cookie'
+        ? 'K2S accessToken uit meegegeven cookie'
+        : 'K2S accessToken';
+    // 2026-05-30: trigger on-demand health-refresh (throttled 1×/min)
+    try { if (typeof noteKeep2ShareError === 'function') noteKeep2ShareError('accessToken-rejected'); } catch (_) {}
+    return {
+      url: '',
+      error: `${sourceLabel} werd niet geaccepteerd voor getUrl: ${keep2ShareApiErrorMessage(json)}. Web-cookie fallback: ${webResolved.error || 'geen downloadlink'}`
+    };
+  }
+  try { if (typeof noteKeep2ShareError === 'function') noteKeep2ShareError('getUrl-failed'); } catch (_) {}
+  return { url: '', error: `Keep2Share getUrl faalde: ${keep2ShareApiErrorMessage(json)}. Web-cookie fallback: ${webResolved.error || 'geen downloadlink'}` };
+}
+
+function redactKeep2ShareDiagnosticText(value) {
+  return String(value || '')
+    .replace(/((?:auth|token|cookie|password|secret|x[_-]?bc)[^=&\s:]{0,32}\s*[=:]\s*)[^\s&,"'}]+/ig, '$1[redacted]')
+    .replace(/(bearer\s+)[a-z0-9._~+/=-]+/ig, '$1[redacted]');
+}
+
+function keep2ShareCredentialPresence() {
+  const cookieAuth = keep2ShareCookieAuthFromEnv();
+  const directAuthToken = String(process.env.WEBDL_KEEP2SHARE_AUTH_TOKEN || process.env.KEEP2SHARE_AUTH_TOKEN || process.env.K2S_AUTH_TOKEN || '').trim();
+  const directAccessToken = String(process.env.WEBDL_KEEP2SHARE_ACCESS_TOKEN || process.env.KEEP2SHARE_ACCESS_TOKEN || process.env.K2S_ACCESS_TOKEN || '').trim();
+  const directWebAccessToken = String(process.env.WEBDL_KEEP2SHARE_WEB_ACCESS_TOKEN || process.env.KEEP2SHARE_WEB_ACCESS_TOKEN || process.env.K2S_WEB_ACCESS_TOKEN || '').trim();
+  const username = String(process.env.WEBDL_KEEP2SHARE_USERNAME || process.env.KEEP2SHARE_USERNAME || process.env.K2S_USERNAME || '').trim();
+  const password = String(process.env.WEBDL_KEEP2SHARE_PASSWORD || process.env.KEEP2SHARE_PASSWORD || process.env.K2S_PASSWORD || '').trim();
+  const xbc = keep2ShareXbcFromEnv();
+  return {
+    cookie: !!cookieAuth.cookieHeader,
+    cookieSource: cookieAuth.source || '',
+    x_bc: !!xbc,
+    auth_token: !!directAuthToken,
+    access_token: !!directAccessToken,
+    web_access_token: !!directWebAccessToken,
+    username: !!username,
+    password: !!password,
+    login_pair: !!username && !!password,
+  };
+}
+
+function keep2SharePreflightFailure(preflight) {
+  const checks = Array.isArray(preflight && preflight.checks) ? preflight.checks : [];
+  const fileResolve = checks.find((check) => check && check.name === 'file_resolve');
+  return redactKeep2ShareDiagnosticText(
+    fileResolve && fileResolve.reason
+      ? fileResolve.reason
+      : preflight && preflight.remoteAcceptance && preflight.remoteAcceptance.status
+        ? `remote status ${preflight.remoteAcceptance.status}`
+        : 'K2S file preflight rejected'
+  );
+}
+
+async function assertKeep2ShareFilePreflight(url) {
+  if (!isKeep2ShareUrl(url)) return null;
+  const preflight = await keep2ShareRemotePreflight(url);
+  if (!preflight || !preflight.remoteAcceptance || preflight.remoteAcceptance.accepted !== true) {
+    // Don't block — let the download attempt proceed; it may succeed via web-cookie fallback
+    console.log(`⚠️  K2S preflight soft-fail: ${keep2SharePreflightFailure(preflight)}`);
+  }
+  return preflight;
+}
+
+function summarizeKeep2ShareJson(json) {
+  if (!json || typeof json !== 'object') return null;
+  return {
+    status: json.status || null,
+    code: json.code || null,
+    message: json.message ? redactKeep2ShareDiagnosticText(json.message) : null,
+    error: json.error ? redactKeep2ShareDiagnosticText(typeof json.error === 'string' ? json.error : JSON.stringify(json.error)) : null,
+    hasUrl: !!keep2ShareDownloadUrlFromJson(json),
+    hasAuthToken: !!json.auth_token,
+    hasAccessToken: !!json.access_token,
+    hasAccountExpires: !!json.account_expires,
+    hasAvailableTraffic: json.available_traffic != null,
+  };
+}
+
+async function keep2ShareRemotePreflight(inputUrl = '') {
+  const url = String(inputUrl || '').trim();
+  const fileId = keep2ShareFileIdFromUrl(url);
+  const presence = keep2ShareCredentialPresence();
+  const checks = [];
+  const addCheck = (check) => {
+    checks.push({
+      name: check.name,
+      source: check.source || '',
+      checked: check.checked === true,
+      accepted: check.accepted === true,
+      status: check.status || (check.checked ? (check.accepted ? 'accepted' : 'rejected') : 'not_checked'),
+      reason: check.reason ? redactKeep2ShareDiagnosticText(check.reason) : '',
+      detail: check.detail || null,
+    });
+  };
+
+  const directAccessToken = String(process.env.WEBDL_KEEP2SHARE_ACCESS_TOKEN || process.env.KEEP2SHARE_ACCESS_TOKEN || process.env.K2S_ACCESS_TOKEN || '').trim();
+  if (directAccessToken) {
+    try {
+      const json = await postKeep2ShareApi('accountInfo', { access_token: directAccessToken });
+      addCheck({
+        name: 'api_account_info',
+        source: 'access_token',
+        checked: true,
+        accepted: json && json.status === 'success',
+        reason: json && json.status === 'success' ? 'accountInfo accepteert access_token' : keep2ShareApiErrorMessage(json),
+        detail: summarizeKeep2ShareJson(json),
+      });
+    } catch (e) {
+      addCheck({ name: 'api_account_info', source: 'access_token', checked: true, accepted: false, reason: e && e.message ? e.message : String(e) });
+    }
+  } else {
+    addCheck({ name: 'api_account_info', source: 'access_token', checked: false, accepted: false, reason: 'Geen K2S_ACCESS_TOKEN/WEBDL_KEEP2SHARE_ACCESS_TOKEN ingesteld.' });
+  }
+
+  if (presence.login_pair) {
+    try {
+      const token = await getKeep2ShareAuthToken();
+      addCheck({ name: 'api_login', source: 'username_password', checked: true, accepted: !!token, reason: token ? 'login gaf auth_token terug' : 'login gaf geen auth_token terug' });
+    } catch (e) {
+      addCheck({ name: 'api_login', source: 'username_password', checked: true, accepted: false, reason: e && e.message ? e.message : String(e) });
+    }
+  } else {
+    addCheck({ name: 'api_login', source: 'username_password', checked: false, accepted: false, reason: 'Geen complete K2S_USERNAME/K2S_PASSWORD ingesteld.' });
+  }
+
+  const cookieAuth = await loadKeep2ShareCookieAuth('k2s.cc', null);
+  if (cookieAuth.cookieHeader) {
+    try {
+      const tokenInfo = await getKeep2ShareWebAccessToken(cookieAuth.cookieHeader, 'k2s.cc', { cookieSource: cookieAuth.source });
+      addCheck({
+        name: 'web_auth_token',
+        source: tokenInfo.source || cookieAuth.source || 'cookie',
+        checked: true,
+        accepted: !!tokenInfo.token,
+        reason: tokenInfo.token ? 'K2S web-access-token kon worden opgehaald.' : 'K2S web-access-token kon niet worden opgehaald.',
+      });
+    } catch (e) {
+      addCheck({ name: 'web_auth_token', source: cookieAuth.source || 'cookie', checked: true, accepted: false, reason: e && e.message ? e.message : String(e) });
+    }
+  } else {
+    addCheck({ name: 'web_auth_token', source: 'cookie', checked: false, accepted: false, reason: 'Geen K2S cookie beschikbaar.' });
+  }
+
+  if (url && fileId) {
+    try {
+      const resolved = await resolveKeep2ShareDirectUrl(url, null);
+      addCheck({
+        name: 'file_resolve',
+        source: 'configured_auth',
+        checked: true,
+        accepted: !!(resolved && resolved.url),
+        reason: resolved && resolved.url ? 'K2S gaf een directe download-URL terug.' : (resolved && resolved.error ? resolved.error : 'geen downloadlink'),
+      });
+    } catch (e) {
+      addCheck({ name: 'file_resolve', source: 'configured_auth', checked: true, accepted: false, reason: e && e.message ? e.message : String(e) });
+    }
+  } else if (url) {
+    addCheck({ name: 'file_resolve', source: 'configured_auth', checked: false, accepted: false, reason: 'URL bevat geen K2S file-id.' });
+  }
+
+  const remoteAccepted = checks.some((check) => check.checked && check.accepted);
+  const fileAccepted = checks.some((check) => check.name === 'file_resolve' && check.accepted);
+  return {
+    service: 'keep2share',
+    readOnly: true,
+    configured: Object.entries(presence).some(([key, value]) => key !== 'cookieSource' && value === true),
+    credentialPresence: presence,
+    input: { hasUrl: !!url, fileId: fileId || null },
+    remoteAcceptance: {
+      checked: true,
+      accepted: url && fileId ? fileAccepted : remoteAccepted,
+      status: (url && fileId ? fileAccepted : remoteAccepted) ? 'accepted' : 'rejected',
+      meaning: url && fileId
+        ? 'Bij een URL telt alleen file_resolve als bewijs dat deze file met de huidige auth downloadbaar is.'
+        : 'Zonder URL bewijst dit alleen of een authbron door een K2S endpoint wordt geaccepteerd.',
+    },
+    checks,
+  };
 }
 
 // Geeft het absolute pad terug van het eerste (alfabetisch) geïndexeerde bestand
@@ -1477,6 +2430,8 @@ const updateDownloadSourceUrl = db.prepare(`UPDATE downloads SET source_url=?, u
 const updateDownloadThumbnail = db.prepare(`UPDATE downloads SET thumbnail=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`);
 const updateDownloadRating = db.prepare(`UPDATE downloads SET rating=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`);
 const updateDownloadUrl = db.prepare(`UPDATE downloads SET url=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`);
+const updateDownloadContentTimestamp = db.prepare(`UPDATE downloads SET created_at=?, updated_at=?, finished_at=? WHERE id=?`);
+const updateDownloadFilesContentTimestamp = db.prepare(`UPDATE download_files SET mtime_ms=?, updated_at=? WHERE download_id=?`);
 const rawGetDownload = db.prepare(`SELECT * FROM downloads WHERE id=?`);
 const getDownload = rawGetDownload;
 const updateScreenshotRating = db.prepare(`UPDATE screenshots SET rating=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`);
@@ -1681,6 +2636,29 @@ async function emitDownloadStatusActivity(downloadId, status, progress, error, e
 const updateDownload = {
   run: async (status, progress, filepath, filename, filesize, format, metadata, error, id) => {
     const out = await rawUpdateDownload.run(status, progress, filepath, filename, filesize, format, metadata, error, id);
+    if (String(status || '').toLowerCase() === 'completed') {
+      try {
+        await normalizeYoutubeDownloadTimestamp(id, filepath);
+      } catch (e) { }
+      // Auto-detect duration via ffprobe for video files
+      if (filepath && /\.(mp4|mkv|webm|avi|mov)$/i.test(filepath)) {
+        try {
+          const { execFile } = require('child_process');
+          execFile('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', filepath], { timeout: 15000 }, (err, stdout) => {
+            if (!err && stdout) {
+              const secs = parseFloat(stdout.trim());
+              if (Number.isFinite(secs) && secs > 0) {
+                const m = Math.floor(secs / 60);
+                const s = Math.floor(secs % 60);
+                const dur = `${m}:${String(s).padStart(2, '0')}`;
+                const pool = db.readPool || db.pool;
+                if (pool && pool.query) pool.query(`UPDATE downloads SET duration = $1 WHERE id = $2 AND (duration IS NULL OR duration = '' OR duration = '0:00')`, [dur, id]).catch(() => {});
+              }
+            }
+          });
+        } catch (e) { }
+      }
+    }
     setDownloadActivityContext(id, { filepath, filename });
     await emitDownloadStatusActivity(id, status, progress, error, { filepath, filename });
     return out;
@@ -1714,6 +2692,23 @@ const updateDownloadStatus = {
             const q = `INSERT INTO download_tags (download_id, tag) VALUES ${placeholders.join(', ')} ON CONFLICT ON CONSTRAINT download_tags_download_id_tag_key DO NOTHING`;
             await (db.readPool || db.pool || db).query ? (db.readPool || db.pool).query({ text: q, values }) : db.prepare(q).run(...values);
           }
+
+          // Auto-detect duration via ffprobe for video files
+          if (d.filepath && /\.(mp4|mkv|webm|avi|mov)$/i.test(d.filepath)) {
+            const { execFile } = require('child_process');
+            execFile('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', d.filepath], { timeout: 15000 }, (err, stdout) => {
+              if (!err && stdout) {
+                const secs = parseFloat(stdout.trim());
+                if (Number.isFinite(secs) && secs > 0) {
+                  const m = Math.floor(secs / 60);
+                  const s = Math.floor(secs % 60);
+                  const dur = `${m}:${String(s).padStart(2, '0')}`;
+                  const pool = db.readPool || db.pool;
+                  if (pool && pool.query) pool.query(`UPDATE downloads SET duration = $1 WHERE id = $2 AND (duration IS NULL OR duration = '' OR duration = '0:00')`, [dur, d.id]).catch(() => {});
+                }
+              }
+            });
+          }
         }
       } catch (e) {
         console.error('[AUTO-TAG] Error in live auto-tag hook:', e.message);
@@ -1742,6 +2737,92 @@ const findReusableDownloadByUrl = db.prepare(`
     created_at DESC,
     id DESC
   LIMIT 1
+`);
+const findReusableKeep2ShareDownloadByFileId = db.prepare(`
+  SELECT id, url, source_url, platform, channel, title, status, progress, filepath, filename, filesize, format, metadata
+  FROM downloads
+  WHERE status IN ('completed', 'pending', 'queued', 'downloading', 'postprocessing')
+    AND (
+      lower(COALESCE(url, '')) LIKE ?
+      OR lower(COALESCE(source_url, '')) LIKE ?
+      OR lower(COALESCE(metadata, '')) LIKE ?
+    )
+  ORDER BY
+    CASE status
+      WHEN 'completed' THEN 0
+      WHEN 'downloading' THEN 1
+      WHEN 'postprocessing' THEN 2
+      WHEN 'queued' THEN 3
+      WHEN 'pending' THEN 4
+      ELSE 9
+    END,
+    updated_at DESC,
+    created_at DESC,
+    id DESC
+  LIMIT 1
+`);
+const findReusableKeep2ShareDownloadByFileIdExcludingId = db.prepare(`
+  SELECT id, url, source_url, platform, channel, title, status, progress, filepath, filename, filesize, format, metadata
+  FROM downloads
+  WHERE id<>?
+    AND status IN ('completed', 'pending', 'queued', 'downloading', 'postprocessing')
+    AND (
+      lower(COALESCE(url, '')) LIKE ?
+      OR lower(COALESCE(source_url, '')) LIKE ?
+      OR lower(COALESCE(metadata, '')) LIKE ?
+    )
+  ORDER BY
+    CASE status
+      WHEN 'completed' THEN 0
+      WHEN 'downloading' THEN 1
+      WHEN 'postprocessing' THEN 2
+      WHEN 'queued' THEN 3
+      WHEN 'pending' THEN 4
+      ELSE 9
+    END,
+    updated_at DESC,
+    created_at DESC,
+    id DESC
+  LIMIT 1
+`);
+const findReusableDownloadMetadataCandidates = db.prepare(`
+  SELECT id, url, source_url, platform, channel, title, status, progress, filepath, filename, filesize, format, metadata
+  FROM downloads
+  WHERE status IN ('completed', 'pending', 'queued', 'downloading', 'postprocessing')
+    AND lower(COALESCE(metadata, '')) LIKE ?
+  ORDER BY
+    CASE status
+      WHEN 'completed' THEN 0
+      WHEN 'downloading' THEN 1
+      WHEN 'postprocessing' THEN 2
+      WHEN 'queued' THEN 3
+      WHEN 'pending' THEN 4
+      ELSE 9
+    END,
+    updated_at DESC,
+    created_at DESC,
+    id DESC
+  LIMIT 200
+`);
+const findReusableDownloadMetadataCandidatesExcludingId = db.prepare(`
+  SELECT id, url, source_url, platform, channel, title, status, progress, filepath, filename, filesize, format, metadata
+  FROM downloads
+  WHERE id<>?
+    AND status IN ('completed', 'pending', 'queued', 'downloading', 'postprocessing')
+    AND lower(COALESCE(metadata, '')) LIKE ?
+  ORDER BY
+    CASE status
+      WHEN 'completed' THEN 0
+      WHEN 'downloading' THEN 1
+      WHEN 'postprocessing' THEN 2
+      WHEN 'queued' THEN 3
+      WHEN 'pending' THEN 4
+      ELSE 9
+    END,
+    updated_at DESC,
+    created_at DESC,
+    id DESC
+  LIMIT 200
 `);
 const findReusableDownloadByUrlExcludingId = db.prepare(`
   SELECT id, url, platform, channel, title, status, progress, filepath, filename, filesize, format, metadata
@@ -1782,6 +2863,185 @@ const findReusableDownloadBySourceRef = db.prepare(`
     id DESC
   LIMIT 1
 `);
+const getDownloadFileRelpathsByDownloadId = db.prepare(`
+  SELECT relpath
+  FROM download_files
+  WHERE download_id = ?
+  ORDER BY id
+  LIMIT ?
+`);
+
+function parseJsonObject(value) {
+  if (!value || typeof value !== 'string') return value && typeof value === 'object' ? value : null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function metadataReferencesInputUrl(metadata, inputUrl) {
+  const meta = parseJsonObject(metadata);
+  if (!meta) return false;
+  const target = String(inputUrl || '').trim();
+  if (!target) return false;
+  const fields = [
+    meta.webdl_input_url,
+    meta.webdl_media_url,
+    meta.webdl_resolved_url,
+    meta.webdl_wrapper_url,
+    meta.original_url,
+    meta.input_url,
+  ];
+  const nested = [
+    meta.external_metadata,
+    meta.webdl_external_metadata,
+  ];
+  for (const ctx of nested) {
+    if (ctx && typeof ctx === 'object') {
+      fields.push(ctx.url, ctx.source_url, ctx.page_url, ctx.original_url, ctx.direct_url, ctx.final_url);
+    }
+  }
+  return fields.some((value) => String(value || '').trim() === target);
+}
+
+function shouldRunExpensiveMetadataReuseLookup(inputUrl) {
+  try {
+    const raw = String(inputUrl || '').trim();
+    if (!raw) return false;
+    if (keep2ShareFileIdFromUrl(raw)) return false;
+    if (pixhostMediaKey(raw)) return false;
+    if (!/^https?:\/\//i.test(raw)) return true;
+    // 2026-05-24: Skip de LIKE-on-metadata redmiddelcheck voor known wrapper
+    // hosts. Met 400k+ rows in downloads-tabel is `metadata LIKE '%<url>%'`
+    // een full table scan; bij parallel-dispatch (concurrency 10) van
+    // whole-thread scans (1000+ wrapper URLs zoals imx.to/imagebam) zat DB
+    // op slot. De snellere checks (url, source_url, k2s_file_id, pixhost-key)
+    // blijven bestaan; alleen de fuzzy metadata-text-match valt weg.
+    // Zet WEBDL_EXPENSIVE_WRAPPER_DEDUPE=1 voor oude gedrag.
+    if (isKnownHtmlWrapperUrl(raw)) {
+      return process.env.WEBDL_EXPENSIVE_WRAPPER_DEDUPE === '1';
+    }
+    return false;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function findReusableDownloadForUrl(inputUrl, options = {}) {
+  const excludeId = Number(options && options.excludeId);
+  const shouldExclude = Number.isFinite(excludeId) && excludeId > 0;
+  const includeMetadata = options && options.includeMetadata === false ? false : true;
+  const direct = shouldExclude ?
+    await findReusableDownloadByUrlExcludingId.get(inputUrl, excludeId) :
+    await findReusableDownloadByUrl.get(inputUrl);
+  if (direct && direct.id) return direct;
+
+  const raw = String(inputUrl || '').trim();
+  const sourceRef = await findReusableDownloadBySourceRef.get(raw, raw);
+  if (sourceRef && sourceRef.id && (!shouldExclude || Number(sourceRef.id) !== excludeId)) return sourceRef;
+
+  const externalKey = pixhostMediaKey(raw);
+  if (externalKey) {
+    const basename = (() => {
+      try { return decodeURIComponent(path.basename(new URL(raw).pathname || '')).toLowerCase(); } catch (e) { return ''; }
+    })();
+    if (basename && basename.length >= 6) {
+      const rows = shouldExclude ?
+        await findReusableKeep2ShareDownloadByFileIdExcludingId.all(excludeId, `%${basename}%`, `%${basename}%`, `%${basename}%`) :
+        await findReusableKeep2ShareDownloadByFileId.all(`%${basename}%`, `%${basename}%`, `%${basename}%`);
+      for (const row of rows || []) {
+        if (sameExternalMediaObject(raw, row && row.url) || sameExternalMediaObject(raw, row && row.source_url)) return row;
+        if (row && row.metadata) {
+          const meta = parseJsonObject(row.metadata);
+          const values = [
+            meta && meta.webdl_input_url,
+            meta && meta.webdl_media_url,
+            meta && meta.webdl_resolved_url,
+            meta && meta.webdl_wrapper_url,
+          ];
+          if (values.some((value) => sameExternalMediaObject(raw, value))) return row;
+        }
+      }
+    }
+  }
+
+  const k2sId = keep2ShareFileIdFromUrl(inputUrl);
+  if (k2sId) {
+    const needle = `%/file/${k2sId}%`;
+    const existingK2s = shouldExclude ?
+      await findReusableKeep2ShareDownloadByFileIdExcludingId.get(excludeId, needle, needle, needle) :
+      await findReusableKeep2ShareDownloadByFileId.get(needle, needle, needle);
+    if (existingK2s && existingK2s.id) return existingK2s;
+  }
+
+  if (includeMetadata && raw.length >= 12 && shouldRunExpensiveMetadataReuseLookup(raw)) {
+    const candidates = shouldExclude ?
+      await findReusableDownloadMetadataCandidatesExcludingId.all(excludeId, `%${raw.toLowerCase()}%`) :
+      await findReusableDownloadMetadataCandidates.all(`%${raw.toLowerCase()}%`);
+    for (const row of candidates || []) {
+      if (metadataReferencesInputUrl(row && row.metadata, raw)) return row;
+    }
+  }
+  return null;
+}
+
+const archivePostprocessInFlight = new Set();
+
+function downloadRowFilepathAbs(row) {
+  const fp = String(row && row.filepath || '').trim();
+  if (!fp) return '';
+  return path.isAbsolute(fp) ? fp : path.resolve(BASE_DIR, fp);
+}
+
+async function existingDownloadHasIndexedMedia(downloadId) {
+  try {
+    const rows = await getDownloadFileRelpathsByDownloadId.all(downloadId, 2000);
+    for (const row of rows || []) {
+      const rel = String(row && row.relpath || '').trim();
+      if (!rel) continue;
+      const abs = path.isAbsolute(rel) ? rel : path.resolve(BASE_DIR, rel);
+      if (isMediaFilePath(abs) && !isAuxiliaryMediaPath(abs)) return true;
+    }
+  } catch (e) { }
+  return false;
+}
+
+async function ensureExistingArchivePostprocessed(row, reason = 'duplicate') {
+  const id = Number(row && row.id);
+  if (!Number.isFinite(id) || id <= 0) return;
+  if (archivePostprocessInFlight.has(id)) return;
+  archivePostprocessInFlight.add(id);
+  try {
+    const fresh = await getDownload.get(id);
+    if (!fresh || String(fresh.status || '').toLowerCase() !== 'completed') return;
+    const filepath = downloadRowFilepathAbs(fresh);
+    if (!filepath || !fs.existsSync(filepath) || !isArchiveFilePath(filepath)) return;
+    if (await existingDownloadHasIndexedMedia(id)) return;
+    console.log(`[archive] bestaande archive postprocess #${id} (${reason}): ${filepath}`);
+    await updateDownloadStatus.run('postprocessing', 95, null, id);
+    const extracted = await extractArchiveDownloadFiles(id, filepath, path.dirname(filepath));
+    try { await db.prepare("UPDATE downloads SET status = 'completed', progress = 100, is_thumb_ready = false, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(id); } catch (e) { }
+    console.log(`[archive] bestaande archive #${id}: ${extracted.mediaCount || 0} media geindexeerd`);
+  } catch (e) {
+    console.log(`[archive] bestaande archive postprocess fout #${id}: ${e && e.message ? e.message : String(e)}`);
+    try { await updateDownloadStatus.run('error', 0, `Archive uitpakken faalde: ${e && e.message ? e.message : String(e)}`, id); } catch (_) { }
+  } finally {
+    archivePostprocessInFlight.delete(id);
+  }
+}
+
+function scheduleExistingArchivePostprocess(row, reason) {
+  const id = Number(row && row.id);
+  if (!Number.isFinite(id) || id <= 0) return;
+  setImmediate(() => {
+    ensureExistingArchivePostprocessed(row, reason).catch((e) => {
+      console.log(`[archive] postprocess scheduling fout #${id}: ${e && e.message ? e.message : String(e)}`);
+    });
+  });
+}
+
 const getDownloadIdByFilepath = db.prepare(`SELECT id FROM downloads WHERE filepath=? LIMIT 1`);
 const getAllDownloads = db.prepare(`SELECT * FROM downloads WHERE status IN ('downloading', 'postprocessing') ORDER BY updated_at DESC, created_at DESC LIMIT 500`);
 const getActiveDownloads = db.prepare(`
@@ -4456,8 +5716,8 @@ const getMediaByChannelByRatingAsc = db.prepare(`
 // ========================
 const activeProcesses = new Map();
 
-let HEAVY_DOWNLOAD_CONCURRENCY = parseInt(process.env.WEBDL_HEAVY_DOWNLOAD_CONCURRENCY || '4', 10);
-let LIGHT_DOWNLOAD_CONCURRENCY = parseInt(process.env.WEBDL_LIGHT_DOWNLOAD_CONCURRENCY || '12', 10);
+let HEAVY_DOWNLOAD_CONCURRENCY = parseInt(process.env.WEBDL_HEAVY_DOWNLOAD_CONCURRENCY || '1', 10);
+let LIGHT_DOWNLOAD_CONCURRENCY = parseInt(process.env.WEBDL_LIGHT_DOWNLOAD_CONCURRENCY || '8', 10);
 
 const initialYoutubeConcurrency = parseInt(process.env.WEBDL_YOUTUBE_DOWNLOAD_CONCURRENCY || '1', 10);
 const initialYoutubeSpacing = parseInt(process.env.WEBDL_YOUTUBE_START_SPACING_MS || '0', 10);
@@ -4648,25 +5908,58 @@ function activeLaneCount(lane) {
   return n;
 }
 
-function detectLane(platform, url = '') {
+function detectLane(platform, url = '', metadata = null) {
   const p = String(platform || '').toLowerCase();
   const u = String(url || '').toLowerCase();
+
+  // K2S files first: ook .rar/.zip — premium-resolve + http-download,
+  // geen ffmpeg-merge. Hoort niet achter heavy yt-dlp video-queue te wachten.
+  if (/(?:keep2share\.cc|k2s\.cc|k2s\.io)\/file\//i.test(u)) return 'light';
+
+  if (isArchiveDownloadLike(url, metadata)) return 'heavy';
+
+  // Direct transfers without postprocessing must never sit behind video jobs.
+  if (isImageUrlLike(u) || isDirectVideoUrlLike(u) || isImageHostPageUrlLike(u)) return 'light';
 
   // If this is a live stream or explicitly a video, definitely heavy
   if (u.includes('is_live=true') || u.includes('/live/') || u.includes('tiktok.com/@') && !u.includes('/photo/')) {
     return 'heavy';
   }
 
-  // Only pure image/direct link platforms get the fast lane
+  // Media that downloads without ffmpeg merge/transcode gets the fast lane.
+  // 2026-05-30 (Jürgen): video-tubes toegevoegd. yt-dlp pakt op deze sites
+  // een al-gemergede mp4 (single-file best), geen ffmpeg-merge nodig. Heavy
+  // is alleen voor merge-zware bronnen (YT/Vimeo/Twitch/Reddit/OF/TikTok
+  // playlists). Eerder hadden 9034 footstockings + spankbang playlist + 12
+  // heavyfetish in heavy gewacht achter 1 concurrent slot.
   const lightPlatforms = [
-    'footfetishforum', 'forum-area', 'imagetwist', 'pixhost', 'postimg', 'bunkr', 'jpg', 'aznudefeet', 'pornpics',
-    'kinky', 'wikifeet', 'wikifeetx', 'elitebabes', 'erome'
+    'footfetishforum', 'forum-area', 'imagetwist', 'imagebam', 'imgbox', 'imagevenue', 'imgchest', 'imgvb',
+    'imx', 'vipr', 'turboimagehost', 'imgkiwi', 'pixhost', 'postimg', 'bunkr', 'jpg', 'aznudefeet', 'pornpics',
+    'kinky', 'wikifeet', 'wikifeetx', 'elitebabes', 'erome', 'keep2share', 'twitter',
+    'vipergirls', 'phun', 'amateurvoyeurforum', 'pictoa', 'imagefap',
+    // 2026-05-30: single-mp4 video-tubes (geen merge) — naar light
+    'footstockings', 'spankbang', 'heavyfetish', 'darknessporn', 'darknetvideos',
+    'redtube', 'xnxx', 'tnaflix', 'xvideos', 'recu', 'omegleporn',
+    'sexygirlspics', 'hoestube', 'porncoven', 'pornkai', 'porndr',
+    'pornzog', 'tubesafari', 'alohatube', 'usersporn', 'xfree', 'zzztube',
+    'spycamhub', 'favoyeurtube', 'nakedneighbour', 'chaturbate', 'bongacams',
+    // 2026-05-30 nog meer: alles wat in heavy-queue zat te wachten
+    'eporner', 'xhamster', 'xh', 'bravoteens', 'drtvid', 'xozilla',
+    'videotubepornclassic', 'bigtitslust', 'vid-ip', 'videohdzog', 'yourlust',
   ];
 
   if (lightPlatforms.includes(p)) return 'light';
 
-  // Everything else (youtube, onlyfans, tiktok videos, instagram zips, reddit videos, wikifeet galleries) is heavy
-  return 'heavy';
+  // 2026-05-30 (Jürgen): default = light. Heavy alleen voor expliciet
+  // merge-zware platforms (YT DASH-merge, Vimeo, Twitch VOD, Reddit video,
+  // OnlyFans/instagram bulk). Obscure tube-sites zonder merge-noodzaak
+  // moeten niet in heavy zitten — they zaten daar eerder per ongeluk.
+  const heavyPlatforms = [
+    'youtube', 'youtube-shorts', 'vimeo', 'twitch', 'reddit', 'onlyfans',
+    'instagram', 'tiktok-playlist',
+  ];
+  if (heavyPlatforms.includes(p)) return 'heavy';
+  return 'light';
 }
 
 function deriveEarlyThumbnail(url, platform) {
@@ -4693,7 +5986,7 @@ function deriveEarlyThumbnail(url, platform) {
 }
 
 async function enqueueDownloadJob(downloadId, url, platform, channel, title, metadata, laneOverride) {
-  const lane = laneOverride || detectLane(platform, url);
+  const lane = laneOverride || detectLane(platform, url, metadata);
   const earlyThumb = deriveEarlyThumbnail(url, platform);
   setDownloadActivityContext(downloadId, { url, platform, channel, title, lane, thumbnail: earlyThumb });
   jobLane.set(downloadId, lane);
@@ -4737,23 +6030,42 @@ function runDownloadSchedulerSoon() {
   if (schedulerTimer) return;
   schedulerTimer = setTimeout(() => {
     schedulerTimer = null;
-    runDownloadScheduler();
-    syncRuntimeActiveState().catch(() => { });
+    Promise.resolve(runDownloadScheduler()).catch((e) => {
+      console.error('Download scheduler error:', e && e.stack ? e.stack : e && e.message ? e.message : String(e));
+    }).finally(() => {
+      syncRuntimeActiveState().catch(() => { });
+    });
   }, 120);
+}
+
+function hasQueuedWorkWithCapacity() {
+  try {
+    const heavyLimit = Math.max(0, HEAVY_DOWNLOAD_CONCURRENCY);
+    const lightLimit = Math.max(0, LIGHT_DOWNLOAD_CONCURRENCY);
+    const batchLimit = Math.max(0, BATCH_DOWNLOAD_CONCURRENCY);
+    return heavyLimit > 0 && queuedHeavy.length > 0 && activeLaneCount('heavy') < heavyLimit ||
+      lightLimit > 0 && queuedLight.length > 0 && activeLaneCount('light') < lightLimit ||
+      batchLimit > 0 && queuedBatch.length > 0 && activeLaneCount('batch') < batchLimit;
+  } catch (e) {
+    return false;
+  }
 }
 
 async function runDownloadScheduler() {
   // Postprocess-cap: als er al N jobs in 'postprocessing' zitten (merge/ffmpeg)
   // starten we geen nieuwe downloads tot die klaar zijn. Voorkomt dat meerdere
   // ffmpeg-merges gelijktijdig CPU/IO opslokken. Default N = 1.
+  // 2026-05-24: cap blokkeerde voorheen ALLE lanes (ook light), waardoor
+  // K2S/image downloads vastliepen achter youtube ffmpeg-merge. Nu pasen we
+  // de cap alleen toe op heavy/batch (yt-dlp ffmpeg-werk). Light is direct
+  // HTTP-download (geen ffmpeg), die mag altijd door.
+  let skipHeavyAndBatch = false;
   try {
     const counts = await getActiveDownloadStatusCounts.all();
     const ppRow = Array.isArray(counts) ? counts.find((r) => r && r.status === 'postprocessing') : null;
     const ppCount = ppRow ? Number(ppRow.n || ppRow.count || 0) : 0;
     if (Number.isFinite(ppCount) && ppCount >= POSTPROCESS_CONCURRENCY) {
-      // Nog postprocessing bezig — laat die eerst klaar worden.
-      // runDownloadSchedulerSoon() wordt aangeroepen zodra een job klaar is.
-      return;
+      skipHeavyAndBatch = true;
     }
   } catch (_e) { /* DB-hick: fall-through; niet fataal */ }
 
@@ -4902,65 +6214,379 @@ async function runDownloadScheduler() {
     }
   }
 
-  // Auto-rehydrate: if all in-memory queues are empty, pull more pending items from DB
-  if (queuedHeavy.length === 0 && queuedLight.length === 0 && queuedBatch.length === 0) {
+  // Auto-rehydrate per lane: a full heavy queue must not starve light/direct downloads.
+  if (shouldAutoRehydrate()) {
     scheduleAutoRehydrate();
   }
 }
 
 let autoRehydrateTimer = null;
+// 2026-05-29: idempotent back-off voor auto-rehydrate. Vorige bug: setInterval(5s)
+// triggerde elke 5s een 250-rows DB-query + 250x JSON.parse(metadata), zelfs als
+// alle 250 rows al in activeProcesses/queuedJobs zaten (loaded=0). Resultaat:
+// hot-loop, heap groeide 27MB/min, OOM-crash op 8GB en op 16GB heap.
+// Fix: tel consecutive zero-loads, skip ticks met exponentiele back-off.
+let consecutiveZeroLoads = 0;
+let nextRehydrateAllowedAt = 0;
+function shouldAutoRehydrate() {
+  if (Date.now() < nextRehydrateAllowedAt) return false;
+  const heavyLimit = Math.max(0, HEAVY_DOWNLOAD_CONCURRENCY);
+  const lightLimit = Math.max(0, LIGHT_DOWNLOAD_CONCURRENCY);
+  const batchLimit = Math.max(0, BATCH_DOWNLOAD_CONCURRENCY);
+  // 2026-05-30 (Jürgen footstockings-bug): pre-fill queue zelfs als slots
+  // vol zijn. Voorheen wachtte rehydrate tot zowel queue=0 ALS slot vrij —
+  // dat creëerde een gap: queue raakt leeg, slot komt vrij, rehydrate
+  // moet eerst back-off (30-300s) overleven voordat nieuwe items binnenkomen.
+  // Nu: keep queue topped up tot >= lightLimit, ongeacht active.
+  const needHeavy = heavyLimit > 0 && queuedHeavy.length < heavyLimit;
+  const needLight = lightLimit > 0 && queuedLight.length < lightLimit;
+  const needBatch = batchLimit > 0 && queuedBatch.length < batchLimit;
+  return needHeavy || needLight || needBatch;
+}
+
+function queueContextFromDownloadRow(row, parsedMeta) {
+  const url = String(row && row.url || '').trim();
+  const storedPlatform = row && row.platform && String(row.platform).trim() ? String(row.platform).trim() : '';
+  const storedChannel = row && row.channel && String(row.channel).trim() ? String(row.channel).trim() : '';
+  const storedTitle = row && row.title && String(row.title).trim() ? String(row.title).trim() : '';
+  const sourceUrl = row && row.source_url && String(row.source_url).trim() ? String(row.source_url).trim() : '';
+  const rawMeta = parsedMeta && typeof parsedMeta === 'object' && !Array.isArray(parsedMeta) ? parsedMeta : null;
+  const origin = normalizeOriginThreadContext(
+    pickSourceContextForUrl(rawMeta, url),
+    storedPlatform,
+    sourceUrl || url,
+    storedChannel,
+    storedTitle
+  );
+  const pinOrigin = !!(origin && origin.url && origin.url !== url && (rawMeta && rawMeta.webdl_pin_context === true || rawMeta && rawMeta.origin_thread || rawMeta && rawMeta.source_context));
+  const originalPlatform = rawMeta && String(rawMeta.original_platform || rawMeta.source_site || rawMeta.original_site || '').trim().toLowerCase();
+  const originalChannel = rawMeta && String(rawMeta.original_channel || '').trim();
+  const originalTitle = rawMeta && String(rawMeta.original_title || '').trim();
+  const pinOriginalMeta = !!(rawMeta && rawMeta.webdl_pin_context === true && originalPlatform && originalPlatform !== storedPlatform);
+  const platform = pinOrigin ? origin.platform : pinOriginalMeta ? normalizePlatform(originalPlatform, sourceUrl || url) : normalizePlatform(storedPlatform, url);
+  const channel = pinOrigin ? origin.channel : pinOriginalMeta && originalChannel ? originalChannel : storedChannel && storedChannel !== 'unknown' ? storedChannel : deriveChannelFromUrl(platform, url) || 'unknown';
+  const title = pinOrigin ? origin.title : pinOriginalMeta && originalTitle ? originalTitle : storedTitle && storedTitle !== 'untitled' ? storedTitle : deriveTitleFromUrl(url);
+  const metadata = rawMeta ? { ...rawMeta } : parsedMeta;
+  if (pinOrigin && metadata && typeof metadata === 'object') {
+    metadata.webdl_pin_context = true;
+    metadata.origin_thread = origin;
+    if (!metadata.webdl_media_url) metadata.webdl_media_url = url;
+    if (!metadata.webdl_detected_platform) metadata.webdl_detected_platform = detectPlatform(url);
+  } else if (pinOriginalMeta && metadata && typeof metadata === 'object') {
+    metadata.webdl_pin_context = true;
+    if (!metadata.webdl_media_url) metadata.webdl_media_url = url;
+    if (!metadata.webdl_detected_platform) metadata.webdl_detected_platform = detectPlatform(url);
+  }
+  return { platform, channel, title, metadata };
+}
+
 function scheduleAutoRehydrate() {
   if (autoRehydrateTimer) return;
   autoRehydrateTimer = setTimeout(async () => {
     autoRehydrateTimer = null;
     try {
-      const rows = await db.prepare(
-        `SELECT id, url, platform, channel, title, metadata, status
-         FROM downloads
-         WHERE status = 'pending'
-         ORDER BY COALESCE(priority, 0) DESC, id ASC
-         LIMIT 250`
-      ).all();
+      const heavyLimit = Math.max(0, HEAVY_DOWNLOAD_CONCURRENCY);
+      const lightLimit = Math.max(0, LIGHT_DOWNLOAD_CONCURRENCY);
+      const batchLimit = Math.max(0, BATCH_DOWNLOAD_CONCURRENCY);
+      // 2026-05-30 (Jürgen footstockings-bug): zie shouldAutoRehydrate.
+      const needHeavy = heavyLimit > 0 && queuedHeavy.length < heavyLimit;
+      const needLight = lightLimit > 0 && queuedLight.length < lightLimit;
+      const needBatch = batchLimit > 0 && queuedBatch.length < batchLimit;
+      if (!needHeavy && !needLight && !needBatch) return;
+
+      // 2026-05-30 Spoor 1.2 v3: starvation-fix via inline-literal IN-clause.
+      // v2 met $1-placeholders crashte ("there is no parameter $1") — db.prepare
+      // hier accepteert geen parameter-binding voor IN-lijst. Nu: hardcoded inline
+      // SQL-string van quoted-literals. Garandeert lane-balance: 125 light-platforms
+      // + 125 heavy-platforms parallel opgehaald, geen wederzijdse starvation.
+      // 2026-05-30: sync met lightPlatforms in detectLane (regel 5911).
+      // Tube-sites toegevoegd zodat rehydrate ze met de juiste prio binnenhaalt.
+      const LIGHT_PLATFORM_HINTS = [
+        'footfetishforum','forum-area','imagetwist','imagebam','imgbox','imagevenue','imgchest','imgvb',
+        'imx','vipr','turboimagehost','imgkiwi','pixhost','postimg','bunkr','jpg','aznudefeet','pornpics',
+        'kinky','wikifeet','wikifeetx','elitebabes','erome','keep2share','twitter',
+        'vipergirls','phun','amateurvoyeurforum','pictoa','imagefap',
+        'footstockings','spankbang','heavyfetish','darknessporn','darknetvideos',
+        'redtube','xnxx','tnaflix','xvideos','recu','omegleporn',
+        'sexygirlspics','hoestube','porncoven','pornkai','porndr',
+        'pornzog','tubesafari','alohatube','usersporn','xfree','zzztube',
+        'spycamhub','favoyeurtube','nakedneighbour','chaturbate','bongacams',
+        'eporner','xhamster','xh','bravoteens','drtvid','xozilla',
+        'videotubepornclassic','bigtitslust','vid-ip','videohdzog','yourlust',
+      ];
+      const lightLiteral = LIGHT_PLATFORM_HINTS.map(p => `'${p}'`).join(',');
+      const baseFilter = `status = 'pending'
+           AND url NOT LIKE 'recording:%'
+           AND COALESCE(CAST(metadata AS TEXT), '') NOT LIKE '%"webdl_kind":"recording"%'
+           AND COALESCE(CAST(metadata AS TEXT), '') NOT LIKE '%"webdl_kind": "recording"%'`;
+      const [lightRowsRaw, heavyRowsRaw] = await Promise.all([
+        db.prepare(
+          `SELECT id, url, source_url, platform, channel, title, metadata, status
+           FROM downloads
+           WHERE ${baseFilter}
+             AND lower(COALESCE(platform,'')) IN (${lightLiteral})
+           ORDER BY COALESCE(priority, 0) DESC, id ASC
+           LIMIT 125`
+        ).all(),
+        db.prepare(
+          `SELECT id, url, source_url, platform, channel, title, metadata, status
+           FROM downloads
+           WHERE ${baseFilter}
+             AND lower(COALESCE(platform,'')) NOT IN (${lightLiteral})
+           ORDER BY COALESCE(priority, 0) DESC, id ASC
+           LIMIT 125`
+        ).all(),
+      ]);
+      const rows = [...(lightRowsRaw || []), ...(heavyRowsRaw || [])];
       if (!rows || rows.length === 0) return;
       console.log(`🔁 Auto-rehydrate: loading ${rows.length} pending items into queue...`);
       let loaded = 0;
+      // 2026-05-30 DIAGNOSTIC: tel skip-reden per categorie
+      let skipActive = 0, skipStarting = 0, skipQueued = 0, skipUrl = 0, skipRec = 0, skipLaneHeavy = 0, skipLaneLight = 0, skipLaneBatch = 0;
+      const skipSampleIds = { activeP: [], startingJ: [], queuedJ: [] };
       for (const row of rows) {
         const id = Number(row.id);
         if (!Number.isFinite(id)) continue;
-        if (activeProcesses.has(id) || startingJobs.has(id) || queuedJobs.has(id)) continue;
-        const url = String(row.url || '').trim();
-        if (!url || url.startsWith('recording:')) continue;
+        if (activeProcesses.has(id)) { skipActive++; if (skipSampleIds.activeP.length < 3) skipSampleIds.activeP.push(id); continue; }
+        if (startingJobs.has(id)) { skipStarting++; if (skipSampleIds.startingJ.length < 3) skipSampleIds.startingJ.push(id); continue; }
+        if (queuedJobs.has(id)) { skipQueued++; if (skipSampleIds.queuedJ.length < 3) skipSampleIds.queuedJ.push(id); continue; }
+        let url = String(row.url || '').trim();
+        if (!url || url.startsWith('recording:')) { skipUrl++; continue; }
         let parsedMeta = null;
         try { if (row.metadata) parsedMeta = JSON.parse(row.metadata); } catch (e) {}
-        if (parsedMeta && parsedMeta.webdl_kind === 'recording') continue;
-        const storedPlatform = String(row.platform || '').trim().toLowerCase();
-        const platform = normalizePlatform(storedPlatform, url);
-        const channel = (row.channel && row.channel !== 'unknown') ? row.channel : deriveChannelFromUrl(platform, url) || 'unknown';
-        const title = (row.title && row.title !== 'untitled') ? row.title : deriveTitleFromUrl(url);
-        const lane = detectLane(platform, url);
-        queuedJobs.set(id, { downloadId: id, url, platform, channel, title, metadata: parsedMeta, progress: 0 });
+        if (parsedMeta && parsedMeta.webdl_kind === 'recording') { skipRec++; continue; }
+        // 2026-05-30 (Jürgen): K2S-resolver overschrijft `downloads.url` met
+        // resolved temp-URL (str-XX.filestore.app/...?temp_url_sig=...). Die
+        // signatures verlopen na ~1u → re-queue krijgt 404. Restore vanuit
+        // metadata.webdl_input_url zodat resolver opnieuw kan draaien met
+        // verse premium-cookie. Update DB ook zodat queue weer in zicht is.
+        if (/^https?:\/\/(?:str|cmb)-[\w.-]+\.filestore\.app\//i.test(url) && parsedMeta && parsedMeta.webdl_input_url) {
+          const restored = String(parsedMeta.webdl_input_url).trim();
+          if (restored && restored !== url) {
+            try { await updateDownloadUrl.run(restored, id); } catch (_) {}
+            url = restored;
+          }
+        }
+        const ctx = queueContextFromDownloadRow(row, parsedMeta);
+        const platform = ctx.platform;
+        const channel = ctx.channel;
+        const title = ctx.title;
+        const metadata = ctx.metadata;
+        const lane = detectLane(platform, url, metadata);
+        if (lane === 'heavy' && !needHeavy) { skipLaneHeavy++; continue; }
+        if (lane === 'light' && !needLight) { skipLaneLight++; continue; }
+        if (lane === 'batch' && !needBatch) { skipLaneBatch++; continue; }
+        queuedJobs.set(id, { downloadId: id, url, platform, channel, title, metadata, progress: 0 });
         jobLane.set(id, lane);
         jobPlatform.set(id, platform);
-        if (lane === 'light') queuedLight.push(id); else queuedHeavy.push(id);
+        // 2026-05-24: priority-aware queue-positie. Items met priority>0
+        // (bv. K2S retries die priority=10 hebben uit hub-slave-router) komen
+        // aan de KOP van de lane-queue zodat ze niet vastlopen achter een
+        // 1000+ items grote whole-thread scan. Default priority=0 → achterop.
+        const prio = Number(row.priority) || 0;
+        if (lane === 'light') {
+          if (prio > 0) queuedLight.unshift(id); else queuedLight.push(id);
+        } else {
+          if (prio > 0) queuedHeavy.unshift(id); else queuedHeavy.push(id);
+        }
         try { await db.prepare("UPDATE downloads SET status = 'queued' WHERE id = ?").run(id); } catch (e) {}
         loaded++;
       }
       if (loaded > 0) {
         console.log(`🔁 Auto-rehydrate: ${loaded} items geladen, scheduler starten...`);
         runDownloadSchedulerSoon();
+        consecutiveZeroLoads = 0;
+        nextRehydrateAllowedAt = 0;
+      } else {
+        // Geen items geladen — alle 250 zaten al in active/queued/starting.
+        // Verhoog back-off om hot-loop te voorkomen (5s → 30s → 2m → 5m → 5m max).
+        consecutiveZeroLoads += 1;
+        const backoffMs = consecutiveZeroLoads === 1 ? 30 * 1000
+                       : consecutiveZeroLoads === 2 ? 2 * 60 * 1000
+                       : 5 * 60 * 1000;
+        nextRehydrateAllowedAt = Date.now() + backoffMs;
+        if (consecutiveZeroLoads <= 3) {
+          console.log(`🔁 Auto-rehydrate: 0 nieuwe items in ${rows.length} pending (alle al in queue/active). Back-off ${Math.round(backoffMs/1000)}s.`);
+          // 2026-05-30 DIAGNOSTIC
+          console.log(`   🔍 skip breakdown: active=${skipActive} starting=${skipStarting} queued=${skipQueued} url=${skipUrl} rec=${skipRec} laneHeavy=${skipLaneHeavy} laneLight=${skipLaneLight} laneBatch=${skipLaneBatch}`);
+          console.log(`   🔍 sample skip-IDs: activeProcesses=${JSON.stringify(skipSampleIds.activeP)} startingJobs=${JSON.stringify(skipSampleIds.startingJ)} queuedJobs=${JSON.stringify(skipSampleIds.queuedJ)}`);
+          console.log(`   🔍 needLight=${needLight} needHeavy=${needHeavy} needBatch=${needBatch} | activeLight=${activeLaneCount('light')} activeHeavy=${activeLaneCount('heavy')}`);
+        }
       }
     } catch (e) {
-      console.error('Auto-rehydrate error:', e.message);
+      // 2026-05-30 (Jürgen OOM-fix): bij ÉLKE error → exponentiële back-off,
+      // anders triggert setInterval (5s) een retry-loop die per iteratie 250
+      // rows uit DB in memory laadt → heap-leak → OOM crash binnen 15min.
+      // Eerdere logs tonen "🔁 Auto-rehydrate: loading 250 pending items"
+      // tientallen keren in een rij vlak voor crash.
+      consecutiveZeroLoads += 1;
+      const errBackoffMs = consecutiveZeroLoads === 1 ? 30 * 1000
+                         : consecutiveZeroLoads === 2 ? 2 * 60 * 1000
+                         : consecutiveZeroLoads <= 5 ? 5 * 60 * 1000
+                         : 30 * 60 * 1000;
+      nextRehydrateAllowedAt = Date.now() + errBackoffMs;
+      console.error(`Auto-rehydrate error (attempt ${consecutiveZeroLoads}, back-off ${Math.round(errBackoffMs/1000)}s):`, e.message);
     }
   }, 2000);
 }
 
 // Periodic check: if in-memory queues are empty but pending items exist, trigger rehydrate
 setInterval(() => {
-  if (queuedHeavy.length === 0 && queuedLight.length === 0 && queuedBatch.length === 0) {
+  if (hasQueuedWorkWithCapacity()) {
+    runDownloadSchedulerSoon();
+  }
+  if (shouldAutoRehydrate()) {
     scheduleAutoRehydrate();
   }
-}, 10000);
+}, 5000);
+
+// ─── K2S Keep-Alive Monitor (2026-05-30 Jürgen) ─────────────────────────
+// Houdt de K2S Firefox-cookie/web-token sessie levend door elke 10 min een
+// lightweight access-token-check te doen. Bij verlopen sessie: log warning +
+// optioneel auto-relogin via WEBDL_KEEP2SHARE_USERNAME/PASSWORD env-vars.
+// Status zichtbaar via GET /api/k2s/status voor UI-indicator.
+let _k2sHealth = { ok: false, reason: 'not-checked-yet', at: null };
+const K2S_HEALTH_INTERVAL_MS = Number.parseInt(process.env.WEBDL_K2S_HEALTH_INTERVAL_MS || '600000', 10) || 600000;
+// Marge waaronder een token "stale" heet — als JWT exp - now < deze waarde,
+// flush cache zodat volgende download verse cookie+token ophaalt.
+const K2S_TOKEN_STALE_MARGIN_MS = Number.parseInt(process.env.WEBDL_K2S_TOKEN_STALE_MARGIN_MS || '300000', 10) || 300000;
+let _k2sHealthInProgress = false;
+async function checkKeep2ShareHealth() {
+  if (_k2sHealthInProgress) return _k2sHealth;
+  _k2sHealthInProgress = true;
+  const at = new Date().toISOString();
+  try {
+    const auth = await loadKeep2ShareCookieAuth('k2s.cc', null);
+    if (!auth || !auth.cookieHeader) {
+      _k2sHealth = { ok: false, reason: 'no-cookie', source: auth && auth.source || 'none', at };
+      console.log('🔑 K2S health: GEEN COOKIE gevonden (Firefox-localstorage leeg of geen env K2S_COOKIE)');
+      return _k2sHealth;
+    }
+    const tokenInfo = await getKeep2ShareWebAccessToken(auth.cookieHeader, 'k2s.cc', { cookieSource: auth.source });
+    if (!tokenInfo || !tokenInfo.token) {
+      _k2sHealth = { ok: false, reason: 'token-missing', source: auth.source, at };
+      console.log(`🔑 K2S health: TOKEN MISSING — cookie source="${auth.source}", sessie waarschijnlijk verlopen. Log opnieuw in op k2s.cc in Firefox.`);
+      return _k2sHealth;
+    }
+    // JWT-exp inspecteren — als het token bijna verloopt, proactief flushen.
+    const payload = decodeJwtPayload(tokenInfo.token) || {};
+    const expMs = typeof payload.exp === 'number' ? payload.exp * 1000 : 0;
+    const tokenExpiresAt = expMs ? new Date(expMs).toISOString() : null;
+    if (expMs && expMs - Date.now() < K2S_TOKEN_STALE_MARGIN_MS) {
+      flushKeep2ShareAuthCaches('health-token-near-exp');
+      _k2sHealth = { ok: false, reason: 'token-near-exp', source: auth.source, tokenSource: tokenInfo.source, tokenExpiresAt, at };
+      console.log(`🔑 K2S health: token verloopt binnen ${Math.round((expMs - Date.now()) / 1000)}s — cache geflusht, log opnieuw in op k2s.cc als dit blijft.`);
+      return _k2sHealth;
+    }
+    _k2sHealth = { ok: true, source: auth.source, tokenSource: tokenInfo.source, tokenExpiresAt, at };
+    // Stille log bij OK — alleen interessant bij verandering
+    if (process.env.WEBDL_K2S_HEALTH_VERBOSE === '1') {
+      console.log(`🔑 K2S health: OK (cookie="${auth.source}", token="${tokenInfo.source}", exp=${tokenExpiresAt || 'n/a'})`);
+    }
+    return _k2sHealth;
+  } catch (e) {
+    _k2sHealth = { ok: false, reason: 'exception', error: String(e && e.message || e), at };
+    console.log(`🔑 K2S health: EXCEPTION ${e && e.message}`);
+    return _k2sHealth;
+  } finally {
+    _k2sHealthInProgress = false;
+  }
+}
+// Eerste check 30s na startup; daarna elke 10 min
+setTimeout(() => { checkKeep2ShareHealth().catch(() => {}); }, 30000);
+setInterval(() => { checkKeep2ShareHealth().catch(() => {}); }, K2S_HEALTH_INTERVAL_MS);
+
+// 2026-05-30 (Jürgen): auto-import telegram-channel-dirs naar DB elke 3 min.
+// telegram-channel-download.py schrijft files+sidecars naar disk, maar
+// tg_import_folder.py is nodig om ze als rows in `downloads` table te krijgen
+// zodat ze in de gallery verschijnen. Dit cron-pad doet dat zonder dat user
+// hoeft te wachten / handmatig te draaien. Dedup is veilig (script skipt
+// bestaande filepath + telegram_message_id).
+const TG_AUTO_IMPORT_SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'tg_auto_import.sh');
+function runTgAutoImport() {
+  try {
+    if (!fs.existsSync(TG_AUTO_IMPORT_SCRIPT)) return;
+    const proc = spawn('/bin/bash', [TG_AUTO_IMPORT_SCRIPT], { detached: true, stdio: 'ignore' });
+    proc.unref();
+  } catch (e) {
+    // niet fataal — script kan ontbreken op machine zonder telegram
+  }
+}
+// Eerste run 45s na startup; daarna elke 3 min
+setTimeout(runTgAutoImport, 45000);
+setInterval(runTgAutoImport, 3 * 60 * 1000);
+// Bij elke K2S-download-error: flush auth-caches + trigger health-check zodat
+// volgende download verse cookie ophaalt. Throttle 1×/min zodat we api.k2s.cc
+// niet bombarderen bij een burst aan failures.
+let _k2sLastErrorFlushAt = 0;
+function noteKeep2ShareError(reason) {
+  if (Date.now() - _k2sLastErrorFlushAt < 60000) return;
+  _k2sLastErrorFlushAt = Date.now();
+  flushKeep2ShareAuthCaches(`download-error:${reason || 'unknown'}`);
+  checkKeep2ShareHealth().catch(() => {});
+}
+// 2026-05-30 (Jürgen restart-race fix): functie hier definiëren, aanroepen
+// gebeurt expliciet vanaf NÁ `const expressApp = express()` (zie regel ~6909
+// + de bijbehorende `registerK2sStatusEndpoints()` call). Vervangt de oude
+// setImmediate-wrap die kwetsbaar was voor cp/mv-race in StartServer.command
+// — bij gedeeltelijke file-load belandde `expressApp.get(...)` op top-level
+// en gaf TDZ-fout "Cannot access 'expressApp' before initialization".
+function registerK2sStatusEndpoints() {
+  try {
+    expressApp.get('/api/k2s/status', (req, res) => {
+      const firefoxAge = keep2ShareFirefoxWebAuthCache && keep2ShareFirefoxWebAuthCache.at
+        ? Math.round((Date.now() - keep2ShareFirefoxWebAuthCache.at) / 1000)
+        : null;
+      const cachedToken = keep2ShareWebAccessTokenCache && keep2ShareWebAccessTokenCache.token;
+      const tokenPayload = cachedToken ? decodeJwtPayload(cachedToken) : null;
+      res.json({
+        success: true,
+        health: _k2sHealth,
+        nextCheckInMs: Math.max(0, K2S_HEALTH_INTERVAL_MS - (Date.now() - (_k2sHealth.at ? new Date(_k2sHealth.at).getTime() : Date.now()))),
+        lastRefresh: _k2sLastRefresh,
+        cachedTokenExpiresAt: tokenPayload && tokenPayload.exp ? new Date(tokenPayload.exp * 1000).toISOString() : null,
+        cachedTokenSource: keep2ShareWebAccessTokenCache && keep2ShareWebAccessTokenCache.source || null,
+        firefoxCookieAgeSec: firefoxAge,
+        firefoxCookieSource: keep2ShareFirefoxWebAuthCache && keep2ShareFirefoxWebAuthCache.source || null,
+      });
+    });
+    expressApp.post('/api/k2s/flush-cache', (req, res) => {
+      const reason = String((req.body && req.body.reason) || req.query.reason || 'manual-api').slice(0, 64);
+      flushKeep2ShareAuthCaches(reason);
+      checkKeep2ShareHealth().catch(() => {});
+      res.json({ success: true, flushedAt: _k2sLastRefresh.at, reason });
+    });
+    // Diagnostic: test-resolve een K2S URL via onze volledige flow zodat we
+    // live kunnen onderscheiden tussen auth-probleem en deleted-file.
+    // Roept ook K2S file-info aan om te zien of het bestand bestaat.
+    expressApp.post('/api/k2s/test-resolve', async (req, res) => {
+      const url = String((req.body && req.body.url) || req.query.url || '').trim();
+      if (!isKeep2ShareUrl(url)) {
+        return res.status(400).json({ success: false, error: 'url must be a k2s.cc/keep2share.cc link' });
+      }
+      const fileId = keep2ShareFileIdFromUrl(url);
+      const out = { success: true, url, fileId };
+      try {
+        const infoRes = await fetch(`https://api.k2s.cc/v1/files/${encodeURIComponent(fileId)}`, {
+          headers: { Accept: 'application/json', Origin: 'https://k2s.cc', Referer: url }
+        });
+        out.fileInfo = await infoRes.json().catch(() => null);
+        out.fileInfoStatus = infoRes.status;
+      } catch (e) {
+        out.fileInfoError = String(e && e.message || e);
+      }
+      try {
+        const resolved = await resolveKeep2ShareDirectUrl(url, null);
+        out.resolved = resolved;
+      } catch (e) {
+        out.resolveError = String(e && e.message || e);
+      }
+      res.json(out);
+    });
+  } catch (e) {
+    console.error('K2S health endpoint registratie faalde:', e.message);
+  }
+}
 
 let postprocessSchedulerTimer = null;
 function runPostprocessSchedulerSoon() {
@@ -5125,7 +6751,7 @@ async function rehydrateDownloadQueueWithMode(modeRaw, maxRowsRaw) {
           "('postprocessing')" :
           "('downloading', 'postprocessing')";
     const rows = await db.prepare(
-      `SELECT id, url, platform, channel, title, metadata, status
+      `SELECT id, url, source_url, platform, channel, title, metadata, status, progress
        FROM downloads
        WHERE status IN ${statusList}
        ORDER BY
@@ -5156,33 +6782,36 @@ async function rehydrateDownloadQueueWithMode(modeRaw, maxRowsRaw) {
       }
       if (url.startsWith('recording:') || parsedMeta && parsedMeta.webdl_kind === 'recording') continue;
 
+      const ctx = queueContextFromDownloadRow(row, parsedMeta);
+      const platform = ctx.platform;
+      const channel = ctx.channel;
+      const title = ctx.title;
+      const metadata = ctx.metadata;
       const storedPlatform = row.platform && String(row.platform).trim() ? String(row.platform).trim() : '';
-      const platform = normalizePlatform(storedPlatform, url);
-
       const storedChannel = row.channel && String(row.channel).trim() ? String(row.channel).trim() : '';
-      const channel = storedChannel && storedChannel !== 'unknown' ? storedChannel : deriveChannelFromUrl(platform, url) || 'unknown';
-
       const storedTitle = row.title && String(row.title).trim() ? String(row.title).trim() : '';
-      const title = storedTitle && storedTitle !== 'untitled' ? storedTitle : deriveTitleFromUrl(url);
 
       if (platform !== storedPlatform || channel !== storedChannel || title !== storedTitle) {
         await updateDownloadBasics.run(platform, channel, title, id);
       }
 
-      const metadata = parsedMeta;
-
       let initialProgress = 0;
       if (row.status === 'downloading' || row.status === 'postprocessing') {
-        const dbProg = await getDatabaseProgress(id);
-        if (dbProg != null) initialProgress = dbProg;
+        const dbProg = Number(row.progress);
+        if (Number.isFinite(dbProg)) initialProgress = dbProg;
       }
 
-      const lane = detectLane(platform, url);
+      const lane = detectLane(platform, url, metadata);
       queuedJobs.set(id, { downloadId: id, url, platform, channel, title, metadata, progress: initialProgress });
       jobLane.set(id, lane);
       jobPlatform.set(id, platform);
-      if (lane === 'light') queuedLight.push(id); else
-        queuedHeavy.push(id);
+      // Priority-aware queue-positie (zelfde logica als auto-rehydrate)
+      const prio = Number(row.priority) || 0;
+      if (lane === 'light') {
+        if (prio > 0) queuedLight.unshift(id); else queuedLight.push(id);
+      } else {
+        if (prio > 0) queuedHeavy.unshift(id); else queuedHeavy.push(id);
+      }
       queued++;
     }
 
@@ -5207,7 +6836,7 @@ async function rehydrateDownloadQueue() {
           "('postprocessing')" :
           "('downloading', 'postprocessing')";
     const rows = await db.prepare(
-      `SELECT id, url, platform, channel, title, metadata, status
+      `SELECT id, url, source_url, platform, channel, title, metadata, status, priority
        FROM downloads
        WHERE status IN ${statusList}
        ORDER BY
@@ -5218,6 +6847,7 @@ async function rehydrateDownloadQueue() {
            WHEN 'pending' THEN 3
            ELSE 9
          END,
+         COALESCE(priority, 0) DESC,
          created_at DESC,
          id DESC
        LIMIT ?`
@@ -5246,20 +6876,18 @@ async function rehydrateDownloadQueue() {
         continue;
       }
 
+      const ctx = queueContextFromDownloadRow(row, parsedMeta);
+      const platform = ctx.platform;
+      const channel = ctx.channel;
+      const title = ctx.title;
+      const metadata = ctx.metadata;
       const storedPlatform = row.platform && String(row.platform).trim() ? String(row.platform).trim() : '';
-      const platform = normalizePlatform(storedPlatform, url);
-
       const storedChannel = row.channel && String(row.channel).trim() ? String(row.channel).trim() : '';
-      const channel = storedChannel && storedChannel !== 'unknown' ? storedChannel : deriveChannelFromUrl(platform, url) || 'unknown';
-
       const storedTitle = row.title && String(row.title).trim() ? String(row.title).trim() : '';
-      const title = storedTitle && storedTitle !== 'untitled' ? storedTitle : deriveTitleFromUrl(url);
 
       if (platform !== storedPlatform || channel !== storedChannel || title !== storedTitle) {
         await updateDownloadBasics.run(platform, channel, title, id);
       }
-
-      const metadata = parsedMeta;
 
       let initialProgress = 0;
       if (row.status === 'downloading' || row.status === 'postprocessing') {
@@ -5269,7 +6897,7 @@ async function rehydrateDownloadQueue() {
         } catch (e) { /* ignore */ }
       }
 
-      const lane = detectLane(platform, url);
+      const lane = detectLane(platform, url, metadata);
       queuedJobs.set(id, { downloadId: id, url, platform, channel, title, metadata, progress: initialProgress });
       jobLane.set(id, lane);
       jobPlatform.set(id, platform);
@@ -5304,16 +6932,196 @@ async function rehydrateDownloadQueue() {
 let activeRecordings = new Map();
 Object.defineProperty(global, 'isRecording', { get: () => activeRecordings.size > 0 });
 
+function getFreeBytesForPath(targetPath) {
+  try {
+    const stat = fs.statfsSync(targetPath);
+    const blockSize = Number(stat.bsize || stat.frsize || 0);
+    const blocks = Number(stat.bavail || stat.bfree || 0);
+    const free = blockSize * blocks;
+    return Number.isFinite(free) && free > 0 ? free : 0;
+  } catch (e) {
+    return 0;
+  }
+}
+
+function requestRecordingStop(recId, reason) {
+  try {
+    const body = JSON.stringify({ id: recId, reason });
+    const req = http.request({
+      hostname: '127.0.0.1',
+      port: PORT,
+      path: '/stop-recording',
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(body)
+      }
+    });
+    req.on('error', () => {});
+    req.end(body);
+  } catch (e) {}
+}
+
+function normalizeRecordingKey(input, metadata = {}) {
+  const platformHint = String(metadata.platform || '').trim().toLowerCase();
+  const channelHint = String(metadata.channel || '').trim().toLowerCase();
+  const cleanTikTokChannel = (value) => {
+    let s = String(value || '').trim().toLowerCase();
+    if (!s) return '';
+    s = s.replace(/^tiktok:/, '');
+    s = s.replace(/^https?:\/\/(?:www\.)?tiktok\.com\//, '');
+    s = s.replace(/^\/+/, '');
+    s = s.replace(/\/live\/?$/, '');
+    if (!s.startsWith('@')) s = `@${s}`;
+    return s;
+  };
+  try {
+    const raw = String(input || metadata.url || metadata.pageUrl || metadata.sourceUrl || '').trim();
+    const platform = platformHint;
+    const channel = channelHint;
+    if (raw) {
+      const rawLower = raw.toLowerCase().replace(/\/+$/, '');
+      if (/^tiktok:@/i.test(rawLower)) {
+        const user = cleanTikTokChannel(rawLower);
+        if (user) return `tiktok:${user}/live`;
+      }
+      if ((platform === 'tiktok' || rawLower.includes('/live')) && /^@[^\/\s]+(?:\/live)?$/i.test(rawLower)) {
+        const user = cleanTikTokChannel(rawLower);
+        if (user) return `tiktok:${user}/live`;
+      }
+      const u = new URL(raw);
+      const host = String(u.hostname || '').toLowerCase().replace(/^www\./, '');
+      const pathname = String(u.pathname || '').replace(/\/+$/, '');
+      const tiktok = pathname.match(/^\/@([^\/]+)(?:\/live)?$/i);
+      if (host.endsWith('tiktok.com') && tiktok && tiktok[1]) return `tiktok:@${tiktok[1].toLowerCase()}/live`;
+      if (host.includes('chaturbate.com')) {
+        const model = pathname.split('/').filter(Boolean)[0] || channel;
+        if (model) return `chaturbate:${model.toLowerCase()}`;
+      }
+      if (host.includes('stripchat.com')) {
+        const model = pathname.split('/').filter(Boolean)[0] || channel;
+        if (model) return `stripchat:${model.toLowerCase()}`;
+      }
+      return `${host}${pathname || '/'}`.toLowerCase();
+    }
+    if (platform === 'tiktok' && channel) {
+      const user = cleanTikTokChannel(channel);
+      if (user) return `tiktok:${user}/live`;
+    }
+    if (platform || channel) return `${platform || 'unknown'}:${channel || 'unknown'}`;
+  } catch (e) {
+    const platform = platformHint;
+    const channel = channelHint;
+    if (platform === 'tiktok' && channel) {
+      const user = cleanTikTokChannel(channel);
+      if (user) return `tiktok:${user}/live`;
+    }
+    if (platform || channel) return `${platform || 'unknown'}:${channel || 'unknown'}`;
+  }
+  return 'default_rec';
+}
+
+function findRecordingEntryFromRequest(body = {}, meta = {}) {
+  const candidates = [
+    body.id,
+    body.recordingKey,
+    body.url,
+    body.tabId,
+    meta.url,
+    meta.pageUrl,
+    meta.sourceUrl
+  ];
+  const normalized = [];
+  const seen = new Set();
+  const add = (value) => {
+    const raw = String(value || '').trim();
+    if (!raw) return;
+    for (const key of [raw, normalizeRecordingKey(raw, meta)]) {
+      const k = String(key || '').trim();
+      if (k && !seen.has(k)) {
+        seen.add(k);
+        normalized.push(k);
+      }
+    }
+  };
+  candidates.forEach(add);
+
+  for (const key of normalized) {
+    if (activeRecordings.has(key)) return [key, activeRecordings.get(key)];
+  }
+
+  const requestedKey = normalized[0] || '';
+  if (requestedKey) {
+    for (const [id, session] of activeRecordings.entries()) {
+      const sessionMeta = session && session.currentRecordingMeta ? session.currentRecordingMeta : {};
+      if (normalizeRecordingKey(id, sessionMeta) === requestedKey) return [id, session];
+      if (normalizeRecordingKey(sessionMeta.recordingKey || sessionMeta.pageUrl, sessionMeta) === requestedKey) return [id, session];
+    }
+  }
+
+  return [null, null];
+}
+
+function getRecordingSnapshots() {
+  return Array.from(activeRecordings.entries()).map(([id, session]) => {
+    const meta = session && session.currentRecordingMeta ? session.currentRecordingMeta : {};
+    return {
+      id,
+      key: id,
+      url: meta.pageUrl || '',
+      platform: meta.platform || '',
+      channel: meta.channel || '',
+      title: meta.title || '',
+      file: session && session.currentRecordingFile ? session.currentRecordingFile : '',
+      startedAt: session && session.startedAt ? new Date(session.startedAt).toISOString() : null,
+      ageMs: session && session.startedAt ? Math.max(0, Date.now() - session.startedAt) : 0,
+      ownerClientId: session && session.ownerClientId ? session.ownerClientId : null,
+      lastHeartbeatAt: session && session.lastHeartbeatAt ? new Date(session.lastHeartbeatAt).toISOString() : null
+    };
+  });
+}
+
+function cleanupOrphanedRecordingProcesses(reason = 'periodic') {
+  const { execSync } = require('child_process');
+  const activePids = new Set(
+    Array.from(activeRecordings.values())
+      .map((session) => session && session.recordingProcess && session.recordingProcess.pid)
+      .filter(Boolean)
+      .map(String)
+  );
+  const pids = execSync("pgrep -f 'ffmpeg.*avfoundation.*recording_' 2>/dev/null || true", { encoding: 'utf8' }).trim().split('\n').filter(Boolean);
+  const killed = [];
+  for (const pid of pids) {
+    if (activePids.has(String(pid))) continue;
+    try { process.kill(Number(pid), 'SIGKILL'); } catch (e) {}
+    killed.push(pid);
+  }
+  if (killed.length > 0) console.log(`[recording] Killed ${killed.length} orphaned ffmpeg recording process(es) (${reason})`);
+}
+
 // Kill orphaned ffmpeg avfoundation recording processes from previous server runs.
 // These zombies block new recordings from capturing the screen.
 try {
-  const { execSync } = require('child_process');
-  const pids = execSync("pgrep -f 'ffmpeg.*avfoundation.*recording_' 2>/dev/null || true", { encoding: 'utf8' }).trim().split('\n').filter(Boolean);
-  for (const pid of pids) {
-    try { process.kill(Number(pid), 'SIGKILL'); } catch (e) {}
-  }
-  if (pids.length > 0) console.log(`[startup] Killed ${pids.length} orphaned ffmpeg recording process(es)`);
+  cleanupOrphanedRecordingProcesses('startup');
 } catch (e) {}
+
+const recordingOrphanCleanupTimer = setInterval(() => {
+  try { cleanupOrphanedRecordingProcesses('periodic'); } catch (e) {}
+}, 60000);
+if (typeof recordingOrphanCleanupTimer.unref === 'function') recordingOrphanCleanupTimer.unref();
+
+const RECORDING_HEARTBEAT_STALE_MS = Math.max(10000, parseInt(process.env.WEBDL_RECORDING_HEARTBEAT_STALE_MS || '30000', 10) || 30000);
+const recordingHeartbeatTimer = setInterval(() => {
+  const now = Date.now();
+  for (const [id, session] of activeRecordings.entries()) {
+    if (!session || !session.ownerClientId || !session.lastHeartbeatAt) continue;
+    if (now - session.lastHeartbeatAt > RECORDING_HEARTBEAT_STALE_MS) {
+      console.warn(`[recording] Client heartbeat stale; stopping ${id}`);
+      requestRecordingStop(id, 'client_lost');
+    }
+  }
+}, 10000);
+if (typeof recordingHeartbeatTimer.unref === 'function') recordingHeartbeatTimer.unref();
 
 let avfoundationDeviceListCache = null;
 
@@ -5336,6 +7144,12 @@ const io = socketIO(server, {
 expressApp.use(express.json({ limit: '50mb' }));
 // Serve downloaded files directly as static assets (fast thumbnails, no DB lookup)
 expressApp.use('/webdl-static', express.static(BASE_DIR, { maxAge: '1h', immutable: true }));
+
+// 2026-05-30 (Jürgen restart-race fix): K2S status/flush/test-resolve endpoints
+// registreren NÁ expressApp init. Vroeger via setImmediate-wrap eerder in file
+// — kwetsbaar voor cp/mv race in StartServer.command waardoor server bleef
+// crashen op TDZ "Cannot access 'expressApp' before initialization".
+try { registerK2sStatusEndpoints(); } catch (e) { console.error('K2S endpoint init faalde:', e.message); }
 
 expressApp.get('/favicon.ico', (req, res) => {
   res.setHeader('Cache-Control', 'public, max-age=604800');
@@ -5370,6 +7184,27 @@ expressApp.use((req, res, next) => {
   next();
 });
 
+expressApp.post('/debug/fff-background-scan', (req, res) => {
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const entry = {
+      at: new Date().toISOString(),
+      tag: 'FFF_BACKGROUND_SCAN',
+      scanId: String(body.scanId || ''),
+      phase: String(body.phase || ''),
+      url: String(body.url || '').slice(0, 500),
+      stats: body.stats && typeof body.stats === 'object' ? body.stats : null,
+      extra: body.extra && typeof body.extra === 'object' ? body.extra : null,
+      error: body.error ? String(body.error).slice(0, 1000) : '',
+      build: body.build ? String(body.build).slice(0, 120) : '',
+    };
+    fs.appendFileSync(LOG_FILE, `${JSON.stringify(entry)}\n`);
+    return res.json({ success: true });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e && e.message ? e.message : String(e) });
+  }
+});
+
 expressApp.post('/api/queue/resume', async (req, res) => {
   const mode = String(req.body && req.body.mode ? req.body.mode : 'all');
   const max = Number.isFinite(Number(req.body && req.body.max)) ? Number(req.body.max) : 500;
@@ -5378,6 +7213,772 @@ expressApp.post('/api/queue/resume', async (req, res) => {
     res.json(result);
   } catch (e) {
     res.status(500).json({ success: false, error: String(e && e.message ? e.message : e) });
+  }
+});
+
+// POST /api/import-file
+// Voor sites achter Cloudflare (zoals recu.me) waar de server zelf niet bij
+// kan: extensie downloadt het bestand via browser.downloads.download (browser
+// heeft geldige CF-sessie). Daarna POSTt extensie naar dit endpoint met de
+// resulting filepath + metadata. Server inserteert een 'completed' rij die
+// naar dat bestand wijst (geen download-werk meer aan onze kant).
+expressApp.post('/api/import-file', async (req, res) => {
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    let filepath = String(body.filepath || '').trim();
+    const sourceUrl = String(body.sourceUrl || body.url || '').trim();
+    const platform = String(body.platform || 'unknown').trim();
+    const channel = String(body.channel || 'unknown').trim();
+    const title = String(body.title || '').trim() || (filepath ? require('path').basename(filepath) : 'untitled');
+    const metadata = body.metadata && typeof body.metadata === 'object' ? body.metadata : {};
+
+    if (!filepath) return res.status(400).json({ success: false, error: 'filepath is vereist' });
+    if (!require('fs').existsSync(filepath)) {
+      return res.status(404).json({ success: false, error: `bestand bestaat niet: ${filepath}` });
+    }
+
+    // Move from Firefox Downloads folder to BASE_DIR (externe HDD)
+    // pattern: ~/Downloads/webdl/<host>/<channel>/<file> → BASE_DIR/<host>/<channel>/<file>
+    const HOME = process.env.HOME || require('os').homedir();
+    const downloadsRoot = require('path').join(HOME, 'Downloads', 'webdl');
+    if (filepath.startsWith(downloadsRoot + require('path').sep) || filepath.startsWith(downloadsRoot + '/')) {
+      try {
+        const rel = require('path').relative(downloadsRoot, filepath);
+        const dest = require('path').join(BASE_DIR, rel);
+        require('fs').mkdirSync(require('path').dirname(dest), { recursive: true });
+        if (require('fs').existsSync(dest)) {
+          // Suffix om collision te vermijden
+          const ext = require('path').extname(dest);
+          const stem = dest.slice(0, dest.length - ext.length);
+          let n = 1;
+          let alt = `${stem}_${n}${ext}`;
+          while (require('fs').existsSync(alt)) { n++; alt = `${stem}_${n}${ext}`; }
+          require('fs').renameSync(filepath, alt);
+          filepath = alt;
+        } else {
+          require('fs').renameSync(filepath, dest);
+          filepath = dest;
+        }
+        console.log(`📦 Verplaatst van Downloads naar ${filepath}`);
+      } catch (mvErr) {
+        console.warn(`⚠️ Move naar BASE_DIR mislukt (${mvErr.message}) — bestand blijft in Downloads.`);
+      }
+    }
+
+    const stat = require('fs').statSync(filepath);
+    const filename = require('path').basename(filepath);
+
+    // Dedup op filepath
+    const existing = await db.prepare('SELECT id FROM downloads WHERE filepath = ? LIMIT 1').get(filepath);
+    if (existing && existing.id) {
+      return res.json({ success: true, downloadId: existing.id, duplicate: true, message: `Bestand al geïmporteerd #${existing.id}`, filepath });
+    }
+
+    const fullMeta = {
+      ...metadata,
+      webdl_kind: 'browser_imported',
+      webdl_source_url: sourceUrl,
+      webdl_imported_at: new Date().toISOString(),
+    };
+
+    const ins = await insertDownload.run(sourceUrl || `file://${filepath}`, platform, channel, title);
+    const downloadId = ins.lastInsertRowid;
+    try {
+      await db.prepare(`UPDATE downloads SET status = 'completed', filepath = ?, filename = ?, filesize = ?, metadata = ?, source_url = ?, finished_at = now(), progress = 100 WHERE id = ?`)
+        .run(filepath, filename, stat.size, JSON.stringify(fullMeta), sourceUrl || null, downloadId);
+    } catch (e) {}
+    console.log(`📥 Imported file #${downloadId}: ${filepath}`);
+    return res.json({ success: true, downloadId, duplicate: false, filepath, size: stat.size });
+  } catch (e) {
+    console.error('Import-file error:', e && e.message ? e.message : e);
+    return res.status(500).json({ success: false, error: String(e && e.message ? e.message : e) });
+  }
+});
+
+// darknetvideos.com /video.php?id=N OR search-page — spawn
+// scripts/darknet_dl.py async (parse JSON-LD VideoObject → contentUrl).
+expressApp.post('/api/darknetvideos/video', (req, res) => {
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const url = String(body.url || '').trim();
+    const channel = String(body.channel || '').trim();
+    if (!url || !/^https?:\/\/(?:www\.)?darknetvideos\.com\//i.test(url)) {
+      return res.status(400).json({ success: false, error: 'url moet darknetvideos.com URL zijn' });
+    }
+    const script = path.join(__dirname, '..', '..', 'scripts', 'darknet_dl.py');
+    if (!fs.existsSync(script)) {
+      return res.status(500).json({ success: false, error: `script ontbreekt: ${script}` });
+    }
+    const args = [script, url];
+    if (channel) args.push('--channel-override', channel);
+    const child = spawn('/usr/bin/python3', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: false,
+      env: { ...process.env },
+    });
+    const pid = child.pid;
+    let stderr = '';
+    child.stderr.on('data', (d) => { stderr += d.toString().slice(0, 4096); });
+    child.on('close', (code) => {
+      console.log(`[darknet_dl pid=${pid}] exit ${code}`);
+      if (code !== 0) console.warn(`[darknet_dl pid=${pid}] stderr: ${stderr.slice(0, 500)}`);
+    });
+    child.unref();
+    return res.json({
+      success: true,
+      url,
+      channel: channel || '(auto)',
+      pid,
+      message: 'darknet_dl.py gestart op achtergrond',
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: String(e && e.message ? e.message : e) });
+  }
+});
+
+// footstockings.com /albums/<id>/<slug>/ — spawn scripts/foot_album_dl.py
+// async, return meteen, script schrijft zelf files + DB-rows.
+//
+// Body: { url, channel } — channel wordt --channel-override (verplicht
+// voor groepering onder listing-context, anders valt 'ie terug op slug).
+expressApp.post('/api/footstockings/album', (req, res) => {
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const url = String(body.url || '').trim();
+    const channel = String(body.channel || '').trim();
+    if (!url || !/^https?:\/\/(?:www\.)?footstockings\.com\/albums\/\d+\/[^/]+\/?$/i.test(url)) {
+      return res.status(400).json({ success: false, error: 'url moet footstockings album-URL zijn' });
+    }
+    const script = path.join(__dirname, '..', '..', 'scripts', 'foot_album_dl.py');
+    if (!fs.existsSync(script)) {
+      return res.status(500).json({ success: false, error: `script ontbreekt: ${script}` });
+    }
+    const args = [script, url];
+    if (channel) args.push('--channel-override', channel);
+    const child = spawn('/usr/bin/python3', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: false,
+      env: { ...process.env },
+    });
+    const pid = child.pid;
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => { stdout += d.toString().slice(0, 4096); });
+    child.stderr.on('data', (d) => { stderr += d.toString().slice(0, 4096); });
+    child.on('close', (code) => {
+      console.log(`[foot_album_dl pid=${pid}] exit ${code}`);
+      if (code !== 0) console.warn(`[foot_album_dl pid=${pid}] stderr: ${stderr.slice(0, 500)}`);
+    });
+    child.unref();
+    return res.json({
+      success: true,
+      url,
+      channel: channel || '(slug)',
+      pid,
+      message: 'foot_album_dl.py gestart op achtergrond — gallery refresht binnen 1-2 min',
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: String(e && e.message ? e.message : e) });
+  }
+});
+
+// erome.com /a/<ID> OR search/profile — spawn scripts/erome_dl.py async
+// (parse <source mp4> + data-src jpeg, downloads + DB-register).
+expressApp.post('/api/erome/album', (req, res) => {
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const url = String(body.url || '').trim();
+    const channel = String(body.channel || '').trim();
+    const pages = Number(body.pages) > 0 ? Math.floor(Number(body.pages)) : 1;
+    if (!url || !/^https?:\/\/(?:www\.)?erome\.com\//i.test(url)) {
+      return res.status(400).json({ success: false, error: 'url moet erome.com URL zijn' });
+    }
+    const script = path.join(__dirname, '..', '..', 'scripts', 'erome_dl.py');
+    if (!fs.existsSync(script)) {
+      return res.status(500).json({ success: false, error: `script ontbreekt: ${script}` });
+    }
+    const args = [script, url];
+    if (channel) args.push('--channel-override', channel);
+    if (pages > 1) args.push('--pages', String(pages));
+    const child = spawn('/usr/bin/python3', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: false,
+      env: { ...process.env },
+    });
+    const pid = child.pid;
+    let stderr = '';
+    child.stderr.on('data', (d) => { stderr += d.toString().slice(0, 4096); });
+    child.on('close', (code) => {
+      console.log(`[erome_dl pid=${pid}] exit ${code}`);
+      if (code !== 0) console.warn(`[erome_dl pid=${pid}] stderr: ${stderr.slice(0, 500)}`);
+    });
+    child.unref();
+    return res.json({
+      success: true,
+      url,
+      channel: channel || '(auto)',
+      pages,
+      pid,
+      message: 'erome_dl.py gestart op achtergrond',
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: String(e && e.message ? e.message : e) });
+  }
+});
+
+// sexygirlspics.com album OR search/category listing → spawn scripts/sgp_dl.py.
+// Werkt voor zowel /pics/<slug>-<id>/ (single album) als /search/<term>/ /
+// /category/<cat>/ / /pornstars/<name>/ (listing-walk + per-album download).
+expressApp.post('/api/sexygirlspics/album', (req, res) => {
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const url = String(body.url || '').trim();
+    const channel = String(body.channel || '').trim();
+    const maxAlbums = Number(body.max) > 0 ? Math.floor(Number(body.max)) : 0;
+    if (!url || !/^https?:\/\/(?:www\.)?sexygirlspics\.com\//i.test(url)) {
+      return res.status(400).json({ success: false, error: 'url moet sexygirlspics.com URL zijn' });
+    }
+    const script = path.join(__dirname, '..', '..', 'scripts', 'sgp_dl.py');
+    if (!fs.existsSync(script)) {
+      return res.status(500).json({ success: false, error: `script ontbreekt: ${script}` });
+    }
+    const args = [script, url];
+    if (channel) args.push('--channel-override', channel);
+    if (maxAlbums) args.push('--max', String(maxAlbums));
+    const child = spawn('/usr/bin/python3', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: false,
+      env: { ...process.env },
+    });
+    const pid = child.pid;
+    let stderr = '';
+    child.stderr.on('data', (d) => { stderr += d.toString().slice(0, 4096); });
+    child.on('close', (code) => {
+      console.log(`[sgp_dl pid=${pid}] exit ${code}`);
+      if (code !== 0) console.warn(`[sgp_dl pid=${pid}] stderr: ${stderr.slice(0, 500)}`);
+    });
+    child.unref();
+    return res.json({
+      success: true,
+      url,
+      channel: channel || '(auto)',
+      maxAlbums,
+      pid,
+      message: 'sgp_dl.py gestart — album of listing-walk loopt op achtergrond',
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: String(e && e.message ? e.message : e) });
+  }
+});
+
+// mega.nz file/folder share-link → spawn scripts/mega_dl.py async.
+// URL moet `#KEY` fragment bevatten (encryption-key) — anders kan megatools
+// niet decrypten. We INSERTen direct een pending DB-row als source-of-truth
+// en spawnen mega_dl.py die later de row update naar completed.
+expressApp.post('/api/mega/download', (req, res) => {
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const url = String(body.url || '').trim();
+    if (!url || !/^https?:\/\/mega\.(?:nz|co\.nz)\/(?:file|folder)\/[A-Za-z0-9_-]+#[A-Za-z0-9_-]+/i.test(url)) {
+      return res.status(400).json({
+        success: false,
+        error: 'url moet mega.nz file/folder share-link met #KEY zijn (ingelogde account-URLs werken niet)',
+      });
+    }
+    const script = path.join(__dirname, '..', '..', 'scripts', 'mega_dl.py');
+    if (!fs.existsSync(script)) {
+      return res.status(500).json({ success: false, error: `script ontbreekt: ${script}` });
+    }
+    const child = spawn('/usr/bin/python3', [script, url], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: false,
+      env: { ...process.env },
+    });
+    const pid = child.pid;
+    let stderr = '';
+    child.stderr.on('data', (d) => { stderr += d.toString().slice(0, 4096); });
+    child.on('close', (code) => {
+      console.log(`[mega_dl pid=${pid}] exit ${code}`);
+      if (code !== 0) console.warn(`[mega_dl pid=${pid}] stderr: ${stderr.slice(0, 500)}`);
+    });
+    child.unref();
+    return res.json({
+      success: true,
+      url,
+      pid,
+      message: 'mega_dl.py gestart — folder kan een tijd duren afhankelijk van grootte',
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: String(e && e.message ? e.message : e) });
+  }
+});
+
+// ───────────────────────────────────────────────────────────────────────
+// NIEUWE STACK — ARCHITECTURE.md fase 1-4 (Source + Scheduler)
+// ───────────────────────────────────────────────────────────────────────
+const webdlSources = require('../../webdl-core/sources');
+const webdlScheduler = require('../../webdl-core/jobs/scheduler');
+
+// POST /api/jobs — start een nieuwe job (single/page/whole-thread)
+expressApp.post('/api/jobs', (req, res) => {
+  try {
+    const body = (req.body && typeof req.body === 'object') ? req.body : {};
+    const intent = String(body.intent || 'page').toLowerCase();
+    const url = String(body.url || '').trim();
+    if (!url) return res.status(400).json({ success: false, error: 'url is vereist' });
+    if (!['single', 'page', 'whole-thread', 'forum-scan'].includes(intent)) {
+      return res.status(400).json({ success: false, error: `intent moet single|page|whole-thread|forum-scan zijn` });
+    }
+    const source = webdlSources.findForUrl(url);
+    if (!source) {
+      return res.status(404).json({
+        success: false,
+        error: `geen Source voor ${url}. Geregistreerd: ${webdlSources.listAll().map((s) => s.id).join(', ')}`,
+      });
+    }
+    if (intent === 'whole-thread' && !source.features.wholeThread) {
+      return res.status(400).json({ success: false, error: `source ${source.id} ondersteunt geen whole-thread` });
+    }
+    const job = webdlScheduler.start({ intent, url, source });
+    return res.json({
+      success: true,
+      jobId: job.id,
+      sourceId: source.id,
+      channel: job.channel,
+      status: job.status,
+      pollUrl: `/api/jobs/${job.id}`,
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: String((e && e.message) || e) });
+  }
+});
+
+// GET /api/jobs/:id — live status van een job (voor polling)
+expressApp.get('/api/jobs/:id', (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) return res.status(400).json({ success: false, error: 'id moet number zijn' });
+  const job = webdlScheduler.get(id);
+  if (!job) return res.status(404).json({ success: false, error: `job ${id} niet gevonden` });
+  res.json({ success: true, job });
+});
+
+// GET /api/jobs — recente jobs (voor dashboard)
+expressApp.get('/api/jobs', (req, res) => {
+  const limit = Math.max(1, Math.min(200, parseInt(req.query.limit || '50', 10)));
+  res.json({ success: true, jobs: webdlScheduler.listRecent(limit) });
+});
+
+// POST /api/jobs/:id/cancel — markeer job als cancelled. De scheduler-loop
+// checkt job.cancelled bij elke page-boundary en stopt netjes. Reeds-
+// gedispatchte items blijven in DB (separate verwijdering nodig).
+expressApp.post('/api/jobs/:id/cancel', (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) return res.status(400).json({ success: false, error: 'id moet number zijn' });
+  const ok = webdlScheduler.cancel(id);
+  if (!ok) return res.status(404).json({ success: false, error: `job ${id} bestaat niet of is al afgerond` });
+  return res.json({ success: true, jobId: id, message: 'cancel gevraagd — stopt bij volgende page-boundary' });
+});
+
+// GET /api/sources — welke Sources zijn beschikbaar
+expressApp.get('/api/sources', (req, res) => {
+  res.json({
+    success: true,
+    sources: webdlSources.listAll().map((s) => ({
+      id: s.id,
+      displayName: s.displayName,
+      features: s.features,
+    })),
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────
+
+// GET /api/sites — overzicht van alle ondersteunde sites met DB-stats.
+// Leest sites/*.js files en parsed label/platform/itemTypes per site.
+// Combineert met DB-counts per platform.
+expressApp.get('/api/sites', async (req, res) => {
+  try {
+    const sitesDir = path.join(__dirname, '..', '..', 'firefox-native-controller', 'content', 'sites');
+    const files = fs.existsSync(sitesDir) ? fs.readdirSync(sitesDir).filter((f) => f.endsWith('.js')) : [];
+    const sites = [];
+    for (const f of files) {
+      const filepath = path.join(sitesDir, f);
+      const text = fs.readFileSync(filepath, 'utf8');
+      const host = (text.match(/window\.WEBDL_SITES\['([^']+)'\]\s*=/) || [])[1] || f.replace(/\.js$/, '');
+      const label = (text.match(/label:\s*'([^']+)'/) || [])[1] || host;
+      const platform = (text.match(/platform:\s*'([^']+)'/) || [])[1] || '';
+      const itemTypeMatches = [...text.matchAll(/name:\s*'([^']+)'/g)].map((m) => m[1]);
+      const endpoints = [...new Set([...text.matchAll(/endpoint:\s*'([^']+)'/g)].map((m) => m[1]))];
+      const hasResolveUrl = /resolveUrl[\s\(]/.test(text);
+      const hasDetectMaxPage = /detectMaxPage\s*\(/.test(text);
+      sites.push({
+        host, label, platform,
+        itemTypes: itemTypeMatches,
+        endpoints,
+        features: {
+          resolveUrl: hasResolveUrl,
+          detectMaxPage: hasDetectMaxPage,
+        },
+        configPath: `firefox-native-controller/content/sites/${f}`,
+      });
+    }
+    // DB-stats per platform
+    let stats = {};
+    try {
+      const rows = await new Promise((resolve, reject) => {
+        const psql = spawn('psql', ['-d', 'webdl', '-t', '-A', '-F', '|', '-c',
+          `SELECT platform, status, COUNT(*) as n, MAX(updated_at) as last FROM public.downloads WHERE platform IS NOT NULL GROUP BY platform, status ORDER BY platform, status;`]);
+        let out = ''; psql.stdout.on('data', (d) => out += d);
+        psql.on('close', () => resolve(out.trim().split('\n').filter(Boolean)));
+        psql.on('error', reject);
+      });
+      for (const line of rows) {
+        const [plat, status, n, last] = line.split('|');
+        if (!stats[plat]) stats[plat] = { total: 0, byStatus: {}, last: null };
+        const count = parseInt(n, 10) || 0;
+        stats[plat].total += count;
+        stats[plat].byStatus[status] = count;
+        if (last && (!stats[plat].last || last > stats[plat].last)) stats[plat].last = last;
+      }
+    } catch (e) {
+      stats = { _error: String(e.message || e) };
+    }
+    // Voeg stats toe per site
+    for (const s of sites) {
+      s.stats = stats[s.platform] || null;
+    }
+    res.json({
+      success: true,
+      count: sites.length,
+      sites,
+      generatedAt: new Date().toISOString(),
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e.message || e) });
+  }
+});
+
+// GET /api/recommendations — mood-based + collection-driven site-suggesties.
+// Analyseert DB-collectie (top platforms/channels/themes) en matched met
+// curated obscure-site-lijst per thema. Doel: serendipity — sites waar
+// user "nooit op zou komen".
+expressApp.get('/api/recommendations', async (req, res) => {
+  try {
+    // Pre-curated obscure sites per thema (mood)
+    const CURATED = {
+      'voet-candid-voyeur': [
+        { name: 'candidfeet.tv', why: 'Pure candid feet, niche forum + dump' },
+        { name: 'candid-board.com', why: 'Candid voyeur forum, beach/sandals' },
+        { name: 'voyeurweb.com/feet', why: 'Oude tube, gecategoriseerd voyeur' },
+        { name: 'upskirt.tv', why: 'Candid voyeur uploads (feet-tag)' },
+      ],
+      'voet-creator-paid': [
+        { name: 'manyvids.com/Categories/Foot-Fetish', why: 'Creator clips, trailers vrij' },
+        { name: 'clips4sale.com/studio/category/115/feet', why: 'Preview-clips van studios' },
+        { name: 'iwantclips.com/categories/foot-fetish', why: 'Idem, andere creators' },
+        { name: 'feetfinder.com', why: 'Paid platform, profielen public' },
+      ],
+      'voet-celebrity': [
+        { name: 'wikifeet.com', why: 'Celebrity feet database, gratis downloads' },
+        { name: 'wikifeetx.com', why: 'Explicit variant van wikifeet' },
+        { name: 'aznudefeet.com', why: 'Asian celebrities + feet (al in collectie)' },
+      ],
+      'voet-tube-niche': [
+        { name: 'worldsex.com/feet', why: 'Oude tube-aggregator, motherless-stijl MP4' },
+        { name: 'eporner.com/cat/foot-fetish', why: 'yt-dlp ondersteund' },
+        { name: '4tube.com/categories/foot-fetish', why: 'yt-dlp ondersteund' },
+        { name: 'tnaflix.com/foot-fetish-porn', why: 'Al in jouw config' },
+        { name: 'txxx.com/categories/foot-fetish', why: 'Cloudflare via Firefox' },
+      ],
+      'voet-forum-dump': [
+        { name: 'phun.org (feet-subforum)', why: 'Heb je al 951 items van — meer uitbreiden' },
+        { name: 'vipergirls.to (feet-section)', why: 'Heb je al 2k van — meer uitbreiden' },
+        { name: 'forum.sex.com/feet', why: 'Kleiner, pure candid' },
+        { name: 'bdsmlr.com/tag/feet', why: 'Tumblr-clone met feet-tag, vergeten hoek' },
+      ],
+      'voet-rare-russian': [
+        { name: 'imgsrc.ru', why: 'Feet-albums, RU-side, weinig EN-indexering' },
+        { name: 'cosplayfeet.club', why: 'Cosplay + feet niche-aggregator' },
+      ],
+      'voet-onlyfans-mirror': [
+        { name: 'coomer.party', why: 'OnlyFans/Fansly mirrors, gratis re-uploads' },
+        { name: 'kemono.party', why: 'Patreon/Fansly mirror' },
+      ],
+      'tiktok-feet': [
+        { name: 'feetfinder.com', why: 'TikTok-style feet content' },
+        { name: 'instagram.com/explore/tags/feetlovers', why: 'IG hashtag, via gallery-dl' },
+      ],
+    };
+
+    // Helpers voor psql-queries
+    const runPsql = (sql) => new Promise((resolve, reject) => {
+      const psql = spawn('psql', ['-d', 'webdl', '-t', '-A', '-F', '|', '-c', sql]);
+      let out = ''; psql.stdout.on('data', (d) => out += d);
+      psql.on('close', () => resolve(out.trim().split('\n').filter(Boolean)));
+      psql.on('error', reject);
+    });
+
+    const THEME_KEYWORDS = {
+      'voet-candid-voyeur': ['candid', 'voyeur', 'beach', 'spy', 'public', 'hidden', 'cam'],
+      'voet-creator-paid': ['onlyfans', 'manyvids', 'patreon', 'clips4sale', 'fansly'],
+      'voet-celebrity': ['wikifeet', 'celebrity', 'famous', 'actress'],
+      'voet-tube-niche': ['tube', 'heavyfetish', 'footstockings'],
+      'voet-forum-dump': ['forum', 'phun', 'viper', 'thread'],
+      'voet-onlyfans-mirror': ['coomer', 'kemono'],
+      'tiktok-feet': ['tiktok', 'tik tok', 'ayak'],
+    };
+
+    // Per-thema count via SQL (veel sneller dan title-scan in JS)
+    const themes = {};
+    for (const [theme, keys] of Object.entries(THEME_KEYWORDS)) {
+      const pattern = keys.map((k) => k.replace(/'/g, "''")).join('|');
+      const rows = await runPsql(
+        `SELECT COUNT(*) FROM public.downloads WHERE status='completed' AND (lower(title) ~ '${pattern}' OR lower(channel) ~ '${pattern}');`);
+      const n = parseInt(rows[0] || '0', 10);
+      if (n > 0) themes[theme] = n;
+    }
+
+    // Top platforms
+    const platRows = await runPsql(
+      `SELECT platform, COUNT(*) FROM public.downloads WHERE status='completed' AND platform IS NOT NULL GROUP BY platform ORDER BY 2 DESC LIMIT 20;`);
+    const platforms = {};
+    for (const line of platRows) {
+      const [v, n] = line.split('|');
+      platforms[v] = parseInt(n, 10) || 0;
+    }
+
+    // Top channels
+    const chanRows = await runPsql(
+      `SELECT channel, COUNT(*) FROM public.downloads WHERE status='completed' AND channel IS NOT NULL AND channel != 'unknown' GROUP BY channel ORDER BY 2 DESC LIMIT 20;`);
+    const channels = {};
+    for (const line of chanRows) {
+      const [v, n] = line.split('|');
+      channels[v] = parseInt(n, 10) || 0;
+    }
+
+    // Top platforms/channels
+    const topPlatforms = Object.entries(platforms).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([name, n]) => ({ name, n }));
+    const topChannels = Object.entries(channels).sort((a, b) => b[1] - a[1]).slice(0, 15).map(([name, n]) => ({ name, n }));
+    const topThemes = Object.entries(themes).sort((a, b) => b[1] - a[1]).map(([name, n]) => ({ name, n }));
+
+    // Recommendations: pak top themes en bied curated sites die NIET al in collectie zitten
+    const knownPlatformsSet = new Set(Object.keys(platforms));
+    const recommendations = [];
+    for (const t of topThemes.slice(0, 4)) {
+      const sites = (CURATED[t.name] || []).map((s) => ({
+        ...s,
+        alreadyInCollection: [...knownPlatformsSet].some((p) => s.name.toLowerCase().includes(p.toLowerCase())),
+      }));
+      recommendations.push({ theme: t.name, matchScore: t.n, sites });
+    }
+    // Bonus: random obscure suggestie uit elke andere theme die niet matched
+    const bonusThemes = Object.keys(CURATED).filter((t) => !topThemes.find((x) => x.name === t));
+    const bonusSuggestions = bonusThemes.map((t) => ({
+      theme: t,
+      site: CURATED[t][Math.floor(Math.random() * CURATED[t].length)],
+    }));
+
+    res.json({
+      success: true,
+      collectionSummary: {
+        topPlatforms,
+        topChannels,
+        detectedThemes: topThemes,
+      },
+      recommendations,
+      bonusSuggestions,
+      generatedAt: new Date().toISOString(),
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e.message || e) });
+  }
+});
+
+// GET /sites — simple HTML dashboard
+expressApp.get('/sites', (req, res) => {
+  res.type('html').send(`<!DOCTYPE html>
+<html lang="nl"><head>
+<meta charset="utf-8">
+<title>WEBDL · Sites Dashboard</title>
+<style>
+body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #e2e8f0; padding: 20px; margin: 0; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+.sub { color: #94a3b8; font-size: 13px; margin-bottom: 20px; }
+table { width: 100%; border-collapse: collapse; background: #1e293b; border-radius: 8px; overflow: hidden; }
+th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #334155; font-size: 13px; }
+th { background: #0f172a; color: #94a3b8; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; }
+tr:hover td { background: #2d3b53; }
+.platform { font-weight: 600; color: #60a5fa; }
+.host { color: #94a3b8; font-size: 11px; }
+.endpoint { background: #334155; padding: 2px 6px; border-radius: 4px; font-size: 11px; margin-right: 4px; display: inline-block; }
+.endpoint.video { background: #1e3a5f; color: #93c5fd; }
+.endpoint.album { background: #4c1d95; color: #c4b5fd; }
+.feature { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; margin-right: 4px; background: #064e3b; color: #6ee7b7; }
+.types { color: #cbd5e1; font-size: 12px; }
+.stat-total { font-weight: 600; color: #facc15; }
+.stat-completed { color: #4ade80; }
+.stat-error { color: #f87171; }
+.stat-pending { color: #94a3b8; }
+.last { color: #94a3b8; font-size: 11px; }
+.loading { text-align: center; padding: 40px; color: #94a3b8; }
+.search { padding: 8px 12px; background: #1e293b; border: 1px solid #334155; color: #e2e8f0; border-radius: 6px; font-size: 14px; width: 300px; margin-bottom: 12px; }
+</style>
+</head><body>
+<h1>⚡ WEBDL · Sites Dashboard</h1>
+<div class="sub" id="sub">Loading...</div>
+
+<div id="recs" style="margin-bottom: 24px;"></div>
+
+<input class="search" id="q" placeholder="Filter op naam/platform/host...">
+<table id="t"><thead><tr>
+  <th>Platform</th><th>Host</th><th>Item types</th><th>Endpoints</th><th>Features</th>
+  <th>Total</th><th>Completed</th><th>Pending</th><th>Error</th><th>Last activity</th>
+</tr></thead><tbody><tr><td colspan="10" class="loading">Loading sites...</td></tr></tbody></table>
+<script>
+async function load() {
+  const r = await fetch('/api/sites');
+  const d = await r.json();
+  if (!d.success) { document.getElementById('sub').textContent = 'Error: ' + d.error; return; }
+  document.getElementById('sub').textContent = d.count + ' sites · ' + new Date(d.generatedAt).toLocaleString('nl-NL');
+  window._sites = d.sites;
+  render(d.sites);
+}
+function render(sites) {
+  const tb = document.querySelector('#t tbody');
+  tb.innerHTML = '';
+  for (const s of sites.sort((a,b) => a.label.localeCompare(b.label))) {
+    const tr = document.createElement('tr');
+    const types = s.itemTypes.length ? s.itemTypes.join(', ') : '<i>geen</i>';
+    const eps = s.endpoints.map((e) => {
+      const cls = e.includes('album') ? 'album' : 'video';
+      return '<span class="endpoint ' + cls + '">' + e + '</span>';
+    }).join('');
+    const feats = [];
+    if (s.features.resolveUrl) feats.push('<span class="feature">resolveUrl</span>');
+    if (s.features.detectMaxPage) feats.push('<span class="feature">maxPage</span>');
+    const st = s.stats || {};
+    const total = st.total || 0;
+    const completed = (st.byStatus && st.byStatus.completed) || 0;
+    const pending = ((st.byStatus && st.byStatus.pending) || 0) + ((st.byStatus && st.byStatus.queued) || 0);
+    const errors = (st.byStatus && st.byStatus.error) || 0;
+    const last = st.last ? new Date(st.last).toLocaleString('nl-NL', { dateStyle: 'short', timeStyle: 'short' }) : '-';
+    tr.innerHTML =
+      '<td><span class="platform">' + (s.label || '-') + '</span></td>' +
+      '<td><span class="host">' + (s.host || '-') + '</span></td>' +
+      '<td><span class="types">' + types + '</span></td>' +
+      '<td>' + eps + '</td>' +
+      '<td>' + (feats.join('') || '-') + '</td>' +
+      '<td><span class="stat-total">' + total.toLocaleString('nl-NL') + '</span></td>' +
+      '<td><span class="stat-completed">' + completed.toLocaleString('nl-NL') + '</span></td>' +
+      '<td><span class="stat-pending">' + pending.toLocaleString('nl-NL') + '</span></td>' +
+      '<td><span class="stat-error">' + errors.toLocaleString('nl-NL') + '</span></td>' +
+      '<td><span class="last">' + last + '</span></td>';
+    tb.appendChild(tr);
+  }
+}
+async function loadRecs() {
+  const r = await fetch('/api/recommendations');
+  const d = await r.json();
+  if (!d.success) return;
+  const root = document.getElementById('recs');
+  const cs = d.collectionSummary;
+  let html = '<div style="background:#1e293b;border-radius:8px;padding:16px;">';
+  html += '<h2 style="margin:0 0 12px;font-size:16px;color:#facc15;">🎯 Voor jou (op basis van je collectie)</h2>';
+
+  if (d.recommendations.length) {
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;">';
+    for (const rec of d.recommendations) {
+      html += '<div style="background:#0f172a;padding:10px;border-radius:6px;border-left:3px solid #60a5fa;">';
+      html += '<div style="font-size:11px;color:#94a3b8;text-transform:uppercase;letter-spacing:0.5px;">'
+        + rec.theme + ' · ' + rec.matchScore + ' hits</div>';
+      for (const s of rec.sites) {
+        const opacity = s.alreadyInCollection ? '0.5' : '1';
+        const tag = s.alreadyInCollection ? ' <span style="color:#4ade80;font-size:10px;">✓ al in collectie</span>' : '';
+        html += '<div style="margin-top:6px;opacity:' + opacity + ';"><a href="https://' + s.name.replace(/\\s.*$/, '') + '" target="_blank" style="color:#60a5fa;text-decoration:none;font-weight:600;">'
+          + s.name + '</a>' + tag + '<div style="font-size:11px;color:#cbd5e1;">' + s.why + '</div></div>';
+      }
+      html += '</div>';
+    }
+    html += '</div>';
+  }
+
+  if (d.bonusSuggestions && d.bonusSuggestions.length) {
+    html += '<div style="margin-top:14px;padding-top:14px;border-top:1px solid #334155;">';
+    html += '<div style="font-size:11px;color:#94a3b8;margin-bottom:6px;">🎲 SERENDIPITY — random sites uit niet-gematchte thema\\'s (waar je nooit op zou komen)</div>';
+    for (const b of d.bonusSuggestions) {
+      html += '<div style="display:inline-block;margin:4px 8px 0 0;padding:6px 10px;background:#0f172a;border-radius:6px;">';
+      html += '<span style="color:#94a3b8;font-size:10px;">' + b.theme + '</span> · ';
+      html += '<a href="https://' + b.site.name.replace(/\\s.*$/, '') + '" target="_blank" style="color:#60a5fa;">' + b.site.name + '</a>';
+      html += '<div style="font-size:10px;color:#cbd5e1;">' + b.site.why + '</div>';
+      html += '</div>';
+    }
+    html += '</div>';
+  }
+
+  // Collection summary inline
+  if (cs.detectedThemes.length) {
+    html += '<div style="margin-top:14px;padding-top:14px;border-top:1px solid #334155;font-size:11px;color:#94a3b8;">';
+    html += 'Gedetecteerde thema\\'s in je collectie: ' + cs.detectedThemes.map((t) => t.name + ' (' + t.n + ')').join(' · ');
+    html += '</div>';
+  }
+  html += '</div>';
+  root.innerHTML = html;
+}
+loadRecs();
+
+document.getElementById('q').addEventListener('input', (e) => {
+  const q = e.target.value.toLowerCase();
+  if (!q) return render(window._sites || []);
+  const filtered = (window._sites || []).filter((s) =>
+    (s.label || '').toLowerCase().includes(q) ||
+    (s.host || '').toLowerCase().includes(q) ||
+    (s.platform || '').toLowerCase().includes(q));
+  render(filtered);
+});
+load();
+</script></body></html>`);
+});
+
+// pictoa.com /albums/<slug>-<id>.html OR listing — spawn scripts/pictoa_dl.py async.
+expressApp.post('/api/pictoa/album', (req, res) => {
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const url = String(body.url || '').trim();
+    const channel = String(body.channel || '').trim();
+    const pages = Number(body.pages) > 0 ? Math.floor(Number(body.pages)) : 1;
+    if (!url || !/^https?:\/\/(?:www\.)?pictoa\.com\//i.test(url)) {
+      return res.status(400).json({ success: false, error: 'url moet pictoa.com URL zijn' });
+    }
+    const script = path.join(__dirname, '..', '..', 'scripts', 'pictoa_dl.py');
+    if (!fs.existsSync(script)) {
+      return res.status(500).json({ success: false, error: `script ontbreekt: ${script}` });
+    }
+    const args = [script, url];
+    if (channel) args.push('--channel-override', channel);
+    if (pages > 1) args.push('--pages', String(pages));
+    const child = spawn('/usr/bin/python3', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: false,
+      env: { ...process.env },
+    });
+    const pid = child.pid;
+    let stderr = '';
+    child.stderr.on('data', (d) => { stderr += d.toString().slice(0, 4096); });
+    child.on('close', (code) => {
+      console.log(`[pictoa_dl pid=${pid}] exit ${code}`);
+      if (code !== 0) console.warn(`[pictoa_dl pid=${pid}] stderr: ${stderr.slice(0, 500)}`);
+    });
+    child.unref();
+    return res.json({
+      success: true,
+      url,
+      channel: channel || '(auto)',
+      pages,
+      pid,
+      message: 'pictoa_dl.py gestart op achtergrond',
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: String(e && e.message ? e.message : e) });
   }
 });
 
@@ -5390,6 +7991,136 @@ expressApp.post('/api/settings/priority', (req, res) => {
   globalPriorityMode = !!(req.body && req.body.enabled);
   console.log(`🔥 Priority mode: ${globalPriorityMode ? 'AAN' : 'UIT'}`);
   res.json({ success: true, priority: globalPriorityMode });
+});
+
+async function startServerGigaScanFromBody(body) {
+  const seedUrl = String(body.url || body.seedUrl || '').trim();
+  if (!seedUrl) throw Object.assign(new Error('url is vereist'), { httpStatus: 400 });
+  const kind = classifyServerGigaScanSeed(seedUrl);
+  const metadata = body.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata) ? { ...body.metadata } : {};
+  if (body.directHints && typeof body.directHints === 'object' && !Array.isArray(body.directHints)) {
+    metadata.webdl_direct_hints = body.directHints;
+  }
+  if (body.sourceContexts && typeof body.sourceContexts === 'object' && !Array.isArray(body.sourceContexts)) {
+    metadata.webdl_source_contexts = body.sourceContexts;
+  }
+  metadata.webdl_gigascan = true;
+  metadata.webdl_gigascan_seed = seedUrl;
+  if (!metadata.url) metadata.url = seedUrl;
+  if (!metadata.platform || metadata.platform === 'unknown') metadata.platform = kind;
+  const force = body.force === true;
+  const initialUrls = Array.isArray(body.initialUrls) ? body.initialUrls : [];
+  const initialThreadLinks = Array.isArray(body.initialThreadLinks || body.threadLinks) ? (body.initialThreadLinks || body.threadLinks) : [];
+  const initialSourceContexts = body.sourceContexts && typeof body.sourceContexts === 'object' && !Array.isArray(body.sourceContexts)
+    ? body.sourceContexts
+    : {};
+  const maxForumPages = parseServerScanLimit(body.maxForumPages, 1000);
+  const maxThreadPages = parseServerScanLimit(body.maxThreadPages || body.maxPages, 1000);
+  const maxItems = Number.isFinite(Number(body.maxItems)) && Number(body.maxItems) > 0 ? Number(body.maxItems) : 0;
+  const scanId = crypto.randomBytes(6).toString('hex');
+  const startedAt = new Date().toISOString();
+  setGigaScanState(scanId, {
+    id: scanId,
+    kind,
+    seedUrl,
+    status: 'running',
+    startedAt,
+    updatedAt: startedAt,
+    stats: { queued: 0, duplicates: 0, errors: 0, media: 0, threads: 0, forumPages: 0, threadPages: 0 },
+  });
+  console.log(`[GIGASCAN] gestart ${scanId}: kind=${kind} seed=${seedUrl} initial=${initialUrls.length}`);
+
+  const run = async () => {
+    if (kind === 'footfetishforum') {
+      return await runFootFetishForumGigaScan({
+        seedUrl,
+        metadata,
+        force,
+        initialUrls,
+        initialThreadLinks,
+        initialSourceContexts,
+        maxForumPages,
+        maxThreadPages,
+        maxItems,
+      });
+    }
+    const initial = await queueGenericGigaInitialChunk(initialUrls, initialSourceContexts, metadata, force);
+    const hubResult = await postHubGigaScanJob(seedUrl, metadata, force, body);
+    return {
+      queued: initial.queued || 0,
+      duplicates: initial.duplicates || 0,
+      errors: initial.errors || 0,
+      media: initialUrls.length,
+      threads: 0,
+      forumPages: 0,
+      threadPages: 0,
+      hubKind: hubResult.kind,
+      hubJobId: hubResult.hub && hubResult.hub.id || null,
+      hubExpanded: !!(hubResult.hub && hubResult.hub.expanded),
+    };
+  };
+
+  run().then((stats) => {
+    const row = activeFootFetishForumGigaScans.get(scanId) || { id: scanId, seedUrl, kind };
+    row.status = stats && stats.incomplete ? 'partial' : 'done';
+    row.updatedAt = new Date().toISOString();
+    row.finishedAt = row.updatedAt;
+    row.stats = stats;
+    setGigaScanState(scanId, row);
+    console.log(`[GIGASCAN] klaar ${scanId}: kind=${kind} ${JSON.stringify(stats)}`);
+  }).catch((e) => {
+    const row = activeFootFetishForumGigaScans.get(scanId) || { id: scanId, seedUrl, kind };
+    row.status = 'error';
+    row.error = e && e.message ? e.message : String(e);
+    if (e && e.stats && typeof e.stats === 'object') row.stats = e.stats;
+    row.updatedAt = new Date().toISOString();
+    row.finishedAt = row.updatedAt;
+    setGigaScanState(scanId, row);
+    console.log(`[GIGASCAN] fout ${scanId}: ${row.error}`);
+  });
+  return { success: true, scanId, kind, accepted: true, initialUrls: initialUrls.length };
+}
+
+expressApp.post('/gigascan', async (req, res) => {
+  try {
+    res.json(await startServerGigaScanFromBody(req.body || {}));
+  } catch (e) {
+    res.status(e && e.httpStatus ? e.httpStatus : 500).json({ success: false, error: e && e.message ? e.message : String(e) });
+  }
+});
+
+expressApp.post('/gigascan/footfetishforum', async (req, res) => {
+  try {
+    const body = { ...(req.body || {}) };
+    const seedUrl = String(body.url || body.seedUrl || '').trim();
+    if (!isFootFetishForumForumUrl(seedUrl) && !isFootFetishForumThreadPageUrl(seedUrl)) {
+      return res.status(400).json({ success: false, error: 'Geen FootFetishForum forum/thread URL' });
+    }
+    res.json(await startServerGigaScanFromBody(body));
+  } catch (e) {
+    res.status(e && e.httpStatus ? e.httpStatus : 500).json({ success: false, error: e && e.message ? e.message : String(e) });
+  }
+});
+
+expressApp.get('/gigascan', (req, res) => {
+  const scans = Array.from(activeFootFetishForumGigaScans.values())
+    .sort((a, b) => String(b.updatedAt || b.startedAt || '').localeCompare(String(a.updatedAt || a.startedAt || '')))
+    .slice(0, 100);
+  res.json({ success: true, scans });
+});
+
+expressApp.get('/gigascan/:id', (req, res) => {
+  const id = String(req.params && req.params.id || '').trim();
+  const row = activeFootFetishForumGigaScans.get(id);
+  if (!row) return res.status(404).json({ success: false, error: 'niet gevonden' });
+  res.json({ success: true, scan: row });
+});
+
+expressApp.get('/gigascan/footfetishforum/:id', (req, res) => {
+  const id = String(req.params && req.params.id || '').trim();
+  const row = activeFootFetishForumGigaScans.get(id);
+  if (!row) return res.status(404).json({ success: false, error: 'niet gevonden' });
+  res.json({ success: true, scan: row });
 });
 
 async function relaySocketCommandToHttp(endpoint, payload) {
@@ -5417,7 +8148,13 @@ async function relaySocketCommandToHttp(endpoint, payload) {
 
 function broadcastRecordingState() {
   try {
-    io.emit('recording-status-changed', { isRecording });
+    const recordings = getRecordingSnapshots();
+    io.emit('recording-status-changed', {
+      isRecording,
+      activeRecordingUrls: recordings.map((r) => r.url).filter(Boolean),
+      activeRecordingKeys: recordings.map((r) => r.key),
+      recordings
+    });
   } catch (e) { }
 }
 
@@ -5428,7 +8165,12 @@ io.on('connection', (socket) => {
     connected: true,
     serverTime: new Date().toISOString()
   });
-  socket.emit('recording-status-changed', { isRecording });
+  socket.emit('recording-status-changed', {
+    isRecording,
+    activeRecordingUrls: getRecordingSnapshots().map((r) => r.url).filter(Boolean),
+    activeRecordingKeys: getRecordingSnapshots().map((r) => r.key),
+    recordings: getRecordingSnapshots()
+  });
 
   socket.on('webdl:request', async (message, ack) => {
     const reply = (payload) => {
@@ -5448,9 +8190,13 @@ io.on('connection', (socket) => {
     }
 
     if (action === 'status') {
+      const recordings = getRecordingSnapshots();
       reply({
         success: true,
         isRecording,
+        activeRecordingUrls: recordings.map((r) => r.url).filter(Boolean),
+        activeRecordingKeys: recordings.map((r) => r.key),
+        recordings,
         activeDownloads: (await getRuntimeActiveDownloadRows()).length,
         serverTime: new Date().toISOString()
       });
@@ -5942,6 +8688,49 @@ function probeVideoDurationSeconds(filePath) {
     });
     proc.on('error', reject);
   });
+}
+
+// 2026-05-30 (Spoor 1.4): post-download integriteits-check voor video-bestanden.
+// Voorkomt B.10 (0:00 mp4 zonder audio sluipt door als 'completed'). Retourneert
+// lege string als OK, of een human-readable error-string die naar status='error'
+// gaat. Faalt safe: bij ffprobe-infra-issues niet rejecten (return '').
+async function verifyVideoIntegrity(filePath) {
+  try {
+    if (!filePath) return '';
+    const stat = fs.statSync(filePath);
+    if (stat.size < 10240) return ''; // < 10KB: andere checks (hotlink-fingerprint) zijn beter
+    const args = ['-v', 'error', '-show_entries', 'stream=codec_type:format=duration', '-of', 'json', filePath];
+    const result = await new Promise((resolve) => {
+      const proc = spawn(FFPROBE, args);
+      let out = '';
+      let err = '';
+      const timer = setTimeout(() => {
+        try { proc.kill('SIGKILL'); } catch (_) {}
+        resolve({ out, err: err || 'ffprobe timeout', code: -1 });
+      }, 8000);
+      proc.stdout.on('data', (d) => { out += d.toString(); });
+      proc.stderr.on('data', (d) => { err += d.toString(); });
+      proc.on('close', (code) => { clearTimeout(timer); resolve({ out, err, code }); });
+      proc.on('error', (e) => { clearTimeout(timer); resolve({ out, err: String(e && e.message || e), code: -1 }); });
+    });
+    if (result.code !== 0) return ''; // infra-fail = onbekend, niet rejecten
+    let data;
+    try { data = JSON.parse(result.out); } catch (_) { return ''; }
+    const duration = parseFloat(data?.format?.duration || 0);
+    const streams = Array.isArray(data?.streams) ? data.streams : [];
+    const hasVideo = streams.some((s) => s && s.codec_type === 'video');
+    const hasAudio = streams.some((s) => s && s.codec_type === 'audio');
+    if (!hasVideo) return ''; // niet-video container (mp4 met alleen audio etc); andere check vangt af
+    if (!Number.isFinite(duration) || duration < 0.5) {
+      return `Video heeft geen leesbare duratie (duration=${duration}s, size=${stat.size}b) — vermoedelijk truncated/broken container`;
+    }
+    if (!hasAudio) {
+      return `Video heeft geen audio-stream (duration=${duration.toFixed(2)}s) — vermoedelijk format-string fout, herproberen met bv*+ba/b`;
+    }
+    return '';
+  } catch (e) {
+    return ''; // veilig: nooit rejecten op infra-fail
+  }
 }
 
 function moveFileSync(srcPath, destPath) {
@@ -6998,6 +9787,7 @@ function detectPlatform(url) {
   if (/instagram\.com/i.test(u)) return 'instagram';
   if (/reddit\.com|redd\.it/i.test(u)) return 'reddit';
   if (/footfetishforum\.com/i.test(u)) return 'footfetishforum';
+  if (/flc\.nyc3\.digitaloceanspaces\.com\/data\/(?:attachments|video)\//i.test(u)) return 'footfetishforum';
   if (/onlyfans\.com/i.test(u)) return 'onlyfans';
   if (/rutube\.ru/i.test(u)) return 'rutube';
   if (/wikifeet\.com/i.test(u)) return 'wikifeet';
@@ -7011,6 +9801,29 @@ function detectPlatform(url) {
   if (/pornpics\.com/i.test(u)) return 'pornpics';
   if (/elitebabes\.com/i.test(u)) return 'elitebabes';
   if (/erome\.com/i.test(u)) return 'erome';
+  if (/imagefap\.com/i.test(u)) return 'imagefap';
+  if (/keep2share\.cc|k2s\.cc/i.test(u)) return 'keep2share';
+  if (/footstockings\.com/i.test(u)) return 'footstockings';
+  if (/heavyfetish\.com/i.test(u)) return 'heavyfetish';
+  if (/darknessporn\.com/i.test(u)) return 'darknessporn';
+  if (/darknetvideos\.com/i.test(u)) return 'darknetvideos';
+  if (/spankbang\.com/i.test(u)) return 'spankbang';
+  if (/xnxx\.com/i.test(u)) return 'xnxx';
+  if (/tnaflix\.com/i.test(u)) return 'tnaflix';
+  if (/redtube\.com/i.test(u)) return 'redtube';
+  if (/pictoa\.com/i.test(u)) return 'pictoa';
+  if (/tubesafari\.com/i.test(u)) return 'tubesafari';
+  if (/pornzog\.com/i.test(u)) return 'pornzog';
+  if (/alohatube\.com/i.test(u)) return 'alohatube';
+  if (/usersporn\.com/i.test(u)) return 'usersporn';
+  if (/nakedneighbour\.com/i.test(u)) return 'nakedneighbour';
+  if (/pornkai\.com/i.test(u)) return 'pornkai';
+  if (/xfree\.com/i.test(u)) return 'xfree';
+  if (/zzztube\.com/i.test(u)) return 'zzztube';
+  if (/favoyeurtube\.net/i.test(u)) return 'favoyeurtube';
+  if (/spycamhub\.net/i.test(u)) return 'spycamhub';
+  if (/sexygirlspics\.com/i.test(u)) return 'sexygirlspics';
+  if (/porncoven\.com/i.test(u)) return 'porncoven';
 
   try {
     const host = new URL(u).hostname.toLowerCase();
@@ -7060,6 +9873,29 @@ const KNOWN_PLATFORMS = new Set([
   'pornpics',
   'elitebabes',
   'erome',
+  'imagefap',
+  'keep2share',
+  'footstockings',
+  'heavyfetish',
+  'darknessporn',
+  'darknetvideos',
+  'spankbang',
+  'xnxx',
+  'tnaflix',
+  'redtube',
+  'pictoa',
+  'tubesafari',
+  'pornzog',
+  'alohatube',
+  'usersporn',
+  'nakedneighbour',
+  'pornkai',
+  'xfree',
+  'zzztube',
+  'favoyeurtube',
+  'spycamhub',
+  'sexygirlspics',
+  'porncoven',
   '4kdownloader',
   'other']
 );
@@ -7067,6 +9903,8 @@ const KNOWN_PLATFORMS = new Set([
 function normalizePlatform(platform, url) {
   const p = typeof platform === 'string' ? platform.trim().toLowerCase() : '';
   const detected = detectPlatform(url);
+  if (p === '_keep2share' || p === 'keep2share.cc' || p === 'k2s.cc' || p === 'k2s.io' || p === 'k2s' || p === 'k2scc') return 'keep2share';
+  if (p.endsWith('.keep2share.cc') || p.endsWith('.k2s.cc') || p.endsWith('.k2s.io')) return 'keep2share';
   if (!p || p === 'unknown' || p === 'other') return detected;
   if (KNOWN_PLATFORMS.has(p)) return p;
   if (/^[a-z0-9_-]{2,30}$/.test(p)) return p;
@@ -7166,6 +10004,161 @@ function deriveChannelFromUrl(platform, url) {
     if (m) return m[1];
     const m2 = u.match(/aznudefeet\.com\/([^\/\?#]+)/i);
     if (m2) return m2[1];
+  }
+
+  if (platform === 'darknessporn') {
+    try {
+      const parsed = new URL(u);
+      const segs = String(parsed.pathname || '').replace(/\/page\/\d+\/?$/i, '/').split('/').filter(Boolean);
+      // /<id>-<slug>/ → single video: 'video_<id>'
+      if (segs.length === 1 && /^\d+-/.test(segs[0])) {
+        const m = segs[0].match(/^(\d+)-/);
+        return m ? `video_${m[1]}` : segs[0];
+      }
+      // /tag/<id>-<slug>/, /category/<slug>/, /search/<q>/ → '<type>_<value>'
+      if (segs.length >= 2) return `${segs[0]}_${segs[1]}`;
+      if (segs.length === 1) return segs[0];
+    } catch (e) {}
+  }
+
+  if (platform === 'footstockings' || platform === 'heavyfetish') {
+    try {
+      const parsed = new URL(u);
+      const segs = String(parsed.pathname || '').split('/').filter(Boolean);
+      // /videos/<id>/<slug>/ → slug (bv. 'flexible-feet')
+      // /albums/<id>/<slug>/ → slug
+      if ((segs[0] === 'videos' || segs[0] === 'albums') && segs.length >= 3) return segs[2];
+      // /models/<name>/, /categories/<cat>/, /channels/<c>/, /playlists/<id>/, /search/<q>/
+      if (segs.length >= 2) return `${segs[0]}_${segs[1]}`;
+      if (segs.length === 1) return segs[0];
+    } catch (e) {}
+  }
+
+  if (platform === 'erome') {
+    try {
+      const parsed = new URL(u);
+      const segs = String(parsed.pathname || '').split('/').filter(Boolean);
+      // /a/<ID> → album_<ID>
+      if (segs[0] === 'a' && segs[1]) return `album_${segs[1]}`;
+      // /search?q=<X> → search_<X>
+      if (segs[0] === 'search') {
+        const q = parsed.searchParams.get('q') || '';
+        if (q) return `search_${q.replace(/\s+/g, '-')}`;
+        return 'erome_search';
+      }
+      // /<username>
+      if (segs.length === 1) return `user_${segs[0]}`;
+    } catch (e) {}
+  }
+
+  if (platform === 'spankbang') {
+    try {
+      const parsed = new URL(u);
+      const segs = String(parsed.pathname || '').split('/').filter(Boolean);
+      if (segs[0] === 's' && segs[1]) return `search_${segs[1]}`;
+      if (segs[0] === 'tag' && segs[1]) return `tag_${segs[1]}`;
+      if (segs[0] === 'pornstar' && segs[1]) return `pornstar_${segs[1]}`;
+      if (segs[0] === 'category' && segs[1]) return `category_${segs[1]}`;
+      // single /<id>/video/<slug>
+      if (segs.length >= 3 && segs[1] === 'video') return `video_${segs[0]}`;
+      if (segs.length >= 2) return `${segs[0]}_${segs[1]}`;
+      if (segs.length === 1) return segs[0];
+    } catch (e) {}
+  }
+
+  if (platform === 'xnxx') {
+    try {
+      const parsed = new URL(u);
+      const segs = String(parsed.pathname || '').split('/').filter(Boolean);
+      if (segs[0] === 'search' && segs[1]) return `search_${segs[1]}`;
+      if (segs[0] === 'tags' && segs[1]) return `tag_${segs[1]}`;
+      if (segs[0] === 'porn' && segs[1]) return `porn_${segs[1]}`;
+      const m = segs[0] && segs[0].match(/^video-([a-z0-9]+)$/i);
+      if (m) return `video_${m[1]}`;
+      if (segs.length >= 2) return `${segs[0]}_${segs[1]}`;
+      if (segs.length === 1) return segs[0];
+    } catch (e) {}
+  }
+
+  if (platform === 'tnaflix') {
+    try {
+      const parsed = new URL(u);
+      const segs = String(parsed.pathname || '').split('/').filter(Boolean);
+      // /search?what=<q>
+      if (segs[0] === 'search' || parsed.pathname === '/search') {
+        const q = (parsed.searchParams.get('what') || parsed.searchParams.get('q') || '').trim();
+        return q ? `search_${q.replace(/\s+/g, '-')}` : 'tnaflix_search';
+      }
+      // /<cat>/<slug>/video<id>
+      const last = segs[segs.length - 1] || '';
+      const vm = last.match(/^video(\d+)$/i);
+      if (vm) return `video_${vm[1]}`;
+      if (segs.length >= 2) return `${segs[0]}_${segs[1]}`;
+      if (segs.length === 1) return segs[0];
+    } catch (e) {}
+  }
+
+  if (platform === 'redtube') {
+    try {
+      const parsed = new URL(u);
+      const segs = String(parsed.pathname || '').split('/').filter(Boolean);
+      const q = (parsed.searchParams.get('search') || '').trim();
+      if (q) return `search_${q.replace(/\s+/g, '-')}`;
+      if (segs[0] === 'category' && segs[1]) return `category_${segs[1]}`;
+      if ((segs[0] === 'tag' || segs[0] === 'tags') && segs[1]) return `tag_${segs[1]}`;
+      if (segs[0] === 'pornstar' && segs[1]) return `pornstar_${segs[1]}`;
+      if (segs.length === 1 && /^\d+$/.test(segs[0])) return `video_${segs[0]}`;
+      if (segs.length >= 2) return `${segs[0]}_${segs[1]}`;
+      if (segs.length === 1) return segs[0];
+    } catch (e) {}
+  }
+
+  if (platform === 'porncoven') {
+    try {
+      const parsed = new URL(u);
+      const segs = String(parsed.pathname || '').split('/').filter(Boolean);
+      if (segs[0] === 'threads' && segs[1]) {
+        const m = segs[1].match(/^(\d+)/);
+        if (m) return `thread_${m[1]}`;
+      }
+      if (segs[0] === 'forums' && segs[1]) {
+        const m = segs[1].match(/^(\d+)/);
+        if (m) return `forum_${m[1]}`;
+      }
+      if (segs.length >= 2) return `${segs[0]}_${segs[1]}`;
+      if (segs.length === 1) return segs[0];
+    } catch (e) {}
+  }
+
+  if (platform === 'pictoa') {
+    try {
+      const parsed = new URL(u);
+      const segs = String(parsed.pathname || '').split('/').filter(Boolean);
+      // /albums/<slug>-<id>.html → album_<id>
+      if (segs[0] === 'albums' && segs[segs.length - 1].endsWith('.html')) {
+        const m = segs[segs.length - 1].match(/-(\d+)\.html$/);
+        if (m) return `album_${m[1]}`;
+      }
+      if (segs[0] === 's' && segs[1]) return `search_${segs[1]}`;
+      if (segs[0] === 'pornstar' && segs[1]) return `pornstar_${segs[1]}`;
+      if ((segs[0] === 'category' || segs[0] === 'categories') && segs[1]) return `category_${segs[1]}`;
+      if ((segs[0] === 'tag' || segs[0] === 'tags') && segs[1]) return `tag_${segs[1]}`;
+      if (segs.length === 1) return segs[0];
+    } catch (e) {}
+  }
+
+  if (platform === 'keep2share') {
+    // /file/<hash>/<filename>  → filename zonder ext als channel (bv. 'NudeBeach1151')
+    // /file/<hash>            → 'k2s_<hash-prefix>' als fallback
+    // Hierdoor voorkomen we 'keep2share/unknown/https___k2s.cc_file_<hash>' folders
+    // voor directe K2S URLs zonder forum-context (vipergirls etc. blijven hun thread_id krijgen via metadata).
+    const m = u.match(/k2s\.(?:cc|io)\/file\/[a-f0-9]+\/([^/?#]+)/i);
+    if (m && m[1]) {
+      const base = decodeURIComponent(m[1]).replace(/\.[^.]+$/, '').replace(/[^\w.-]+/g, '_');
+      if (base) return base.slice(0, 60);
+    }
+    const idm = u.match(/k2s\.(?:cc|io)\/file\/([a-f0-9]+)/i);
+    if (idm && idm[1]) return `k2s_${idm[1].slice(0, 12)}`;
   }
 
   if (platform === 'telegram') {
@@ -7493,6 +10486,531 @@ function isFootfetishforumThreadUrl(input) {
   }
 }
 
+function isFootfetishforumForumUrl(input) {
+  try {
+    const u = new URL(String(input || ''));
+    const host = String(u.hostname || '').toLowerCase();
+    if (!(host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com'))) return false;
+    return /\/forums\/[^\/\?#]*\.(\d+)(?:\/|\?|#|$)/i.test(String(u.pathname || '') + String(u.search || '') + String(u.hash || ''));
+  } catch (e) {
+    return false;
+  }
+}
+
+function sourceContextLookupKey(value) {
+  try {
+    const u = new URL(String(value || '').trim());
+    u.hash = '';
+    return u.toString();
+  } catch (e) {
+    return String(value || '').trim();
+  }
+}
+
+function pickSourceContextForUrl(metadata, url) {
+  try {
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null;
+    const map = metadata.webdl_source_contexts && typeof metadata.webdl_source_contexts === 'object'
+      ? metadata.webdl_source_contexts
+      : null;
+    const key = String(url || '').trim();
+    const normalizedKey = sourceContextLookupKey(key);
+    if (map) {
+      for (const candidateKey of [key, normalizedKey]) {
+        if (candidateKey && map[candidateKey] && typeof map[candidateKey] === 'object') return map[candidateKey];
+      }
+      for (const [mappedKey, ctx] of Object.entries(map)) {
+        if (!ctx || typeof ctx !== 'object') continue;
+        if (sourceContextLookupKey(mappedKey) === normalizedKey) return ctx;
+      }
+    }
+    if (metadata.source_context && typeof metadata.source_context === 'object') return metadata.source_context;
+    if (metadata.origin_thread && typeof metadata.origin_thread === 'object') return metadata.origin_thread;
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function normalizeOriginThreadContext(ctx, fallbackPlatform, fallbackUrl, fallbackChannel, fallbackTitle) {
+  try {
+    const raw = ctx && typeof ctx === 'object' && !Array.isArray(ctx) ? ctx : {};
+    const url = String(raw.url || fallbackUrl || '').trim();
+    if (!url) return null;
+    const platform = normalizePlatform(raw.platform || fallbackPlatform || '', url);
+    const fffInfo = platform === 'footfetishforum' ? parseFootFetishForumThreadInfo(url) : null;
+    const channel = String(
+      fffInfo && fffInfo.name ||
+      raw.channel ||
+      fallbackChannel ||
+      deriveChannelFromUrl(platform, url) ||
+      'unknown'
+    ).trim();
+    const title = String(
+      fffInfo && fffInfo.name ||
+      raw.title ||
+      fallbackTitle ||
+      deriveTitleFromUrl(url)
+    ).trim();
+    const out = { url, platform, channel: channel || 'unknown', title: title || 'untitled' };
+    if (raw.thread_id) out.thread_id = String(raw.thread_id);
+    if (fffInfo && fffInfo.id) out.thread_id = fffInfo.id;
+    return out;
+  } catch (e) {
+    return null;
+  }
+}
+
+function parseFootFetishForumThreadParts(rawUrl, baseHref = '') {
+  try {
+    const u = new URL(String(rawUrl || ''), baseHref || undefined);
+    u.hash = '';
+    const host = String(u.hostname || '').toLowerCase();
+    if (!(host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com'))) return null;
+    const m = String(u.pathname || '').match(/^\/threads\/([^\/\?#]+)\.(\d+)(?:\/|$)/i);
+    if (!m || !m[1] || !m[2]) return null;
+    return { url: u, slug: m[1], id: String(m[2]) };
+  } catch (e) {
+    return null;
+  }
+}
+
+function normalizeFootFetishForumThreadUrl(rawUrl, baseHref = '') {
+  const parts = parseFootFetishForumThreadParts(rawUrl, baseHref);
+  if (!parts) return '';
+  parts.url.pathname = `/threads/${parts.slug}.${parts.id}/`;
+  parts.url.search = '';
+  parts.url.hash = '';
+  return parts.url.toString();
+}
+
+function isFootFetishForumForumUrl(input) {
+  try {
+    const u = new URL(String(input || ''));
+    const host = String(u.hostname || '').toLowerCase();
+    if (!(host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com'))) return false;
+    return /^\/forums\/[^\/\?#]*\.\d+(?:\/|$)/i.test(String(u.pathname || ''));
+  } catch (e) {
+    return false;
+  }
+}
+
+function isFootFetishForumThreadPageUrl(input) {
+  return !!parseFootFetishForumThreadParts(input);
+}
+
+function htmlDecodeAttribute(value) {
+  return String(value || '')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+}
+
+function parseServerScanLimit(value, fallback) {
+  const raw = String(value == null ? '' : value).trim().toLowerCase();
+  if (!raw || raw === '0' || raw === 'all' || raw === 'alles' || raw === 'unlimited' || raw === 'onbeperkt') return fallback;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+async function fetchFootFetishForumHtml(url, timeoutMs = 20000) {
+  const headers = {
+    'User-Agent': FOOTFETISHFORUM_FIREFOX_UA,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9,nl;q=0.8',
+    'Cache-Control': 'no-cache',
+    'Pragma': 'no-cache',
+  };
+  try {
+    const host = new URL(String(url || '')).hostname || 'footfetishforum.com';
+    const cookieStr = await loadCookiesForDomain(host);
+    if (cookieStr) headers.Cookie = cookieStr;
+  } catch (e) {}
+  const controller = new AbortController();
+  const t = setTimeout(() => {
+    try { controller.abort(); } catch (e) {}
+  }, Math.max(3000, Number(timeoutMs) || 20000));
+  try {
+    const resp = await fetch(String(url || ''), { headers, redirect: 'follow', signal: controller.signal });
+    const text = await resp.text();
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    if (/just a moment|enable javascript and cookies|cloudflare/i.test(text)) {
+      throw new Error('Cloudflare/login challenge');
+    }
+    return text;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+function absoluteFootFetishForumUrl(raw, baseHref) {
+  try {
+    const u = new URL(htmlDecodeAttribute(raw), baseHref);
+    u.hash = '';
+    return u.toString();
+  } catch (e) {
+    return '';
+  }
+}
+
+function collectFootFetishForumThreadLinksFromHtml(html, baseHref, maxThreads = 1000) {
+  const out = [];
+  const seen = new Set();
+  const push = (raw) => {
+    if (out.length >= maxThreads) return;
+    const final = normalizeFootFetishForumThreadUrl(raw, baseHref);
+    if (!final) return;
+    const parts = parseFootFetishForumThreadParts(final);
+    const key = parts && parts.id ? parts.id : final;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(final);
+  };
+  const text = String(html || '');
+  let m;
+  const attrRe = /\b(?:href|data-href|data-url|data-preview-url|data-content-url)=["']([^"']*\/threads\/[^"']+\.\d+[^"']*)["']/ig;
+  while ((m = attrRe.exec(text)) && out.length < maxThreads) push(m[1]);
+  const absRe = /https?:\/\/(?:[^\/"'\s<>]+\.)?footfetishforum\.com\/(?:index\.php\?)?threads\/[^"'\s<>]+?\.\d+[^"'\s<>]*/ig;
+  while ((m = absRe.exec(text)) && out.length < maxThreads) push(m[0]);
+  return out;
+}
+
+function findFootFetishForumNextPageFromHtml(html, baseHref) {
+  const text = String(html || '');
+  const patterns = [
+    /<link\b[^>]*rel=["']next["'][^>]*href=["']([^"']+)["']/i,
+    /<a\b[^>]*rel=["']next["'][^>]*href=["']([^"']+)["']/i,
+    /<a\b[^>]*class=["'][^"']*pageNav-jump--next[^"']*["'][^>]*href=["']([^"']+)["']/i,
+    /<a\b[^>]*href=["']([^"']+)["'][^>]*class=["'][^"']*pageNav-jump--next[^"']*["']/i,
+  ];
+  for (const re of patterns) {
+    const m = text.match(re);
+    if (m && m[1]) return absoluteFootFetishForumUrl(m[1], baseHref);
+  }
+  return '';
+}
+
+function isFootFetishForumMediaCandidateUrl(rawUrl, baseHref = '') {
+  try {
+    const u = new URL(String(rawUrl || ''), baseHref || undefined);
+    const host = String(u.hostname || '').toLowerCase();
+    const pathName = String(u.pathname || '').toLowerCase();
+    if (/\/data\/avatars\//i.test(pathName)) return false;
+    if (/\b(?:avatar|emoji|smilie|reaction|logo|favicon)\b/i.test(pathName)) return false;
+    if ((host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) && /^\/attachments\//i.test(pathName)) return true;
+    if ((host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) && /\/data\/attachments\//i.test(pathName)) return true;
+    if (host === 'upload.footfetishforum.com' || host.endsWith('.upload.footfetishforum.com')) return true;
+    if (/\.(?:jpe?g|png|gif|webp|bmp|avif|heic|heif|mp4|mov|m4v|webm|mkv)(?:$|\?)/i.test(u.toString())) return true;
+    if (/^(?:pixhost\.to|postimg\.cc|imgur\.com|redgifs\.com|gfycat\.com)$/i.test(host)) return true;
+    if (host.endsWith('.pixhost.to') || host.endsWith('.postimg.cc') || host.endsWith('.imgur.com') || host.endsWith('.redgifs.com')) return true;
+  } catch (e) {}
+  return false;
+}
+
+function collectFootFetishForumMediaFromHtml(html, baseHref, maxItems = 1000) {
+  const out = [];
+  const seen = new Set();
+  const push = (raw) => {
+    if (out.length >= maxItems) return;
+    const final = absoluteFootFetishForumUrl(raw, baseHref);
+    if (!final || seen.has(final)) return;
+    if (!isFootFetishForumMediaCandidateUrl(final, baseHref)) return;
+    seen.add(final);
+    out.push(final);
+  };
+  const text = String(html || '');
+  let m;
+  const attrRe = /\b(?:href|src|data-src|data-lazy-src|data-url|data-href)=["']([^"']+)["']/ig;
+  while ((m = attrRe.exec(text)) && out.length < maxItems) push(m[1]);
+  const rawRe = /(https?:\/\/[^\s"'<>)]+)/g;
+  while ((m = rawRe.exec(text)) && out.length < maxItems) {
+    push(String(m[1] || '').replace(/[),\]."']+$/g, ''));
+  }
+  return out;
+}
+
+function footFetishForumContextFromThreadUrl(threadUrl, fallbackTitle = '') {
+  const info = parseFootFetishForumThreadInfo(threadUrl);
+  const title = String(info && info.name || fallbackTitle || deriveTitleFromUrl(threadUrl)).trim();
+  return {
+    url: threadUrl,
+    platform: 'footfetishforum',
+    channel: info && info.name ? info.name : deriveChannelFromUrl('footfetishforum', threadUrl) || 'unknown',
+    title: title || 'untitled',
+    thread_id: info && info.id ? String(info.id) : undefined,
+  };
+}
+
+async function queueFootFetishForumGigaChunk(urls, sourceContexts, metadata, force) {
+  const clean = Array.from(new Set((Array.isArray(urls) ? urls : []).map((u) => String(u || '').trim()).filter(Boolean)));
+  if (!clean.length) return { queued: 0, duplicates: 0, errors: 0 };
+  const chunkMeta = {
+    ...(metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {}),
+    platform: 'footfetishforum',
+    webdl_pin_context: true,
+    webdl_gigascan: true,
+    webdl_source_contexts: sourceContexts && typeof sourceContexts === 'object' ? sourceContexts : {},
+  };
+  try {
+    const response = await fetch(`http://127.0.0.1:${PORT}/download/batch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ urls: clean, metadata: chunkMeta, force: force === true, priority: 1 }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data && data.error ? data.error : `HTTP ${response.status}`);
+    return {
+      queued: Array.isArray(data.downloads) ? data.downloads.filter((d) => !d.duplicate).length : 0,
+      duplicates: Array.isArray(data.downloads) ? data.downloads.filter((d) => d.duplicate).length : 0,
+      errors: 0,
+    };
+  } catch (e) {
+    console.log(`[GIGASCAN] queue chunk fout: ${e.message}`);
+    return { queued: 0, duplicates: 0, errors: clean.length };
+  }
+}
+
+async function queueGenericGigaInitialChunk(urls, sourceContexts, metadata, force) {
+  const clean = Array.from(new Set((Array.isArray(urls) ? urls : []).map((u) => String(u || '').trim()).filter(Boolean)));
+  if (!clean.length) return { queued: 0, duplicates: 0, errors: 0 };
+  const chunkMeta = {
+    ...(metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {}),
+    webdl_pin_context: true,
+    webdl_gigascan: true,
+    webdl_source_contexts: sourceContexts && typeof sourceContexts === 'object' ? sourceContexts : {},
+  };
+  try {
+    const response = await fetch(`http://127.0.0.1:${PORT}/download/batch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ urls: clean, metadata: chunkMeta, force: force === true, priority: 1 }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data && data.error ? data.error : `HTTP ${response.status}`);
+    return {
+      queued: Array.isArray(data.downloads) ? data.downloads.filter((d) => !d.duplicate).length : 0,
+      duplicates: Array.isArray(data.downloads) ? data.downloads.filter((d) => d.duplicate).length : 0,
+      errors: 0,
+    };
+  } catch (e) {
+    console.log(`[GIGASCAN] initial chunk fout: ${e.message}`);
+    return { queued: 0, duplicates: 0, errors: clean.length };
+  }
+}
+
+function classifyServerGigaScanSeed(seedUrl) {
+  try {
+    const u = new URL(String(seedUrl || '').trim());
+    const host = String(u.hostname || '').toLowerCase().replace(/^www\./, '');
+    if (host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) return 'footfetishforum';
+    if (host === 'vipergirls.to' || host.endsWith('.vipergirls.to') || host === 'viper.to' || host.endsWith('.viper.to')) return 'vipergirls';
+    if (host === 'amateurvoyeurforum.com' || host.endsWith('.amateurvoyeurforum.com')) return 'amateurvoyeurforum';
+    if (host === 'foot-fetish.club' || host.endsWith('.foot-fetish.club')) return 'foot-fetish.club';
+    if (/forum|xenforo|vbulletin|threads?|showthread|forumdisplay/i.test(`${host}${u.pathname}`)) return 'generic-forum';
+  } catch (e) {}
+  return 'generic';
+}
+
+async function postHubGigaScanJob(seedUrl, metadata, force, body = {}) {
+  const kind = classifyServerGigaScanSeed(seedUrl);
+  const adapter =
+    kind === 'vipergirls' ? 'gallerydl' :
+    kind === 'amateurvoyeurforum' ? 'vbulletin' :
+    kind === 'foot-fetish.club' ? 'xenforo' :
+    null;
+  const options = {
+    ...(metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {}),
+    queued_from: 'simple-server-gigascan',
+    webdl_gigascan: true,
+    webdl_gigascan_seed: seedUrl,
+    contextUrl: seedUrl,
+    pageUrl: seedUrl,
+    vipergirlsWholeThread: true,
+  };
+  if (body.sourceContexts && typeof body.sourceContexts === 'object' && !Array.isArray(body.sourceContexts)) {
+    options.webdl_source_contexts = body.sourceContexts;
+  }
+  if (body.directHints && typeof body.directHints === 'object' && !Array.isArray(body.directHints)) {
+    options.webdl_direct_hints = body.directHints;
+  }
+  if (kind !== 'generic' && !options.platform) options.platform = kind;
+  const response = await fetch('http://127.0.0.1:35730/api/jobs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      url: seedUrl,
+      ...(adapter ? { adapter } : {}),
+      force: force === true,
+      priority: 80,
+      options,
+    }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data && data.error ? data.error : `Hub HTTP ${response.status}`);
+  return { kind, adapter: adapter || data.adapter || null, hub: data };
+}
+
+async function runFootFetishForumGigaScan({ seedUrl, metadata = {}, force = false, initialUrls = [], initialThreadLinks = [], initialSourceContexts = {}, maxForumPages = 1000, maxThreadPages = 1000, maxItems = 0 }) {
+  const seenMedia = new Set();
+  const seenThreads = new Set();
+  const sourceContexts = {};
+  const stats = { queued: 0, duplicates: 0, errors: 0, media: 0, threads: 0, forumPages: 0, threadPages: 0 };
+  const flush = async (items) => {
+    const urls = [];
+    const ctx = {};
+    for (const item of items) {
+      const url = String(item && item.url || item || '').trim();
+      if (!url || seenMedia.has(url)) continue;
+      seenMedia.add(url);
+      urls.push(url);
+      const sourceContext = item && item.sourceContext || sourceContexts[url] || initialSourceContexts[url] || null;
+      if (sourceContext && sourceContext.url) {
+        ctx[url] = sourceContext;
+        try {
+          const normalized = sourceContextLookupKey ? sourceContextLookupKey(url) : url;
+          if (normalized) ctx[normalized] = sourceContext;
+        } catch (e) {}
+      }
+    }
+    if (!urls.length) return;
+    stats.media += urls.length;
+    const res = await queueFootFetishForumGigaChunk(urls, ctx, metadata, force);
+    stats.queued += res.queued || 0;
+    stats.duplicates += res.duplicates || 0;
+    stats.errors += res.errors || 0;
+  };
+
+  await flush((Array.isArray(initialUrls) ? initialUrls : []).map((url) => ({ url, sourceContext: initialSourceContexts[url] })));
+
+  const scanThread = async (threadUrl) => {
+    const normalizedThreadUrl = normalizeFootFetishForumThreadUrl(threadUrl) || threadUrl;
+    if (!normalizedThreadUrl || seenThreads.has(normalizedThreadUrl)) return;
+    seenThreads.add(normalizedThreadUrl);
+    stats.threads++;
+    const threadContext = footFetishForumContextFromThreadUrl(normalizedThreadUrl, metadata && metadata.title);
+    let pageUrl = normalizedThreadUrl;
+    let page = 0;
+    while (pageUrl && page < maxThreadPages) {
+      page++;
+      stats.threadPages++;
+      let html = '';
+      try {
+        html = await fetchFootFetishForumHtml(pageUrl);
+      } catch (e) {
+        stats.errors++;
+        stats.incomplete = true;
+        console.log(`[GIGASCAN] thread fetch fout ${pageUrl}: ${e.message}`);
+        break;
+      }
+      const media = collectFootFetishForumMediaFromHtml(html, pageUrl, 5000)
+        .map((url) => ({ url, sourceContext: threadContext }));
+      await flush(media);
+      if (maxItems > 0 && stats.media >= maxItems) break;
+      const nextUrl = findFootFetishForumNextPageFromHtml(html, pageUrl);
+      if (!nextUrl || nextUrl === pageUrl) break;
+      pageUrl = nextUrl;
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+  };
+
+  const normalizedSeed = String(seedUrl || '').trim();
+  if (isFootFetishForumThreadPageUrl(normalizedSeed)) {
+    await scanThread(normalizedSeed);
+    if (stats.threadPages === 0) {
+      const err = new Error('FootFetishForum thread kon niet door de server worden geladen');
+      err.stats = stats;
+      throw err;
+    }
+    return stats;
+  }
+
+  if (!isFootFetishForumForumUrl(normalizedSeed)) throw new Error('Geen FootFetishForum forum/thread URL');
+  const providedThreadLinks = Array.from(new Set((Array.isArray(initialThreadLinks) ? initialThreadLinks : [])
+    .map((link) => normalizeFootFetishForumThreadUrl(link, normalizedSeed))
+    .filter(Boolean)));
+  for (const link of providedThreadLinks) {
+    await scanThread(link);
+    if (maxItems > 0 && stats.media >= maxItems) break;
+  }
+
+  let forumUrl = normalizedSeed;
+  let forumPage = 0;
+  while (forumUrl && forumPage < maxForumPages) {
+    forumPage++;
+    stats.forumPages++;
+    let html = '';
+    try {
+      html = await fetchFootFetishForumHtml(forumUrl);
+    } catch (e) {
+      stats.errors++;
+      stats.incomplete = true;
+      console.log(`[GIGASCAN] forum fetch fout ${forumUrl}: ${e.message}`);
+      break;
+    }
+    const links = collectFootFetishForumThreadLinksFromHtml(html, forumUrl, 2000);
+    for (const link of links) {
+      await scanThread(link);
+      if (maxItems > 0 && stats.media >= maxItems) break;
+    }
+    if (maxItems > 0 && stats.media >= maxItems) break;
+    const nextUrl = findFootFetishForumNextPageFromHtml(html, forumUrl);
+    if (!nextUrl || nextUrl === forumUrl) break;
+    forumUrl = nextUrl;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  if (stats.threadPages === 0 && stats.errors > 0) {
+    const err = new Error('FootFetishForum forum kon niet door de server worden geladen');
+    err.stats = stats;
+    throw err;
+  }
+  return stats;
+}
+
+function loadGigaScanState() {
+  const map = new Map();
+  try {
+    if (!fs.existsSync(GIGASCAN_STATE_FILE)) return map;
+    const raw = fs.readFileSync(GIGASCAN_STATE_FILE, 'utf8');
+    const rows = JSON.parse(raw);
+    if (!Array.isArray(rows)) return map;
+    const now = new Date().toISOString();
+    for (const row of rows) {
+      if (!row || !row.id) continue;
+      const copy = { ...row };
+      if (copy.status === 'running') {
+        copy.status = 'interrupted';
+        copy.error = copy.error || 'server herstart tijdens gigascan';
+        copy.finishedAt = copy.finishedAt || now;
+        copy.updatedAt = now;
+      }
+      map.set(String(copy.id), copy);
+    }
+  } catch (e) {
+    console.log(`[GIGASCAN] status laden mislukt: ${e.message}`);
+  }
+  return map;
+}
+
+function persistGigaScanState() {
+  try {
+    const rows = Array.from(activeFootFetishForumGigaScans.values())
+      .sort((a, b) => String(b.updatedAt || b.startedAt || '').localeCompare(String(a.updatedAt || a.startedAt || '')))
+      .slice(0, 200);
+    fs.writeFileSync(GIGASCAN_STATE_FILE, JSON.stringify(rows, null, 2));
+  } catch (e) {
+    console.log(`[GIGASCAN] status bewaren mislukt: ${e.message}`);
+  }
+}
+
+function setGigaScanState(scanId, row) {
+  activeFootFetishForumGigaScans.set(scanId, row);
+  persistGigaScanState();
+}
+
+const activeFootFetishForumGigaScans = loadGigaScanState();
+
 function isAznudefeetViewUrl(input) {
   try {
     const u = new URL(String(input || ''));
@@ -7570,6 +11088,23 @@ expressApp.get('/health', (req, res) => {
   });
 });
 
+expressApp.get('/api/keep2share/preflight', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  try {
+    const url = String(req.query.url || '').trim();
+    res.json(await keep2ShareRemotePreflight(url));
+  } catch (e) {
+    res.status(500).json({
+      service: 'keep2share',
+      readOnly: true,
+      remoteAcceptance: { checked: true, accepted: false, status: 'error' },
+      error: redactKeep2ShareDiagnosticText(e && e.message ? e.message : String(e)),
+    });
+  }
+});
+
 // Status
 expressApp.get('/status', async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -7621,6 +11156,33 @@ expressApp.get('/status', async (req, res) => {
   } catch (e) {
     dbStatusError = (e && e.message) ? e.message : String(e);
   }
+  // 2026-05-25: Stale-postprocess GC. activePostprocessJobs kan blijven hangen
+  // als een postprocess-Promise nooit settled (worker-crash, race). Sync hier
+  // tegen DB-status: als job in DB 'completed'/'error'/'cancelled'/'pending',
+  // dan is 'ie zeker niet meer aan 't postprocessen → set + context opruimen.
+  try {
+    const ppIds = Array.from(activePostprocessJobs).map((x) => Number(x)).filter(Number.isFinite);
+    if (ppIds.length > 0) {
+      const pool = db.readPool || db.pool;
+      const r = pool ? await pool.query({
+        text: 'SELECT id, status FROM downloads WHERE id = ANY($1::bigint[])',
+        values: [ppIds],
+      }) : null;
+      const rows = (r && r.rows) || [];
+      const dbStatusById = new Map();
+      for (const row of rows) dbStatusById.set(Number(row.id), String(row.status || ''));
+      for (const id of ppIds) {
+        const st = dbStatusById.get(id);
+        if (!st || st === 'completed' || st === 'error' || st === 'cancelled' || st === 'pending') {
+          activePostprocessJobs.delete(id);
+          activePostprocessJobs.delete(String(id));
+          downloadActivityContextById.delete(id);
+          downloadActivityContextById.delete(String(id));
+        }
+      }
+    }
+  } catch (e) { /* niet-fataal */ }
+
   // Build active_items for the gallery's queue bar using real-time context
   const activeDownloadsList = [];
   try {
@@ -7635,13 +11197,13 @@ expressApp.get('/status', async (req, res) => {
   // Pad with queued AND pending downloads if we have room (skip recordings)
   try {
     if (activeDownloadsList.length < 24 && (dbQueuedCount > 0 || dbPendingCount > 0)) {
-      const qrows = await db.prepare("SELECT id, url, thumbnail, platform, channel, title, status FROM downloads WHERE status IN ('queued', 'pending') AND url NOT LIKE 'recording:%' ORDER BY CASE status WHEN 'queued' THEN 0 WHEN 'pending' THEN 1 END, created_at ASC LIMIT 100").all();
+      const qrows = await db.prepare("SELECT id, url, thumbnail, platform, channel, title, status, metadata FROM downloads WHERE status IN ('queued', 'pending') AND url NOT LIKE 'recording:%' ORDER BY CASE status WHEN 'queued' THEN 0 WHEN 'pending' THEN 1 END, created_at ASC LIMIT 100").all();
       const existingIds = new Set(activeDownloadsList.map(a => Number(a.id)));
       let heavyPad = 0, lightPad = 0;
       for (const qr of qrows || []) {
         if (heavyPad >= 12 && lightPad >= 12) break;
         if (!existingIds.has(Number(qr.id)) && !activeProcIds.has(qr.id) && !startingJobs.has(qr.id)) {
-          const lane = detectLane(qr.platform, qr.url);
+          const lane = detectLane(qr.platform, qr.url, qr.metadata);
           if (lane === 'heavy' && heavyPad >= 12) continue;
           if (lane === 'light' && lightPad >= 12) continue;
           if (lane === 'heavy') heavyPad++; else lightPad++;
@@ -7664,7 +11226,14 @@ expressApp.get('/status', async (req, res) => {
   res.json({
     status: 'running',
     isRecording,
-    activeRecordingUrls: Array.from(activeRecordings.keys()),
+    activeRecordingUrls: getRecordingSnapshots().map((r) => r.url).filter(Boolean),
+    activeRecordingKeys: getRecordingSnapshots().map((r) => r.key),
+    recordings: getRecordingSnapshots(),
+    recordingLimits: {
+      maxActive: RECORDING_MAX_ACTIVE,
+      maxDurationMs: RECORDING_MAX_DURATION_MS,
+      minFreeBytes: RECORDING_MIN_FREE_BYTES
+    },
     activeDownloads: runtimeActive.length,
     active_items: activeDownloadsList,
     queuedDownloads: dbQueuedCount,
@@ -7700,11 +11269,13 @@ expressApp.get('/status', async (req, res) => {
     queues: {
       heavy: { active: heavyActive, limit: heavyLimit, queued: queuedHeavy.length },
       light: { active: lightActive, limit: lightLimit, queued: queuedLight.length },
+      fastlane: { active: lightActive, limit: lightLimit, queued: queuedLight.length },
       batch: { active: activeLaneCount('batch'), limit: BATCH_DOWNLOAD_CONCURRENCY, queued: queuedBatch.length }
     },
     queue_ids: {
       heavy: queuedHeavy.slice(0, 80),
-      light: queuedLight.slice(0, 80)
+      light: queuedLight.slice(0, 80),
+      fastlane: queuedLight.slice(0, 80)
     },
     processes: {
       active: activeProcesses.size,
@@ -7760,10 +11331,13 @@ expressApp.get('/api/settings/lanes', (req, res) => {
     success: true,
     heavy: HEAVY_DOWNLOAD_CONCURRENCY,
     light: LIGHT_DOWNLOAD_CONCURRENCY,
+    fastlane: LIGHT_DOWNLOAD_CONCURRENCY,
     active_heavy: activeLaneCount('heavy'),
     active_light: activeLaneCount('light'),
+    active_fastlane: activeLaneCount('light'),
     queued_heavy: queuedHeavy.length,
     queued_light: queuedLight.length,
+    queued_fastlane: queuedLight.length,
   });
 });
 
@@ -7801,6 +11375,81 @@ function parseSqliteDateMs(s) {
   } catch (e) {
     return null;
   }
+}
+
+function getYtdlpSourceTimestamp(info) {
+  try {
+    if (!info || typeof info !== 'object') return null;
+    const rawTimestamp = Number(info.release_timestamp || info.timestamp || info.modified_timestamp || 0);
+    if (Number.isFinite(rawTimestamp) && rawTimestamp > 0) {
+      const dt = new Date(rawTimestamp * 1000);
+      const ms = dt.getTime();
+      if (Number.isFinite(ms)) return dt.toISOString();
+    }
+
+    const uploadDate = String(info.upload_date || '').trim();
+    const m = uploadDate.match(/^(\d{4})(\d{2})(\d{2})$/);
+    if (m) {
+      const y = parseInt(m[1], 10);
+      const mo = parseInt(m[2], 10);
+      const d = parseInt(m[3], 10);
+      const dt = new Date(Date.UTC(y, Math.max(0, mo - 1), d, 12, 0, 0));
+      const ms = dt.getTime();
+      if (Number.isFinite(ms)) return dt.toISOString();
+    }
+    const releaseDate = String(info.release_date || info.date || '').trim();
+    const rm = releaseDate.match(/^(\d{4})(\d{2})(\d{2})$/);
+    if (rm) {
+      const y = parseInt(rm[1], 10);
+      const mo = parseInt(rm[2], 10);
+      const d = parseInt(rm[3], 10);
+      const dt = new Date(Date.UTC(y, Math.max(0, mo - 1), d, 12, 0, 0));
+      const ms = dt.getTime();
+      if (Number.isFinite(ms)) return dt.toISOString();
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function findYtdlpInfoJsonForMediaPath(fpRaw) {
+  try {
+    const fp = String(fpRaw || '').trim();
+    if (!fp || !fs.existsSync(fp)) return null;
+    const st = fs.statSync(fp);
+    const dir = st.isDirectory() ? fp : path.dirname(fp);
+    const files = fs.readdirSync(dir).filter(f => f.endsWith('.info.json'));
+    if (!files.length) return null;
+    const stem = st.isDirectory() ? '' : path.basename(fp, path.extname(fp));
+    const exact = stem ? files.find(f => path.basename(f, '.info.json') === stem) : null;
+    return path.join(dir, exact || files[0]);
+  } catch (e) {
+    return null;
+  }
+}
+
+async function normalizeYoutubeDownloadTimestamp(downloadId, filepath) {
+  try {
+    if (!downloadId) return;
+    const row = await rawGetDownload.get(downloadId);
+    if (!row || String(row.platform || '').toLowerCase() !== 'youtube') return;
+    const fp = filepath || row.filepath || '';
+    const infoPath = findYtdlpInfoJsonForMediaPath(fp);
+    if (!infoPath) return;
+    const info = JSON.parse(fs.readFileSync(infoPath, 'utf8'));
+    const sourcePublishedAt = getYtdlpSourceTimestamp(info);
+    if (!sourcePublishedAt) return;
+    await updateDownloadContentTimestamp.run(sourcePublishedAt, sourcePublishedAt, sourcePublishedAt, downloadId);
+    const sourceMs = new Date(sourcePublishedAt).getTime();
+    if (Number.isFinite(sourceMs)) {
+      try { await updateDownloadFilesContentTimestamp.run(Math.floor(sourceMs), sourcePublishedAt, downloadId); } catch (e) { }
+    }
+    const sourceUrl = String(info.webpage_url || info.original_url || '').trim();
+    if (sourceUrl) {
+      try { await updateDownloadSourceUrl.run(sourceUrl, downloadId); } catch (e) { }
+    }
+  } catch (e) { }
 }
 
 function looksCompleteOnDisk(fpRaw) {
@@ -8355,26 +12004,8 @@ expressApp.post('/start-recording', async (req, res) => {
   } catch (e) { }
 
   const { metadata = {}, crop, lock } = req.body || {};
-  const recId = String((metadata && metadata.url) || req.body.url || 'default_rec').trim();
-
   const force = req.body.force === true;
-
-  if (activeRecordings.has(recId)) {
-    if (force) {
-      console.log(`[MULTI-REC] Force restart requested for ${recId}`);
-      // Wait for previous to die if any
-      const existing = activeRecordings.get(recId);
-      if (existing && existing.recordingProcess) {
-        try { existing.recordingProcess.kill('SIGINT'); } catch (e) { }
-      }
-      activeRecordings.delete(recId);
-      broadcastRecordingState();
-      await new Promise(r => setTimeout(r, 800));
-    } else {
-      console.log(`[MULTI-REC] URL already recording, prompting needsForce: ${recId}`);
-      return res.json({ success: true, action: 'start-recording', needsForce: true, existingUrl: recId });
-    }
-  }
+  const ownerClientId = String(req.body.recordingClientId || req.body.clientId || '').trim();
   let recordingProcess = null;
   let currentRecordingFile = null;
   let currentRecording = null;
@@ -8389,7 +12020,51 @@ expressApp.post('/start-recording', async (req, res) => {
   } const platform = resolved.platform || 'other';
   const channel = resolved.channel || 'unknown';
   const title = resolved.title || 'untitled';
+  const recId = normalizeRecordingKey(req.body.recordingKey || req.body.url || metadata.url || resolved.url, { ...metadata, ...resolved, platform, channel, title });
+
+  if (activeRecordings.has(recId)) {
+    if (force) {
+      console.log(`[MULTI-REC] Force restart requested for ${recId}`);
+      const existing = activeRecordings.get(recId);
+      if (existing && existing.recordingProcess) {
+        try { existing.recordingProcess.kill('SIGINT'); } catch (e) { }
+        if (existing.maxDurationTimer) clearTimeout(existing.maxDurationTimer);
+      }
+      activeRecordings.delete(recId);
+      broadcastRecordingState();
+      await new Promise(r => setTimeout(r, 800));
+    } else {
+      console.log(`[MULTI-REC] Recording already active for key ${recId}`);
+      return res.json({
+        success: true,
+        action: 'start-recording',
+        needsForce: true,
+        duplicate: true,
+        existingUrl: recId,
+        recordingKey: recId,
+        recordings: getRecordingSnapshots()
+      });
+    }
+  }
+  if (RECORDING_MAX_ACTIVE > 0 && activeRecordings.size >= RECORDING_MAX_ACTIVE) {
+    return res.status(429).json({
+      success: false,
+      error: `Maximaal aantal actieve opnames bereikt (${RECORDING_MAX_ACTIVE})`,
+      activeRecordingUrls: getRecordingSnapshots().map((r) => r.url).filter(Boolean),
+      activeRecordingKeys: getRecordingSnapshots().map((r) => r.key)
+    });
+  }
   const dir = getDownloadDir(platform, channel, title);
+  const freeBytes = getFreeBytesForPath(dir);
+  if (RECORDING_MIN_FREE_BYTES > 0 && freeBytes > 0 && freeBytes < RECORDING_MIN_FREE_BYTES) {
+    return res.status(507).json({
+      success: false,
+      error: `Te weinig vrije ruimte voor opname (${freeBytes} bytes vrij, minimaal ${RECORDING_MIN_FREE_BYTES})`,
+      freeBytes,
+      minFreeBytes: RECORDING_MIN_FREE_BYTES,
+      dir
+    });
+  }
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   const safeBase = sanitizeName(`${platform}__${channel}__${title}`).replace(/_+/g, '_');
@@ -8495,6 +12170,7 @@ expressApp.post('/start-recording', async (req, res) => {
   currentRecordingMeta = {
     recordingUrl: `recording:${timestamp}`,
     pageUrl: String(resolved.url || metadata.url || '').trim(),
+    recordingKey: recId,
     platform,
     channel,
     title,
@@ -8572,6 +12248,7 @@ expressApp.post('/start-recording', async (req, res) => {
     try { logStream.end(); } catch (e) { }
     const active = activeRecordings.get(recId);
     if (active && active.recordingProcess === recordingProcess) {
+      if (active.maxDurationTimer) clearTimeout(active.maxDurationTimer);
       activeRecordings.delete(recId);
     }
     broadcastRecordingState();
@@ -8582,25 +12259,40 @@ expressApp.post('/start-recording', async (req, res) => {
     try { logStream.end(); } catch (e) { }
     const active = activeRecordings.get(recId);
     if (active && active.recordingProcess === recordingProcess) {
+      if (active.maxDurationTimer) clearTimeout(active.maxDurationTimer);
       activeRecordings.delete(recId);
     }
     broadcastRecordingState();
   });
 
   currentRecordingFile = recordingFilePath;
-  activeRecordings.set(recId, {
+  const session = {
     recordingProcess,
     currentRecordingFile,
     currentRecording,
-    currentRecordingMeta
-  });
+    currentRecordingMeta,
+    startedAt: Date.now(),
+    ownerClientId,
+    lastHeartbeatAt: ownerClientId ? Date.now() : null,
+    maxDurationTimer: null
+  };
+  if (RECORDING_MAX_DURATION_MS > 0) {
+    session.maxDurationTimer = setTimeout(() => {
+      console.warn(`[recording] Max duration reached; stopping ${recId}`);
+      requestRecordingStop(recId, 'max_duration');
+    }, RECORDING_MAX_DURATION_MS);
+    if (typeof session.maxDurationTimer.unref === 'function') session.maxDurationTimer.unref();
+  }
+  activeRecordings.set(recId, session);
   broadcastRecordingState();
   console.log(`🔴 Opname gestart: ${recordingFilePath}`);
-  res.json({ success: true, action: 'start-recording', file: filename, dir, meta: resolved, lock: lockMode, rawFile: lockMode ? path.basename(rawFilePath) : undefined, finalFile: path.basename(finalFilePath), input: { device: inputDevice, video_name: resolvedVideoName, audio_name: resolvedAudioName, pixel_format: inputPixelFormat } });
+  res.json({ success: true, action: 'start-recording', file: filename, dir, meta: resolved, recordingKey: recId, lock: lockMode, rawFile: lockMode ? path.basename(rawFilePath) : undefined, finalFile: path.basename(finalFilePath), input: { device: inputDevice, video_name: resolvedVideoName, audio_name: resolvedAudioName, pixel_format: inputPixelFormat } });
 });
 
 expressApp.post('/recording/crop-update', (req, res) => {
-  const recId = String((req.body && req.body.url) || 'default_rec').trim();
+  const body = req.body || {};
+  const meta = body && typeof body.metadata === 'object' && body.metadata ? body.metadata : {};
+  const recId = normalizeRecordingKey(body.id || body.recordingKey || body.url || meta.url, meta);
   let currentRecording = activeRecordings.has(recId) ? activeRecordings.get(recId).currentRecording : null;
   if (!currentRecording && activeRecordings.size > 0) currentRecording = activeRecordings.values().next().value.currentRecording;
 
@@ -8618,21 +12310,57 @@ expressApp.post('/recording/crop-update', (req, res) => {
   res.json({ success: true });
 });
 
+expressApp.get('/recordings', (_req, res) => {
+  res.json({ success: true, isRecording, recordings: getRecordingSnapshots() });
+});
+
+expressApp.post('/recording/heartbeat', (req, res) => {
+  const body = req.body || {};
+  const meta = body && typeof body.metadata === 'object' && body.metadata ? body.metadata : {};
+  const recId = normalizeRecordingKey(body.id || body.recordingKey || body.url || meta.url, meta);
+  const clientId = String(body.recordingClientId || body.clientId || '').trim();
+  const [activeRecId, session] = findRecordingEntryFromRequest(body, meta);
+  if (!session) return res.json({ success: true, active: false, recordingKey: recId });
+  if (session.ownerClientId && clientId && session.ownerClientId !== clientId) {
+    const last = Number(session.lastHeartbeatAt || 0);
+    if (last && Date.now() - last > RECORDING_HEARTBEAT_STALE_MS) {
+      console.warn(`[recording] Client heartbeat owner stale; reassigning ${activeRecId}`);
+      session.ownerClientId = clientId;
+    } else {
+      return res.json({ success: true, active: true, owner: false, recordingKey: recId });
+    }
+  }
+  if (clientId && !session.ownerClientId) session.ownerClientId = clientId;
+  session.lastHeartbeatAt = Date.now();
+  return res.json({ success: true, active: true, owner: true, recordingKey: activeRecId || recId });
+});
+
+expressApp.post('/recordings/stop-all', async (req, res) => {
+  const reason = String((req.body && req.body.reason) || 'panic').trim() || 'panic';
+  const ids = Array.from(activeRecordings.keys());
+  for (const id of ids) requestRecordingStop(id, reason);
+  res.json({ success: true, action: 'stop-all-recordings', count: ids.length, ids });
+});
+
 expressApp.post('/stop-recording', (req, res) => {
-  const reqId = String((req.body && (req.body.id || req.body.tabId || (req.body.metadata && req.body.metadata.url))) || '').trim();
+  const body = req.body || {};
+  const meta = body && typeof body.metadata === 'object' && body.metadata ? body.metadata : {};
+  const clientId = String(body.recordingClientId || body.clientId || '').trim();
+  const reason = String(body.reason || '').trim();
   let session = null;
   let activeRecId = null;
 
-  if (reqId && activeRecordings.has(reqId)) {
-    session = activeRecordings.get(reqId);
-    activeRecId = reqId;
-  } else if (activeRecordings.size > 0) {
+  [activeRecId, session] = findRecordingEntryFromRequest(body, meta);
+  if (!session && activeRecordings.size > 0) {
     activeRecId = activeRecordings.keys().next().value;
     session = activeRecordings.get(activeRecId);
   }
 
   if (!session) {
     return res.json({ success: false, error: 'Er loopt geen opname' });
+  }
+  if ((reason === 'pagehide' || reason === 'client_lost') && session.ownerClientId && clientId && session.ownerClientId !== clientId) {
+    return res.json({ success: true, action: 'stop-recording', ignored: true, reason: 'client_mismatch' });
   }
 
   const recordingProcess = session.recordingProcess;
@@ -8662,6 +12390,7 @@ expressApp.post('/stop-recording', (req, res) => {
 
   const cleanup = () => {
     console.log(`⬛ Opname gestopt: ${currentRecordingFile}`);
+    if (session.maxDurationTimer) clearTimeout(session.maxDurationTimer);
     activeRecordings.delete(activeRecId);
     broadcastRecordingState();
   };
@@ -9000,8 +12729,12 @@ expressApp.post('/download', async (req, res) => {
       const lookupUrl = canonicalYoutubeUrl(it.url);
       try {
         if (!forceDuplicates) {
-          const existing = await findReusableDownloadByUrl.get(lookupUrl);
-          if (existing && existing.id) { stats.duplicates++; continue; }
+          const existing = await findReusableDownloadForUrl(lookupUrl);
+          if (existing && existing.id) {
+            scheduleExistingArchivePostprocess(existing, 'youtube-expand-duplicate');
+            stats.duplicates++;
+            continue;
+          }
         }
         const channelName = it.uploader || 'unknown';
         const titleText = it.title || 'untitled';
@@ -9030,19 +12763,37 @@ expressApp.post('/download', async (req, res) => {
     return res.status(400).json({ success: false, error: 'Dit is een profiel/kanaal link. Gebruik de BATCH knop in de extensie om het hele kanaal te downloaden.' });
   }
 
+  if (isKeep2ShareUrl(effectiveUrl)) {
+    try {
+      await assertKeep2ShareFilePreflight(effectiveUrl);
+    } catch (e) {
+      return res.status(e && e.httpStatus ? e.httpStatus : 409).json({
+        success: false,
+        error: e && e.message ? e.message : String(e),
+        preflight: e && e.preflight ? {
+          remoteAcceptance: e.preflight.remoteAcceptance || null,
+          input: e.preflight.input || null,
+        } : null,
+      });
+    }
+  }
 
-  const pageUrl = metadata && typeof metadata.url === 'string' ? metadata.url.trim() : '';
-  const originPlatform = normalizePlatform(metaPlatform, pageUrl || effectiveUrl);
+  const sourceContext = pickSourceContextForUrl(metadata, effectiveUrl);
+  const rawPageUrl = metadata && typeof metadata.url === 'string' ? metadata.url.trim() : '';
+  const pageUrl = sourceContext && sourceContext.url ? String(sourceContext.url).trim() : rawPageUrl;
+  const sourceOrigin = normalizeOriginThreadContext(sourceContext, metaPlatform, pageUrl || effectiveUrl, metadata && metadata.channel, metadata && metadata.title);
+  const originPlatform = sourceOrigin && sourceOrigin.platform ? sourceOrigin.platform : normalizePlatform(metaPlatform, pageUrl || effectiveUrl);
+  const pinSourceOrigin = !!(sourceOrigin && sourceOrigin.url && sourceOrigin.url !== effectiveUrl);
   const pinFffOrigin = !!(
-    (originPlatform === 'footfetishforum' && pageUrl && pageUrl !== effectiveUrl && isFootfetishforumThreadUrl(pageUrl)) ||
-    (detectPlatform(effectiveUrl) === 'footfetishforum' && /\/attachments\//i.test(effectiveUrl) && pageUrl && isFootfetishforumThreadUrl(pageUrl))
+    (originPlatform === 'footfetishforum' && pageUrl && pageUrl !== effectiveUrl && (isFootfetishforumThreadUrl(pageUrl) || isFootfetishforumForumUrl(pageUrl))) ||
+    (detectPlatform(effectiveUrl) === 'footfetishforum' && /\/attachments\//i.test(effectiveUrl) && pageUrl && (isFootfetishforumThreadUrl(pageUrl) || isFootfetishforumForumUrl(pageUrl)))
   );
   const pinAznOrigin = !!(originPlatform === 'aznudefeet' && pageUrl && pageUrl !== effectiveUrl && isAznudefeetViewUrl(pageUrl));
-  const pinToOrigin = !!(pinFffOrigin || pinAznOrigin);
+  const pinToOrigin = !!(pinSourceOrigin || pinFffOrigin || pinAznOrigin);
   const fffThreadInfo = pinFffOrigin ? parseFootFetishForumThreadInfo(pageUrl || effectiveUrl) : null;
   const detectedPlatform = detectPlatform(effectiveUrl);
-  const originChannel = pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : metadata && metadata.channel && metadata.channel !== 'unknown' ? metadata.channel : deriveChannelFromUrl(originPlatform, pageUrl || effectiveUrl) || 'unknown';
-  const originTitle = pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : metadata && metadata.title ? metadata.title : deriveTitleFromUrl(pageUrl || effectiveUrl);
+  const originChannel = sourceOrigin && sourceOrigin.channel ? sourceOrigin.channel : pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : metadata && metadata.channel && metadata.channel !== 'unknown' ? metadata.channel : deriveChannelFromUrl(originPlatform, pageUrl || effectiveUrl) || 'unknown';
+  const originTitle = sourceOrigin && sourceOrigin.title ? sourceOrigin.title : pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : metadata && metadata.title ? metadata.title : deriveTitleFromUrl(pageUrl || effectiveUrl);
 
   const preferDetectedPlatform = !!(pinFffOrigin && detectedPlatform && detectedPlatform !== 'other' && detectedPlatform !== originPlatform);
   const platform = pinToOrigin ? originPlatform : (preferDetectedPlatform ? detectedPlatform : normalizePlatform(metaPlatform, effectiveUrl));
@@ -9074,7 +12825,7 @@ expressApp.post('/download', async (req, res) => {
     } catch (e) { }
   }
 
-  const existing = await findReusableDownloadByUrl.get(lookupUrl);
+  const existing = await findReusableDownloadForUrl(lookupUrl);
   let isMissingFile = false;
   if (existing && existing.status === 'completed') {
     const absPath = existing.filepath ? require('path').resolve(BASE_DIR, existing.filepath) : null;
@@ -9100,6 +12851,7 @@ expressApp.post('/download', async (req, res) => {
           console.log(`   ⚠️  Duplicate handling fout: ${e.message}`);
         }
 
+        scheduleExistingArchivePostprocess(existing, 'direct-duplicate');
         return res.json({
           success: true,
           downloadId: Number(existing.id),
@@ -9150,7 +12902,10 @@ expressApp.post('/download', async (req, res) => {
   }
   if (pinToOrigin) {
     jobMetadata.webdl_pin_context = true;
-    jobMetadata.origin_thread = { url: pageUrl, platform: originPlatform, channel: originChannel, title: originTitle };
+    jobMetadata.origin_thread = sourceOrigin && sourceOrigin.url ? sourceOrigin : { url: pageUrl, platform: originPlatform, channel: originChannel, title: originTitle };
+    jobMetadata.source_context = jobMetadata.origin_thread;
+    jobMetadata.source_site = originPlatform;
+    jobMetadata.source_sites = Array.from(new Set([originPlatform, ...(Array.isArray(jobMetadata.source_sites) ? jobMetadata.source_sites : [])].filter(Boolean)));
     jobMetadata.webdl_media_url = effectiveUrl;
     jobMetadata.webdl_detected_platform = detectedPlatform;
   }
@@ -9372,30 +13127,46 @@ async function _expandAndQueueBackground(deferredUrls, { originPlatform, originC
         }
       }
 
-      // Queue each discovered CDN URL
-      const channel = originChannel !== 'unknown' ? originChannel : deriveChannelFromUrl(sitePlatform, u) || 'unknown';
-      const title = originTitle || metadata && metadata.title || deriveTitleFromUrl(u);
+      // Queue each discovered CDN URL. If the gallery/model link came from a
+      // thread batch, keep the original thread as the storage context.
+      const sourceContext = pickSourceContextForUrl(metadata, u);
+      const sourceOrigin = normalizeOriginThreadContext(sourceContext, originPlatform, pageUrl || u, originChannel, originTitle);
+      const pinToSourceOrigin = !!(sourceOrigin && sourceOrigin.url && sourceOrigin.url !== u);
+      const queuedPlatform = pinToSourceOrigin ? sourceOrigin.platform : sitePlatform;
+      const channel = pinToSourceOrigin ? sourceOrigin.channel : originChannel !== 'unknown' ? originChannel : deriveChannelFromUrl(sitePlatform, u) || 'unknown';
+      const title = pinToSourceOrigin ? sourceOrigin.title : originTitle || metadata && metadata.title || deriveTitleFromUrl(u);
       let queuedCount = 0;
       let skippedCount = 0;
       for (const cdnUrl of cdnUrls) {
         try {
           // In-memory dedup: prevent race-condition duplicates across concurrent expand runs
           if (!forceDuplicates && _expandQueuedUrls.has(cdnUrl)) { skippedCount++; continue; }
-          const existing = await findReusableDownloadByUrl.get(cdnUrl);
-          if (!forceDuplicates && existing && existing.id) { skippedCount++; continue; }
+          const existing = await findReusableDownloadForUrl(cdnUrl);
+          if (!forceDuplicates && existing && existing.id) {
+            scheduleExistingArchivePostprocess(existing, 'background-expand-duplicate');
+            skippedCount++;
+            continue;
+          }
           _expandQueuedUrls.add(cdnUrl);
           // Cap set size to prevent unbounded memory growth
           if (_expandQueuedUrls.size > 200000) {
             const iter = _expandQueuedUrls.values();
             for (let i = 0; i < 50000; i++) { const v = iter.next(); if (v.done) break; _expandQueuedUrls.delete(v.value); }
           }
-          const result = await insertDownload.run(cdnUrl, sitePlatform, channel, title);
+          const result = await insertDownload.run(cdnUrl, queuedPlatform, channel, title);
           const downloadId = result.lastInsertRowid;
           try {
-            if (pageUrl && pageUrl !== cdnUrl) await updateDownloadSourceUrl.run(pageUrl, downloadId);
+            const sourceUrl = pinToSourceOrigin && sourceOrigin.url ? sourceOrigin.url : pageUrl;
+            if (sourceUrl && sourceUrl !== cdnUrl) await updateDownloadSourceUrl.run(sourceUrl, downloadId);
           } catch (e) {}
-          const jobMeta = { ...(metadata || {}), tool: 'curl', platform: sitePlatform, channel, title };
-          enqueueDownloadJob(downloadId, cdnUrl, sitePlatform, channel, title, jobMeta);
+          const jobMeta = { ...(metadata || {}), tool: 'curl', platform: queuedPlatform, channel, title };
+          if (pinToSourceOrigin) {
+            jobMeta.webdl_pin_context = true;
+            jobMeta.origin_thread = sourceOrigin;
+            jobMeta.webdl_media_url = cdnUrl;
+            jobMeta.webdl_detected_platform = detectPlatform(cdnUrl);
+          }
+          enqueueDownloadJob(downloadId, cdnUrl, queuedPlatform, channel, title, jobMeta);
           queuedCount++;
         } catch (e) {
           console.log(`[BG-EXPAND] Queue error for ${cdnUrl.slice(-40)}: ${e.message}`);
@@ -9422,7 +13193,7 @@ expressApp.post('/download/batch', async (req, res) => {
   const metaPlatform = metadata && typeof metadata.platform === 'string' ? metadata.platform : null;
   const pageUrl = metadata && typeof metadata.url === 'string' ? metadata.url.trim() : '';
   const originPlatform = normalizePlatform(metaPlatform, pageUrl || '');
-  const pinFffOrigin = !!(originPlatform === 'footfetishforum' && pageUrl && isFootfetishforumThreadUrl(pageUrl));
+  const pinFffOrigin = !!(originPlatform === 'footfetishforum' && pageUrl && (isFootfetishforumThreadUrl(pageUrl) || isFootfetishforumForumUrl(pageUrl)));
   const pinAznOrigin = !!(originPlatform === 'aznudefeet' && pageUrl && isAznudefeetViewUrl(pageUrl));
   const fffThreadInfo = pinFffOrigin ? parseFootFetishForumThreadInfo(pageUrl) : null;
   const originChannel = pinFffOrigin && fffThreadInfo && fffThreadInfo.name ? fffThreadInfo.name : metadata && metadata.channel && metadata.channel !== 'unknown' ? metadata.channel : deriveChannelFromUrl(originPlatform, pageUrl) || 'unknown';
@@ -9430,13 +13201,12 @@ expressApp.post('/download/batch', async (req, res) => {
 
   const unique = [];
   const seen = new Set();
-  const BATCH_SKIP_RE = /(?:^|[/])(?:apple-touch-icon|favicon|site-logo|browserconfig|manifest\.json)(?:\.\w+)?(?:\?|$)/i;
   for (const u of urls) {
     const raw = typeof u === 'string' ? u.trim() : '';
     const s = isRedditFamilyUrl(raw) ? canonicalizeRedditCandidateUrl(raw) : raw;
     if (!s) continue;
     if (seen.has(s)) continue;
-    if (BATCH_SKIP_RE.test(s)) continue;
+    if (isSiteInfrastructureUrl(s)) continue;
     seen.add(s);
     unique.push(s);
   }
@@ -9483,19 +13253,55 @@ expressApp.post('/download/batch', async (req, res) => {
   // Process immediate URLs synchronously (fast)
   const created = [];
   for (const u of immediate) {
-    const pinToOrigin = !!((pinFffOrigin || pinAznOrigin) && pageUrl && pageUrl !== u);
+    if (isKeep2ShareUrl(u)) {
+      try {
+        await assertKeep2ShareFilePreflight(u);
+      } catch (e) {
+        created.push({
+          url: u,
+          platform: 'keep2share',
+          error: e && e.message ? e.message : String(e),
+          preflight: e && e.preflight ? {
+            remoteAcceptance: e.preflight.remoteAcceptance || null,
+            input: e.preflight.input || null,
+          } : null,
+        });
+        continue;
+      }
+    }
+    const itemSourceContext = pickSourceContextForUrl(metadata, u);
+    const itemPageUrl = itemSourceContext && itemSourceContext.url ? String(itemSourceContext.url).trim() : pageUrl;
+    const itemOrigin = normalizeOriginThreadContext(itemSourceContext, metaPlatform, itemPageUrl || pageUrl, metadata && metadata.channel, metadata && metadata.title);
+    const itemOriginPlatform = itemOrigin && itemOrigin.platform ? itemOrigin.platform : originPlatform;
+    const itemFffThreadInfo = itemOriginPlatform === 'footfetishforum' && itemPageUrl ? parseFootFetishForumThreadInfo(itemPageUrl) : fffThreadInfo;
+    const itemOriginChannel = itemOrigin && itemOrigin.channel ? itemOrigin.channel : itemOriginPlatform === 'footfetishforum' && itemFffThreadInfo && itemFffThreadInfo.name ? itemFffThreadInfo.name : originChannel;
+    const itemOriginTitle = itemOrigin && itemOrigin.title ? itemOrigin.title : itemOriginPlatform === 'footfetishforum' && itemFffThreadInfo && itemFffThreadInfo.name ? itemFffThreadInfo.name : originTitle;
+    const itemPinSourceOrigin = !!(itemOrigin && itemOrigin.url && itemOrigin.url !== u);
+    const itemPinFffOrigin = !!(
+      (itemOriginPlatform === 'footfetishforum' && itemPageUrl && itemPageUrl !== u && (isFootfetishforumThreadUrl(itemPageUrl) || isFootfetishforumForumUrl(itemPageUrl))) ||
+      (detectPlatform(u) === 'footfetishforum' && /\/attachments\//i.test(u) && itemPageUrl && (isFootfetishforumThreadUrl(itemPageUrl) || isFootfetishforumForumUrl(itemPageUrl)))
+    );
+    const itemPinAznOrigin = !!(itemOriginPlatform === 'aznudefeet' && itemPageUrl && itemPageUrl !== u && isAznudefeetViewUrl(itemPageUrl));
+    const pinToOrigin = !!(itemPinSourceOrigin || itemPinFffOrigin || itemPinAznOrigin);
     const detectedPlatform = detectPlatform(u);
-    const preferDetectedPlatform = !!(pinFffOrigin && pinToOrigin && detectedPlatform && detectedPlatform !== 'other' && detectedPlatform !== originPlatform);
-    const platform = pinToOrigin ? originPlatform : (preferDetectedPlatform ? detectedPlatform : normalizePlatform(metaPlatform, u));
-    const isElitebabesCdn = originPlatform === 'elitebabes' && /cdn\.elitebabes\.com/i.test(u);
-    const isPornpicsCdn = originPlatform === 'pornpics' && /cdni\.pornpics\.com/i.test(u);
-    const channel = pinToOrigin ? originChannel : (isElitebabesCdn || isPornpicsCdn) ? (originChannel !== 'unknown' ? originChannel : metadata && metadata.channel || 'unknown') : preferDetectedPlatform ? deriveChannelFromUrl(platform, u) || originChannel : metadata && metadata.channel && metadata.channel !== 'unknown' ? metadata.channel : deriveChannelFromUrl(platform, u) || 'unknown';
-    const title = pinToOrigin ? originTitle : (isElitebabesCdn || isPornpicsCdn) ? (originTitle || metadata && metadata.title || deriveTitleFromUrl(u)) : preferDetectedPlatform ? deriveTitleFromUrl(u) : metadata && metadata.title ? metadata.title : deriveTitleFromUrl(u);
+    const preferDetectedPlatform = !!(itemPinFffOrigin && pinToOrigin && detectedPlatform && detectedPlatform !== 'other' && detectedPlatform !== itemOriginPlatform);
+    // Pin to origin platform for known forum sources: when media URLs are from external
+    // image hosts (imagebam, filesor, imgbox, etc.) but originated from a forum thread,
+    // keep the forum platform instead of deriving from the download URL domain.
+    // Exception: K2S downloads keep their own platform (keep2share) with the forum as source_site.
+    const isForumOriginPlatform = /^(phun|vipergirls|footfetishforum)$/i.test(itemOriginPlatform);
+    const isK2sUrl = isKeep2ShareUrl(u) || /filestore\.app/i.test(u);
+    const pinForumOrigin = !!(isForumOriginPlatform && itemOriginPlatform && itemOriginChannel && itemOriginChannel !== 'unknown' && !isK2sUrl);
+    const platform = pinToOrigin ? itemOriginPlatform : pinForumOrigin ? itemOriginPlatform : (preferDetectedPlatform ? detectedPlatform : normalizePlatform(metaPlatform, u));
+    const isElitebabesCdn = itemOriginPlatform === 'elitebabes' && /cdn\.elitebabes\.com/i.test(u);
+    const isPornpicsCdn = itemOriginPlatform === 'pornpics' && /cdni\.pornpics\.com/i.test(u);
+    const channel = pinToOrigin ? itemOriginChannel : pinForumOrigin ? itemOriginChannel : (isElitebabesCdn || isPornpicsCdn) ? (itemOriginChannel !== 'unknown' ? itemOriginChannel : metadata && metadata.channel || 'unknown') : preferDetectedPlatform ? deriveChannelFromUrl(platform, u) || itemOriginChannel : metadata && metadata.channel && metadata.channel !== 'unknown' ? metadata.channel : deriveChannelFromUrl(platform, u) || 'unknown';
+    const title = pinToOrigin ? itemOriginTitle : pinForumOrigin ? itemOriginTitle : (isElitebabesCdn || isPornpicsCdn) ? (itemOriginTitle || metadata && metadata.title || deriveTitleFromUrl(u)) : preferDetectedPlatform ? deriveTitleFromUrl(u) : metadata && metadata.title ? metadata.title : deriveTitleFromUrl(u);
     const allowRedditRerun = platform === 'reddit' && isRedditRollingTargetUrl(u);
     const allowPatreonRerun = platform === 'patreon' && (u.includes('/posts') || u.includes('patreon.com/c/'));
     const allowRerun = allowRedditRerun || allowPatreonRerun;
 
-    const existing = await findReusableDownloadByUrl.get(u);
+    const existing = await findReusableDownloadForUrl(u);
     let isMissingFile = false;
     if (existing && existing.status === 'completed') {
       const absPath = existing.filepath ? require('path').resolve(BASE_DIR, existing.filepath) : null;
@@ -9504,6 +13310,7 @@ expressApp.post('/download/batch', async (req, res) => {
       }
     }
     if (!forceDuplicates && existing && existing.id && !isMissingFile && !(allowRerun && String(existing.status || '') === 'completed')) {
+      scheduleExistingArchivePostprocess(existing, 'batch-duplicate');
       created.push({
         downloadId: existing.id,
         url: u,
@@ -9522,9 +13329,8 @@ expressApp.post('/download/batch', async (req, res) => {
     }
 
     try {
-      const pageUrl = metadata && typeof metadata.url === 'string' ? metadata.url.trim() : '';
-      if (pageUrl && pageUrl !== u) {
-        await updateDownloadSourceUrl.run(pageUrl, downloadId);
+      if (itemPageUrl && itemPageUrl !== u) {
+        await updateDownloadSourceUrl.run(itemPageUrl, downloadId);
       }
     } catch (e) { }
 
@@ -9537,9 +13343,18 @@ expressApp.post('/download/batch', async (req, res) => {
     }
     if (pinToOrigin) {
       jobMetadata.webdl_pin_context = true;
-      jobMetadata.origin_thread = { url: pageUrl, platform: originPlatform, channel: originChannel, title: originTitle };
+      jobMetadata.origin_thread = itemOrigin && itemOrigin.url ? itemOrigin : { url: itemPageUrl, platform: itemOriginPlatform, channel: itemOriginChannel, title: itemOriginTitle };
       jobMetadata.webdl_media_url = u;
       jobMetadata.webdl_detected_platform = detectedPlatform;
+    }
+    // Enrich source_sites: include both origin platform and download host for cross-filtering
+    // e.g. K2S file from vipergirls → source_sites: ['vipergirls', 'keep2share']
+    if (pinForumOrigin || pinToOrigin) {
+      const dlHost = detectedPlatform && detectedPlatform !== 'other' ? detectedPlatform : '';
+      const sites = new Set((Array.isArray(jobMetadata.source_sites) ? jobMetadata.source_sites : []).map(s => String(s || '').toLowerCase()).filter(Boolean));
+      if (itemOriginPlatform) sites.add(itemOriginPlatform.toLowerCase());
+      if (dlHost && dlHost !== itemOriginPlatform) sites.add(dlHost.toLowerCase());
+      jobMetadata.source_sites = Array.from(sites);
     }
     enqueueDownloadJob(downloadId, u, platform, channel, title, jobMetadata);
   }
@@ -9585,7 +13400,17 @@ expressApp.post('/download/batch', async (req, res) => {
   if (deferred.length > 0) {
     console.log(`[BATCH] Responding immediately, ${deferred.length} URLs expanding in background, ~${estimatedGalleries} galleries estimated`);
   }
-  res.json({ success: true, downloads: created, expanding: deferred.length, estimatedGalleries });
+  const duplicateCount = created.filter((row) => row && row.duplicate === true).length;
+  res.json({
+    success: true,
+    downloads: created,
+    total: created.length,
+    queued: Math.max(0, created.length - duplicateCount),
+    duplicates: duplicateCount,
+    errors: created.filter((row) => row && row.error).length,
+    expanding: deferred.length,
+    estimatedGalleries
+  });
 
   // Fire-and-forget: expand deferred URLs in background
   if (deferred.length > 0) {
@@ -9604,7 +13429,7 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
 
   let driver = 'yt-dlp';
   if (platform === 'onlyfans') driver = 'ofscraper'; else
-    if (platform === 'instagram') driver = 'instaloader'; else
+    if (platform === 'instagram') driver = 'gallery-dl'; else
       if (platform === 'reddit') driver = 'reddit-dl'; else
         if (platform === 'telegram') driver = 'tdl'; else
           if (
@@ -9613,11 +13438,12 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
             platform === 'kinky' ||
             platform === 'pornpics' ||
             platform === 'erome' ||
+            platform === 'imagefap' ||
             platform === 'twitter' ||
             platform === 'aznudefeet' && !looksLikeDirectFileUrl(url) ||
             platform === 'tiktok' && isTikTokPhotoUrl(url)
           ) driver = 'gallery-dl'; else
-            if (isKnownHtmlWrapperUrl(url) || looksLikeDirectFileUrl(url)) driver = 'direct';
+            if (isKeep2ShareUrl(url) || isKnownHtmlWrapperUrl(url) || looksLikeDirectFileUrl(url)) driver = 'direct';
   setDownloadActivityContext(downloadId, { url, platform, channel, title, lane: jobLane.get(downloadId) || '', driver });
   emitDownloadEventActivity('dispatch', downloadId, { url, platform, channel, title, lane: jobLane.get(downloadId) || '', driver }).catch(() => { });
 
@@ -9627,13 +13453,14 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
     const allowRedditRerun = platform === 'reddit' && isRedditRollingTargetUrl(url);
     const allowPatreonRerun = platform === 'patreon' && (url.includes('/posts') || url.includes('patreon.com/c/'));
     const allowRerun = allowRedditRerun || allowPatreonRerun;
-    const reusable = await findReusableDownloadByUrlExcludingId.get(url, downloadId);
+    const reusable = await findReusableDownloadForUrl(url, { excludeId: downloadId, includeMetadata: false });
     if (!forceDuplicates && reusable && reusable.id) {
       if (allowRerun && String(reusable.status || '') === 'completed') {
 
         // Voor r/<subreddit> en u/<user> willen we herhaalde scans toestaan.
       } else {
         if (reusable.status === 'completed' && reusable.filepath) {
+          scheduleExistingArchivePostprocess(reusable, 'start-duplicate');
           await updateDownload.run(
             'completed',
             100,
@@ -9645,10 +13472,15 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
             null,
             downloadId
           );
+          return;
+        } else if (Number(reusable.id) > Number(downloadId)) {
+          // Bij gelijktijdige duplicate inserts mag alleen de nieuwere rij afvallen.
+          // Anders kunnen twee workers elkaar kruislings cancelen en blijft er niets over.
+          console.log(`[DL #${downloadId}] Duplicate #${reusable.id} is nieuwer; huidige rij blijft actief`);
         } else {
           await updateDownloadStatus.run('cancelled', 0, `Duplicate URL; al actief als #${reusable.id}`, downloadId);
+          return;
         }
-        return;
       }
     }
   } catch (e) { }
@@ -9660,11 +13492,11 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
   // YouTube is handled by the default fallback (yt-dlp) at the bottom.
 
   if (platform === 'instagram') {
-    return startInstaloaderDownload(downloadId, url, platform, channel, title, metadata);
+    return startGalleryDlDownload(downloadId, url, platform, channel, title, metadata);
   }
 
   if (platform === 'reddit') {
-    return startRedditDlDownload(downloadId, url, platform, channel, title, metadata);
+    return startRedditDownload(downloadId, url, platform, channel, title, metadata);
   }
 
   if (platform === 'telegram') {
@@ -9680,10 +13512,22 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
     platform === 'wikifeet' ||
     platform === 'wikifeetx' ||
     platform === 'pornpics' ||
+    platform === 'imagefap' ||
     (platform === 'aznudefeet' && !looksLikeDirectFileUrl(url)) ||
     platform === 'tiktok' && isTikTokPhotoUrl(url)
   ) {
     return startGalleryDlDownload(downloadId, url, platform, channel, title, metadata);
+  }
+
+  if (isKeep2ShareUrl(url)) {
+    // Ensure K2S downloads always have source_sites metadata
+    const k2sMeta = metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? { ...metadata } : {};
+    if (!Array.isArray(k2sMeta.source_sites) || !k2sMeta.source_sites.length) {
+      const fromVipergirls = platform === 'vipergirls' || /vipergirls/i.test(String(k2sMeta.url || k2sMeta.source_url || (k2sMeta.origin_thread && k2sMeta.origin_thread.url) || channel || ''));
+      k2sMeta.source_sites = fromVipergirls ? ['vipergirls', 'keep2share'] : ['keep2share'];
+      if (!k2sMeta.source_site) k2sMeta.source_site = fromVipergirls ? 'vipergirls' : 'keep2share';
+    }
+    return startDirectFileDownload(downloadId, url, platform, channel, title, k2sMeta);
   }
 
   if (isKnownHtmlWrapperUrl(url)) {
@@ -9693,13 +13537,15 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
           metadata && typeof metadata === 'object' && metadata.url && metadata.url !== url ? metadata.url :
             ''
       ).trim();
-      const resolved = await resolveHtmlWrapperToDirectMediaUrl(url, 15000, wrapperReferer);
-      if (resolved && resolved !== url) {
-        try { await updateDownloadUrl.run(resolved, downloadId); } catch (e) { }
+      const resolved = await resolveHtmlWrapperToDirectMedia(url, 15000, wrapperReferer);
+      const resolvedUrl = resolvedMediaUrl(resolved);
+      if (resolvedUrl && resolvedUrl !== url) {
+        try { await updateDownloadUrl.run(resolvedUrl, downloadId); } catch (e) { }
         const nextMeta = metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? { ...metadata } : {};
         if (!nextMeta.webdl_input_url) nextMeta.webdl_input_url = url;
-        nextMeta.webdl_resolved_url = resolved;
-        return startDirectFileDownload(downloadId, resolved, platform, channel, title, nextMeta);
+        nextMeta.webdl_resolved_url = resolvedUrl;
+        const metaWithExternal = mergeExternalMetadataIntoMetadata(nextMeta, resolvedExternalMetadata(resolved));
+        return startDirectFileDownload(downloadId, resolvedUrl, platform, channel, title, metaWithExternal);
       }
     } catch (e) { }
     return startDirectFileDownload(downloadId, url, platform, channel, title, metadata);
@@ -9710,6 +13556,121 @@ async function startDownload(downloadId, url, platform, channel, title, metadata
   }
 
   return startYtDlpDownload(downloadId, url, platform, channel, title, metadata);
+}
+
+async function startRedditDownload(downloadId, url, platform, channel, title, metadata) {
+  const backend = redditBackendChoice();
+  if (backend === 'bdfr') return startRedditBdfrDownload(downloadId, url, platform, channel, title, metadata);
+  if (backend === 'reddit-dl') return startRedditDlDownload(downloadId, url, platform, channel, title, metadata);
+  await updateDownloadStatus.run('error', 0, `Geen Reddit-downloader gevonden. Installeer BDFR (python3 -m pip install --user bdfr) of configureer WEBDL_REDDIT_DL.`, downloadId);
+}
+
+async function startRedditBdfrDownload(downloadId, url, platform, channel, title, metadata) {
+  let createdConfigPath = '';
+  try {
+    if (isCancelled(downloadId)) {
+      clearCancelled(downloadId);
+      jobLane.delete(downloadId);
+      await updateDownloadStatus.run('cancelled', 0, null, downloadId);
+      return;
+    }
+
+    const sourceArgs = redditBdfrSourceArgs(url);
+    if (!sourceArgs.length) {
+      await updateDownloadStatus.run('error', 0, 'Reddit URL wordt niet ondersteund door BDFR', downloadId);
+      return;
+    }
+
+    if (!REDDIT_BDFR || REDDIT_BDFR.includes('/') && !fs.existsSync(REDDIT_BDFR)) {
+      await updateDownloadStatus.run('error', 0, `BDFR niet gevonden: ${REDDIT_BDFR}`, downloadId);
+      return;
+    }
+
+    const outChannel = channel && channel !== 'unknown' ? channel : deriveChannelFromUrl('reddit', url) || 'unknown';
+    const dir = getDownloadDirChannelOnly('reddit', outChannel);
+    try { await updateDownloadFilepath.run(dir, downloadId); } catch (e) { }
+    await updateDownloadStatus.run('downloading', 0, null, downloadId);
+
+    const configFile = writeTempBdfrConfig(downloadId);
+    if (configFile.created) createdConfigPath = configFile.path;
+
+    const args = [
+      'download',
+      dir,
+      '--folder-scheme', '',
+      '--file-scheme', '{SUBREDDIT}_{REDDITOR}_{TITLE}_{POSTID}',
+      '--filename-restriction-scheme', 'linux',
+      '--no-dupes',
+      '--search-existing',
+      '--max-wait-time', '120'
+    ];
+    if (configFile.path) args.push('--config', configFile.path);
+    try {
+      const limit = metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+        ? Number(metadata.limit || metadata.bdfr_limit || metadata.reddit_limit || 0)
+        : 0;
+      if (Number.isFinite(limit) && limit > 0) args.push('-L', String(Math.floor(limit)));
+    } catch (e) {}
+    args.push(...sourceArgs);
+
+    const result = await new Promise((resolve) => {
+      const proc = spawnNice(REDDIT_BDFR, args);
+      activeProcesses.set(downloadId, proc);
+      try { startingJobs.delete(downloadId); } catch (e) { }
+      let stderr = '';
+      let stdout = '';
+      proc.stderr.on('data', (d) => { stderr += d.toString(); });
+      proc.stdout.on('data', (d) => { stdout += d.toString(); });
+      const finish = (code) => {
+        activeProcesses.delete(downloadId);
+        resolve({ code, stderr, stdout });
+      };
+      proc.on('close', finish);
+      proc.on('error', (err) => {
+        stderr += String(err && err.message ? err.message : err);
+        finish(-1);
+      });
+    });
+
+    const mediaSummary = summarizeMediaDir(dir, 12000);
+    const mediaCount = Number(mediaSummary && mediaSummary.count);
+    const totalBytes = Number(mediaSummary && mediaSummary.totalBytes);
+    const safeCount = Number.isFinite(mediaCount) ? Math.max(0, mediaCount) : 0;
+    const safeTotalBytes = Number.isFinite(totalBytes) ? Math.max(0, totalBytes) : 0;
+
+    if (result.code === 0 && safeCount > 0) {
+      const filenameLabel = `(multiple: ${safeCount} files)`;
+      const metaObj = {
+        tool: 'bdfr',
+        implementation: REDDIT_BDFR,
+        platform: 'reddit',
+        channel: outChannel,
+        title,
+        url,
+        source_args: sourceArgs,
+        outputDir: dir,
+        media_count: safeCount,
+        media_bytes: safeTotalBytes
+      };
+      await indexDownloadDirImmediately(downloadId);
+      await updateDownload.run('completed', 100, dir, filenameLabel, safeTotalBytes, '', JSON.stringify(metaObj), null, downloadId);
+      return;
+    }
+
+    const stderrMsg = stripAnsiCodes(result.stderr).trim();
+    const stdoutMsg = stripAnsiCodes(result.stdout).trim();
+    const details = stderrMsg || stdoutMsg || (result.code === 0 ? 'BDFR afgerond maar geen media-bestanden gevonden' : `BDFR exit code: ${result.code}`);
+    const authHint = /401|403|oauth|forbidden|unauthori[sz]ed|blocked|ratelimit/i.test(details)
+      ? ' Controleer Reddit OAuth/BDFR-configuratie: WEBDL_REDDIT_CLIENT_ID en WEBDL_REDDIT_CLIENT_SECRET of WEBDL_REDDIT_BDFR_CONFIG.'
+      : '';
+    await updateDownloadStatus.run('error', 0, (`BDFR: ${details}${authHint}`).slice(0, 1200), downloadId);
+  } catch (err) {
+    await updateDownloadStatus.run('error', 0, err.message, downloadId);
+  } finally {
+    if (createdConfigPath) {
+      try { fs.unlinkSync(createdConfigPath); } catch (e) { }
+    }
+  }
 }
 
 async function startRedditDlDownload(downloadId, url, platform, channel, title, metadata) {
@@ -9846,7 +13807,6 @@ function looksLikeDirectFileUrl(url) {
     if (host.includes('cdninstagram.com') || host.includes('fbcdn.net')) return true;
 
     const p = (u.pathname || '').toLowerCase();
-    if ((host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) && /^\/attachments\/(?:[^\/]+\.)?\d+\/?$/i.test(p)) return true;
     if ((host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) && /\/data\/attachments\//i.test(p)) return true;
     const m = p.match(/\.([a-z0-9]{1,8})($|\?|#)/i); // Added query/hash support
     if (!m) {
@@ -9867,13 +13827,33 @@ function looksLikeDirectFileUrl(url) {
   }
 }
 
+function isSiteInfrastructureUrl(url) {
+  try {
+    const u = new URL(String(url || ''));
+    const p = String(u.pathname || '').toLowerCase();
+    return /(?:^|[/])(?:apple-touch-icon(?:-\d+x\d+)?|favicon(?:-\d+x\d+)?|browserconfig|manifest|site-logo|logo-imxto)(?:[_.-]|\.\w+$)/i.test(p)
+      || /\/(?:css\/img|icons?)\//i.test(p);
+  } catch (e) {
+    return false;
+  }
+}
+
 function isKnownExternalMediaWrapperHost(hostname) {
   try {
     const host = String(hostname || '').toLowerCase();
     if (!host) return false;
     if (/^(?:www\.)?(?:pixhost\.to|postimages\.org|postimg\.cc|imagebam\.com|imgvb\.com|ibb\.co|imgbox\.com|imagevenue\.com|imgchest\.com|turboimagehost\.com|imx\.to|vipr\.im|pixeldrain\.com|cyberfile\.me|jpg\.pet|gofile\.io|img\.kiwi)$/.test(host)) return true;
-    if (/^(?:www\.)?bunkr\.(?:si|ru|is|ph)$/.test(host)) return true;
+    if (isBunkrHost(host)) return true;
     return false;
+  } catch (e) {
+    return false;
+  }
+}
+
+function isBunkrHost(hostname) {
+  try {
+    const host = String(hostname || '').toLowerCase().replace(/^www\./, '');
+    return /^bunkr\.(?:cr|si|ru|is|ph|su|site|red)$/.test(host);
   } catch (e) {
     return false;
   }
@@ -9884,15 +13864,37 @@ function isKnownHtmlWrapperUrl(url) {
     const u = new URL(String(url || ''));
     const host = String(u.hostname || '').toLowerCase();
     const p = String(u.pathname || '');
+    if (isSiteInfrastructureUrl(url)) return false;
+    if ((host === 'footfetishforum.com' || host.endsWith('.footfetishforum.com')) && /^\/attachments\/(?:[^\/]+\.)?\d+\/?$/i.test(p)) return true;
     if (host === 'upload.footfetishforum.com' && p.startsWith('/image/')) return true;
     if (host.endsWith('pixhost.to') && p.startsWith('/show/')) return true;
     if (host === 'jpg.pet' && /^\/img\//i.test(p)) return true;
     if (host === 'pixeldrain.com' && /^\/u\//i.test(p)) return true;
+    if (looksLikeDirectFileUrl(url)) return false;
     if (isKnownExternalMediaWrapperHost(host)) return true;
     return false;
   } catch (e) {
     return false;
   }
+}
+
+function pixhostMediaKey(rawUrl) {
+  try {
+    const u = new URL(String(rawUrl || '').trim());
+    const host = String(u.hostname || '').toLowerCase().replace(/^www\./, '');
+    if (!(host === 'pixhost.to' || host.endsWith('.pixhost.to'))) return '';
+    const m = String(u.pathname || '').match(/^\/(?:show|images|thumbs)\/([^\/?#]+)\/([^\/?#]+)$/i);
+    if (!m || !m[1] || !m[2]) return '';
+    return `pixhost:${String(m[1]).toLowerCase()}/${decodeURIComponent(String(m[2])).toLowerCase()}`;
+  } catch (e) {
+    return '';
+  }
+}
+
+function sameExternalMediaObject(a, b) {
+  const ak = pixhostMediaKey(a);
+  if (!ak) return false;
+  return ak === pixhostMediaKey(b);
 }
 
 async function fetchTextWithTimeout(url, timeoutMs = 15000, referer = '') {
@@ -9920,7 +13922,7 @@ async function fetchTextWithTimeout(url, timeoutMs = 15000, referer = '') {
       signal: ctrl.signal
     });
     const text = await res.text();
-    return { ok: res.ok, status: res.status, text, contentType: String(res.headers.get('content-type') || ''), finalUrl: String(res.url || url || '') };
+    return { ok: res.ok, status: res.status, text, contentType: String(res.headers.get('content-type') || ''), finalUrl: String(res.url || url || ''), headers: res.headers };
   } finally {
     clearTimeout(timer);
   }
@@ -9995,6 +13997,235 @@ function normalizeHtmlExtractedUrl(raw, baseUrl) {
   }
 }
 
+function decodeHtmlText(raw) {
+  try {
+    let out = htmlDecodeAttribute(decodeHtmlEscapedUrlText(raw));
+    out = out.replace(/&#(\d+);/g, (_m, code) => {
+      const n = Number(code);
+      return Number.isFinite(n) && n > 0 ? String.fromCharCode(n) : '';
+    });
+    out = out.replace(/&#x([0-9a-f]+);/ig, (_m, code) => {
+      const n = parseInt(code, 16);
+      return Number.isFinite(n) && n > 0 ? String.fromCharCode(n) : '';
+    });
+    return out;
+  } catch (e) {
+    return String(raw || '');
+  }
+}
+
+function cleanExternalMetadataText(raw, maxLen = 300) {
+  try {
+    let s = decodeHtmlText(raw)
+      .replace(/<script\b[\s\S]*?<\/script>/ig, ' ')
+      .replace(/<style\b[\s\S]*?<\/style>/ig, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    s = s
+      .replace(/\s+[-|:]\s+(?:IMX\.to|VIPR\.im|ImageBam|Pixhost|Imgbox|ImageVenue|Postimages|ImgBB|ImgChest)\s*$/i, '')
+      .replace(/^(?:image|view image|continue to your image)\s*[-:|]\s*/i, '')
+      .trim();
+    if (s.length > maxLen) s = `${s.slice(0, Math.max(0, maxLen - 1)).trim()}...`;
+    return s;
+  } catch (e) {
+    return '';
+  }
+}
+
+function extractHtmlAttribute(tag, attrName) {
+  try {
+    const re = new RegExp(`${attrName}\\s*=\\s*(["'])([\\s\\S]*?)\\1`, 'i');
+    const m = String(tag || '').match(re);
+    return m && m[2] ? cleanExternalMetadataText(m[2], 1000) : '';
+  } catch (e) {
+    return '';
+  }
+}
+
+function firstMetaContent(html, names) {
+  try {
+    const wanted = new Set((names || []).map((v) => String(v || '').toLowerCase()));
+    for (const m of String(html || '').matchAll(/<meta\b[^>]*>/ig)) {
+      const tag = m && m[0] ? m[0] : '';
+      const key = (extractHtmlAttribute(tag, 'property') || extractHtmlAttribute(tag, 'name')).toLowerCase();
+      if (!key || !wanted.has(key)) continue;
+      const content = extractHtmlAttribute(tag, 'content');
+      if (content) return content;
+    }
+    return '';
+  } catch (e) {
+    return '';
+  }
+}
+
+function firstTagText(html, tagName) {
+  try {
+    const re = new RegExp(`<${tagName}\\b[^>]*>([\\s\\S]*?)<\\/${tagName}>`, 'i');
+    const m = String(html || '').match(re);
+    return m && m[1] ? cleanExternalMetadataText(m[1]) : '';
+  } catch (e) {
+    return '';
+  }
+}
+
+function firstImageAttributeText(html, attrName) {
+  try {
+    for (const m of String(html || '').matchAll(/<img\b[^>]*>/ig)) {
+      const value = extractHtmlAttribute(m && m[0] ? m[0] : '', attrName);
+      if (value && !/^(?:image|photo|thumbnail|preview)$/i.test(value)) return value;
+    }
+    return '';
+  } catch (e) {
+    return '';
+  }
+}
+
+function externalModelCandidatesFromText(parts, host = '') {
+  try {
+    const ignored = new Set([
+      'imx', 'imx.to', 'vipr', 'vipr.im', 'imagebam', 'pixhost', 'imgbox', 'imagevenue',
+      'postimages', 'imgbb', 'imgchest', 'image', 'view image', 'continue to your image'
+    ]);
+    const hostParts = String(host || '').toLowerCase().split('.').filter(Boolean);
+    for (const hp of hostParts) ignored.add(hp);
+    const out = [];
+    const seen = new Set();
+    const push = (value) => {
+      let s = cleanExternalMetadataText(value, 120)
+        .replace(/\.(?:jpe?g|png|gif|webp|bmp|mp4|mov|webm|mkv)$/i, '')
+        .replace(/[_]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      s = s.replace(/^(?:model|models|name|performer|actress)\s*[:=-]\s*/i, '').trim();
+      const key = s.toLowerCase();
+      if (!s || s.length < 2 || s.length > 80) return;
+      if (!/[a-z]/i.test(s) || /^https?:\/\//i.test(s)) return;
+      if (ignored.has(key) || /^(?:img|image|photo|pic|file|download|view|untitled)(?:\s+\d+)?$/i.test(s)) return;
+      if (/^\d+$/.test(s)) return;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push(s);
+    };
+    for (const raw of parts || []) {
+      const text = cleanExternalMetadataText(raw, 500);
+      if (!text) continue;
+      for (const m of text.matchAll(/\b(?:model|models|name|performer|actress)\s*[:=-]\s*([a-z0-9][^|,;()[\]{}<>]{1,80})/ig)) {
+        if (m && m[1]) push(m[1]);
+      }
+      for (const piece of text.split(/\s+-\s+|\s+\|\s+|[,;\n\r]+/g)) push(piece);
+    }
+    return out.slice(0, 8);
+  } catch (e) {
+    return [];
+  }
+}
+
+function extractExternalWrapperMetadata(html, pageUrl, directUrl = '', finalUrl = '') {
+  try {
+    const h = String(html || '');
+    let host = '';
+    let finalHost = '';
+    try { host = new URL(String(pageUrl || finalUrl || '')).hostname.toLowerCase(); } catch (e) { }
+    try { finalHost = new URL(String(directUrl || finalUrl || '')).hostname.toLowerCase(); } catch (e) { }
+    const title = firstMetaContent(h, ['og:title', 'twitter:title']) || firstTagText(h, 'title');
+    const description = firstMetaContent(h, ['og:description', 'description', 'twitter:description']);
+    const siteName = firstMetaContent(h, ['og:site_name']);
+    const previewImage = normalizeHtmlExtractedUrl(firstMetaContent(h, ['og:image', 'twitter:image']), pageUrl) || '';
+    const caption = firstTagText(h, 'figcaption');
+    const imageAlt = firstImageAttributeText(h, 'alt');
+    const imageTitle = firstImageAttributeText(h, 'title');
+    const modelCandidates = externalModelCandidatesFromText([title, description, caption, imageAlt, imageTitle], host);
+    const out = {
+      host,
+      source_url: String(pageUrl || '').trim(),
+      scraped_at: new Date().toISOString()
+    };
+    if (finalUrl && finalUrl !== pageUrl) out.final_url = String(finalUrl);
+    if (finalHost && finalHost !== host) out.final_host = finalHost;
+    if (directUrl) out.resolved_url = String(directUrl);
+    if (title) out.title = title;
+    if (description) out.description = description;
+    if (siteName) out.site_name = siteName;
+    if (previewImage && !isSiteInfrastructureUrl(previewImage)) out.preview_image = previewImage;
+    if (caption) out.caption = caption;
+    if (imageAlt) out.image_alt = imageAlt;
+    if (imageTitle) out.image_title = imageTitle;
+    if (modelCandidates.length) out.model_candidates = modelCandidates;
+    return Object.keys(out).length > 3 || out.resolved_url ? out : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function resolvedMediaUrl(result) {
+  try {
+    if (!result) return '';
+    if (typeof result === 'string') return result.trim();
+    if (typeof result === 'object' && result.url) return String(result.url || '').trim();
+    return '';
+  } catch (e) {
+    return '';
+  }
+}
+
+function resolvedExternalMetadata(result) {
+  try {
+    return result && typeof result === 'object' && result.externalMetadata && typeof result.externalMetadata === 'object'
+      ? result.externalMetadata
+      : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function mergeExternalMetadataIntoMetadata(metadata, externalMetadata) {
+  const next = metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? { ...metadata } : {};
+  if (!externalMetadata || typeof externalMetadata !== 'object') return next;
+  const previous = next.webdl_external_metadata && typeof next.webdl_external_metadata === 'object'
+    ? next.webdl_external_metadata
+    : next.external_metadata && typeof next.external_metadata === 'object'
+      ? next.external_metadata
+      : null;
+  const merged = previous ? { ...previous, ...externalMetadata } : { ...externalMetadata };
+  next.webdl_external_metadata = merged;
+  next.external_metadata = merged;
+  if (!next.webdl_wrapper_url && merged.source_url) next.webdl_wrapper_url = merged.source_url;
+  if (!next.webdl_source_host && merged.host) next.webdl_source_host = merged.host;
+  return next;
+}
+
+function externalMetadataFromDownloadMetadata(metadata) {
+  try {
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null;
+    if (metadata.webdl_external_metadata && typeof metadata.webdl_external_metadata === 'object') return metadata.webdl_external_metadata;
+    if (metadata.external_metadata && typeof metadata.external_metadata === 'object') return metadata.external_metadata;
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function mergeWrapperMetadataIntoFullMeta(fullMeta, metadata) {
+  try {
+    const out = fullMeta && typeof fullMeta === 'object' && !Array.isArray(fullMeta) ? { ...fullMeta } : {};
+    const external = externalMetadataFromDownloadMetadata(metadata);
+    if (external) {
+      out.external_metadata = external;
+      out.webdl_external_metadata = external;
+    }
+    if (metadata && typeof metadata === 'object' && !Array.isArray(metadata)) {
+      if (metadata.webdl_input_url) out.webdl_input_url = metadata.webdl_input_url;
+      if (metadata.webdl_resolved_url) out.webdl_resolved_url = metadata.webdl_resolved_url;
+      if (metadata.webdl_wrapper_url) out.webdl_wrapper_url = metadata.webdl_wrapper_url;
+      if (metadata.webdl_source_host) out.webdl_source_host = metadata.webdl_source_host;
+    }
+    return out;
+  } catch (e) {
+    return fullMeta && typeof fullMeta === 'object' ? fullMeta : {};
+  }
+}
+
 function extractOpenGraphMediaUrl(html, baseUrl) {
   try {
     const h = String(html || '');
@@ -10059,13 +14290,125 @@ function upgradeKnownLowQualityMediaUrl(rawUrl) {
       }
       if (host.endsWith('pixhost.to')) {
         u.pathname = p.replace(/\/thumbs\//i, '/images/');
+        u.hostname = String(u.hostname || '').replace(/^t(\d+)\.pixhost\.to$/i, 'img$1.pixhost.to');
         out = u.toString();
+      }
+      if ((host === 'image.imx.to' || host.endsWith('.image.imx.to')) && /^\/u\/t\//i.test(p)) {
+        u.pathname = p.replace(/^\/u\/t\//i, '/u/i/');
+        out = u.toString();
+      }
+      // Imagebam thumb → wrapper page: thumbs2.imagebam.com/.../XXID.jpg → imagebam.com/view/XXID
+      if (/^thumbs?\d*\.imagebam\.com$/i.test(host) || /^thumbnails?\d*\.imagebam\.com$/i.test(host)) {
+        const imgId = p.match(/\/([a-z0-9]+)\.\w+$/i);
+        if (imgId && imgId[1]) {
+          return `https://www.imagebam.com/view/${imgId[1]}`;
+        }
+      }
+      const viprWrapper = viprWrapperUrlFromLowQualityImageUrl(u.toString());
+      if (viprWrapper) return viprWrapper;
+      if ((host === 'vipr.im' || host.endsWith('.vipr.im')) && /^\/th\//i.test(p)) {
+        const m = String(u.pathname || '').match(/^\/th\/([^/]+)\/([^/?#]+\.jpe?g)$/i);
+        if (m && m[1] && m[2]) {
+          u.pathname = `/i/${m[1]}/${m[2]}/30.jpg`;
+          out = u.toString();
+        }
       }
     } catch (e) { }
     return out;
   } catch (e) {
     return String(rawUrl || '').trim();
   }
+}
+
+function viprWrapperUrlFromLowQualityImageUrl(rawUrl) {
+  try {
+    const u = new URL(String(rawUrl || ''));
+    const host = String(u.hostname || '').toLowerCase().replace(/^www\./, '');
+    if (host !== 'vipr.im' && !host.endsWith('.vipr.im')) return '';
+    const m = String(u.pathname || '').match(/^\/i\/[^/]+\/([^/?#]+)\.jpe?g\/\d{1,3}\.jpe?g$/i);
+    if (!m || !m[1]) return '';
+    return `https://vipr.im/${encodeURIComponent(m[1])}`;
+  } catch (e) {
+    return '';
+  }
+}
+
+function isViprLowQualityImageUrl(rawUrl) {
+  return !!viprWrapperUrlFromLowQualityImageUrl(rawUrl);
+}
+
+function isLikelyThumbnailImageUrl(rawUrl) {
+  try {
+    const input = String(rawUrl || '').trim();
+    if (!input || !isImageUrlLike(input)) return false;
+    const u = new URL(input);
+    const host = String(u.hostname || '').toLowerCase();
+    const p = String(u.pathname || '').toLowerCase();
+    if (/^(?:thumbs?|thumbnails?)\d*\./i.test(host)) return true;
+    if (/^thumbs\d*\.imagebam\.com$/i.test(host)) return true;
+    if ((host === 'image.imx.to' || host.endsWith('.image.imx.to')) && /^\/u\/t\//i.test(p)) return true;
+    if (isViprLowQualityImageUrl(input)) return true;
+    if ((host === 'vipr.im' || host.endsWith('.vipr.im')) && /^\/th\//i.test(p)) return true;
+    if ((host === 'pixhost.to' || host.endsWith('.pixhost.to')) && /\/thumbs\//i.test(p)) return true;
+    if (/\/[^\/?#]+_t\.(?:jpe?g|png|gif|webp)(?:$|[?#])/i.test(p) && /imagebam\.com$/i.test(host)) return true;
+    if (/\/(?:thumb|thumbs|thumbnail|thumbnails|preview|previews|small|mini|square)\//i.test(p)) return true;
+    if (/\.(?:th|thumb|thumbnail|preview|small|md)\.(?:jpe?g|png|gif|webp|bmp|avif|heic|heif)(?:$|[?#])/i.test(input)) return true;
+    if (/(?:^|[-_.\/])(?:thumb|thumbnail|preview|small|mini)(?:[-_.\/]|$)/i.test(p)) return true;
+    return false;
+  } catch (e) {
+    return false;
+  }
+}
+
+function isFootFetishForumAttachmentCdnImageUrl(rawUrl) {
+  try {
+    const u = new URL(String(rawUrl || ''));
+    const host = String(u.hostname || '').toLowerCase();
+    const p = String(u.pathname || '').toLowerCase();
+    return host === 'flc.nyc3.digitaloceanspaces.com'
+      && /\/data\/attachments\/\d+\/\d+-[^/]+\.(jpe?g|png|webp|gif)(?:$|[?#])/i.test(p);
+  } catch (e) {
+    return false;
+  }
+}
+
+async function ensureFullscaleImageDownloadUrl(rawUrl, metadata = {}, referer = '') {
+  const input = String(rawUrl || '').trim();
+  if (!input || !isImageUrlLike(input)) {
+    return { url: input, quality: 'not_image', wasThumbnail: false, rejected: false };
+  }
+
+  const directHint = upgradeKnownLowQualityMediaUrl(String(
+    metadata && typeof metadata === 'object' && metadata.webdl_direct_hint ? metadata.webdl_direct_hint : ''
+  ).trim());
+  if (directHint && looksLikeDirectFileUrl(directHint) && !isLikelyThumbnailImageUrl(directHint)) {
+    return { url: directHint, quality: 'fullscale_hint', wasThumbnail: isLikelyThumbnailImageUrl(input), rejected: false };
+  }
+
+  let upgraded = upgradeKnownLowQualityMediaUrl(input);
+  if (upgraded && upgraded !== input) {
+    if (isKnownHtmlWrapperUrl(upgraded)) {
+      const resolved = await resolveHtmlWrapperToDirectMediaUrl(upgraded, 15000, referer);
+      if (resolved && looksLikeDirectFileUrl(resolved) && !isLikelyThumbnailImageUrl(resolved)) {
+        return { url: upgradeKnownLowQualityMediaUrl(resolved), quality: 'fullscale_resolved', wasThumbnail: true, rejected: false };
+      }
+    }
+    if (looksLikeDirectFileUrl(upgraded) && !isLikelyThumbnailImageUrl(upgraded)) {
+      return { url: upgraded, quality: 'fullscale_upgraded', wasThumbnail: true, rejected: false };
+    }
+  }
+
+  if (isLikelyThumbnailImageUrl(input)) {
+    return {
+      url: input,
+      quality: 'thumbnail_rejected',
+      wasThumbnail: true,
+      rejected: true,
+      reason: 'Thumbnail-achtige image URL kon niet naar fullscale worden opgewaardeerd'
+    };
+  }
+
+  return { url: upgraded || input, quality: 'direct_image', wasThumbnail: false, rejected: false };
 }
 
 function scoreDirectMediaCandidate(url, baseUrl = '') {
@@ -10110,6 +14453,7 @@ function extractDirectMediaCandidates(html, baseUrl) {
     const pushUrl = (raw) => {
       const normalized = upgradeKnownLowQualityMediaUrl(normalizeHtmlExtractedUrl(raw, baseUrl));
       if (!normalized || seen.has(normalized)) return;
+      if (isSiteInfrastructureUrl(normalized)) return;
       seen.add(normalized);
       out.push(normalized);
     };
@@ -10144,31 +14488,309 @@ function extractDirectMediaCandidates(html, baseUrl) {
     }
 
     return out
-      .filter((u) => looksLikeDirectFileUrl(u))
+      .filter((u) => looksLikeDirectFileUrl(u) && scoreDirectMediaCandidate(u, baseUrl) > 0)
       .sort((a, b) => scoreDirectMediaCandidate(b, baseUrl) - scoreDirectMediaCandidate(a, baseUrl));
   } catch (e) {
     return [];
   }
 }
 
-async function resolveHtmlWrapperToDirectMediaUrl(url, timeoutMs = 15000, referer = '') {
+function isViprWrapperUrl(rawUrl) {
   try {
-    const u0 = String(url || '').trim();
-    if (!u0) return '';
-    const r = await fetchTextWithTimeout(u0, timeoutMs, referer);
-    if (!r) return '';
-    if (r.contentType && r.contentType.toLowerCase().startsWith('image/')) return upgradeKnownLowQualityMediaUrl(String(r.finalUrl || u0));
-    if (r.contentType && r.contentType.toLowerCase().startsWith('video/')) return upgradeKnownLowQualityMediaUrl(String(r.finalUrl || u0));
-    if (!r.text) return '';
-    const candidates = extractDirectMediaCandidates(r.text, u0);
-    if (candidates && candidates.length) return candidates[0];
-    const og = upgradeKnownLowQualityMediaUrl(extractOpenGraphMediaUrl(r.text, u0));
-    if (!og) return '';
-    if (!looksLikeDirectFileUrl(og)) return '';
-    return og;
+    const u = new URL(String(rawUrl || ''));
+    const host = String(u.hostname || '').toLowerCase().replace(/^www\./, '');
+    const p = String(u.pathname || '');
+    return host === 'vipr.im' && /^\/[a-z0-9]+\/?$/i.test(p);
+  } catch (e) {
+    return false;
+  }
+}
+
+function isViprFullImageUrl(rawUrl) {
+  try {
+    const u = new URL(String(rawUrl || ''));
+    const host = String(u.hostname || '').toLowerCase();
+    const p = String(u.pathname || '');
+    if (!(host === 'vipr.im' || host.endsWith('.vipr.im'))) return false;
+    if (/^\/th\//i.test(p)) return false;
+    if (isViprLowQualityImageUrl(rawUrl)) return false;
+    return /^\/i\/[^/]+\/[^/]+/i.test(p) && /\.(?:jpe?g|png|gif|webp|bmp)(?:$|[/?#])/i.test(p);
+  } catch (e) {
+    return false;
+  }
+}
+
+function extractViprDirectMediaCandidate(html, baseUrl) {
+  try {
+    const h = String(html || '');
+    const decodedHtml = decodeHtmlEscapedUrlText(h);
+    const variants = decodedHtml && decodedHtml !== h ? [h, decodedHtml] : [h];
+    const out = [];
+    const seen = new Set();
+    const pushUrl = (raw) => {
+      const normalized = upgradeKnownLowQualityMediaUrl(normalizeHtmlExtractedUrl(raw, baseUrl));
+      if (!normalized || seen.has(normalized)) return;
+      if (!isViprFullImageUrl(normalized)) return;
+      seen.add(normalized);
+      out.push(normalized);
+    };
+
+    for (const variant of variants) {
+      for (const m of variant.matchAll(/<(?:a|img|source|meta|link)\b[^>]+(?:href|src|data-src|data-url|data-image|data-full-url|content)=["']([^"']+)["'][^>]*>/ig)) {
+        if (m && m[1]) pushUrl(m[1]);
+      }
+      for (const m of variant.matchAll(/https?:\/\/[^"'\s<>]+/gi)) {
+        if (m && m[0]) pushUrl(m[0]);
+      }
+    }
+
+    return out[0] || '';
   } catch (e) {
     return '';
   }
+}
+
+function cookieHeaderFromSetCookie(headers) {
+  try {
+    if (!headers) return '';
+    let values = [];
+    try {
+      if (typeof headers.getSetCookie === 'function') values = headers.getSetCookie();
+    } catch (e) { }
+    if (!values || !values.length) {
+      const single = typeof headers.get === 'function' ? headers.get('set-cookie') : '';
+      if (single) values = [single];
+    }
+    return (values || [])
+      .map((v) => String(v || '').split(';')[0].trim())
+      .filter(Boolean)
+      .join('; ');
+  } catch (e) {
+    return '';
+  }
+}
+
+function isImxWrapperUrl(rawUrl) {
+  try {
+    const u = new URL(String(rawUrl || ''));
+    const host = String(u.hostname || '').toLowerCase().replace(/^www\./, '');
+    return host === 'imx.to' && /^\/i\/[a-z0-9]+\/?$/i.test(String(u.pathname || ''));
+  } catch (e) {
+    return false;
+  }
+}
+
+async function resolveImxDirectMedia(pageUrl, timeoutMs = 15000, referer = '', initialResponse = null) {
+  try {
+    const input = String(pageUrl || '').trim();
+    if (!input || !isImxWrapperUrl(input)) return { url: '', externalMetadata: null };
+    const page = new URL(input);
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      ...(referer ? { 'Referer': referer } : {})
+    };
+    let first = initialResponse && typeof initialResponse === 'object' ? initialResponse : null;
+    let cookie = first && first.headers ? cookieHeaderFromSetCookie(first.headers) : '';
+    let firstText = first && first.text ? String(first.text || '') : '';
+    if (!first) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => {
+        try { ctrl.abort(); } catch (e) { }
+      }, Math.max(1000, timeoutMs));
+      try {
+        first = await fetch(input, { method: 'GET', headers, signal: ctrl.signal });
+        if (String(first.headers.get('content-type') || '').toLowerCase().startsWith('image/')) {
+          const direct = upgradeKnownLowQualityMediaUrl(String(first.url || input));
+          return { url: direct, externalMetadata: extractExternalWrapperMetadata('', input, direct, String(first.url || input)) };
+        }
+        cookie = cookieHeaderFromSetCookie(first.headers);
+        firstText = await first.text();
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    const firstCandidates = extractDirectMediaCandidates(firstText, input).filter((u) => /(?:^|\.)image\.imx\.to\//i.test(u) || !/imx\.to\/(?:apple-touch-icon|favicon|css\/img)/i.test(u));
+    if (firstCandidates.length) {
+      return {
+        url: firstCandidates[0],
+        externalMetadata: extractExternalWrapperMetadata(firstText, input, firstCandidates[0], first && first.url ? String(first.url) : input)
+      };
+    }
+
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => {
+      try { ctrl.abort(); } catch (e) { }
+    }, Math.max(1000, timeoutMs));
+    try {
+      const postHeaders = {
+        ...headers,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Origin': page.origin,
+        'Referer': input,
+        ...(cookie ? { 'Cookie': cookie } : {})
+      };
+      const resp = await fetch(input, {
+        method: 'POST',
+        headers: postHeaders,
+        body: 'imgContinue=Continue+to+your+image...',
+        signal: ctrl.signal
+      });
+      const ct = String(resp.headers.get('content-type') || '').toLowerCase();
+      if (ct.startsWith('image/')) {
+        const direct = upgradeKnownLowQualityMediaUrl(String(resp.url || input));
+        return { url: direct, externalMetadata: extractExternalWrapperMetadata(firstText, input, direct, String(resp.url || input)) };
+      }
+      const html = await resp.text();
+      const candidates = extractDirectMediaCandidates(html, String(resp.url || input))
+        .filter((u) => {
+          try {
+            const cu = new URL(String(u || ''));
+            return /(?:^|\.)image\.imx\.to$/i.test(cu.hostname) || /\/u\/i\//i.test(cu.pathname);
+          } catch (e) {
+            return false;
+          }
+        });
+      if (candidates.length) {
+        return {
+          url: candidates[0],
+          externalMetadata: extractExternalWrapperMetadata(html || firstText, input, candidates[0], String(resp.url || input))
+        };
+      }
+      return { url: '', externalMetadata: extractExternalWrapperMetadata(html || firstText, input, '', String(resp.url || input)) };
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch (e) {
+    return { url: '', externalMetadata: null };
+  }
+}
+
+async function resolveImxDirectMediaUrl(pageUrl, timeoutMs = 15000, referer = '', initialResponse = null) {
+  const result = await resolveImxDirectMedia(pageUrl, timeoutMs, referer, initialResponse);
+  return resolvedMediaUrl(result);
+}
+
+function decryptBunkrVideoUrl(payload) {
+  try {
+    if (!payload || typeof payload !== 'object') return '';
+    const encryptedUrl = String(payload.url || '').trim();
+    const timestamp = Number(payload.timestamp || 0);
+    if (!encryptedUrl || !Number.isFinite(timestamp) || timestamp <= 0) return encryptedUrl;
+    if (payload.encrypted !== true) return encryptedUrl;
+    const key = Buffer.from(`SECRET_KEY_${Math.floor(timestamp / 3600)}`);
+    const bytes = Buffer.from(encryptedUrl, 'base64');
+    const out = Buffer.alloc(bytes.length);
+    for (let i = 0; i < bytes.length; i++) out[i] = bytes[i] ^ key[i % key.length];
+    return out.toString('utf8').trim();
+  } catch (e) {
+    return '';
+  }
+}
+
+function extractBunkrSlug(html, pageUrl) {
+  try {
+    const h = String(html || '');
+    let m = h.match(/\bjsSlug\s*=\s*["']([^"']+)["']/i);
+    if (m && m[1]) return String(m[1]).trim();
+    m = h.match(/\/api\/vs[\s\S]{0,500}slug["']?\s*[:=]\s*["']([^"']+)["']/i);
+    if (m && m[1]) return String(m[1]).trim();
+    const u = new URL(String(pageUrl || ''));
+    m = String(u.pathname || '').match(/\/f\/([^/?#]+)/i);
+    if (m && m[1]) return decodeURIComponent(m[1]).trim();
+    return '';
+  } catch (e) {
+    return '';
+  }
+}
+
+async function resolveBunkrDirectMediaUrl(pageUrl, html, timeoutMs = 15000, referer = '') {
+  try {
+    const input = String(pageUrl || '').trim();
+    if (!input) return '';
+    const page = new URL(input);
+    if (!isBunkrHost(page.hostname)) return '';
+
+    const slug = extractBunkrSlug(html, input);
+    if (!slug) return '';
+
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => {
+      try { ctrl.abort(); } catch (e) { }
+    }, Math.max(1000, timeoutMs));
+    try {
+      const res = await fetch(new URL('/api/vs', page.origin).toString(), {
+        method: 'POST',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+          'Accept': 'application/json, text/plain, */*',
+          'Content-Type': 'application/json',
+          'Referer': referer || input,
+          'Origin': page.origin
+        },
+        body: JSON.stringify({ slug }),
+        signal: ctrl.signal
+      });
+      if (!res.ok) return '';
+      const json = await res.json();
+      const direct = decryptBunkrVideoUrl(json);
+      if (direct && looksLikeDirectFileUrl(direct)) return direct;
+      return '';
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch (e) {
+    return '';
+  }
+}
+
+async function resolveHtmlWrapperToDirectMedia(url, timeoutMs = 15000, referer = '') {
+  try {
+    const u0 = String(url || '').trim();
+    if (!u0) return { url: '', externalMetadata: null };
+    const r = await fetchTextWithTimeout(u0, timeoutMs, referer);
+    if (!r) return { url: '', externalMetadata: null };
+    if (r.contentType && r.contentType.toLowerCase().startsWith('image/')) {
+      const direct = upgradeKnownLowQualityMediaUrl(String(r.finalUrl || u0));
+      return { url: direct, externalMetadata: extractExternalWrapperMetadata('', u0, direct, String(r.finalUrl || u0)) };
+    }
+    if (r.contentType && r.contentType.toLowerCase().startsWith('video/')) {
+      const direct = upgradeKnownLowQualityMediaUrl(String(r.finalUrl || u0));
+      return { url: direct, externalMetadata: extractExternalWrapperMetadata('', u0, direct, String(r.finalUrl || u0)) };
+    }
+    if (!r.text) return { url: '', externalMetadata: null };
+    const externalMetadata = extractExternalWrapperMetadata(r.text, u0, '', String(r.finalUrl || u0));
+    if (isViprWrapperUrl(u0) || isViprWrapperUrl(r.finalUrl || '')) {
+      const vipr = extractViprDirectMediaCandidate(r.text, r.finalUrl || u0);
+      if (vipr) return { url: vipr, externalMetadata: externalMetadata ? { ...externalMetadata, resolved_url: vipr } : null };
+      return { url: '', externalMetadata };
+    }
+    if (isImxWrapperUrl(u0)) {
+      const imx = await resolveImxDirectMedia(u0, timeoutMs, referer, r);
+      const imxUrl = resolvedMediaUrl(imx);
+      if (imxUrl) {
+        return {
+          url: imxUrl,
+          externalMetadata: resolvedExternalMetadata(imx) || (externalMetadata ? { ...externalMetadata, resolved_url: imxUrl } : null)
+        };
+      }
+    }
+    const bunkr = await resolveBunkrDirectMediaUrl(r.finalUrl || u0, r.text, timeoutMs, referer);
+    if (bunkr) return { url: bunkr, externalMetadata: externalMetadata ? { ...externalMetadata, resolved_url: bunkr } : null };
+    const candidates = extractDirectMediaCandidates(r.text, u0);
+    if (candidates && candidates.length) return { url: candidates[0], externalMetadata: externalMetadata ? { ...externalMetadata, resolved_url: candidates[0] } : null };
+    const og = upgradeKnownLowQualityMediaUrl(extractOpenGraphMediaUrl(r.text, u0));
+    if (!og) return { url: '', externalMetadata };
+    if (!looksLikeDirectFileUrl(og)) return { url: '', externalMetadata };
+    return { url: og, externalMetadata: externalMetadata ? { ...externalMetadata, resolved_url: og } : null };
+  } catch (e) {
+    return { url: '', externalMetadata: null };
+  }
+}
+
+async function resolveHtmlWrapperToDirectMediaUrl(url, timeoutMs = 15000, referer = '') {
+  const result = await resolveHtmlWrapperToDirectMedia(url, timeoutMs, referer);
+  return resolvedMediaUrl(result);
 }
 
 function uniqueFilePath(filepath, suffix) {
@@ -10188,6 +14810,11 @@ function uniqueFilePath(filepath, suffix) {
 function filenameFromUrl(url, fallback = 'download.bin') {
   try {
     const u = new URL(String(url || ''));
+    const queryName = String(u.searchParams.get('filename') || '').trim();
+    if (queryName) {
+      const safeQueryName = sanitizeName(path.basename(queryName));
+      if (safeQueryName) return safeQueryName;
+    }
     if (String(u.pathname || '').toLowerCase() === '/attachment.php') {
       const attachmentId = String(u.searchParams.get('attachmentid') || '').trim();
       if (attachmentId) {
@@ -10279,13 +14906,188 @@ function resolveDirectDownloadFilename(url, fallback, rawHeaders) {
   const hinted = filenameFromContentDisposition(headers['content-disposition']);
   let filename = hinted || filenameFromUrl(url, fallback);
   const ext = String(path.extname(filename || '') || '').replace('.', '').toLowerCase();
-  const contentExt = extensionFromContentType(headers['content-type']);
+  let contentExt = extensionFromContentType(headers['content-type']);
+  if (!contentExt) {
+    try {
+      const u = new URL(String(url || ''));
+      contentExt = extensionFromContentType(u.searchParams.get('content_type') || '');
+    } catch (e) { }
+  }
   if ((!ext || ext === 'php' || ext === 'bin') && contentExt) {
     const stem = sanitizeName(path.basename(filename || fallback, path.extname(filename || fallback)) || `download_${Date.now()}`);
     filename = `${stem}.${contentExt}`;
   }
   const safe = sanitizeName(filename || '');
   return safe || fallback;
+}
+
+function directDownloadLooksLikeHtml(filepath, rawHeaders) {
+  const headers = parseLastHttpHeaders(rawHeaders);
+  const contentType = String(headers['content-type'] || '').toLowerCase();
+  if (/\b(?:text\/html|application\/xhtml\+xml)\b/.test(contentType)) return true;
+  try {
+    if (!filepath || !fs.existsSync(filepath)) return false;
+    const fd = fs.openSync(filepath, 'r');
+    try {
+      const buf = Buffer.alloc(512);
+      const n = fs.readSync(fd, buf, 0, buf.length, 0);
+      const head = buf.slice(0, n).toString('utf8').trimStart().toLowerCase();
+      return head.startsWith('<!doctype html') || head.startsWith('<html') || head.includes('<title>keep2share</title>');
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (e) {
+    return false;
+  }
+}
+
+// 2026-05-30 (Spoor 1.3): host-registry voor hotlink-protected image-hosts.
+// Per host: rejectExactSizes (bekende placeholder-fingerprints), minValidSize
+// (alles eronder = placeholder/error-pagina). Nieuwe host = 1 regel toevoegen.
+// Referer-injectie zit al in download-flow ~14910 — registry hier is voor
+// post-download fingerprint-detect.
+const HOTLINK_HOST_REGISTRY = {
+  'vipr.im':        { rejectExactSizes: [8346], minValidSize: 1024 },
+  'imagetwist.com': { rejectExactSizes: [8346], minValidSize: 1024 },
+  'imagebam.com':   { minValidSize: 2048 },
+  'imx.to':         { minValidSize: 1024 },
+  'pixhost.to':     { minValidSize: 1024 },
+  'pixhost.cc':     { minValidSize: 1024 },
+  'imgbox.com':     { minValidSize: 1024 },
+  'imagevenue.com': { minValidSize: 2048 },
+  'imgchest.com':   { minValidSize: 1024 },
+};
+
+function lookupHotlinkConfig(host) {
+  const h = String(host || '').toLowerCase();
+  for (const key of Object.keys(HOTLINK_HOST_REGISTRY)) {
+    if (h === key || h.endsWith('.' + key)) return HOTLINK_HOST_REGISTRY[key];
+  }
+  return null;
+}
+
+function rejectInvalidDirectDownload(url, filepath, filename, rawHeaders) {
+  const ext = String(path.extname(filename || filepath || '') || '').toLowerCase();
+  const isExpectedMedia = IMPORTABLE_VIDEO_EXTS.has(ext) || isImagePath(filename || filepath || '');
+  const isKeep2Share = /(?:keep2share\.cc|k2s\.cc)/i.test(String(url || ''));
+  if ((isExpectedMedia || isKeep2Share) && directDownloadLooksLikeHtml(filepath, rawHeaders)) {
+    return isKeep2Share
+      ? 'Keep2Share gaf een HTML/login-pagina terug in plaats van het videobestand; premium-cookie ontbreekt of is niet geldig'
+      : 'Directe download gaf HTML terug in plaats van media';
+  }
+  // 2026-05-30 (Spoor 1.3): registry-based fingerprint-detect (vervangt
+  // hardcoded vipr.im/imagetwist 8346b check; uitbreidbaar per host).
+  try {
+    let host = '';
+    try { host = new URL(String(url || '')).hostname.toLowerCase(); } catch (_) {}
+    const cfg = lookupHotlinkConfig(host);
+    if (cfg) {
+      const stat = fs.statSync(filepath);
+      if (Array.isArray(cfg.rejectExactSizes) && cfg.rejectExactSizes.includes(stat.size)) {
+        return `Hotlink-error placeholder (${host}, fingerprint ${stat.size}b)`;
+      }
+      if (typeof cfg.minValidSize === 'number' && stat.size < cfg.minValidSize && isExpectedMedia) {
+        return `Hotlink-error placeholder (${host}, bestand ${stat.size}b < min ${cfg.minValidSize}b — vermoedelijk error-pagina)`;
+      }
+    }
+  } catch (e) { /* niet-fataal */ }
+  return '';
+}
+
+function isArchiveFilePath(inputPath) {
+  const ext = String(path.extname(String(inputPath || '')).toLowerCase() || '');
+  if (IMPORTABLE_ARCHIVE_EXTS.has(ext)) return true;
+  try {
+    if (!inputPath || !fs.existsSync(inputPath)) return false;
+    const fd = fs.openSync(inputPath, 'r');
+    try {
+      const buf = Buffer.alloc(8);
+      const n = fs.readSync(fd, buf, 0, buf.length, 0);
+      if (n >= 4 && buf[0] === 0x50 && buf[1] === 0x4b && [0x03, 0x05, 0x07].includes(buf[2]) && [0x04, 0x06, 0x08].includes(buf[3])) return true;
+      if (n >= 7 && buf[0] === 0x52 && buf[1] === 0x61 && buf[2] === 0x72 && buf[3] === 0x21 && buf[4] === 0x1a && buf[5] === 0x07 && (buf[6] === 0x00 || buf[6] === 0x01)) return true;
+      if (n >= 6 && buf[0] === 0x37 && buf[1] === 0x7a && buf[2] === 0xbc && buf[3] === 0xaf && buf[4] === 0x27 && buf[5] === 0x1c) return true;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (e) { }
+  return false;
+}
+
+function archiveEntryLooksUnsafe(entry) {
+  const raw = String(entry || '').trim();
+  if (!raw) return false;
+  const normalized = raw.replace(/\\/g, '/');
+  if (normalized.startsWith('/') || /^[a-z]:/i.test(normalized)) return true;
+  return normalized.split('/').some((part) => part === '..');
+}
+
+function uniqueDirectoryPath(basePath, downloadId) {
+  const base = path.resolve(String(basePath || ''));
+  if (!fs.existsSync(base)) return base;
+  const suffix = downloadId ? `_${downloadId}` : '';
+  for (let i = 1; i < 1000; i++) {
+    const candidate = `${base}${suffix}_${i}`;
+    if (!fs.existsSync(candidate)) return candidate;
+  }
+  return `${base}${suffix}_${Date.now()}`;
+}
+
+function runArchiveTool(args, { timeoutMs = 10 * 60 * 1000 } = {}) {
+  return new Promise((resolve, reject) => {
+    const bin = '/usr/bin/bsdtar';
+    if (!fs.existsSync(bin)) {
+      reject(new Error('bsdtar niet gevonden; archive kan niet worden uitgepakt'));
+      return;
+    }
+    const proc = spawn(bin, args);
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => {
+      try { proc.kill('SIGKILL'); } catch (e) { }
+      reject(new Error('archive uitpakken duurde te lang'));
+    }, Math.max(1000, timeoutMs));
+    proc.stdout.on('data', (d) => { stdout = (stdout + d.toString()).slice(-2_000_000); });
+    proc.stderr.on('data', (d) => { stderr = (stderr + d.toString()).slice(-200_000); });
+    proc.on('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve({ stdout, stderr });
+      else reject(new Error(stderr || `bsdtar exit code ${code}`));
+    });
+  });
+}
+
+async function extractArchiveDownloadFiles(downloadId, archivePath, outputDir) {
+  if (!isArchiveFilePath(archivePath)) return { archive: false, mediaCount: 0, mediaBytes: 0, extractDir: '' };
+  if (!safeIsAllowedExistingPath(archivePath)) throw new Error('Archive staat buiten toegestane downloadmap');
+  const listing = await runArchiveTool(['-tf', archivePath], { timeoutMs: 2 * 60 * 1000 });
+  const entries = String(listing.stdout || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (entries.some(archiveEntryLooksUnsafe)) {
+    throw new Error('Archive bevat onveilige paden en is niet uitgepakt');
+  }
+
+  const stem = sanitizeName(path.basename(archivePath, path.extname(archivePath))) || `archive_${downloadId}`;
+  const extractDir = uniqueDirectoryPath(path.join(outputDir, `${stem}__extracted`), downloadId);
+  fs.mkdirSync(extractDir, { recursive: true });
+  await runArchiveTool(['-xf', archivePath, '-C', extractDir]);
+
+  const files = listMediaFilesInDir(extractDir, DOWNLOAD_FILES_AUTO_INDEX_MAX_FILES);
+  let mediaBytes = 0;
+  const indexedAt = new Date().toISOString();
+  for (const filePath of files) {
+    try {
+      if (!isMediaFilePath(filePath) || isAuxiliaryMediaPath(filePath)) continue;
+      const relPath = relPathFromBaseDir(filePath);
+      if (!relPath || (!path.isAbsolute(relPath) && relPath.startsWith('..'))) continue;
+      const st = fs.statSync(filePath);
+      mediaBytes += Number(st.size) || 0;
+      await upsertDownloadFile.run(downloadId, relPath, st.size, Math.floor(st.mtimeMs), indexedAt, indexedAt);
+    } catch (e) { }
+  }
+  return { archive: true, mediaCount: files.length, mediaBytes, extractDir };
 }
 
 async function startDirectFileDownload(downloadId, url, platform, channel, title, metadata) {
@@ -10297,11 +15099,55 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
       return;
     }
 
-    // Probeer lage resolutie links van footfetishforum te upgraden
-    url = upgradeKnownLowQualityMediaUrl(url);
+    if (isKeep2ShareUrl(url)) {
+      // Parse metadata if it's a JSON string (e.g. from DB rehydrate)
+      if (typeof metadata === 'string' && metadata) {
+        try { metadata = JSON.parse(metadata); } catch (_) { metadata = {}; }
+      }
+      try {
+        const originalK2sUrl = url;
+        const resolved = await resolveKeep2ShareDirectUrl(originalK2sUrl, metadata);
+        if (!resolved.url) {
+          await updateDownloadStatus.run('error', 0, resolved.error || 'Keep2Share premium download-URL kon niet worden opgehaald', downloadId);
+          return;
+        }
+        if (resolved.url !== url) {
+          const nextMeta = metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? { ...metadata } : {};
+          nextMeta.webdl_input_url = nextMeta.webdl_input_url || originalK2sUrl;
+          nextMeta.webdl_resolved_url = resolved.url;
+          // Ensure source_sites is always set for K2S downloads
+          if (!Array.isArray(nextMeta.source_sites) || !nextMeta.source_sites.length) {
+            const fromVG = platform === 'vipergirls' || /vipergirls/i.test(String(nextMeta.url || nextMeta.source_url || channel || ''));
+            nextMeta.source_sites = fromVG ? ['vipergirls', 'keep2share'] : ['keep2share'];
+            if (!nextMeta.source_site) nextMeta.source_site = fromVG ? 'vipergirls' : 'keep2share';
+          }
+          try { await updateDownloadUrl.run(resolved.url, downloadId); } catch (e) { }
+          url = resolved.url;
+          metadata = nextMeta;
+        }
+      } catch (e) {
+        await updateDownloadStatus.run('error', 0, `Keep2Share premium-resolve faalde: ${e && e.message ? e.message : String(e)}`, downloadId);
+        return;
+      }
+    }
+
+    const initialReferer = String(
+      metadata && typeof metadata === 'object' && metadata.origin_thread && metadata.origin_thread.url ? metadata.origin_thread.url :
+        metadata && typeof metadata === 'object' && metadata.url && metadata.url !== url ? metadata.url :
+          ''
+    ).trim();
+    const fullscaleCheck = await ensureFullscaleImageDownloadUrl(url, metadata, initialReferer);
+    if (fullscaleCheck.rejected) {
+      await updateDownloadStatus.run('error', 0, fullscaleCheck.reason || 'Image URL lijkt een thumbnail en is niet fullscale bevestigd', downloadId);
+      return;
+    }
+    if (fullscaleCheck.url && fullscaleCheck.url !== url) {
+      try { await updateDownloadUrl.run(fullscaleCheck.url, downloadId); } catch (e) { }
+      url = fullscaleCheck.url;
+    }
 
     // Skip site infrastructure files (favicons, apple-touch-icons, etc.)
-    if (/(?:^|[/])(?:apple-touch-icon|favicon|browserconfig)(?:[_.]|\.\w+$)/i.test(url)) {
+    if (isSiteInfrastructureUrl(url)) {
       console.log(`[DL #${downloadId}] SKIP infrastructure URL: ${url}`);
       await updateDownloadStatus.run('cancelled', 0, null, downloadId);
       jobLane.delete(downloadId);
@@ -10309,7 +15155,13 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
     }
 
     const pinContext = !!(metadata && typeof metadata === 'object' && !Array.isArray(metadata) && metadata.webdl_pin_context === true);
-    const originThread = metadata && typeof metadata === 'object' && metadata.origin_thread && typeof metadata.origin_thread === 'object' ? metadata.origin_thread : null;
+    const originThread = metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+      ? (metadata.origin_thread && typeof metadata.origin_thread === 'object'
+        ? metadata.origin_thread
+        : metadata.source_context && typeof metadata.source_context === 'object'
+          ? metadata.source_context
+          : null)
+      : null;
     const pinnedPlatform = String(originThread && originThread.platform ? originThread.platform : platform || '').toLowerCase();
     if (isKnownHtmlWrapperUrl(url)) {
       const directHint = upgradeKnownLowQualityMediaUrl(String(metadata && typeof metadata === 'object' && metadata.webdl_direct_hint ? metadata.webdl_direct_hint : '').trim());
@@ -10325,13 +15177,32 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
             ''
       ).trim();
       try {
-        const resolved = await resolveHtmlWrapperToDirectMediaUrl(url, 15000, wrapperReferer);
-        if (resolved && resolved !== url) {
-          try { await updateDownloadUrl.run(resolved, downloadId); } catch (e) { }
-          url = upgradeKnownLowQualityMediaUrl(resolved);
+        const resolved = await resolveHtmlWrapperToDirectMedia(url, 15000, wrapperReferer);
+        const resolvedUrl = resolvedMediaUrl(resolved);
+        if (resolvedUrl && resolvedUrl !== url) {
+          try { await updateDownloadUrl.run(resolvedUrl, downloadId); } catch (e) { }
+          const nextMeta = mergeExternalMetadataIntoMetadata(metadata, resolvedExternalMetadata(resolved));
+          if (!nextMeta.webdl_input_url) nextMeta.webdl_input_url = url;
+          nextMeta.webdl_resolved_url = resolvedUrl;
+          metadata = nextMeta;
+          url = upgradeKnownLowQualityMediaUrl(resolvedUrl);
         }
       } catch (e) { }
       if (isKnownHtmlWrapperUrl(url)) {
+        const wrapperHost = (() => {
+          try { return String(new URL(String(url || '')).hostname || '').toLowerCase(); } catch (e) { return ''; }
+        })();
+        const wrapperPath = (() => {
+          try { return String(new URL(String(url || '')).pathname || ''); } catch (e) { return ''; }
+        })();
+        const unresolvedFffAttachment = (wrapperHost === 'footfetishforum.com' || wrapperHost.endsWith('.footfetishforum.com'))
+          && /^\/attachments\/(?:[^\/]+\.)?\d+\/?$/i.test(wrapperPath);
+        if (unresolvedFffAttachment) {
+          console.log(`[DL #${downloadId}] SKIP unresolved FFF attachment wrapper: ${url}`);
+          await updateDownloadStatus.run('cancelled', 0, null, downloadId);
+          jobLane.delete(downloadId);
+          return;
+        }
         await updateDownloadStatus.run('error', 0, 'Kon wrapper media URL niet resolven naar een direct bestand', downloadId);
         return;
       }
@@ -10354,7 +15225,8 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
       // garbage for CDN image URLs (e.g., 'cdn.elitebabes.com' or empty)
       const metaChannel = meta.channel && meta.channel !== 'unknown' && !meta.channel.includes('cdn.') ? meta.channel : null;
       const finalChannel = pinContext ? channel : (channel && channel !== 'unknown' ? channel : metaChannel || channel);
-      await updateDownloadMeta.run(finalTitle, finalChannel, meta.description, meta.duration, meta.thumbnail, JSON.stringify(meta.fullMeta), downloadId);
+      const fullMetaWithWrapper = mergeWrapperMetadataIntoFullMeta(meta.fullMeta, metadata);
+      await updateDownloadMeta.run(finalTitle, finalChannel, meta.description, meta.duration, meta.thumbnail, JSON.stringify(fullMetaWithWrapper), downloadId);
       title = finalTitle;
       channel = finalChannel;
       console.log(`   [#${downloadId}] ✅ Metadata: "${title}" door ${channel} (${meta.duration})`);
@@ -10377,9 +15249,19 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
       duration: meta.duration,
       thumbnail: meta.thumbnail,
       origin_thread: originThread && originThread.url ? originThread : null,
+      source_context: originThread && originThread.url ? originThread : null,
+      source_site: originThread && originThread.platform ? originThread.platform : null,
+      source_sites: Array.isArray(metadata && metadata.source_sites) ? metadata.source_sites : (originThread && originThread.platform ? [originThread.platform] : []),
+      source_graph: metadata && metadata.source_graph ? metadata.source_graph : null,
+      external_metadata: externalMetadataFromDownloadMetadata(metadata),
+      webdl_external_metadata: externalMetadataFromDownloadMetadata(metadata),
+      webdl_wrapper_url: metadata && metadata.webdl_wrapper_url ? metadata.webdl_wrapper_url : null,
+      webdl_resolved_url: metadata && metadata.webdl_resolved_url ? metadata.webdl_resolved_url : null,
       webdl_pin_context: pinContext,
       webdl_media_url: metadata && metadata.webdl_media_url ? metadata.webdl_media_url : url,
       webdl_detected_platform: metadata && metadata.webdl_detected_platform ? metadata.webdl_detected_platform : detectPlatform(url),
+      webdl_image_quality: fullscaleCheck.quality,
+      webdl_was_thumbnail_url: fullscaleCheck.wasThumbnail === true,
       downloadedAt: new Date().toISOString()
     }, null, 2));
 
@@ -10403,6 +15285,18 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
     if (!referer && platform === 'elitebabes') referer = 'https://www.elitebabes.com/';
     if (!referer && platform === 'erome') referer = 'https://www.erome.com/';
     if (!referer && platform === 'zishy') referer = 'https://www.zishy.com/';
+    // 2026-05-25: image-hosts die hotlink-protection hebben. Zonder Referer
+    // geven ze de error-JPG (8346b). Prefer metadata.source_url (vipergirls
+    // thread-page), anders host-self.
+    if (!referer) {
+      try {
+        const dlHost = new URL(String(url || '')).hostname.toLowerCase();
+        if (/(?:^|\.)(?:vipr\.im|imagetwist\.com|imagebam\.com|imagevenue\.com|imx\.to|pixhost\.(?:to|cc))$/i.test(dlHost)) {
+          const srcUrl = String((metadata && (metadata.source_url || metadata.sourceUrl || (metadata.source_context && metadata.source_context.url))) || '').trim();
+          referer = (srcUrl && /^https?:/i.test(srcUrl)) ? srcUrl : `https://${dlHost}/`;
+        }
+      } catch (_) {}
+    }
     let curlUserAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
     let curlHost = '';
     try {
@@ -10425,9 +15319,16 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
         if (cookieStr) curlArgs.push('-b', cookieStr);
       } catch (e) {}
     }
+    if (curlHost === 'k2s.cc' || curlHost.endsWith('.k2s.cc') || curlHost === 'keep2share.cc' || curlHost.endsWith('.keep2share.cc')) {
+      try {
+        const cookieStr = await loadKeep2ShareCookieHeader(curlHost, metadata);
+        if (cookieStr) curlArgs.push('-b', cookieStr);
+      } catch (e) { }
+    }
     if (curlHost === 'footfetishforum.com' || curlHost.endsWith('.footfetishforum.com')) {
       try {
-        const cookieStr = await loadCookiesForDomain(curlHost);
+        const metadataCookies = metadata && typeof metadata === 'object' ? cookieHeaderFromMetadataCookies(metadata.cookies) : '';
+        const cookieStr = metadataCookies || await loadCookiesForDomain(curlHost);
         if (cookieStr) curlArgs.push('-b', cookieStr);
       } catch (e) { }
     }
@@ -10448,6 +15349,24 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
         if (code === 0 && fs.existsSync(tmpFilepath)) {
           const rawHeaders = fs.existsSync(headerFilepath) ? fs.readFileSync(headerFilepath, 'utf8') : '';
           const filename = resolveDirectDownloadFilename(url, provisionalFilename, rawHeaders);
+          const ext = String(path.extname(filename || '') || '').replace('.', '').toLowerCase();
+          const isImage = isImagePath(filename || '');
+          const invalidReason = rejectInvalidDirectDownload(url, tmpFilepath, filename, rawHeaders);
+          if (invalidReason) {
+            try { fs.rmSync(tmpFilepath, { force: true }); } catch (e) { }
+            await updateDownloadStatus.run('error', 0, invalidReason, downloadId);
+            return;
+          }
+          // 2026-05-30 (Spoor 1.4): ffprobe-verify voor video-extensions.
+          // Voorkomt B.10 (0:00 mp4 zonder audio sluipt door als 'completed').
+          if (IMPORTABLE_VIDEO_EXTS.has('.' + ext)) {
+            const videoIssue = await verifyVideoIntegrity(tmpFilepath);
+            if (videoIssue) {
+              try { fs.rmSync(tmpFilepath, { force: true }); } catch (e) { }
+              await updateDownloadStatus.run('error', 0, videoIssue, downloadId);
+              return;
+            }
+          }
           const filepath = uniqueFilePath(path.join(dir, filename), downloadId);
           try {
             if (fs.existsSync(filepath)) {
@@ -10459,18 +15378,48 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
             return;
           }
           const size = fs.existsSync(filepath) ? fs.statSync(filepath).size : 0;
-          const ext = (path.extname(filename).replace('.', '') || '').toLowerCase();
           const metaObj = { tool: 'curl', platform, channel, title, url, outputDir: dir };
+          const externalMetadata = externalMetadataFromDownloadMetadata(metadata);
+          if (externalMetadata) {
+            metaObj.external_metadata = externalMetadata;
+            metaObj.webdl_external_metadata = externalMetadata;
+          }
+          if (metadata && metadata.webdl_wrapper_url) metaObj.webdl_wrapper_url = metadata.webdl_wrapper_url;
+          if (metadata && metadata.webdl_input_url) metaObj.webdl_input_url = metadata.webdl_input_url;
+          if (metadata && metadata.webdl_resolved_url) metaObj.webdl_resolved_url = metadata.webdl_resolved_url;
+          if (metadata && metadata.webdl_source_host) metaObj.webdl_source_host = metadata.webdl_source_host;
+          metaObj.webdl_image_quality = fullscaleCheck.quality;
+          metaObj.webdl_was_thumbnail_url = fullscaleCheck.wasThumbnail === true;
           if (pinContext) {
             metaObj.webdl_pin_context = true;
             metaObj.origin_thread = originThread && originThread.url ? originThread : null;
+            metaObj.source_context = originThread && originThread.url ? originThread : null;
+            metaObj.source_site = originThread && originThread.platform ? originThread.platform : null;
+            metaObj.source_sites = Array.isArray(metadata && metadata.source_sites) ? metadata.source_sites : (originThread && originThread.platform ? [originThread.platform] : []);
+            if (metadata && metadata.source_graph) metaObj.source_graph = metadata.source_graph;
             metaObj.webdl_media_url = metadata && metadata.webdl_media_url ? metadata.webdl_media_url : url;
             metaObj.webdl_detected_platform = metadata && metadata.webdl_detected_platform ? metadata.webdl_detected_platform : detectPlatform(url);
             if (originThread && originThread.url) metaObj.source_url = originThread.url;
           }
 
-          const isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'].includes(ext);
-          if (isImage) {
+          const isArchive = isArchiveFilePath(filepath);
+          let archiveExtract = null;
+          if (isArchive) {
+            try {
+              await updateDownloadStatus.run('postprocessing', 95, null, downloadId);
+              archiveExtract = await extractArchiveDownloadFiles(downloadId, filepath, dir);
+              metaObj.archive_extracted = true;
+              metaObj.archive_extract_dir = archiveExtract.extractDir || '';
+              metaObj.archive_media_count = archiveExtract.mediaCount || 0;
+              metaObj.archive_media_bytes = archiveExtract.mediaBytes || 0;
+              try {
+                await db.prepare("UPDATE downloads SET is_thumb_ready = false WHERE id = ?").run(downloadId);
+              } catch (e) { }
+            } catch (e) {
+              await updateDownloadStatus.run('error', 0, `Archive uitpakken faalde: ${e && e.message ? e.message : String(e)}`, downloadId);
+              return;
+            }
+          } else if (isImage) {
             try {
               await updateDownloadThumbnail.run(`/download/${downloadId}/thumb`, downloadId);
               // Image files serve as their own thumbnail - mark ready immediately
@@ -10478,7 +15427,7 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
             } catch (e) { }
           }
 
-          try {
+          if (!isArchive) try {
             const relPath = path.relative(BASE_DIR, filepath);
             if (relPath && !relPath.startsWith('..')) {
               const indexedAt = new Date().toISOString();
@@ -10549,8 +15498,17 @@ async function startTdlDownload(downloadId, url, platform, channel, title, metad
       return;
     }
 
-    const args = [scriptPath, chatId, dir];
-    const proc = spawn('python3', args, { env: { ...process.env, TELEGRAM_PHONE: process.env.TELEGRAM_PHONE || '' } });
+    // 2026-05-30 (Jürgen "telegram langzaam"): --parallel 20 ipv default 5
+    // voor 3-4× snellere whole-channel downloads. Telegram rate-limit zit
+    // rond ~20 concurrent requests, dus 20 is tegen het plafond maar werkt
+    // bij empirische test (undergirlsfeetstudio ~16 MB/s → ~30+ MB/s).
+    //
+    // CRUCIAAL: gebruik /usr/bin/python3 (system Python 3.9 heeft telethon
+    // user-installed in ~/Library/Python/3.9/lib/...). Homebrew python3/3.11/3.12
+    // hebben telethon NIET → ModuleNotFoundError. Hardcoded pad lost dit op.
+    const args = [scriptPath, chatId, dir, '--parallel', '20'];
+    const PYTHON_WITH_TELETHON = fs.existsSync('/usr/bin/python3') ? '/usr/bin/python3' : 'python3';
+    const proc = spawn(PYTHON_WITH_TELETHON, args, { env: { ...process.env, TELEGRAM_PHONE: process.env.TELEGRAM_PHONE || '' } });
     activeProcesses.set(downloadId, proc);
     try { startingJobs.delete(downloadId); } catch (e) { }
     let stderr = '';
@@ -11054,10 +16012,18 @@ async function startGalleryDlDownload(downloadId, url, platform, channel, title,
     }
 
     const gdlArgs = [url];
-    // For Twitter/X: download entire conversation thread (all replies with media)
-    // Needs Firefox cookies for authenticated timeline access (conversations API)
+    // For Twitter/X: use authenticated gallery-dl and include the common
+    // timeline/thread surfaces instead of only the single visible tweet.
     if (platform === 'twitter') {
-      gdlArgs.unshift('--cookies-from-browser', 'firefox', '-o', 'conversations=true', '-o', 'replies=true');
+      gdlArgs.unshift(
+        '--cookies-from-browser', 'firefox',
+        '-o', 'conversations=true',
+        '-o', 'replies=true',
+        '-o', 'retweets=true',
+        '-o', 'quoted=true',
+        '-o', 'pinned=true',
+        '-o', 'videos=true',
+      );
     }
     const proc = spawnNice(GALLERY_DL, gdlArgs, { cwd: dir });
     activeProcesses.set(downloadId, proc);
@@ -11072,72 +16038,91 @@ async function startGalleryDlDownload(downloadId, url, platform, channel, title,
       } catch (e) {}
     }, 5 * 60 * 1000);
 
-    let stderr = '';
-    proc.stderr.on('data', (d) => { stderr += d.toString(); });
-    proc.stdout.on('data', () => { });
+	    let stderr = '';
+	    proc.stderr.on('data', (d) => { stderr += d.toString(); });
+	    proc.stdout.on('data', () => { });
 
-    proc.on('close', async (code) => {
-      activeProcesses.delete(downloadId);
-      if (code === 0) {
-        // Index all downloaded files
-        try {
-          const files = listMediaFilesInDir(dir);
-          let indexed = 0;
-          for (const fullPath of files) {
-            try {
-              const file = path.basename(fullPath);
-              const st = fs.statSync(fullPath);
-              // Skip gallery-dl downloaded thumbnails/logos (not server-generated ones)
-              if (file.endsWith('_thumb.jpg') || file.endsWith('_thumb.png') || file.endsWith('_logo.jpg') || file.endsWith('_logo.png')) continue;
-              if (st.isFile()) {
-                const relPath = path.relative(BASE_DIR, fullPath);
-                if (relPath && !relPath.startsWith('..')) {
-                  const indexedAt = new Date().toISOString();
-                  await upsertDownloadFile.run(downloadId, relPath, st.size, Math.floor(st.mtimeMs), indexedAt, indexedAt);
-                  indexed++;
-                }
-              }
-            } catch (e) { }
-            if (indexed % 10 === 0) await yieldEventLoop();
-          }
-          console.log(`   📂 Geïndexeerd: ${indexed} files voor download #${downloadId}`);
-          recentFilesTopCache.clear();
+	    const indexGalleryDlFilesAndComplete = async (files, extraMeta = {}) => {
+	      let indexed = 0;
+	      let safeTotalBytes = 0;
+	      for (const fullPath of files) {
+	        try {
+	          const file = path.basename(fullPath);
+	          const st = fs.statSync(fullPath);
+	          // Skip gallery-dl downloaded thumbnails/logos (not server-generated ones)
+	          if (file.endsWith('_thumb.jpg') || file.endsWith('_thumb.png') || file.endsWith('_logo.jpg') || file.endsWith('_logo.png')) continue;
+	          if (st.isFile()) {
+	            const relPath = path.relative(BASE_DIR, fullPath);
+	            if (relPath && !relPath.startsWith('..')) {
+	              const indexedAt = new Date().toISOString();
+	              await upsertDownloadFile.run(downloadId, relPath, st.size, Math.floor(st.mtimeMs), indexedAt, indexedAt);
+	              indexed++;
+	              safeTotalBytes += Number(st.size || 0);
+	            }
+	          }
+	        } catch (e) { }
+	        if (indexed % 10 === 0) await yieldEventLoop();
+	      }
+	      console.log(`   📂 Geïndexeerd: ${indexed} files voor download #${downloadId}`);
+	      recentFilesTopCache.clear();
 
-          // Post-download channel derivation: if channel is still 'unknown', try to derive from gallery-dl output
-          if (!outChannel || outChannel === 'unknown') {
-            try {
-              let betterChannel = null;
-              for (const fullPath of files) {
-                const relFromDir = path.relative(dir, fullPath);
-                // gallery-dl/pornpics/94245654 Gallery Title/file.jpg
-                const gdMatch = relFromDir.match(/gallery-dl\/pornpics\/(?:\d+\s+)?([^\/]+)\//i);
-                if (gdMatch && gdMatch[1]) {
-                  betterChannel = gdMatch[1];
-                  break;
-                }
-              }
-              if (betterChannel) {
-                await db.prepare(
-                  db.isPostgres
-                    ? 'UPDATE downloads SET channel = $1 WHERE id = $2'
-                    : 'UPDATE downloads SET channel = ? WHERE id = ?'
-                ).run(betterChannel, downloadId);
-                console.log(`   📝 Channel afgeleid: "${betterChannel}" voor download #${downloadId}`);
-              }
-            } catch (e) { }
-          }
-        } catch (e) {
-          console.log(`   ⚠️  Indexing fout: ${e.message}`);
-        }
+	      // Post-download channel derivation: if channel is still 'unknown', try to derive from gallery-dl output
+	      if (!outChannel || outChannel === 'unknown') {
+	        try {
+	          let betterChannel = null;
+	          for (const fullPath of files) {
+	            const relFromDir = path.relative(dir, fullPath);
+	            // gallery-dl/pornpics/94245654 Gallery Title/file.jpg
+	            const gdMatch = relFromDir.match(/gallery-dl\/pornpics\/(?:\d+\s+)?([^\/]+)\//i);
+	            if (gdMatch && gdMatch[1]) {
+	              betterChannel = gdMatch[1];
+	              break;
+	            }
+	          }
+	          if (betterChannel) {
+	            await db.prepare(
+	              db.isPostgres
+	                ? 'UPDATE downloads SET channel = $1 WHERE id = $2'
+	                : 'UPDATE downloads SET channel = ? WHERE id = ?'
+	            ).run(betterChannel, downloadId);
+	            console.log(`   📝 Channel afgeleid: "${betterChannel}" voor download #${downloadId}`);
+	          }
+	        } catch (e) { }
+	      }
 
-        const metaObj = { tool: 'gallery-dl', platform, channel: outChannel, title, url, outputDir: dir };
-        await updateDownload.run('completed', 100, dir, '(multiple)', 0, '', JSON.stringify(metaObj), null, downloadId);
-        try { runDownloadSchedulerSoon(); } catch (e) { }
-        try { syncRuntimeActiveState().catch(() => { }); } catch (e) { }
-      } else {
-        await updateDownloadStatus.run('error', 0, stderr || `gallery-dl exit code: ${code}`, downloadId);
-        try { runDownloadSchedulerSoon(); } catch (e) { }
-        try { syncRuntimeActiveState().catch(() => { }); } catch (e) { }
+	      const metaObj = { tool: 'gallery-dl', platform, channel: outChannel, title, url, outputDir: dir, ...extraMeta };
+	      await updateDownload.run('completed', 100, dir, indexed > 1 ? `(multiple: ${indexed} files)` : '(multiple)', safeTotalBytes, '', JSON.stringify(metaObj), null, downloadId);
+	    };
+
+	    proc.on('close', async (code) => {
+	      activeProcesses.delete(downloadId);
+	      if (code === 0) {
+	        // Index all downloaded files
+	        try {
+	          const files = listMediaFilesInDir(dir);
+	          await indexGalleryDlFilesAndComplete(files);
+	        } catch (e) {
+	          console.log(`   ⚠️  Indexing fout: ${e.message}`);
+	        }
+	        try { runDownloadSchedulerSoon(); } catch (e) { }
+	        try { syncRuntimeActiveState().catch(() => { }); } catch (e) { }
+	      } else {
+	        try {
+	          const files = listMediaFilesInDir(dir);
+	          if (files && files.length) {
+	            console.log(`   ⚠️  gallery-dl exit ${code}, maar ${files.length} media-bestanden gevonden; indexeer als completed voor download #${downloadId}`);
+	            await indexGalleryDlFilesAndComplete(files, {
+	              recoveredFromExitCode: code,
+	              stderr: String(stderr || '').slice(-2000),
+	            });
+	            try { runDownloadSchedulerSoon(); } catch (e) { }
+	            try { syncRuntimeActiveState().catch(() => { }); } catch (e) { }
+	            return;
+	          }
+	        } catch (e) { }
+	        await updateDownloadStatus.run('error', 0, stderr || `gallery-dl exit code: ${code}`, downloadId);
+	        try { runDownloadSchedulerSoon(); } catch (e) { }
+	        try { syncRuntimeActiveState().catch(() => { }); } catch (e) { }
       }
     });
 
@@ -11501,20 +16486,66 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
 
     const forceOverwrite = !!(metadata && typeof metadata === 'object' && !Array.isArray(metadata) && metadata.webdl_force === true);
     const outputTemplate = path.join(dir, '%(title).120B [%(id)s].%(ext)s');
+    // 2026-05-30 (Jürgen context-menu kwaliteit): per-request format-keuze.
+    // metadata.preferredHeight (1080/720/480) → height-cap. metadata.audioOnly
+    // → bestaudio + mp3. Geen veld = default best-mp4 zoals voorheen.
+    let _formatSpec = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best';
+    let _mergeFormat = 'mp4';
+    try {
+      if (metadata && typeof metadata === 'object' && !Array.isArray(metadata)) {
+        const h = Number(metadata.preferredHeight);
+        if (Number.isFinite(h) && h > 0) {
+          _formatSpec = `bv*[height<=${h}][ext=mp4]+ba[ext=m4a]/bv*[height<=${h}]+ba/b[height<=${h}]/b`;
+        }
+        if (metadata.audioOnly === true) {
+          _formatSpec = 'bestaudio[ext=m4a]/bestaudio/best';
+          _mergeFormat = 'mp3';
+        }
+      }
+    } catch (_) {}
     const baseArgs = [
       '--concurrent-fragments', YTDLP_CONCURRENT_FRAGMENTS,
       '--socket-timeout', '30',
       '--ffmpeg-location', path.dirname(FFMPEG),
-      '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-      '--merge-output-format', 'mp4',
+      '-f', _formatSpec,
+      '--merge-output-format', _mergeFormat,
       '--write-thumbnail',
       '--write-info-json'];
+
+    // K2S direct file downloads: URL has the filename in the query string and
+    // the full URL is too long / contains special chars for .info.json writing.
+    const isK2sDirectFile = /filestore\.app/i.test(url);
+    if (isK2sDirectFile) {
+      // Remove --write-info-json — the URL encodes the full filename
+      const infoJsonIdx = baseArgs.indexOf('--write-info-json');
+      if (infoJsonIdx !== -1) baseArgs.splice(infoJsonIdx, 1);
+      // Extract the real filename from the URL ?filename= parameter
+      try {
+        const k2sUrl = new URL(url);
+        const k2sFilename = k2sUrl.searchParams.get('filename') || '';
+        if (k2sFilename) {
+          const safeName = k2sFilename.replace(/[^a-zA-Z0-9._\-() ]/g, '_');
+          const k2sOutputTemplate = path.join(dir, safeName);
+          baseArgs.push('--no-overwrites', '--progress', '--newline', '-o', k2sOutputTemplate, url);
+          // Skip the normal arg-append below
+        } else {
+          baseArgs.push('--restrict-filenames');
+          if (!forceOverwrite) baseArgs.push('--no-overwrites');
+          baseArgs.push('--progress', '--newline', '-o', outputTemplate, url);
+        }
+      } catch (e) {
+        baseArgs.push('--restrict-filenames');
+        if (!forceOverwrite) baseArgs.push('--no-overwrites');
+        baseArgs.push('--progress', '--newline', '-o', outputTemplate, url);
+      }
+    } else {
     if (!forceOverwrite) {
       baseArgs.push('--no-overwrites');
     } else {
       baseArgs.push('--force-overwrites');
     }
     baseArgs.push('--progress', '--newline', '-o', outputTemplate, url);
+    }
 
 
     if (platform === 'youtube') {
@@ -11682,11 +16713,12 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
         }
 
         if (!mainPath) {
-          const files = fs.readdirSync(dir).filter((f) =>
-            f.endsWith('.mp4') || f.endsWith('.mkv') || f.endsWith('.webm') ||
-            f.endsWith('.jpg') || f.endsWith('.jpeg') || f.endsWith('.png') ||
-            f.endsWith('.gif') || f.endsWith('.webp') || f.endsWith('.unknown_video')
-          );
+          const files = fs.readdirSync(dir).filter((f) => {
+            const ext = path.extname(String(f || '')).toLowerCase();
+            return IMPORTABLE_VIDEO_EXTS.has(ext) ||
+              IMPORTABLE_IMAGE_EXTS.has(ext) ||
+              String(f || '').endsWith('.unknown_video');
+          });
           files.sort((a, b) => {
             try {
               const statA = fs.statSync(path.join(dir, a));
@@ -11698,6 +16730,12 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
           });
           const mainFileGuess = files[0] || '';
           mainPath = mainFileGuess ? path.join(dir, mainFileGuess) : '';
+        }
+
+        if (!mainPath || !fs.existsSync(mainPath)) {
+          await updateDownloadStatus.run('error', 0, 'yt-dlp eindigde zonder importeerbaar mediabestand', downloadId);
+          console.log(`   ❌ Download mislukt: geen importeerbaar mediabestand gevonden in ${dir}`);
+          return;
         }
 
         if (mainPath && mainPath.endsWith('.unknown_video')) {
@@ -11785,6 +16823,7 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
         // Read info.json to get the real channel/uploader (especially for playlist downloads)
         let realChannel = channel;
         let realTitle = title;
+        let sourcePublishedAt = null;
         try {
           const infoJson = fs.readdirSync(dir).find(f => f.endsWith('.info.json'));
           if (infoJson) {
@@ -11799,6 +16838,8 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
             if (info.webpage_url || info.original_url) {
               metaObj.source_url = info.webpage_url || info.original_url;
             }
+            sourcePublishedAt = getYtdlpSourceTimestamp(info);
+            if (sourcePublishedAt) metaObj.source_published_at = sourcePublishedAt;
           }
         } catch (e) {}
 
@@ -11834,6 +16875,11 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
         }
 
         await updateDownload.run('completed', 100, finalPath, finalFile, finalSize, finalFormat, JSON.stringify(metaObj), null, downloadId);
+        if (sourcePublishedAt && String(platform || '').toLowerCase() === 'youtube') {
+          try {
+            await updateDownloadContentTimestamp.run(sourcePublishedAt, sourcePublishedAt, sourcePublishedAt, downloadId);
+          } catch (e) { }
+        }
         try {
           const thumbPath = pickThumbnailFile(dir);
           if (thumbPath) await updateDownloadThumbnail.run(`/download/${downloadId}/thumb`, downloadId);
@@ -12107,13 +17153,14 @@ async function importExistingVideosFromDisk(options = {}) {
 
         const sidecar = readImportSidecarMetadata(fp);
         const sourceUrl = String(sidecar.sourceUrl || '').trim();
-        const platform = inferPlatformFromImportedFile(fp, sourceUrl);
+        let platform = inferPlatformFromImportedFile(fp, sourceUrl);
         const fallbackTitle = path.basename(fp, ext) || path.basename(fp) || 'imported-video';
         const title = String(sidecar.title || '').trim() || fallbackTitle;
 
         // For 4K Downloader imports: use parent directory as channel name
         // Structure: _4KDownloader/ChannelName/VideoTitle.mkv
         let channelFromPath = '';
+        let platformFromPath = '';
         if (fp.includes('_4KDownloader') || fp.includes('_4kdownloader')) {
           const rel4k = fp.split(/_4[Kk][Dd]ownloader[\/\\]/)[1] || '';
           const pathParts = rel4k.split(/[\/\\]/).filter(Boolean);
@@ -12121,7 +17168,41 @@ async function importExistingVideosFromDisk(options = {}) {
             channelFromPath = pathParts[0]; // Parent dir = channel name
           }
         }
+        // 2026-05-25: generieke pad-detect voor `_Downloads/<platform>/<channel>/<file>`
+        // Voor tdl-imports: /_Downloads/telegram/empire-of-the-feet/<file>
+        //   → platform=telegram, channel=empire-of-the-feet
+        // Geldt ook voor andere adapters die zelf in subfolders schrijven.
+        if (!channelFromPath || !platformFromPath) {
+          const dlSplit = fp.split(/[\/\\]_Downloads[\/\\]/);
+          if (dlSplit.length > 1) {
+            const relParts = String(dlSplit[1] || '').split(/[\/\\]/).filter(Boolean);
+            if (relParts.length >= 3) {
+              // relParts = [platform-folder, channel-folder, ..., filename]
+              if (!platformFromPath) platformFromPath = relParts[0];
+              if (!channelFromPath) channelFromPath = relParts[1];
+            }
+          }
+        }
 
+        // Voor telegram-imports: probeer de echte channel-titel uit een eerdere
+        // download met dezelfde chat-id (filename pattern `<chat_id>_<msg_id>_...`)
+        if (platformFromPath === 'telegram' && channelFromPath) {
+          const m = path.basename(fp).match(/^(\d{6,15})_\d+_/);
+          if (m && m[1]) {
+            try {
+              const sameChat = await db.prepare(
+                `SELECT channel FROM downloads WHERE platform='telegram' AND metadata::jsonb->>'youtube_channel_id' = $1 AND channel IS NOT NULL AND channel <> '' LIMIT 1`
+              ).get(m[1]);
+              if (sameChat && sameChat.channel) channelFromPath = String(sameChat.channel);
+            } catch (e) { /* niet-fataal */ }
+          }
+        }
+
+        // Als inferPlatformFromImportedFile 'other' gaf maar het pad een
+        // bekende platform-folder bevat (_Downloads/<platform>/...), gebruik die.
+        if ((platform === 'other' || !platform) && platformFromPath) {
+          platform = platformFromPath;
+        }
         const channelFromUrl = sourceUrl ? deriveChannelFromUrl(platform, sourceUrl) || '' : '';
         const channel = String(sidecar.channel || '').trim() || channelFromPath || channelFromUrl || 'imported';
         const canonicalSource = sourceUrl ? sourceUrl : `file://${fp}`;
@@ -12139,6 +17220,7 @@ async function importExistingVideosFromDisk(options = {}) {
             moveFileSyncWithFallback(fp, targetPath);
           } else {
             fs.copyFileSync(fp, targetPath);
+            try { fs.utimesSync(targetPath, st.atime, st.mtime); } catch (e) { }
           }
         }
 
@@ -12177,6 +17259,11 @@ async function importExistingVideosFromDisk(options = {}) {
             JSON.stringify(importMeta)
           );
           const newId = Number(info && info.lastInsertRowid);
+          if (Number.isFinite(newId)) {
+            const sourceMtime = new Date(st.mtimeMs).toISOString();
+            await updateDownloadContentTimestamp.run(sourceMtime, sourceMtime, sourceMtime, newId);
+            if (platform === 'youtube') await normalizeYoutubeDownloadTimestamp(newId, storedPath);
+          }
           if (Number.isFinite(newId) && sourceUrl && sourceUrl !== canonicalSource) {
             try { await updateDownloadSourceUrl.run(sourceUrl, newId); } catch (e) { }
           }
@@ -12753,7 +17840,33 @@ expressApp.post('/download/:id/retry', async (req, res) => {
   // Set back to pending in DB so it rehydrates automatically
   await updateDownloadStatus.run('pending', 0, null, id);
   console.log(`🔄 Download #${id} herstart via retry`);
-  try { await rehydrateDownloadQueueWithMode('all', 0); } catch (e) { }
+
+  // 2026-05-24: voor retry pakken we het item DIRECT terug in de in-memory
+  // queue zodat het niet achter een grote rehydrate-batch verdwijnt. Mode-
+  // rehydrate sorteert op status-priority + created_at en kan ons item
+  // missen als de queue al vol staat met queued-items van een grote scan.
+  // Priority>0 → vooraan, anders achteraan.
+  try {
+    const row = await db.prepare('SELECT id, url, source_url, platform, channel, title, metadata, priority FROM downloads WHERE id = ?').get(id);
+    if (row && row.url) {
+      let parsedMeta = null;
+      try { if (row.metadata) parsedMeta = JSON.parse(row.metadata); } catch (e) {}
+      const ctx = queueContextFromDownloadRow(row, parsedMeta);
+      const lane = detectLane(ctx.platform, row.url, ctx.metadata);
+      queuedJobs.set(id, { downloadId: id, url: row.url, platform: ctx.platform, channel: ctx.channel, title: ctx.title, metadata: ctx.metadata, progress: 0 });
+      jobLane.set(id, lane);
+      jobPlatform.set(id, ctx.platform);
+      const prio = Number(row.priority) || 0;
+      const target = lane === 'light' ? queuedLight : lane === 'batch' ? queuedBatch : queuedHeavy;
+      if (prio > 0) target.unshift(id); else target.push(id);
+      try { await db.prepare("UPDATE downloads SET status = 'queued' WHERE id = ?").run(id); } catch (e) {}
+      console.log(`🔄 Retry #${id} → lane=${lane} prio=${prio} positie=${prio > 0 ? 'front' : 'back'}`);
+      runDownloadSchedulerSoon();
+    }
+  } catch (e) {
+    console.warn(`Retry #${id} direct-enqueue mislukt: ${e && e.message ? e.message : e}`);
+    try { await rehydrateDownloadQueueWithMode('all', 0); } catch (e2) {}
+  }
 
   return res.json({ success: true });
 });
@@ -14095,9 +19208,10 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
   res.setHeader('Expires', '0');
   const limit = Math.max(1, Math.min(500, parseInt(req.query.limit || '120', 10) || 120));
   const type = String(req.query.type || 'all').toLowerCase();
-  const tagFilter = String(req.query.tag || '').trim();
+  const tagFilter = String(req.query.tag || '').trim().toLowerCase().replace(/^#/, '');
   const sort = String(req.query.sort || 'recent').toLowerCase();
-  const searchQuery = String(req.query.q || '').trim().toLowerCase();
+  let searchQuery = String(req.query.q || '').trim().toLowerCase();
+  if (tagFilter && !searchQuery) searchQuery = `#${tagFilter}`;
   const cursorRaw = String(req.query.cursor || '').trim();
   const cur = decodeCursor(cursorRaw);
   const includeActive = String(req.query.include_active || '0') !== '0';
@@ -14300,7 +19414,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
       // from dominating the entire page. Items stay in timestamp order,
       // but once a platform has enough representation, its remaining items are skipped.
       const platformCount = new Map();
-      const SOFT_CAP = fastPathPlatforms ? Infinity : Math.max(30, Math.ceil(limit * 0.3));
+      const SOFT_CAP = fastPathPlatforms ? Infinity : Math.max(6, Math.ceil(limit * 0.3));
       for (const row of pgResult.rows) {
         if (items.length >= limit) break;
         if (!row || !row.id) continue;
@@ -14499,6 +19613,7 @@ expressApp.get('/api/media/recent-files', async (req, res) => {
 
         const reqTime = Date.now() - reqStartTime;
         console.log(`📤 [${new Date().toISOString().substr(11, 8)}] Response /api/media/recent-files (search fast-path) - ${items.length} items in ${reqTime}ms`);
+        await attachTagsToItems(items, db);
         return res.json({
           success: true,
           items,
@@ -15378,16 +20493,8 @@ async function startServer() {
 
   server.on('error', (err) => {
     if (err.code === 'EADDRINUSE') {
-      console.log(`⚠️  Poort ${PORT} is bezet, probeer oude server te stoppen...`);
-      try {
-        const { execSync } = require('child_process');
-        execSync(`lsof -ti :${PORT} | xargs kill -9 2>/dev/null || true`, { timeout: 5000 });
-      } catch (e) { }
-      setTimeout(() => {
-        server.listen(PORT, () => {
-          console.log(`\n🟢 WEBDL Server draait op http://localhost:${PORT} (na herstart)`);
-        });
-      }, 1500);
+      console.error(`⚠️  Poort ${PORT} is al bezet. Stop eerst de bestaande WEBDL-server gericht; automatische kill is uitgeschakeld zodat Firefox en andere processen niet geraakt worden.`);
+      setTimeout(() => process.exit(1), 50);
     } else {
       console.error('Server error:', err);
     }
@@ -15422,6 +20529,14 @@ async function startServer() {
 
     setTimeout(() => {
       try {
+        // 2026-05-30 (Jürgen): zombie 'queued' rows uit vorige sessie terug
+        // naar 'pending' zodat rehydrate ze meeneemt. Anders blijven ze hangen
+        // (auto-rehydrate filtert alleen status='pending'). Klassieke
+        // lost-on-restart bug.
+        db.prepare("UPDATE downloads SET status='pending', updated_at=NOW() WHERE status='queued'")
+          .run()
+          .then((r) => { if (r && r.changes > 0) console.log(`🔄 Startup: ${r.changes} zombie 'queued' rows teruggezet naar 'pending'.`); })
+          .catch(() => {});
         rehydrateDownloadQueue();
         runDownloadSchedulerSoon();
         syncRuntimeActiveState().catch(() => { });
@@ -15527,7 +20642,7 @@ async function startServer() {
       path.join(BASE_DIR, 'Videodownloadhelper'),
       '/Volumes/HDD - One Touch/WEBDL/_4KDownloader',
     ];
-    const _4K_VIDEO_EXTS = new Set(['.mp4', '.mkv', '.webm', '.mov', '.m4v']);
+    const _4K_VIDEO_EXTS = new Set(['.mp4', '.mkv', '.webm', '.mov', '.m4v', '.avi', '.wmv', '.flv', '.ts', '.m2ts', '.mpg', '.mpeg', '.ogv', '.3gp', '.3g2']);
     const _4K_IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.avif']);
     // Combineer beide: watcher indexeert voortaan ook plaatjes uit hub-downloads.
     const _4K_MEDIA_EXTS = new Set([..._4K_VIDEO_EXTS, ..._4K_IMAGE_EXTS]);
@@ -15770,37 +20885,42 @@ async function startServer() {
         console.warn(`⚠️ [4K-Watcher] Watch mislukt: ${watchDir}: ${e.message}`);
       }
     }
-    // Startup scan: index any existing unindexed files retroactively
-    setTimeout(async () => {
-      let startupIndexed = 0;
-      for (const watchDir of _4K_WATCH_DIRS) {
-        if (!fs.existsSync(watchDir)) continue;
-        try {
-          const scanDir = (dir, depth = 0) => {
-            if (depth > 4) return [];
-            const results = [];
-            const entries = fs.readdirSync(dir, { withFileTypes: true });
-            for (const e of entries) {
-              if (e.name.startsWith('.')) continue;
-              const full = path.join(dir, e.name);
-              if (e.isDirectory()) results.push(...scanDir(full, depth + 1));
-              else if (e.isFile()
-                       && _4K_MEDIA_EXTS.has(path.extname(e.name).toLowerCase())
-                       && !_4K_SKIP_BASENAME_RE.test(e.name)) {
-                results.push(full);
+    // Startup scan is opt-in: a recursive scan over external volumes can block
+    // the simple-server event loop and make the Firefox extension look offline.
+    if (/^(1|true|yes|on)$/i.test(String(process.env.WEBDL_4K_WATCH_STARTUP_SCAN || '0'))) {
+      setTimeout(async () => {
+        let startupIndexed = 0;
+        for (const watchDir of _4K_WATCH_DIRS) {
+          if (!fs.existsSync(watchDir)) continue;
+          try {
+            const scanDir = (dir, depth = 0) => {
+              if (depth > 4) return [];
+              const results = [];
+              const entries = fs.readdirSync(dir, { withFileTypes: true });
+              for (const e of entries) {
+                if (e.name.startsWith('.')) continue;
+                const full = path.join(dir, e.name);
+                if (e.isDirectory()) results.push(...scanDir(full, depth + 1));
+                else if (e.isFile()
+                         && _4K_MEDIA_EXTS.has(path.extname(e.name).toLowerCase())
+                         && !_4K_SKIP_BASENAME_RE.test(e.name)) {
+                  results.push(full);
+                }
               }
+              return results;
+            };
+            const allFiles = scanDir(watchDir);
+            for (const fp of allFiles) {
+              await index4kFile(fp);
+              startupIndexed++;
             }
-            return results;
-          };
-          const allFiles = scanDir(watchDir);
-          for (const fp of allFiles) {
-            await index4kFile(fp);
-            startupIndexed++;
-          }
-        } catch (e) { }
-      }
-      if (startupIndexed > 0) console.log(`📥 [4K-Watcher] Startup scan: ${startupIndexed} bestanden gecontroleerd`);
-    }, 3000);
+          } catch (e) { }
+        }
+        if (startupIndexed > 0) console.log(`📥 [4K-Watcher] Startup scan: ${startupIndexed} bestanden gecontroleerd`);
+      }, 3000);
+    } else {
+      console.log('📥 [4K-Watcher] Startup scan overgeslagen (WEBDL_4K_WATCH_STARTUP_SCAN=0)');
+    }
     // ── einde 4K Downloader watcher ───────────────────────────────────
 
   });
@@ -15822,6 +20942,7 @@ function shutdownGracefully(signal) {
     for (const session of activeRecordings.values()) {
       promises.push(new Promise((resolve) => {
         try {
+          if (session.maxDurationTimer) clearTimeout(session.maxDurationTimer);
           const proc = session.recordingProcess;
           if (!proc || proc.killed) return resolve();
 
@@ -16014,6 +21135,7 @@ async function scan4KDownloaderDir() {
         );
         const newId = ins && ins.lastInsertRowid ? ins.lastInsertRowid : null;
         if (newId) {
+          await normalizeYoutubeDownloadTimestamp(newId, filePath);
           console.log(`[4K-SCAN] Indexed #${newId}: ${title} (${channel})`);
           // Queue thumbnail generation
           try {

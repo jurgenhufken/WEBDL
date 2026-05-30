@@ -81,18 +81,10 @@ function plan(url, opts = {}) {
 async function collectOutputs(workdir, opts = {}) {
   const seen = new Set();
   const out = [];
-  async function addFiles(files, minMtimeMs = 0) {
+  async function addFiles(files) {
     for (const file of files) {
       if (!file?.path || seen.has(file.path)) continue;
       if (!isFinalMediaFile(file.path)) continue;
-      if (minMtimeMs) {
-        try {
-          const st = await fs.promises.stat(file.path);
-          if (st.mtimeMs + 1000 < minMtimeMs) continue;
-        } catch {
-          continue;
-        }
-      }
       seen.add(file.path);
       out.push(file);
     }
@@ -104,7 +96,9 @@ async function collectOutputs(workdir, opts = {}) {
   if (saveLocation && path.resolve(saveLocation) !== path.resolve(workdir)) {
     const user = opts.job?.url ? urlToUsername(opts.job.url) : null;
     const userDir = user ? path.join(saveLocation, user) : saveLocation;
-    await addFiles(await collectOutputsRecursive(userDir), opts.startedAtMs || 0);
+    // ofscraper preserves source mtimes, so filtering by mtime drops freshly
+    // downloaded media whose original post date is older than the job start.
+    await addFiles(await collectOutputsRecursive(userDir));
   }
   return out;
 }

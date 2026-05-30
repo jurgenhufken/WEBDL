@@ -1,3 +1,8 @@
+> ⚠️ **VEROUDERD per 2026-05-30** — laatst bijgewerkt 24 april. Voor actueel:
+> - [../STATUS-2026-05-24.md](../STATUS-2026-05-24.md) — live document
+> - [../ARCHITECTURE.md](../ARCHITECTURE.md) — target architectuur
+> - [../DOCS-INDEX.md](../DOCS-INDEX.md) — overzicht alle docs
+
 # WEBDL Roadmap & Concept
 
 > Complete roadmap: wat gebouwd is, wat er NU wordt gebouwd, en wat er

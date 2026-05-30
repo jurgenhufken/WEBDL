@@ -1,40 +1,184 @@
 {
   "manifest_version": 2,
   "name": "Screen Recorder Controller",
-  "version": "1.0.16",
+  "version": "1.1.0",
   "description": "Besturingsinterface voor de native Screen Recorder applicatie",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "webdl-screen-recorder-controller@local",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ]
+      }
+    }
+  },
   "icons": {
     "48": "icons/icon-48.svg",
     "96": "icons/icon-96.svg"
   },
   "permissions": [
     "activeTab",
+    "tabs",
     "contextMenus",
     "storage",
+    "downloads",
     "http://localhost/*",
     "http://127.0.0.1/*",
+    "*://foot-fetish.club/*",
+    "*://*.foot-fetish.club/*",
     "*://*.footfetishforum.com/*",
+    "*://*.vipergirls.to/*",
+    "*://*.viper.to/*",
+    "*://*.xvideos.com/*",
+    "*://*.xvideos.red/*",
+    "*://*.xvideos-cdn.com/*",
+    "*://*.xv-cdn.com/*",
     "*://*.amateurvoyeurforum.com/*",
-    "*://*.elitebabes.com/*"
+    "*://*.elitebabes.com/*",
+    "*://*.footstockings.com/*",
+    "*://*.omegleporn.to/*",
+    "*://*.heavyfetish.com/*",
+    "*://*.darknetvideos.com/*",
+    "*://*.darknessporn.com/*",
+    "*://*.erome.com/*",
+    "*://*.xnxx.com/*",
+    "*://*.tnaflix.com/*",
+    "*://*.spankbang.com/*",
+    "*://*.redtube.com/*",
+    "*://*.pictoa.com/*",
+    "*://*.tubesafari.com/*",
+    "*://*.pornzog.com/*",
+    "*://*.alohatube.com/*",
+    "*://*.usersporn.com/*",
+    "*://*.nakedneighbour.com/*",
+    "*://*.pornkai.com/*",
+    "*://*.xfree.com/*",
+    "*://*.zzztube.com/*",
+    "*://*.favoyeurtube.net/*",
+    "*://*.spycamhub.net/*",
+    "*://*.sexygirlspics.com/*",
+    "*://*.porncoven.com/*",
+    "*://vipergirls.to/*",
+    "*://viper.to/*",
+    "*://*.recu.me/*",
+    "*://recu.me/*",
+    "*://*.chaturbate.com/*",
+    "*://chaturbate.com/*",
+    "*://t.me/*",
+    "*://*.t.me/*",
+    "*://telegram.me/*",
+    "*://*.telegram.me/*",
+    "*://web.telegram.org/*",
+    "*://mega.nz/*",
+    "*://*.mega.nz/*",
+    "*://mega.co.nz/*",
+    "*://*.mega.co.nz/*"
   ],
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
+      "matches": [
+        "<all_urls>"
+      ],
       "exclude_matches": [
         "http://localhost/*",
         "http://127.0.0.1/*"
       ],
-      "js": ["background/browser-polyfill.js", "content/debug-toolbar.js"],
+      "js": [
+        "background/browser-polyfill.js",
+        "content/debug-toolbar.js"
+      ],
+      "run_at": "document_end"
+    },
+    {
+      "matches": [
+        "*://*.footstockings.com/*",
+        "*://*.omegleporn.to/*",
+        "*://*.heavyfetish.com/*",
+        "*://*.darknetvideos.com/*",
+        "*://*.darknessporn.com/*",
+        "*://*.erome.com/*",
+        "*://*.xnxx.com/*",
+        "*://*.tnaflix.com/*",
+        "*://*.spankbang.com/*",
+        "*://*.redtube.com/*",
+        "*://*.pictoa.com/*",
+        "*://*.tubesafari.com/*",
+        "*://*.pornzog.com/*",
+        "*://*.alohatube.com/*",
+        "*://*.usersporn.com/*",
+        "*://*.nakedneighbour.com/*",
+        "*://*.pornkai.com/*",
+        "*://*.xfree.com/*",
+        "*://*.zzztube.com/*",
+        "*://*.favoyeurtube.net/*",
+        "*://*.spycamhub.net/*",
+        "*://*.sexygirlspics.com/*",
+        "*://*.porncoven.com/*",
+        "*://*.vipergirls.to/*",
+        "*://vipergirls.to/*",
+        "*://*.viper.to/*",
+        "*://viper.to/*",
+        "*://*.recu.me/*",
+        "*://recu.me/*",
+        "*://*.chaturbate.com/*",
+        "*://chaturbate.com/*",
+        "*://t.me/*",
+        "*://*.t.me/*",
+        "*://telegram.me/*",
+        "*://*.telegram.me/*",
+        "*://web.telegram.org/*",
+        "*://mega.nz/*",
+        "*://*.mega.nz/*",
+        "*://mega.co.nz/*",
+        "*://*.mega.co.nz/*"
+      ],
+      "js": [
+        "content/sites/mega.js",
+        "content/sites/telegram.js",
+        "content/sites/chaturbate.js",
+        "content/sites/footstockings.js",
+        "content/sites/omegleporn.js",
+        "content/sites/vipergirls.js",
+        "content/sites/heavyfetish.js",
+        "content/sites/darknetvideos.js",
+        "content/sites/darknessporn.js",
+        "content/sites/erome.js",
+        "content/sites/xnxx.js",
+        "content/sites/tnaflix.js",
+        "content/sites/spankbang.js",
+        "content/sites/redtube.js",
+        "content/sites/pictoa.js",
+        "content/sites/tubesafari.js",
+        "content/sites/pornzog.js",
+        "content/sites/alohatube.js",
+        "content/sites/usersporn.js",
+        "content/sites/nakedneighbour.js",
+        "content/sites/pornkai.js",
+        "content/sites/xfree.js",
+        "content/sites/zzztube.js",
+        "content/sites/favoyeurtube.js",
+        "content/sites/spycamhub.js",
+        "content/sites/sexygirlspics.js",
+        "content/sites/porncoven.js",
+        "content/sites/recu-me.js",
+        "content/site-engine.js"
+      ],
       "run_at": "document_end"
     }
   ],
   "background": {
-    "scripts": ["background/browser-polyfill.js", "background/socket.io.min.js", "background/simple-background.js"]
+    "scripts": [
+      "background/browser-polyfill.js",
+      "background/socket.io.min.js",
+      "background/simple-background.js"
+    ]
   },
   "web_accessible_resources": [
     "icons/*.svg",
     "content/*.css",
     "content/*.js",
+    "content/sites/*.js",
     "background/*.js"
   ]
 }

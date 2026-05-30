@@ -8,6 +8,18 @@ const { defineAdapter } = require('./base');
 
 const YT_DLP = process.env.WEBDL_YT_DLP || 'yt-dlp';
 const FFMPEG_LOCATION = process.env.WEBDL_FFMPEG || '/opt/homebrew/bin/ffmpeg';
+const YOUTUBE_SLEEP_REQUESTS = process.env.WEBDL_YTDLP_YOUTUBE_SLEEP_REQUESTS || '2';
+const YOUTUBE_SLEEP_INTERVAL = process.env.WEBDL_YTDLP_YOUTUBE_SLEEP_INTERVAL || '2';
+const YOUTUBE_MAX_SLEEP_INTERVAL = process.env.WEBDL_YTDLP_YOUTUBE_MAX_SLEEP_INTERVAL || '8';
+const XVIDEOS_EXPAND_LIMIT = Number.parseInt(process.env.WEBDL_XVIDEOS_EXPAND_LIMIT || '50', 10) || 50;
+const XHOMEALONE_EXPAND_LIMIT = Number.parseInt(process.env.WEBDL_XHOMEALONE_EXPAND_LIMIT || '100', 10) || 100;
+const YTDLP_TIMEOUT_MS = Number.parseInt(process.env.WEBDL_YTDLP_TIMEOUT_MS || String(4 * 60 * 60 * 1000), 10);
+const YTDLP_IDLE_TIMEOUT_MS = Number.parseInt(process.env.WEBDL_YTDLP_IDLE_TIMEOUT_MS || String(12 * 60 * 1000), 10);
+const MERGE_VIDEO_HOSTS = [
+  'youtube.com', 'youtu.be', 'vimeo.com', 'twitch.tv',
+  'reddit.com', 'redd.it', 'v.redd.it',
+  'streamable.com', 'bitchute.com', 'rumble.com',
+];
 
 // Generieke matcher: yt-dlp ondersteunt duizenden sites, dus we accepteren
 // elke http(s)-URL. Andere adapters (reddit, instagram, tdl) hebben hogere
@@ -23,10 +35,318 @@ function matches(url) {
 
 // Output-template: alle media van één job in z'n eigen job-dir, nette naam.
 const OUTPUT_TEMPLATE = '%(title).200B [%(id)s].%(ext)s';
+const DIRECT_MEDIA_RE = /\.(jpe?g|png|webp|gif|avif|bmp|mp4|webm|mkv|mov|m4v|avi|flv|ts)(?:[/?#]|$)/i;
+
+function isDirectMediaUrl(url) {
+  try {
+    const u = new URL(String(url || ''));
+    return (u.protocol === 'http:' || u.protocol === 'https:') && DIRECT_MEDIA_RE.test(u.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeFileNamePart(value, fallback = 'download') {
+  const cleaned = String(value || '')
+    .normalize('NFKD')
+    .replace(/[^\w .()[\]-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120);
+  return cleaned || fallback;
+}
+
+function directMediaFileName(url, opts = {}) {
+  try {
+    const u = new URL(String(url || ''));
+    const parts = u.pathname.split('/').filter(Boolean);
+    const ext = path.extname(parts[parts.length - 1] || '').toLowerCase() || '.bin';
+    const idPart = [...parts].reverse()
+      .map((part) => part.replace(/\.(jpe?g|png|webp|gif|avif|bmp|mp4|webm|mkv|mov|m4v|avi|flv|ts)$/i, ''))
+      .find((part) => /^[a-z0-9]{8,}$/i.test(part));
+    const title = sanitizeFileNamePart(opts.title || idPart || parts[parts.length - 1] || 'download');
+    return `${title}${ext}`;
+  } catch {
+    return 'download.bin';
+  }
+}
+
+function normalizeFlatEntryUrl(obj, seedUrl) {
+  const raw = String(obj && (obj.url || obj.webpage_url || obj.original_url) || '').trim();
+  const id = String(obj && obj.id || '').trim();
+  if (/^https?:\/\//i.test(raw)) return raw;
+  try {
+    const seed = new URL(String(seedUrl || ''));
+    const host = seed.hostname.replace(/^www\./, '').toLowerCase();
+    if (raw.startsWith('/')) return new URL(raw, seed.origin).toString();
+    if ((host === 'youtube.com' || host === 'youtu.be' || host.endsWith('.youtube.com')) && id) {
+      return `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`;
+    }
+    if (raw) return new URL(raw, seed.origin).toString();
+  } catch {}
+  return raw || (id ? `https://www.youtube.com/watch?v=${encodeURIComponent(id)}` : '');
+}
+
+function bestThumbnail(obj, entryUrl) {
+  const direct = String(obj && (obj.thumbnail || obj.thumbnail_url) || '').trim();
+  if (/^https?:\/\//i.test(direct)) return direct;
+
+  const thumbs = Array.isArray(obj && obj.thumbnails) ? obj.thumbnails : [];
+  const urls = thumbs
+    .map((t) => String(t && t.url || '').trim())
+    .filter((u) => /^https?:\/\//i.test(u));
+  if (urls.length) return urls[urls.length - 1];
+
+  try {
+    const u = new URL(String(entryUrl || ''));
+    const host = u.hostname.replace(/^www\./, '').toLowerCase();
+    const videoId = host === 'youtu.be'
+      ? u.pathname.split('/').filter(Boolean)[0]
+      : u.searchParams.get('v');
+    if ((host === 'youtube.com' || host === 'youtu.be' || host.endsWith('.youtube.com')) && videoId) {
+      return `https://i.ytimg.com/vi/${encodeURIComponent(videoId)}/hqdefault.jpg`;
+    }
+  } catch {}
+  return '';
+}
+
+function isTikTokUrl(url) {
+  try {
+    const h = new URL(String(url || '')).hostname.replace(/^www\./, '').toLowerCase();
+    return h === 'tiktok.com' || h.endsWith('.tiktok.com');
+  } catch {
+    return false;
+  }
+}
+
+function isDirectTikTokVideoUrl(url) {
+  try {
+    const u = new URL(String(url || ''));
+    const host = u.hostname.replace(/^www\./, '').toLowerCase();
+    if (host !== 'tiktok.com' && !host.endsWith('.tiktok.com')) return false;
+    return /^\/@[^/]+\/video\/\d+\/?$/i.test(u.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function isMergeVideoUrl(url) {
+  try {
+    const host = new URL(String(url || '')).hostname.replace(/^www\./, '').toLowerCase();
+    if (host === 'tiktok.com' || host.endsWith('.tiktok.com')) {
+      return !isDirectTikTokVideoUrl(url);
+    }
+    return MERGE_VIDEO_HOSTS.some((h) => host === h || host.endsWith('.' + h));
+  } catch {
+    return false;
+  }
+}
+
+function isXvideosListingUrl(url) {
+  try {
+    const u = new URL(String(url || ''));
+    if (!isXvideosHost(u.hostname)) return false;
+    return !/^\/video[./]/i.test(u.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function isXvideosHost(hostname) {
+  const host = String(hostname || '').replace(/^www\./, '').toLowerCase();
+  return host === 'xvideos.com' || host.endsWith('.xvideos.com') || host === 'xvideos.red' || host.endsWith('.xvideos.red');
+}
+
+function normalizeXvideosUrlForYtdlp(url) {
+  try {
+    const u = new URL(String(url || ''));
+    if (isXvideosHost(u.hostname) && /\.red$/i.test(u.hostname.replace(/^www\./i, ''))) {
+      u.hostname = 'www.xvideos.com';
+      return u.toString();
+    }
+  } catch {}
+  return url;
+}
+
+function isXhomealoneListingUrl(url) {
+  try {
+    const u = new URL(String(url || ''));
+    const host = u.hostname.replace(/^www\./, '').toLowerCase();
+    if (host !== 'xhomealone.com' && !host.endsWith('.xhomealone.com')) return false;
+    return !/^\/videos\/\d+\//i.test(u.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function decodeHtml(text) {
+  return String(text || '')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(Number.parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number.parseInt(n, 10)));
+}
+
+function titleFromXvideosHref(href) {
+  const slug = String(href || '').split('/').filter(Boolean).pop() || '';
+  return decodeURIComponent(slug).replace(/[_-]+/g, ' ').trim();
+}
+
+function absoluteUrl(href, seedUrl) {
+  try {
+    return new URL(href, seedUrl).toString().split('#')[0];
+  } catch {
+    return '';
+  }
+}
+
+function nextXvideosListingUrl(docUrl, html, visited) {
+  const links = [];
+  const re = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = re.exec(html))) {
+    const href = decodeHtml(m[1]);
+    const text = decodeHtml(String(m[2] || '').replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim().toLowerCase();
+    const abs = absoluteUrl(href, docUrl);
+    if (!abs || visited.has(abs)) continue;
+    try {
+      const u = new URL(abs);
+      if (!isXvideosHost(u.hostname)) continue;
+      const pageNo = Number.parseInt(u.searchParams.get('p') || '', 10);
+      const relNext = /\b(?:next|volgende|›|»)\b/i.test(text) || /rel=["']next["']/i.test(m[0]);
+      if (relNext || Number.isFinite(pageNo)) links.push({ url: abs, pageNo: Number.isFinite(pageNo) ? pageNo : Number.MAX_SAFE_INTEGER, relNext });
+    } catch {}
+  }
+  const explicit = links.find((entry) => entry.relNext);
+  if (explicit) return explicit.url;
+  links.sort((a, b) => a.pageNo - b.pageNo);
+  return links.length ? links[0].url : '';
+}
+
+async function expandXvideosListing(url, opts = {}) {
+  const pageLimit = Math.max(1, Number.parseInt(opts.xvideosPages || opts.pages || process.env.WEBDL_XVIDEOS_EXPAND_PAGES || '1', 10) || 1);
+  const entries = [];
+  const seen = new Set();
+  const visited = new Set();
+  let pageUrl = url;
+  for (let page = 0; page < pageLimit && pageUrl && entries.length < XVIDEOS_EXPAND_LIMIT; page += 1) {
+    if (visited.has(pageUrl)) break;
+    visited.add(pageUrl);
+    const res = await fetch(pageUrl, {
+    headers: {
+      'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+      'accept': 'text/html,application/xhtml+xml',
+    },
+    });
+    if (!res.ok) throw new Error(`xvideos listing fetch failed: HTTP ${res.status}`);
+    const html = await res.text();
+    const re = /<a\b[^>]*href=["']([^"']*\/video[./][^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+    let m;
+    while ((m = re.exec(html)) && entries.length < XVIDEOS_EXPAND_LIMIT) {
+      const entryUrl = absoluteUrl(decodeHtml(m[1]), pageUrl);
+      if (!entryUrl || seen.has(entryUrl)) continue;
+      seen.add(entryUrl);
+      const textTitle = decodeHtml(String(m[2] || '').replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+      const hrefTitle = titleFromXvideosHref(entryUrl);
+      entries.push({
+        id: entryUrl.split('/').filter(Boolean).slice(-2, -1)[0] || '',
+        title: textTitle && !/^\d+p$/i.test(textTitle) ? textTitle : hrefTitle,
+        url: normalizeXvideosUrlForYtdlp(entryUrl),
+        thumbnail: '',
+        channel: 'xvideos',
+        playlistTitle: 'xvideos listing',
+      });
+    }
+    pageUrl = nextXvideosListingUrl(pageUrl, html, visited);
+  }
+  return entries;
+}
+
+function xhomealoneChannelFromUrl(seedUrl) {
+  try {
+    const parts = new URL(String(seedUrl || '')).pathname.split('/').filter(Boolean);
+    if (parts[0] === 'tags' && parts[1]) return decodeURIComponent(parts[1]).replace(/-/g, '_');
+  } catch {}
+  return '';
+}
+
+async function expandXhomealoneListing(url) {
+  const res = await fetch(url, {
+    headers: {
+      'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+      'accept': 'text/html,application/xhtml+xml',
+    },
+  });
+  if (!res.ok) throw new Error(`xhomealone listing fetch failed: HTTP ${res.status}`);
+  const html = await res.text();
+  const entries = [];
+  const seen = new Set();
+  const re = /<a\b([^>]*?)href=["']([^"']*\/videos\/\d+\/[^"']*)["']([^>]*)>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = re.exec(html)) && entries.length < XHOMEALONE_EXPAND_LIMIT) {
+    const entryUrl = absoluteUrl(decodeHtml(m[2]), url);
+    if (!entryUrl || seen.has(entryUrl)) continue;
+    seen.add(entryUrl);
+    const attrs = `${m[1] || ''} ${m[3] || ''}`;
+    const titleMatch = attrs.match(/\btitle=["']([^"']+)["']/i);
+    const body = String(m[4] || '');
+    const thumbMatch = body.match(/\bdata-original=["']([^"']+)["']/i)
+      || body.match(/\bdata-webp=["']([^"']+)["']/i)
+      || body.match(/\bsrc=["']([^"']+)["']/i);
+    const textTitle = decodeHtml(String(m[4] || '').replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+    const title = decodeHtml(titleMatch ? titleMatch[1] : textTitle).replace(/\s+/g, ' ').trim()
+      || titleFromXvideosHref(entryUrl);
+    entries.push({
+      id: (entryUrl.match(/\/videos\/(\d+)\//i) || [])[1] || '',
+      title,
+      url: entryUrl,
+      thumbnail: thumbMatch ? absoluteUrl(decodeHtml(thumbMatch[1]), url) : '',
+      channel: xhomealoneChannelFromUrl(url) || '',
+      playlistTitle: xhomealoneChannelFromUrl(url) ? `xhomealone tag ${xhomealoneChannelFromUrl(url)}` : 'xhomealone listing',
+    });
+  }
+  return entries;
+}
 
 function plan(url, opts = {}) {
   const cwd = opts.cwd;
-  const quality = opts.quality || 'bv*+ba/best';
+  const plannedUrl = normalizeXvideosUrlForYtdlp(url);
+  if (isDirectMediaUrl(plannedUrl)) {
+    return {
+      cmd: process.env.WEBDL_CURL || 'curl',
+      args: [
+        '-L',
+        '--fail',
+        '--retry', '2',
+        '--retry-delay', '1',
+        '--connect-timeout', '20',
+        '--max-time', process.env.WEBDL_DIRECT_MEDIA_MAX_TIME || '180',
+        '-A', process.env.WEBDL_DIRECT_MEDIA_USER_AGENT || 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+        '-o', directMediaFileName(plannedUrl, opts),
+        plannedUrl,
+      ],
+      cwd,
+      env: {},
+      timeoutMs: Number.parseInt(process.env.WEBDL_DIRECT_MEDIA_TIMEOUT_MS || String(4 * 60 * 1000), 10),
+      idleTimeoutMs: Number.parseInt(process.env.WEBDL_DIRECT_MEDIA_IDLE_TIMEOUT_MS || String(90 * 1000), 10),
+    };
+  }
+  const isYoutube = /(?:youtube\.com|youtu\.be)/i.test(String(plannedUrl || ''));
+  const isTikTok = isTikTokUrl(plannedUrl);
+  // 2026-05-30 Spoor A.8: Jürgen heeft YouTube Premium → optimale kwaliteit garanderen.
+  // - YouTube: cap 4K (height<=2160) zodat 8K-randgevallen geen schijf vol pompen,
+  //   maar 4K WEL wordt gepakt als beschikbaar. Premium-streams (hogere bitrate
+  //   1080p/4K) worden via cookies-from-browser herkend en gerouteerd.
+  // - Format-sort: prefer hoogste resolutie, dan bitrate, dan moderne codecs
+  //   (AV1 > VP9 > H.264, opus > m4a). yt-dlp 2024+ ondersteunt dit native.
+  // - Andere merge-hosts: bv*+ba/best blijft (vimeo etc. hebben geen Premium-tier).
+  const quality = opts.quality
+    || (isYoutube ? 'bv*[height<=2160]+ba/b'
+        : isMergeVideoUrl(plannedUrl) ? 'bv*+ba/best'
+        : 'best');
   const args = [
     '--no-colors',
     '--newline',                // progress per regel i.p.v. \r-updates
@@ -35,23 +355,54 @@ function plan(url, opts = {}) {
     '-f', quality,
     '-o', OUTPUT_TEMPLATE,
     '--ffmpeg-location', FFMPEG_LOCATION,  // Fix postprocessing / audio merge
-    '--cookies-from-browser', 'firefox',   // Fix age verification
+    '--cookies-from-browser', 'firefox',   // Fix age verification + YT Premium auth
     '--write-info-json',                   // Metadata voor gallery sync
     '--no-playlist',                       // NOOIT een hele playlist in 1 job
-    url,
   ];
-  return { cmd: YT_DLP, args, cwd, env: {} };
+  if (isYoutube) {
+    // Prefereer hogere resolutie, dan hogere bitrate (Premium HD-streams),
+    // dan moderne codecs voor efficiëntie + filesize.
+    args.push('--format-sort', 'res,br,codec:av01:vp9.2:vp9:avc1,acodec:opus:m4a');
+  }
+  if (isTikTok) {
+    args.push(
+      '--impersonate', process.env.WEBDL_TIKTOK_IMPERSONATE || 'chrome',
+      '--ignore-errors',
+      '--no-abort-on-error',
+      '--skip-playlist-after-errors', process.env.WEBDL_TIKTOK_SKIP_PLAYLIST_AFTER_ERRORS || '25',
+    );
+  }
+  if (isYoutube) {
+    args.push(
+      '--sleep-requests', YOUTUBE_SLEEP_REQUESTS,
+      '--sleep-interval', YOUTUBE_SLEEP_INTERVAL,
+      '--max-sleep-interval', YOUTUBE_MAX_SLEEP_INTERVAL,
+    );
+  }
+  args.push(plannedUrl);
+  return { cmd: YT_DLP, args, cwd, env: {}, timeoutMs: YTDLP_TIMEOUT_MS, idleTimeoutMs: YTDLP_IDLE_TIMEOUT_MS };
 }
 
 // Matcht op onze custom progress-template hierboven.
 const PROG_RE = /^PROG pct=\s*([\d.]+)%\s+speed=\s*(\S+)\s+eta=\s*(\S+)/;
+const CURL_PROGRESS_RE = /^\s*(\d{1,3})\s+\S+\s+\d{1,3}\s+\S+\s+\d+\s+\d+\s+(\S+)\s+\S+\s+\S+\s+\S+\s+(\S+)/;
 
 function parseProgress(line) {
   const m = PROG_RE.exec(line);
-  if (!m) return null;
-  const pct = Number.parseFloat(m[1]);
-  if (!Number.isFinite(pct)) return null;
-  return { pct, speed: m[2], eta: m[3] };
+  if (m) {
+    const pct = Number.parseFloat(m[1]);
+    if (!Number.isFinite(pct)) return null;
+    return { pct, speed: m[2], eta: m[3] };
+  }
+  const curl = CURL_PROGRESS_RE.exec(line);
+  if (curl) {
+    const pct = Number.parseFloat(curl[1]);
+    if (!Number.isFinite(pct) || pct < 0 || pct > 100) return null;
+    const speed = curl[2] && curl[2] !== '0' ? `${curl[2]}/s` : '';
+    const eta = curl[3] && curl[3] !== '--:--:--' ? curl[3] : '';
+    return { pct, speed, eta };
+  }
+  return null;
 }
 
 // Eenvoudige file-collectie: alles wat in workdir staat na afloop, niet-recursief.
@@ -75,8 +426,16 @@ async function collectOutputs(workdir) {
 // Draait `yt-dlp --flat-playlist --dump-json` en parsed elke JSON-line
 // tot een compacte entry { id, title, url }.
 // Resolvet naar een array of rejects bij fatale fouten.
-function expandPlaylist(url) {
+function expandPlaylist(url, opts = {}) {
   return new Promise((resolve, reject) => {
+    if (isXvideosListingUrl(url)) {
+      expandXvideosListing(url, opts).then(resolve, reject);
+      return;
+    }
+    if (isXhomealoneListingUrl(url)) {
+      expandXhomealoneListing(url).then(resolve, reject);
+      return;
+    }
     const args = [
       '--flat-playlist',
       '--dump-json',
@@ -100,9 +459,18 @@ function expandPlaylist(url) {
           const obj = JSON.parse(trimmed);
           const id = obj.id || '';
           const title = obj.title || obj.fulltitle || '';
-          const entryUrl = obj.url || obj.webpage_url || obj.original_url || '';
+          const entryUrl = normalizeFlatEntryUrl(obj, url);
           if (entryUrl) {
-            entries.push({ id, title, url: entryUrl });
+            entries.push({
+              id,
+              title,
+              url: entryUrl,
+              thumbnail: bestThumbnail(obj, entryUrl),
+              channel: obj.channel || obj.uploader || obj.uploader_id || obj.playlist_uploader || '',
+              channelId: obj.channel_id || obj.uploader_id || '',
+              channelUrl: obj.channel_url || obj.uploader_url || '',
+              playlistTitle: obj.playlist_title || '',
+            });
           }
         } catch { /* niet-JSON regel, skip */ }
       }

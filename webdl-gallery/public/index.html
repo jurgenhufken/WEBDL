@@ -4,18 +4,31 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WEBDL Gallery</title>
-<link rel="stylesheet" href="/styles.css">
+<link rel="stylesheet" href="/vendor/jstree/themes/default/style.min.css?v=3.3.17">
+<link rel="stylesheet" href="/styles.css?v=20260524-8">
 </head>
 <body>
   <header class="topbar">
     <h1>WEBDL Gallery</h1>
     <div class="filters">
       <input id="q" type="search" placeholder="Zoeken...">
-      <select id="platform"><option value="">Alle platforms</option></select>
-      <select id="channel"><option value="">Alle kanalen</option></select>
+      <select id="platform" class="legacy-filter-select"><option value="">Alle platforms</option></select>
+      <div id="platformPicker" class="source-tree-filter"></div>
+      <select id="channel" class="legacy-filter-select"><option value="">Alle kanalen</option></select>
+      <div id="channelPicker" class="facet-picker legacy-filter-select"></div>
+      <select id="channelSort" title="Kanaalsortering">
+        <option value="count">Kanalen: aantal</option>
+        <option value="name">Kanalen: naam</option>
+        <option value="recent">Kanalen: recent</option>
+        <option value="rating">Kanalen: rating</option>
+      </select>
       <select id="sort">
         <option value="recent">Nieuwste</option>
-        <option value="rating">Rating</option>
+        <option value="oldest">Oudste</option>
+        <option value="channel">Kanaal/model A-Z</option>
+        <option value="channel_desc">Kanaal/model Z-A</option>
+        <option value="rating">Rating hoog</option>
+        <option value="rating_asc">Rating laag</option>
         <option value="random">Random</option>
       </select>
       <select id="minRating">
@@ -31,12 +44,19 @@
         <option value="video">🎬 Video</option>
         <option value="image">🖼 Afbeelding</option>
       </select>
+      <input id="tagFilter" type="hidden" value="">
+      <div id="tagFilterMatrix" class="tag-filter-matrix" aria-label="Tag filter"></div>
+      <button id="queryBack" class="query-nav-btn" title="Vorige gallery-query">←</button>
+      <button id="queryForward" class="query-nav-btn" title="Volgende gallery-query">→</button>
+      <span id="queryHistoryLabel" class="query-history-label"></span>
       <button id="refresh">Ververs</button>
       <button id="themeBtn" class="theme-btn" title="Thema wisselen">💎</button>
+      <button id="helpBtn" class="theme-btn" title="Sneltoetsen & bediening (?)">❓</button>
       <span id="stats" class="stats"></span>
     </div>
   </header>
 
+  <section id="activeStrip" class="active-strip" aria-live="polite"></section>
   <main id="grid" class="grid"></main>
   <div id="sentinel" class="sentinel">Laden…</div>
 
@@ -57,9 +77,8 @@
           <option value="video">Video</option>
           <option value="image">Foto</option>
         </select>
-        <select id="vTagFilter" title="Tag filter">
-          <option value="">Alle tags</option>
-        </select>
+        <input id="vTagFilter" type="hidden" value="">
+        <div id="vTagFilterMatrix" class="tag-filter-matrix viewer-tag-filter" aria-label="Tag filter"></div>
         <button id="vReload" title="Herladen">↻</button>
       </div>
 
@@ -76,8 +95,9 @@
           <option value="60">1m</option>
           <option value="300">5m</option>
         </select>
-        <button id="vWrap" title="Wrap aan/uit" class="active">🔁 Wrap: aan</button>
+        <button id="vWrap" title="Aan het einde verder laden uit de database">∞ Oneindig</button>
         <button id="vRandom" title="Random aan/uit">🔀 Rand: uit</button>
+        <button id="vChannelScope" title="Omhoog/omlaag springt naar vorige/volgende groep: model, set/thread of kanaal binnen de huidige query">↕ Kanaal: query</button>
         <button id="vVideoWait" title="Wacht op video-einde" class="active">⏳ Wacht: aan</button>
       </div>
 
@@ -96,13 +116,14 @@
         <!-- Links: sidebar toggle + titel -->
         <div class="vtop-left">
           <button id="vBtnSidebar" class="vtop-btn" title="Sidebar openen/sluiten (S)">☰</button>
+          <button id="vBtnLocateGallery" class="vtop-btn" type="button" title="Ga naar deze plek in de gallery">↙ Gallery</button>
           <div class="vtop-info">
             <div id="vNowTitle" class="vtop-title"></div>
             <div id="vNowSub" class="vtop-sub"></div>
           </div>
         </div>
 
-        <!-- Midden: rating + afspeelknoppen -->
+        <!-- Midden: rating -->
         <div class="vtop-center">
           <div class="vtop-rating" id="vNowRating"></div>
           <select id="vRatingSelect" class="vtop-select" title="Rating instellen">
@@ -118,23 +139,37 @@
             <option value="4.5">4.5</option>
             <option value="5">5</option>
           </select>
-          <button id="vSlideshow2" class="vtop-btn" title="Diashow starten/stoppen (spatiebalk)">▶ Dia</button>
-          <button id="vRandom2" class="vtop-btn" title="Willekeurige volgorde aan/uit">🔀 Rand</button>
-          <label class="vtop-ctrl" title="Zoom"><span>Zoom</span> <input id="vZoomRange" type="range" min="100" max="600" step="10" value="100"></label>
-          <button id="vZoomReset" class="vtop-btn" title="Zoom resetten">Reset</button>
         </div>
 
-        <!-- Rechts: media-controls + tools -->
+        <!-- Rechts: tools -->
         <div class="vtop-right">
           <label class="vtop-ctrl" title="Volume"><span>Vol</span> <input id="vVol" type="range" min="0" max="1" step="0.01" value="0.8"></label>
           <button id="vBtnMute" class="vtop-btn" title="Geluid dempen (M)">🔊</button>
-          <label class="vtop-ctrl" title="Positie in video"><span>Tijd</span> <input id="vSeek" type="range" min="0" max="1000" step="1" value="0"></label>
+          <button id="vBtnReloadMedia" class="vtop-btn" title="Alleen huidige media opnieuw laden">↻ Video</button>
           <span class="vtop-sep"></span>
           <button id="vBtnOpen" class="vtop-btn" title="Bron-URL openen in browser">🔗 Bron</button>
+          <button id="vBtnShowGroup" class="vtop-btn" title="Toon deze serie/model/kanaal als gallery-query" onclick="window.__wdShowCurrentGroupInGallery && window.__wdShowCurrentGroupInGallery(event)">↪ Groep</button>
           <button id="vBtnFinder" class="vtop-btn" title="Bestand tonen in Finder">📁 Finder</button>
-          <button id="vBtnTags" class="vtop-btn" title="Tags beheren">🏷 Tags</button>
+          <button id="vBtnRotate" class="vtop-btn" title="Media 90° draaien" onmousedown="window.__wdRotateMedia && window.__wdRotateMedia(event)" onclick="window.__wdRotateMedia && window.__wdRotateMedia(event)">↻ +90°</button>
+          <button id="vBtnTags" class="vtop-btn" type="button" title="Tags beheren">🏷 Tags</button>
           <button id="vBtnLog" class="vtop-btn" title="Activiteitenlog tonen (L)">📋 Log</button>
           <button id="vBtnTheme" class="vtop-btn" title="Thema wisselen">💎</button>
+          <button id="vBtnHelp" class="vtop-btn" title="Sneltoetsen & bediening (?)">❓</button>
+          <input id="vZoomRange" class="vzoom-hidden" type="range" min="100" max="600" step="10" value="100" aria-hidden="true" tabindex="-1">
+          <button id="vZoomReset" class="vzoom-hidden" aria-hidden="true" tabindex="-1">Reset</button>
+          <button id="vSlideshow2" class="vtop-btn" title="Slideshow aan/uit">▶ Dia</button>
+          <select id="vSlideshowSec2" class="vtop-btn" title="Interval slideshow" style="padding:2px 4px;">
+            <option value="2">2s</option>
+            <option value="4" selected>4s</option>
+            <option value="7">7s</option>
+            <option value="10">10s</option>
+            <option value="15">15s</option>
+            <option value="30">30s</option>
+            <option value="60">1m</option>
+            <option value="300">5m</option>
+          </select>
+          <button id="vVideoWait2" class="vtop-btn active" title="Videos uitspelen of meteen door">⏳ Wacht: aan</button>
+          <button id="vRandom2" class="vtop-btn" title="Random navigatie aan/uit (R)">🔀 Rand</button>
           <button id="vClose" class="vtop-close" title="Viewer sluiten (Esc)">✕</button>
         </div>
       </div>
@@ -142,30 +177,111 @@
       <!-- Stage -->
       <div class="viewer-stage" id="vStage">
         <div id="vContent" class="vcontent"></div>
-        <!-- Progress bar: absoluut gepositioneerd, JS alignt op video-onderkant -->
+        <!-- Progress bar: vaste plek in de control-zone -->
         <div class="vprogressbar" id="vProgressBar">
           <div class="vprogressbar-fill" id="vProgressFill"></div>
           <div class="vprogressbar-handle" id="vProgressHandle"></div>
         </div>
-        <button class="viewer-nav prev" id="vPrev" title="Vorige (←)">‹</button>
-        <button class="viewer-nav next" id="vNext" title="Volgende (→)">›</button>
-        <div class="hud-pill hud-left" id="vHudLeft"></div>
-        <div class="hud-pill hud-right" id="vHudRight"></div>
+        <div class="vbottom-overlay" id="vBottomOverlay">
+          <div class="vbottom-meta-row">
+            <div class="hud-pill hud-left" id="vHudLeft"></div>
+            <div class="hud-pill hud-right" id="vHudRight"></div>
+          </div>
+          <div id="vFavoriteOverlay" class="vfavorite-overlay hidden" aria-label="Snelle tags"></div>
+          <div class="vbottom-controls hidden" id="vBottomControls" aria-label="Video bediening">
+            <input id="vSeek" class="vbottom-seek" type="range" min="0" max="1000" step="1" value="0" title="Positie in video">
+            <div class="vbottom-row">
+              <div class="vbottom-left">
+                <button id="vBtnPlayPause" class="vplay-btn" title="Afspelen/pauzeren (spatie)">▶</button>
+                <button class="vicon-btn" data-seek="-10" title="10 seconden terug">↶ 10</button>
+                <button class="vicon-btn" data-seek="10" title="10 seconden vooruit">10 ↷</button>
+                <button id="vBtnMuteBottom" class="vicon-btn" title="Geluid dempen (M)">🔊</button>
+                <input id="vBottomVol" class="vvolume-range" type="range" min="0" max="1" step="0.01" value="0.8" title="Volume">
+              </div>
+              <div class="vtime-label" id="vTimeLabel">0:00 / 0:00</div>
+              <div class="vbottom-right">
+                <button id="vSpeedDown" class="vicon-btn" title="Langzamer ([)">−</button>
+                <select id="vSpeedSelect" class="vspeed-select" title="Afspeelsnelheid">
+                  <option value="0.1">0.1×</option>
+                  <option value="0.25">0.25×</option>
+                  <option value="0.5">0.5×</option>
+                  <option value="1" selected>1×</option>
+                  <option value="1.5">1.5×</option>
+                  <option value="2">2×</option>
+                  <option value="3">3×</option>
+                  <option value="4">4×</option>
+                </select>
+                <button id="vSpeedUp" class="vicon-btn" title="Sneller (])">+</button>
+                <button id="vBtnReverse" class="vicon-btn" title="Achteruit afspelen">↤</button>
+                <button id="vBtnMainProgress" class="vicon-btn vmain-progress-toggle active" title="Grote voortgangsbalk verbergen">▰</button>
+                <button id="vBtnCaptureStage" class="vicon-btn vcapture-float" type="button" title="Screenshot van huidige video/frame (rechter Ctrl)">📷</button>
+                <button id="vBtnRotateBottom" class="vicon-btn" title="Media 90° draaien">⟳</button>
+                <button id="vBtnFullscreen" class="vicon-btn" title="Volledig scherm">⛶</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <button id="vBtnRotateStage" class="vrotate-float" title="Media 90° draaien">↻ +90°</button>
+        <button class="viewer-nav prev" id="vPrev" title="Vorige binnen huidige lijst (←)">‹</button>
+        <button class="viewer-nav next" id="vNext" title="Volgende binnen huidige lijst (→)">›</button>
       </div>
 
     </div><!-- /viewer-main -->
 
     <!-- Tag dialog -->
     <div id="vTagDialog" class="tag-dialog hidden">
-      <div class="tag-dialog-inner">
+      <div id="vTagDialogInner" class="tag-dialog-inner">
         <div class="tag-dialog-head">
           <strong>Tags</strong>
-          <button id="vBtnCloseTagDialog">✕</button>
+          <div class="tag-dialog-head-actions">
+            <button id="vBtnToggleRecipes" type="button">Recepten</button>
+            <button id="vBtnCloseTagDialog" type="button">✕</button>
+          </div>
         </div>
-        <div id="vTagList" class="tag-list"></div>
+        <div class="tag-dialog-body">
+          <div class="tag-current-wrap">
+            <div class="tag-label">Op dit item</div>
+            <div id="vTagCurrent" class="tag-current"></div>
+          </div>
+          <div class="tag-last-wrap">
+            <div class="tag-label">Laatst toegepast</div>
+            <div id="vTagLast" class="tag-last"></div>
+          </div>
+          <div class="tag-target-wrap">
+            <div class="tag-label">Waar moet een tag heen?</div>
+            <div class="tag-target-buttons">
+              <button id="vTagTargetMedia" type="button" class="tag-target active">Media</button>
+              <button id="vTagTargetRecipe" type="button" class="tag-target">Recept</button>
+            </div>
+          </div>
+          <div class="tag-quick-wrap">
+            <div class="tag-label">Favorieten</div>
+            <div id="vTagQuick" class="tag-quick"></div>
+          </div>
+          <div class="tag-recipes-wrap">
+            <div class="tag-label">Recepten</div>
+            <div id="vTagRecipes" class="tag-recipes"></div>
+            <div class="tag-label tag-recipe-edit-label">Recept maken / wijzigen</div>
+            <div class="tag-recipe-editor">
+              <input id="vRecipeName" type="text" placeholder="Naam recept...">
+              <input id="vRecipeDescription" type="text" placeholder="Omschrijving...">
+            </div>
+            <div class="tag-label tag-recipe-draft-label">Tags in recept</div>
+            <div id="vRecipeDraft" class="tag-recipe-draft"></div>
+            <div class="tag-recipe-actions">
+              <button id="vBtnRecipeFromItem" type="button">Creëer recept van media-tags</button>
+              <button id="vBtnSaveRecipe" type="button">Opslaan</button>
+              <button id="vBtnClearRecipe" type="button">Reset</button>
+            </div>
+          </div>
+          <div class="tag-search">
+            <input id="vTagSearch" type="search" placeholder="Zoek bestaande tags...">
+          </div>
+          <div id="vTagList" class="tag-list"></div>
+        </div>
         <div class="tag-new">
-          <input id="vNewTagInput" type="text" placeholder="Nieuwe tag...">
-          <button id="vBtnAddTag">＋ Toevoegen</button>
+          <input id="vNewTagInput" type="text" placeholder="Nieuwe tag voor dit item...">
+          <button id="vBtnAddTag">＋ Maak + voeg toe</button>
         </div>
       </div>
     </div>
@@ -178,8 +294,207 @@
 
   </div><!-- /viewer -->
 
-  <script src="/app.js?v=20260430-11"></script>
-  <script src="/viewer.js?v=20260430-11"></script>
+  <!-- ═══ HELP MODAL ══════════════════════════════════════════════════════ -->
+  <div id="helpModal" class="help-modal hidden" aria-hidden="true">
+    <div class="help-modal-backdrop"></div>
+    <div class="help-modal-content">
+      <div class="help-modal-head">
+        <h2>⌨️ Bediening & Sneltoetsen</h2>
+        <button id="helpClose" class="help-modal-close" title="Sluiten">✕</button>
+      </div>
+      <div class="help-modal-body">
+
+        <div class="help-section">
+          <h3>🖼 Gallery</h3>
+          <table class="help-table">
+            <tr><td><kbd>Enter</kbd></td><td>Zoeken uitvoeren</td></tr>
+            <tr><td><kbd>🖱 Klik</kbd> kaart</td><td>Openen in viewer</td></tr>
+            <tr><td><kbd>🖱 Muis 4/5</kbd></td><td>Query-geschiedenis terug/vooruit</td></tr>
+            <tr><td><kbd>← →</kbd> knoppen</td><td>Query-geschiedenis navigatie</td></tr>
+            <tr><td>Scroll omlaag</td><td>Meer items laden (infinite scroll)</td></tr>
+          </table>
+        </div>
+
+        <div class="help-section">
+          <h3>🎬 Viewer — Navigatie</h3>
+          <table class="help-table">
+            <tr><td><kbd>←</kbd></td><td>Vorig item</td></tr>
+            <tr><td><kbd>→</kbd></td><td>Volgend item</td></tr>
+            <tr><td><kbd>↑</kbd></td><td>Vorige groep/model</td></tr>
+            <tr><td><kbd>↓</kbd></td><td>Volgende groep/model</td></tr>
+            <tr><td><kbd>Esc</kbd></td><td>Viewer sluiten</td></tr>
+          </table>
+        </div>
+
+        <div class="help-section">
+          <h3>🎬 Viewer — Video</h3>
+          <table class="help-table">
+            <tr><td><kbd>Spatie</kbd></td><td>Play / Pause</td></tr>
+            <tr><td><kbd>Dubbelklik</kbd></td><td>Play / Pause (video) · Zoom toggle (afbeelding)</td></tr>
+            <tr><td><kbd>[</kbd></td><td>Langzamer</td></tr>
+            <tr><td><kbd>]</kbd></td><td>Sneller</td></tr>
+            <tr><td><kbd>\</kbd></td><td>Snelheid reset (1×)</td></tr>
+            <tr><td><kbd>I</kbd></td><td>Loop start instellen</td></tr>
+            <tr><td><kbd>O</kbd></td><td>Loop einde instellen</td></tr>
+            <tr><td><kbd>P</kbd></td><td>Loop wissen</td></tr>
+          </table>
+        </div>
+
+        <div class="help-section">
+          <h3>🎬 Viewer — Panelen & Tools</h3>
+          <table class="help-table">
+            <tr><td><kbd>S</kbd></td><td>Sidebar tonen/verbergen</td></tr>
+            <tr><td><kbd>L</kbd></td><td>Log-paneel tonen/verbergen</td></tr>
+            <tr><td><kbd>T</kbd></td><td>Tag-dialog openen</td></tr>
+            <tr><td><kbd>G</kbd></td><td>Groep tonen in gallery</td></tr>
+            <tr><td><kbd>M</kbd></td><td>Geluid dempen</td></tr>
+            <tr><td><kbd>R</kbd></td><td>Random navigatie aan/uit</td></tr>
+          </table>
+        </div>
+
+        <div class="help-section">
+          <h3>🖱 Viewer — Muis & Zoom</h3>
+          <table class="help-table">
+            <tr><td><kbd>Scrollwiel</kbd></td><td>In/uitzoomen</td></tr>
+            <tr><td><kbd>Dubbelklik</kbd> afbeelding</td><td>Toggle 2× zoom</td></tr>
+            <tr><td><kbd>Slepen</kbd> (ingezoomd)</td><td>Pan / verschuiven</td></tr>
+          </table>
+        </div>
+
+        <div class="help-section">
+          <h3>🔢 Numpad (Viewer)</h3>
+          <table class="help-table">
+            <tr><td><kbd>Num 5</kbd></td><td>Play / Pause</td></tr>
+            <tr><td><kbd>Num 4</kbd></td><td>Terugspoelen</td></tr>
+            <tr><td><kbd>Num 6</kbd></td><td>Vooruitspoelen</td></tr>
+            <tr><td><kbd>Num 8</kbd></td><td>Fijn vooruit</td></tr>
+            <tr><td><kbd>Num 7</kbd></td><td>Volume omlaag</td></tr>
+            <tr><td><kbd>Num 9</kbd></td><td>Volume omhoog</td></tr>
+            <tr><td><kbd>Num 1</kbd></td><td>Langzamer</td></tr>
+            <tr><td><kbd>Num 3</kbd></td><td>Sneller</td></tr>
+            <tr><td><kbd>Num 2</kbd></td><td>Screenshot (video frame)</td></tr>
+            <tr><td><kbd>Num .</kbd></td><td>Segment-marker plaatsen</td></tr>
+            <tr><td><kbd>Num Enter</kbd></td><td>Auto-speed aan/uit</td></tr>
+            <tr><td><kbd>Num +</kbd></td><td>Alle segmenten wissen</td></tr>
+            <tr><td><kbd>Num −</kbd></td><td>Laatste marker verwijderen</td></tr>
+            <tr><td><kbd>Num *</kbd></td><td>Speed-baan tonen/verbergen</td></tr>
+            <tr><td><kbd>Num /</kbd></td><td>Pen-tekenmodus</td></tr>
+          </table>
+        </div>
+
+        <div class="help-section help-section-full">
+          <h3>⌨️ Visueel toetsenbord — Viewer sneltoetsen</h3>
+          <div class="help-keyboard">
+            <div class="kb-main">
+              <div class="kb-row">
+                <span class="kb-key kb-esc kb-nav" data-tip="Sluiten">Esc</span>
+                <span class="kb-key kb-spacer"></span>
+                <span class="kb-key">F1</span><span class="kb-key">F2</span><span class="kb-key">F3</span><span class="kb-key">F4</span>
+                <span class="kb-key kb-spacer-sm"></span>
+                <span class="kb-key">F5</span><span class="kb-key">F6</span><span class="kb-key">F7</span><span class="kb-key">F8</span>
+                <span class="kb-key kb-spacer-sm"></span>
+                <span class="kb-key">F9</span><span class="kb-key">F10</span><span class="kb-key">F11</span><span class="kb-key">F12</span>
+              </div>
+              <div class="kb-row">
+                <span class="kb-key">` ~</span>
+                <span class="kb-key">1</span><span class="kb-key">2</span><span class="kb-key">3</span><span class="kb-key">4</span><span class="kb-key">5</span>
+                <span class="kb-key">6</span><span class="kb-key">7</span><span class="kb-key">8</span><span class="kb-key">9</span><span class="kb-key">0</span>
+                <span class="kb-key">-</span><span class="kb-key">=</span>
+                <span class="kb-key kb-wide">⌫</span>
+              </div>
+              <div class="kb-row">
+                <span class="kb-key kb-w15">Tab</span>
+                <span class="kb-key">Q</span><span class="kb-key">W</span><span class="kb-key">E</span>
+                <span class="kb-key kb-panel" data-tip="Random">R</span>
+                <span class="kb-key kb-panel" data-tip="Tags">T</span>
+                <span class="kb-key">Y</span><span class="kb-key">U</span>
+                <span class="kb-key kb-video" data-tip="Loop start">I</span>
+                <span class="kb-key kb-video" data-tip="Loop eind">O</span>
+                <span class="kb-key kb-video" data-tip="Loop wis">P</span>
+                <span class="kb-key kb-video" data-tip="Langzamer">[</span>
+                <span class="kb-key kb-video" data-tip="Sneller">]</span>
+                <span class="kb-key kb-video" data-tip="Reset 1×">\</span>
+              </div>
+              <div class="kb-row">
+                <span class="kb-key kb-w175">Caps</span>
+                <span class="kb-key">A</span>
+                <span class="kb-key kb-panel" data-tip="Sidebar">S</span>
+                <span class="kb-key">D</span><span class="kb-key">F</span>
+                <span class="kb-key kb-panel" data-tip="Groep">G</span>
+                <span class="kb-key">H</span><span class="kb-key">J</span><span class="kb-key">K</span>
+                <span class="kb-key kb-panel" data-tip="Log">L</span>
+                <span class="kb-key">;</span><span class="kb-key">'</span>
+                <span class="kb-key kb-w225">Enter</span>
+              </div>
+              <div class="kb-row">
+                <span class="kb-key kb-w225">Shift</span>
+                <span class="kb-key">Z</span><span class="kb-key">X</span><span class="kb-key">C</span><span class="kb-key">V</span><span class="kb-key">B</span>
+                <span class="kb-key">N</span>
+                <span class="kb-key kb-panel" data-tip="Mute">M</span>
+                <span class="kb-key">,</span>
+                <span class="kb-key">.</span>
+                <span class="kb-key kb-zoom" data-tip="Help">?</span>
+                <span class="kb-key kb-w275">Shift</span>
+              </div>
+              <div class="kb-row">
+                <span class="kb-key kb-w15">Ctrl</span><span class="kb-key">⌥</span><span class="kb-key">⌘</span>
+                <span class="kb-key kb-space kb-video" data-tip="Play/Pause">Spatie</span>
+                <span class="kb-key">⌘</span><span class="kb-key">⌥</span>
+                <span class="kb-key kb-nav" data-tip="Vorige">←</span>
+                <span class="kb-key kb-nav-vert">
+                  <span class="kb-key kb-half kb-nav" data-tip="Groep ↑">↑</span>
+                  <span class="kb-key kb-half kb-nav" data-tip="Groep ↓">↓</span>
+                </span>
+                <span class="kb-key kb-nav" data-tip="Volgende">→</span>
+              </div>
+            </div>
+            <div class="kb-numpad">
+              <div class="kb-row">
+                <span class="kb-key kb-num" data-tip="Segm. wis">Num</span>
+                <span class="kb-key kb-num" data-tip="Pen-modus">/</span>
+                <span class="kb-key kb-num" data-tip="Speed-baan">*</span>
+                <span class="kb-key kb-num" data-tip="Marker −">−</span>
+              </div>
+              <div class="kb-row">
+                <span class="kb-key kb-num" data-tip="Vol −">7</span>
+                <span class="kb-key kb-num" data-tip="Fijn ▶">8</span>
+                <span class="kb-key kb-num" data-tip="Vol +">9</span>
+                <span class="kb-key kb-num kb-tall" data-tip="Wis alle">+</span>
+              </div>
+              <div class="kb-row">
+                <span class="kb-key kb-num" data-tip="Langzamer">4</span>
+                <span class="kb-key kb-num kb-num-main" data-tip="Play/Pause">5</span>
+                <span class="kb-key kb-num" data-tip="Sneller">6</span>
+              </div>
+              <div class="kb-row">
+                <span class="kb-key kb-num" data-tip="Langzamer">1</span>
+                <span class="kb-key kb-num" data-tip="Screenshot">2</span>
+                <span class="kb-key kb-num" data-tip="Sneller">3</span>
+                <span class="kb-key kb-num kb-tall" data-tip="Auto-speed">⏎</span>
+              </div>
+              <div class="kb-row">
+                <span class="kb-key kb-num kb-wide" data-tip="">0</span>
+                <span class="kb-key kb-num" data-tip="Marker">.</span>
+              </div>
+            </div>
+          </div>
+          <div class="kb-legend">
+            <span class="kb-legend-item"><span class="kb-swatch kb-nav"></span>Navigatie</span>
+            <span class="kb-legend-item"><span class="kb-swatch kb-video"></span>Video</span>
+            <span class="kb-legend-item"><span class="kb-swatch kb-panel"></span>Panelen</span>
+            <span class="kb-legend-item"><span class="kb-swatch kb-num"></span>Numpad</span>
+            <span class="kb-legend-item"><span class="kb-swatch kb-zoom"></span>Help</span>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <script src="/vendor/jquery-3.7.1.min.js?v=3.7.1"></script>
+  <script src="/vendor/jstree/jstree.min.js?v=3.3.17"></script>
+  <script src="/app.js?v=20260524-2"></script>
+  <script src="/viewer.js?v=20260514-2"></script>
   <script>
   // ─── Thema switcher ─────────────────────────────────────────────────────
   (function() {
@@ -217,6 +532,28 @@
     // Bind buttons
     document.getElementById('themeBtn')?.addEventListener('click', cycleTheme);
     document.getElementById('vBtnTheme')?.addEventListener('click', cycleTheme);
+  })();
+  </script>
+
+  <script>
+  // ─── Help modal ───────────────────────────────────────────────────────
+  (function() {
+    const modal = document.getElementById('helpModal');
+    if (!modal) return;
+    const show = () => { modal.classList.remove('hidden'); modal.setAttribute('aria-hidden', 'false'); };
+    const hide = () => { modal.classList.add('hidden'); modal.setAttribute('aria-hidden', 'true'); };
+    const toggle = () => modal.classList.contains('hidden') ? show() : hide();
+
+    document.getElementById('helpBtn')?.addEventListener('click', toggle);
+    document.getElementById('vBtnHelp')?.addEventListener('click', toggle);
+    document.getElementById('helpClose')?.addEventListener('click', hide);
+    modal.querySelector('.help-modal-backdrop')?.addEventListener('click', hide);
+
+    window.addEventListener('keydown', (e) => {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+      if (e.key === '?' || (e.key === '/' && e.shiftKey)) { e.preventDefault(); toggle(); }
+      if (e.key === 'Escape' && !modal.classList.contains('hidden')) { e.preventDefault(); e.stopPropagation(); hide(); }
+    }, { capture: true });
   })();
   </script>
 </body>

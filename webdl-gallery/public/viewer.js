@@ -11,26 +11,45 @@
     // Eigen items + paginering (onafhankelijk van gallery grid)
     items: [],
     offset: 0,
+    nextCursor: null,
     done: false,
     loading: false,
     typeFilter: 'all',    // 'all' | 'video' | 'image'
+    queryFilters: null,
 
     // Slideshow
     slideshow: false,
     slideshowTimer: null,
     slideshowSec: 4,
-    wrap: true,
+    wrap: false,
     random: false,
     videoWait: true,
+    channelScope: 'query', // 'query' | 'all'
 
     // UI
     sidebarOpen: false,
     logOpen: false,
     hudTimer: null,
+    mainProgressVisible: true,
+    screenshotRunning: false,
+    screenshotDotTimer: null,
 
     // Tags
     availableTags: [],
     currentItemTags: [],
+    tagRecipes: [],
+    recipeDraftTagIds: [],
+    lastAppliedTags: [],
+    lastAppliedItemId: null,
+    editingRecipeId: null,
+    tagTarget: 'media',
+    lastTagOpenAt: 0,
+    tagDialogX: 0,
+    tagDialogY: 0,
+    tagDialogDrag: null,
+    tagRecipesOpen: false,
+    quickTagMode: 'media',
+    currentItemTagRequestKey: '',
 
     // Video
     vol: 0.8,
@@ -40,17 +59,41 @@
     // Afspeelsnelheid
     playbackRate: 1.0,
     reverseRAF: null,      // requestAnimationFrame ID voor achteruit
+    reverseTimer: null,
     reverseLastT: 0,
+    reverseBaseTime: 0,
+    reverseBaseT: 0,
 
     // Loop sectie
     loopStart: null,       // in seconden
     loopEnd: null,
+    mediaReloadNonce: 0,
+    mediaResetSeq: 0,
+    mediaSeq: 0,
+    hudMessageTimer: null,
+    forceTranscodeIds: new Set(),
+
+    // Segment markers: array of time values in seconds.
+    // Pairs of consecutive markers define "keep" segments.
+    // Odd marker = partial (start set, waiting for end)
+    segments: [],
+    segmentSkipEnabled: true,
+
+    // Speed automation lane (Bitwig-style)
+    // Points: [{pct: 0-1 (time position), rate: 0.1-4 (speed), curve: 0 (linear) to ±1 (bezier)}]
+    autoPoints: [],
+    autoEnabled: false,
+    autoLaneVisible: false,
+    autoDragIdx: -1,
+    autoPenActive: false, // pen drawing mode
 
     // Zoom (exact als oude viewer)
     zoomed: false,
     scale: 1,
     panX: 0,
     panY: 0,
+    rotation: 0,
+    lastRotateAt: 0,
     currentMediaEl: null,
     dragging: false,
     dragMoved: false,
@@ -68,9 +111,16 @@
 
   // Gecachede DOM refs
   const el = {};
+  let navChain = Promise.resolve();
 
   // Uniek per tabblad — voorkomt dat de browser requests van verschillende tabs samenvoegt
   const VIEWER_TAB_ID = Math.random().toString(36).slice(2, 8);
+  const VIEWER_POS_KEY = 'webdl:viewer:last-position';
+  const VIEWER_RESTORE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+  const VIEWER_SPEED_KEY = 'webdl:viewer:playback-rate';
+  const MAIN_PROGRESS_KEY = 'webdl:viewer:main-progress-visible';
+  const TAG_RECIPES_OPEN_KEY = 'webdl:viewer:tag-recipes-open';
+  const LAST_APPLIED_TAGS_KEY = 'webdl:viewer:last-applied-tags';
 
   async function api(url, opts) {
     const sep = url.includes('?') ? '&' : '?';
@@ -79,41 +129,686 @@
     return r.json();
   }
 
+  function mediaRotationKey(it) {
+    return `webdl:media-rotation:${String((it && it.id) || '')}`;
+  }
+
+  function sourceSummaryParts(it) {
+    const platform = String(it && it.platform || '').trim();
+    const sourceSite = String(it && it.source_site || '').trim();
+    const sameSource = window.__wdGallery && typeof window.__wdGallery.shouldShowSourceSite === 'function'
+      ? !window.__wdGallery.shouldShowSourceSite(platform, sourceSite)
+      : sourceSite === platform;
+    const parts = [
+      platform,
+      sourceSite && !sameSource ? `via ${sourceSite}` : '',
+      it && it.channel && it.channel !== 'unknown' ? it.channel : '',
+    ].filter(Boolean);
+    if (it && Array.isArray(it.content_sites) && it.content_sites.length) {
+      parts.push(`inhoud: ${it.content_sites.slice(0, 3).join(', ')}`);
+    }
+    if (it && it.source_thread_title && it.source_thread_title !== it.channel) {
+      parts.push(it.source_thread_title);
+    }
+    if (it && sourceModelTitle(it)) {
+      parts.push(`set/model ${sourceModelTitle(it)}`);
+    } else if (it && (it.source_post_num || it.source_post_id || it.source_post_title)) {
+      const postLabel = it.source_post_num || it.source_post_id || '';
+      const postTitle = it.source_post_title ? ` · ${it.source_post_title}` : '';
+      parts.push(postLabel ? `post ${postLabel}${postTitle}` : it.source_post_title);
+    }
+    return parts;
+  }
+
+  function sourceLinkForItem(it) {
+    return String((it && (it.source_post_url || it.source_url || it.url)) || '').trim();
+  }
+
+  function sourceThreadKey(it) {
+    if (!it) return '';
+    return String(it.source_thread_url || it.source_thread_id || it.source_thread_title || '').trim().toLowerCase();
+  }
+
+  function sourcePostKey(it) {
+    if (!it) return '';
+    return String(it.source_post_num || it.source_post_id || it.source_post_url || it.source_post_title || '').trim().toLowerCase();
+  }
+
+  function itemMetadata(it) {
+    if (!it || !it.metadata) return null;
+    if (it._parsedMetadata !== undefined) return it._parsedMetadata;
+    try {
+      it._parsedMetadata = typeof it.metadata === 'string' ? JSON.parse(it.metadata) : it.metadata;
+    } catch (_) {
+      it._parsedMetadata = null;
+    }
+    return it._parsedMetadata;
+  }
+
+  function sourcePlatformGroupKey(it, platform) {
+    const meta = itemMetadata(it);
+    if (platform === 'youtube') {
+      const channelKey = String(meta?.youtube_channel_id || meta?.youtube_channel_url || '').trim().toLowerCase();
+      if (channelKey) return ['youtube-channel', channelKey].join('\u0001');
+    }
+    return '';
+  }
+
+  function sourceModelTitleFromText(value) {
+    let title = String(value || '').trim();
+    if (!title) return '';
+    title = title
+      .replace(/\.[a-z0-9]{2,5}$/i, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const stripPatterns = [
+      /(?:[._ -])p(?:[._ -])?\d{1,5}[a-z]?$/i,
+      /(?:[._ -])(?:img|image|pic|photo)(?:[._ -])?\d{1,5}[a-z]?$/i,
+      /(?:[._ -])\d{1,5}[a-z]?$/i,
+    ];
+    for (const re of stripPatterns) {
+      const stripped = title.replace(re, '').trim();
+      if (stripped && stripped !== title) return stripped;
+    }
+    return title;
+  }
+
+  function sourceModelTitle(it) {
+    if (!it) return '';
+    const explicit = String(it.source_model_title || '').trim();
+    if (explicit) return explicit;
+    const site = String(it.source_site || it.platform || '').toLowerCase();
+    if (site === 'twitter' || site === 'x' || site.includes('twitter')) {
+      return sourceModelTitleFromText(it.source_post_title || '');
+    }
+    return sourceModelTitleFromText(it.source_post_title || it.title || it.filename || '');
+  }
+
+  function sourceModelKey(it) {
+    if (!it) return '';
+    const explicit = String(it.source_model_key || '').trim().toLowerCase();
+    if (explicit) return explicit;
+    const title = sourceModelTitle(it);
+    if (title) {
+      return title
+        .trim()
+        .toLowerCase()
+        .replace(/[\s._-]+/g, '-')
+        .replace(/[^a-z0-9-]+/g, '')
+        .replace(/^-+|-+$/g, '');
+    }
+    return sourcePostKey(it);
+  }
+
+  function sourceNavigationModelKey(it) {
+    if (!it) return '';
+    const platform = String(it.platform || '').trim().toLowerCase();
+    const title = String(it.source_model_title || '').trim();
+    const key = String(it.source_model_key || '').trim().toLowerCase();
+    if (!title || !key) return '';
+    if (platform === 'youtube') return '';
+    const filename = String(it.filename || '').trim();
+    const displayTitle = String(it.title || '').trim();
+    const derivedFromFile = title === sourceModelTitleFromText(filename) || title === sourceModelTitleFromText(displayTitle);
+    if (derivedFromFile) return '';
+    return key;
+  }
+
+  function sourceNavigationGroupKey(it) {
+    if (!it) return '';
+    const platform = String(it.platform || '').trim().toLowerCase();
+    const platformGroupKey = sourcePlatformGroupKey(it, platform);
+    if (platformGroupKey) return ['platform-group', platform, platformGroupKey].join('\u0001');
+    const threadKey = sourceThreadKey(it);
+    const modelKey = sourceNavigationModelKey(it);
+    if (modelKey) return ['model', platform, threadKey || String(it.channel || '').trim().toLowerCase(), modelKey].join('\u0001');
+    if (threadKey) return ['thread', platform, threadKey].join('\u0001');
+    const channel = String(it.channel || '').trim().toLowerCase();
+    if (platform || channel) return ['channel', platform, channel].join('\u0001');
+    return '';
+  }
+
+  function loadMediaRotation(it) {
+    try {
+      const value = Number(localStorage.getItem(mediaRotationKey(it)) || 0);
+      return Number.isFinite(value) ? ((Math.round(value / 90) * 90) % 360 + 360) % 360 : 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  function saveMediaRotation(it, degrees) {
+    try {
+      const normalized = ((Math.round(Number(degrees || 0) / 90) * 90) % 360 + 360) % 360;
+      const key = mediaRotationKey(it);
+      if (normalized === 0) localStorage.removeItem(key);
+      else localStorage.setItem(key, String(normalized));
+    } catch (_) {}
+  }
+
+  function syncRotationUi() {
+    for (const btn of [el.vBtnRotate, el.vBtnRotateStage]) {
+      if (!btn) continue;
+      const degrees = Number(vs.rotation || 0);
+      btn.textContent = degrees ? `↻ ${degrees}°` : '↻ +90°';
+      btn.title = degrees ? `Rotatie: ${degrees}° (klik voor +90°)` : 'Media 90° draaien';
+      btn.dataset.rotation = String(degrees);
+      btn.classList.toggle('active', Boolean(vs.rotation));
+    }
+    if (el.vBtnRotateBottom) {
+      const degrees = Number(vs.rotation || 0);
+      el.vBtnRotateBottom.textContent = '⟳';
+      el.vBtnRotateBottom.title = degrees ? `Rotatie: ${degrees}° (klik voor +90°)` : 'Media 90° draaien';
+      el.vBtnRotateBottom.dataset.rotation = String(degrees);
+      el.vBtnRotateBottom.classList.toggle('active', Boolean(vs.rotation));
+    }
+  }
+
+  function thumbUrl(it, retry = 0) {
+    const params = new URLSearchParams();
+    params.set('v', it && it.is_thumb_ready ? '1' : '0');
+    if (retry) params.set('retry', String(retry));
+    return `/thumb/${encodeURIComponent(String(it.id))}?${params.toString()}`;
+  }
+
+  const VIEWER_FILTER_KEYS = [
+    'platform', 'channel', 'q', 'sort', 'channel_sort', 'min_rating', 'media_type', 'tag_id',
+    'source_thread_url', 'source_thread_title', 'source_post_url',
+    'source_model_key', 'source_model_title', 'source_scope_label',
+  ];
+
+  function normalizeViewerFilters(filters = {}) {
+    const out = {};
+    for (const key of VIEWER_FILTER_KEYS) out[key] = String(filters[key] || '');
+    if (!out.sort) out.sort = 'recent';
+    if (!out.channel_sort) out.channel_sort = 'count';
+    return out;
+  }
+
+  function viewerFiltersEqual(a, b) {
+    const left = normalizeViewerFilters(a || {});
+    const right = normalizeViewerFilters(b || {});
+    return VIEWER_FILTER_KEYS.every((key) => left[key] === right[key]);
+  }
+
+  function snapshotGalleryFilters() {
+    const filters = { ...(gal().state.filters || {}) };
+    return normalizeViewerFilters({
+      platform: filters.platform || '',
+      channel: filters.channel || '',
+      q: filters.q || '',
+      sort: filters.sort || 'recent',
+      channel_sort: filters.channel_sort || 'count',
+      min_rating: filters.min_rating || '',
+      media_type: filters.media_type || '',
+      tag_id: el.vTagFilter ? el.vTagFilter.value || '' : '',
+      source_thread_url: filters.source_thread_url || '',
+      source_thread_title: filters.source_thread_title || '',
+      source_post_url: filters.source_post_url || '',
+      source_model_key: filters.source_model_key || '',
+      source_model_title: filters.source_model_title || '',
+      source_scope_label: filters.source_scope_label || '',
+    });
+  }
+
+  function viewerFilters() {
+    return vs.queryFilters || snapshotGalleryFilters();
+  }
+
+  function appendContextParams(params, { includeChannel = true } = {}) {
+    const filters = viewerFilters();
+    if (filters.platform) params.set('platform', filters.platform);
+    if (includeChannel && filters.channel) params.set('channel', filters.channel);
+    if (filters.q) params.set('q', filters.q);
+    if (filters.min_rating) params.set('min_rating', filters.min_rating);
+    if (filters.tag_id) params.set('tag_id', filters.tag_id);
+    for (const key of ['source_thread_url', 'source_thread_title', 'source_post_url', 'source_model_key', 'source_model_title']) {
+      if (filters[key]) params.set(key, filters[key]);
+    }
+    const type = vs.typeFilter && vs.typeFilter !== 'all' ? vs.typeFilter : filters.media_type;
+    if (type) params.set('media_type', type);
+    return params;
+  }
+
+  function galleryGroupQueryForItem(it) {
+    if (!it) return null;
+    const base = snapshotGalleryFilters();
+    const platform = String(it.platform || base.platform || '').trim();
+    const channel = String(it.channel || base.channel || '').trim();
+    const threadUrl = String(it.source_thread_url || '').trim();
+    const threadTitle = String(it.source_thread_title || '').trim();
+    const postUrl = String(it.source_post_url || '').trim();
+    const modelKey = sourceNavigationModelKey(it);
+    const modelTitle = sourceModelTitle(it);
+    const filters = {
+      ...base,
+      platform,
+      channel: '',
+      q: '',
+      source_thread_url: '',
+      source_thread_title: '',
+      source_post_url: '',
+      source_model_key: '',
+      source_model_title: '',
+      source_scope_label: '',
+    };
+    if (modelKey && modelTitle && (threadUrl || threadTitle)) {
+      filters.source_thread_url = threadUrl;
+      filters.source_thread_title = threadTitle;
+      filters.source_model_key = modelKey;
+      filters.source_model_title = modelTitle;
+      filters.source_scope_label = `Model: ${modelTitle}`;
+      return filters;
+    }
+    if (postUrl) {
+      filters.source_post_url = postUrl;
+      filters.source_scope_label = threadTitle ? `Post in ${threadTitle}` : 'Huidige post';
+      return filters;
+    }
+    if (threadUrl || threadTitle) {
+      filters.source_thread_url = threadUrl;
+      filters.source_thread_title = threadTitle;
+      filters.source_scope_label = threadTitle ? `Serie: ${threadTitle}` : 'Huidige serie';
+      return filters;
+    }
+    if (channel) {
+      filters.channel = channel;
+      filters.source_scope_label = `Map: ${channel}`;
+      return filters;
+    }
+    if (platform) {
+      filters.source_scope_label = `Bron: ${platform}`;
+      return filters;
+    }
+    return null;
+  }
+
+  async function showCurrentGroupInGallery() {
+    const it = vs.items[vs.idx];
+    const filters = galleryGroupQueryForItem(it);
+    const gallery = gal();
+    if (!filters || !gallery || typeof gallery.applyQuery !== 'function') {
+      showHudMessage('Geen serie/model/kanaal gevonden');
+      return;
+    }
+    try {
+      const applied = gallery.applyQuery(filters);
+      showHudMessage(filters.source_scope_label || 'Query toegepast');
+      close();
+      applied.catch((e) => log('Groep-query fout: ' + e.message));
+    } catch (e) {
+      showHudMessage('Query toepassen mislukt');
+      log('Groep-query fout: ' + e.message);
+    }
+  }
+
   // ─── Init ──────────────────────────────────────────────────────────────────
   function init() {
     const ids = [
       'viewer','vSidebar','vSidebarBackdrop','vList',
-      'vMode','vFilter','vTagFilter','vReload',
-      'vSlideshow','vSlideshowSec','vWrap','vRandom','vVideoWait',
+      'vMode','vFilter','vTagFilter','vTagFilterMatrix','vReload',
+      'vSlideshow','vSlideshowSec','vWrap','vRandom','vVideoWait','vChannelScope',
       'vNowTitle','vNowSub','vNowRating',
       'vRatingSelect',
-      'vBtnSidebar','vBtnOpen','vBtnFinder',
+      'vBtnSidebar','vBtnOpen','vBtnShowGroup','vBtnFinder','vBtnRotate',
       'vZoomRange','vZoomReset',
-      'vVol','vBtnMute','vSeek',
-      'vBtnTags','vBtnLog','vClose',
-      'vSlideshow2','vRandom2',
+      'vVol','vBtnMute','vBtnReloadMedia','vSeek',
+      'vBtnReverse','vSpeedSelect','vSpeedDown','vSpeedUp',
+      'vBtnMuteBottom','vBottomVol','vBtnMainProgress','vBtnFullscreen',
+      'vBtnTags','vBtnLog','vBtnLocateGallery','vClose',
+      'vSlideshow2','vRandom2','vSlideshowSec2','vVideoWait2',
       'vStage','vContent','vPrev','vNext','vHudLeft','vHudRight',
       'vProgressBar','vProgressFill','vProgressHandle',
-      'vTagDialog','vTagList','vNewTagInput','vBtnAddTag','vBtnCloseTagDialog',
+      'vBottomControls','vBtnPlayPause','vTimeLabel','vBtnRotateBottom','vBtnRotateStage','vBtnCaptureStage',
+      'vTagDialog','vTagDialogInner','vTagCurrent','vTagTargetMedia','vTagTargetRecipe','vTagQuick','vTagRecipes','vRecipeName','vRecipeDescription',
+      'vRecipeDraft','vBtnRecipeFromItem','vBtnSaveRecipe','vBtnClearRecipe','vBtnToggleRecipes','vFavoriteOverlay',
+      'vTagLast','vTagSearch','vTagList','vNewTagInput','vBtnAddTag','vBtnCloseTagDialog',
       'vLogPanel','vLogBody',
     ];
     for (const id of ids) {
       el[id] = $(id);
       if (!el[id]) console.warn(`viewer: element #${id} niet gevonden`);
     }
+    window.__wdShowCurrentGroupInGallery = (event) => {
+      if (event) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      showCurrentGroupInGallery();
+    };
+    window.__wdOpenTags = openTagsFromEvent;
     bindControls();
     bindKeyboard();
     bindMouse();
+    restorePlaybackRate();
+    restoreMainProgressVisibility();
+    restoreTagRecipeVisibility();
+    restoreLastAppliedTags();
+    syncViewerModeControls();
     loadTags();
+    document.addEventListener('webdl:gallery-ready', () => {
+      restoreLastPosition().catch((e) => log('Viewer herstel fout: ' + (e && e.message ? e.message : String(e))));
+    });
+    setTimeout(() => {
+      const gallery = gal();
+      if (gallery && gallery.state && Array.isArray(gallery.state.items) && gallery.state.items.length) {
+        restoreLastPosition().catch((e) => log('Viewer herstel fout: ' + (e && e.message ? e.message : String(e))));
+      }
+    }, 0);
+  }
+
+  function restorePlaybackRate() {
+    try {
+      const stored = Number(localStorage.getItem(VIEWER_SPEED_KEY) || '1');
+      if (SPEED_STEPS.includes(stored)) vs.playbackRate = stored;
+    } catch (_) {}
+  }
+
+  function restoreMainProgressVisibility() {
+    try {
+      const stored = localStorage.getItem(MAIN_PROGRESS_KEY);
+      vs.mainProgressVisible = stored == null ? true : stored !== '0';
+    } catch (_) {
+      vs.mainProgressVisible = true;
+    }
+    syncMainProgressVisibility();
+  }
+
+  function syncMainProgressVisibility() {
+    if (el.vStage) {
+      el.vStage.classList.toggle('viewer-stage--main-progress-hidden', !vs.mainProgressVisible);
+    }
+    if (el.vBtnMainProgress) {
+      el.vBtnMainProgress.classList.toggle('active', vs.mainProgressVisible);
+      el.vBtnMainProgress.textContent = vs.mainProgressVisible ? '▰' : '▱';
+      el.vBtnMainProgress.title = vs.mainProgressVisible
+        ? 'Grote voortgangsbalk verbergen'
+        : 'Grote voortgangsbalk tonen';
+      el.vBtnMainProgress.setAttribute('aria-pressed', vs.mainProgressVisible ? 'true' : 'false');
+    }
+  }
+
+  function setMainProgressVisible(visible, { persist = true } = {}) {
+    vs.mainProgressVisible = Boolean(visible);
+    syncMainProgressVisibility();
+    if (persist) {
+      try { localStorage.setItem(MAIN_PROGRESS_KEY, vs.mainProgressVisible ? '1' : '0'); } catch (_) {}
+    }
+  }
+
+  function restoreTagRecipeVisibility() {
+    try {
+      vs.tagRecipesOpen = localStorage.getItem(TAG_RECIPES_OPEN_KEY) === '1';
+    } catch (_) {
+      vs.tagRecipesOpen = false;
+    }
+    syncTagRecipeVisibility();
+  }
+
+  function syncTagRecipeVisibility() {
+    const wrap = el.vTagRecipes ? el.vTagRecipes.closest('.tag-recipes-wrap') : null;
+    if (wrap) wrap.classList.toggle('tag-section-collapsed', !vs.tagRecipesOpen);
+    if (el.vBtnToggleRecipes) {
+      el.vBtnToggleRecipes.classList.toggle('active', vs.tagRecipesOpen);
+      el.vBtnToggleRecipes.textContent = vs.tagRecipesOpen ? 'Recepten aan' : 'Recepten uit';
+      el.vBtnToggleRecipes.title = vs.tagRecipesOpen ? 'Recepten verbergen' : 'Recepten tonen';
+    }
+  }
+
+  function setTagRecipesOpen(open, { persist = true } = {}) {
+    vs.tagRecipesOpen = Boolean(open);
+    syncTagRecipeVisibility();
+    if (persist) {
+      try { localStorage.setItem(TAG_RECIPES_OPEN_KEY, vs.tagRecipesOpen ? '1' : '0'); } catch (_) {}
+    }
+  }
+
+  function favoriteTags() {
+    return (vs.availableTags || [])
+      .filter((t) => t.is_favorite)
+      .sort(sortTagsByName);
+  }
+
+  function renderFavoriteOverlay() {
+    if (!el.vFavoriteOverlay) return;
+    const it = vs.items[vs.idx];
+    const tags = favoriteTags();
+    if (!vs.open || !it || !tags.length) {
+      el.vFavoriteOverlay.classList.add('hidden');
+      el.vFavoriteOverlay.innerHTML = '';
+      return;
+    }
+    const itemId = it.rating_id || it.id;
+    const currentIds = new Set((vs.currentItemTags || []).map((t) => Number(t.id)));
+    const activeFilterId = String((vs.queryFilters && vs.queryFilters.tag_id) || viewerFilters().tag_id || '');
+    el.vFavoriteOverlay.innerHTML = '';
+    const modeWrap = document.createElement('div');
+    modeWrap.className = 'vfavorite-mode';
+    for (const [mode, label] of [['media', 'Media +'], ['filter', 'Filter']]) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'vfavorite-mode-btn' + (vs.quickTagMode === mode ? ' active' : '');
+      btn.textContent = label;
+      btn.title = mode === 'media' ? 'Klik tags om ze aan media toe te voegen' : 'Klik tags om de viewer te filteren';
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        vs.quickTagMode = mode;
+        renderFavoriteOverlay();
+      });
+      modeWrap.appendChild(btn);
+    }
+    if (activeFilterId) {
+      const clear = document.createElement('button');
+      clear.type = 'button';
+      clear.className = 'vfavorite-clear';
+      clear.textContent = 'Alle tags';
+      clear.title = 'Tagfilter wissen';
+      clear.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        await applyQuickTagFilter(null);
+      });
+      modeWrap.appendChild(clear);
+    }
+    el.vFavoriteOverlay.appendChild(modeWrap);
+    for (const tag of tags) {
+      const tagId = Number(tag.id);
+      const active = currentIds.has(tagId);
+      const filterActive = String(tagId) === activeFilterId;
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'vfavorite-chip'
+        + (active ? ' active' : '')
+        + (filterActive ? ' filter-active' : '');
+      chip.title = vs.quickTagMode === 'filter'
+        ? (filterActive ? 'Tagfilter wissen' : 'Filter viewer op deze tag')
+        : (active ? 'Tag van huidige media verwijderen' : 'Tag aan huidige media toevoegen');
+      const name = document.createElement('span');
+      name.className = 'vfavorite-chip-name';
+      name.textContent = `#${safeText(tag.name)}`;
+      const count = document.createElement('span');
+      count.className = 'vfavorite-chip-count';
+      count.textContent = String(userTagUses(tag));
+      chip.append(name, count);
+      chip.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (vs.quickTagMode === 'filter') {
+          await applyQuickTagFilter(filterActive ? null : tag);
+          return;
+        }
+        try {
+          chip.disabled = true;
+          if (active) {
+            await removeTagFromMedia(itemId, tag);
+          } else {
+            await addTagToMedia(itemId, tag);
+          }
+          if (el.vTagDialog && !el.vTagDialog.classList.contains('hidden')) renderTagDialog();
+          const gallery = gal();
+          if (gallery && typeof gallery.loadTagFilterDropdown === 'function') {
+            gallery.loadTagFilterDropdown().catch(() => {});
+          }
+          log(active ? `Tag verwijderd: ${tag.name}` : `Tag toegevoegd: ${tag.name}`);
+        } catch (err) {
+          chip.disabled = false;
+          log('Tag fout: ' + err.message);
+        }
+      });
+      el.vFavoriteOverlay.appendChild(chip);
+    }
+    el.vFavoriteOverlay.classList.remove('hidden');
+
+    // Auto-scale: shrink chips if they overflow so all tags stay visible
+    requestAnimationFrame(() => {
+      const container = el.vFavoriteOverlay;
+      if (!container || !container.children.length) return;
+      const chips = container.querySelectorAll('.vfavorite-chip, .vfavorite-mode-btn, .vfavorite-clear');
+      const totalTags = chips.length;
+      // Pick font-size based on tag count
+      let fontSize = 10;
+      if (totalTags > 30) fontSize = 7;
+      else if (totalTags > 20) fontSize = 8;
+      else if (totalTags > 14) fontSize = 9;
+      chips.forEach(c => { c.style.fontSize = fontSize + 'px'; c.style.padding = fontSize <= 8 ? '0px 4px' : '1px 6px'; c.style.minHeight = fontSize <= 8 ? '16px' : '19px'; });
+    });
+  }
+
+  async function applyQuickTagFilter(tag) {
+    const tagId = tag && tag.id != null ? String(tag.id) : '';
+    if (!vs.queryFilters) vs.queryFilters = snapshotGalleryFilters();
+    vs.queryFilters.tag_id = tagId;
+    if (el.vTagFilter) el.vTagFilter.value = tagId;
+    renderViewerTagFilterMatrix();
+    vs.channels = [];
+    const gallery = gal();
+    if (gallery && typeof gallery.applyTagFilter === 'function') {
+      gallery.applyTagFilter(tagId).catch((err) => log('Gallery filter fout: ' + err.message));
+    } else if (gallery && typeof gallery.setFilter === 'function') {
+      gallery.setFilter('tag_id', tagId);
+      if (typeof gallery.reload === 'function') gallery.reload().catch(() => {});
+    }
+    await reloadViewerItems({ preserveSelection: true });
+    renderFavoriteOverlay();
+    log(tagId ? `Filter: #${safeText(tag.name)}` : 'Tagfilter gewist');
+  }
+
+  function rememberCurrentPosition({ open = vs.open } = {}) {
+    const it = vs.items[vs.idx];
+    if (!it) return;
+    try {
+      sessionStorage.setItem(VIEWER_POS_KEY, JSON.stringify({
+        open: Boolean(open),
+        id: String(it.id),
+        idx: vs.idx,
+        filters: normalizeViewerFilters(viewerFilters()),
+        at: Date.now(),
+      }));
+    } catch (_) {}
+  }
+
+  function readRememberedPosition() {
+    try {
+      const raw = sessionStorage.getItem(VIEWER_POS_KEY);
+      if (!raw) return null;
+      const saved = JSON.parse(raw);
+      if (!saved || saved.open !== true) return null;
+      const id = String(saved.id || '').trim();
+      if (!id) return null;
+      const at = Number(saved.at || 0);
+      if (at && Date.now() - at > VIEWER_RESTORE_MAX_AGE_MS) return null;
+      return {
+        id,
+        idx: Math.max(0, Number(saved.idx) || 0),
+        filters: normalizeViewerFilters(saved.filters || {}),
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function restoreLoadPageBudget(saved) {
+    const indexHint = Math.max(0, Number(saved && saved.idx) || 0);
+    return Math.max(12, Math.min(120, Math.ceil(indexHint / 100) + 20));
+  }
+
+  function currentViewerHistoryState() {
+    const it = vs.items[vs.idx];
+    if (!it) return { page: 'viewer' };
+    return {
+      page: 'viewer',
+      id: String(it.id),
+      idx: vs.idx,
+      filters: normalizeViewerFilters(viewerFilters()),
+    };
+  }
+
+  function positionFromHistoryState(state) {
+    if (!state || state.page !== 'viewer') return null;
+    const id = String(state.id || '').trim();
+    if (!id) return null;
+    return {
+      id,
+      idx: Math.max(0, Number(state.idx) || 0),
+      filters: normalizeViewerFilters(state.filters || {}),
+    };
+  }
+
+  function syncViewerHistoryState() {
+    if (!vs.open || !vs.items[vs.idx]) return;
+    try {
+      if (history.state && history.state.page === 'viewer') {
+        history.replaceState(currentViewerHistoryState(), '', location.href);
+      }
+    } catch (_) {}
+  }
+
+  function syncViewerModeControls() {
+    if (el.vWrap) {
+      el.vWrap.textContent = vs.wrap ? '🔁 Query loop' : '∞ Oneindig';
+      el.vWrap.title = vs.wrap
+        ? 'Aan het einde terug naar het begin van de huidige query'
+        : 'Aan het einde verder laden uit de database';
+      el.vWrap.classList.toggle('active', vs.wrap);
+    }
+    if (el.vRandom) {
+      el.vRandom.textContent = `🔀 Rand: ${vs.random ? 'aan' : 'uit'}`;
+      el.vRandom.classList.toggle('active', vs.random);
+    }
+    if (el.vVideoWait) {
+      el.vVideoWait.textContent = `⏳ Wacht: ${vs.videoWait ? 'aan' : 'uit'}`;
+      el.vVideoWait.classList.toggle('active', vs.videoWait);
+    }
+    if (el.vVideoWait2) {
+      el.vVideoWait2.textContent = `⏳ Wacht: ${vs.videoWait ? 'aan' : 'uit'}`;
+      el.vVideoWait2.classList.toggle('active', vs.videoWait);
+    }
+    if (el.vChannelScope) {
+      const all = vs.channelScope === 'all';
+      el.vChannelScope.textContent = all ? '↕ Kanaal: alles' : '↕ Kanaal: query';
+      el.vChannelScope.title = all
+        ? 'Omhoog/omlaag springt naar vorige/volgende groep buiten de huidige query als dat nodig is'
+        : 'Omhoog/omlaag springt naar vorige/volgende groep: model, set/thread of kanaal binnen de huidige query';
+      el.vChannelScope.classList.toggle('active', all);
+    }
   }
 
   // ─── Open / sluit ─────────────────────────────────────────────────────────
-  function open(idx) {
+  function open(idx, options = {}) {
     // Kopieer gallery items als startpunt
     const gState = gal().state;
+    vs.queryFilters = snapshotGalleryFilters();
+    vs.typeFilter = vs.queryFilters.media_type || (el.vFilter ? el.vFilter.value : 'all') || 'all';
+    if (el.vFilter) el.vFilter.value = vs.typeFilter;
+    vs.channels = [];
+    vs.chIdx = 0;
     vs.items  = [...gState.items];
-    vs.offset = gState.offset;
-    vs.done   = gState.done;
+    // 2026-05-30 (Jürgen): viewer paginate altijd via offset=vs.items.length,
+    // niet via cursor. Daarom vs.nextCursor altijd null en vs.offset gelijk
+    // aan vs.items.length. vs.done blijft alleen true als gallery zelf
+    // bewees klaar te zijn — maar wordt door eerste loadMoreViewerItems
+    // bevestigd (data.items.length < 100).
+    vs.offset = vs.items.length;
+    vs.nextCursor = null;
+    vs.done   = Boolean(gState.done);
     vs.idx    = Math.max(0, Math.min(idx, vs.items.length - 1));
     vs.open   = true;
 
@@ -121,9 +816,17 @@
     el.viewer.classList.toggle('viewer--sidebar-open', vs.sidebarOpen);
     el.viewer.setAttribute('aria-hidden', 'false');
     document.body.style.overflow = 'hidden';
+    if (gal().setViewerActive) gal().setViewerActive(true);
 
-    // Push history state zodat browser-back (en muis-back-knop) de viewer sluit
-    history.pushState({ page: 'viewer' }, '', location.href);
+    // Push history state zodat browser-back (en muis-back-knop) de viewer sluit.
+    // Bij herstel na browser-refresh vervangen we de bestaande viewer-entry.
+    try {
+      if (options.replaceHistory || (history.state && history.state.page === 'viewer')) {
+        history.replaceState(currentViewerHistoryState(), '', location.href);
+      } else {
+        history.pushState(currentViewerHistoryState(), '', location.href);
+      }
+    } catch (_) {}
 
     renderSidebarList();
     showCurrent();
@@ -132,16 +835,23 @@
 
   function close(skipHistory) {
     if (!vs.open) return;
+    const anchorId = vs.items[vs.idx] ? String(vs.items[vs.idx].id) : '';
+    rememberCurrentPosition({ open: false });
     vs.open = false;
     stopSlideshow();
     cleanupMedia();
-    closeTagDialog();
+    closeTagDialog({ force: true });
+    if (el.vFavoriteOverlay) el.vFavoriteOverlay.classList.add('hidden');
     if (vs.logOpen) toggleLog();
 
     el.viewer.classList.add('hidden');
     el.viewer.setAttribute('aria-hidden', 'true');
     document.body.style.overflow = '';
     vs.idx = -1;
+    if (gal().setViewerActive) gal().setViewerActive(false);
+    if (anchorId && gal().restoreViewerAnchor) {
+      gal().restoreViewerAnchor(anchorId).catch(() => {});
+    }
 
     // Pop de viewer history entry (tenzij we al via popstate kwamen)
     if (!skipHistory) {
@@ -150,186 +860,374 @@
   }
 
   // ─── Huidige item tonen ────────────────────────────────────────────────────
-  function showCurrent() {
+  function mediaUrl(it) {
+    const params = new URLSearchParams();
+    if (vs.mediaReloadNonce) params.set('reload', String(vs.mediaReloadNonce));
+    if (it && it.type === 'video') {
+      const ext = String(it.ext || it.format || '').toLowerCase();
+      const nativeVideo = ext === 'mp4' || ext === 'webm' || ext === 'ogv';
+      if (!nativeVideo) params.set('play', '1');
+      if (vs.forceTranscodeIds.has(String(it.id))) params.set('transcode', '1');
+    }
+    return `/media/${encodeURIComponent(String(it.id))}${params.toString() ? '?' + params.toString() : ''}`;
+  }
+
+  function wait(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async function reloadCurrentMedia() {
+    if (!vs.open || !vs.items[vs.idx]) return;
+    const seq = ++vs.mediaResetSeq;
+    const activeIdx = vs.idx;
+    vs.mediaReloadNonce = Date.now();
+    cleanupMedia();
+    if (el.vProgressBar) el.vProgressBar.style.display = 'none';
+    if (el.vBottomControls) el.vBottomControls.classList.add('hidden');
+    if (el.vContent) {
+      el.vContent.innerHTML = '<div class="media-reset-note">Speler wordt opnieuw opgebouwd...</div>';
+    }
+    await wait(350);
+    if (!vs.open || seq !== vs.mediaResetSeq || activeIdx !== vs.idx) return;
+    showCurrent();
+    showHUD();
+    log('Speler opnieuw opgebouwd');
+  }
+
+  async function rebuildCurrentMedia({ reason = '', quiet = false } = {}) {
+    if (!vs.open || !vs.items[vs.idx]) return;
+    const seq = ++vs.mediaResetSeq;
+    const activeIdx = vs.idx;
+    vs.mediaReloadNonce = Date.now();
+    cleanupMedia();
+    if (!quiet) {
+      if (el.vProgressBar) el.vProgressBar.style.display = 'none';
+      if (el.vBottomControls) el.vBottomControls.classList.add('hidden');
+      if (el.vContent) {
+        el.vContent.innerHTML = '<div class="media-reset-note">Speler wordt opnieuw opgebouwd...</div>';
+      }
+    }
+    await wait(quiet ? 180 : 350);
+    if (!vs.open || seq !== vs.mediaResetSeq || activeIdx !== vs.idx) return;
+    showCurrent({ autoRecovered: true });
+    showHUD();
+    if (reason) log(reason);
+  }
+
+  function showVideoFallback(videoEl, it) {
+    if (!videoEl || videoEl.dataset.fallbackShown === '1') return;
+    videoEl.dataset.fallbackShown = '1';
+    stopReverse();
+
+    const img = document.createElement('img');
+    img.src = thumbUrl(it, Date.now());
+    img.alt = it.title || '';
+    img.classList.add('zoom-media');
+    img.style.transition = 'transform 120ms ease-out';
+    img.onerror = () => { img.classList.add('media-fallback-empty'); };
+
+    videoEl.replaceWith(img);
+    vs.currentMediaEl = img;
+    attachZoomHandlers(img);
+    applyTransform();
+
+    el.vVol.disabled = true;
+    el.vSeek.disabled = true;
+    el.vSeek.value = '0';
+    if (el.vBottomControls) el.vBottomControls.classList.add('hidden');
+    if (el.vProgressBar) el.vProgressBar.style.display = 'none';
+    updatePlaybackControls(null);
+
+    const note = document.createElement('div');
+    note.className = 'media-error-note';
+    note.innerHTML = `
+      <span>Video niet afspeelbaar · preview getoond</span>
+      <button type="button" class="media-error-action">Opnieuw laden</button>
+    `;
+    note.querySelector('.media-error-action').addEventListener('click', (e) => {
+      e.stopPropagation();
+      reloadCurrentMedia().catch((err) => log('Reload fout: ' + err.message));
+    });
+    el.vContent.appendChild(note);
+  }
+
+  function showCurrent(opts = {}) {
     const it = vs.items[vs.idx];
     if (!it) { close(); return; }
 
+    // 2026-05-30 (Jürgen): proactief volgende batch laden zodra we de rand
+    // naderen, zodat ▶ blijft werken in filters met duizenden items.
+    maybePrefetchViewerItems();
+    preloadNextMedia();
+
     cleanupMedia();
+    const mediaSeq = ++vs.mediaSeq;
     resetZoom(); // Reset zoom bij elk nieuw item (exact als oude viewer)
+    vs.rotation = loadMediaRotation(it);
+    syncRotationUi();
 
     let mediaEl;
     if (it.type === 'video') {
       mediaEl = document.createElement('video');
-      mediaEl.src = `/media/${it.id}`;
-      mediaEl.poster = `/thumb/${it.id}`;   // thumbnail terwijl video laadt
-      mediaEl.autoplay = true;
+      mediaEl.preload = 'auto';
       mediaEl.playsinline = true;
       mediaEl.muted = true;                  // altijd muted starten (browser autoplay policy)
       mediaEl.volume = vs.vol;
+      mediaEl.poster = thumbUrl(it);        // thumbnail terwijl video laadt
+      mediaEl.dataset.autoRecoveries = opts.autoRecovered ? '1' : '0';
+      try { mediaEl.setAttribute('controlsList', 'noremoteplayback nodownload'); } catch (_) {}
+      try { mediaEl.disablePictureInPicture = true; } catch (_) {}
 
-      // Zodra metadata geladen is: unmute als gebruiker dat wil
+      // Start altijd muted; zet de gewenste mute-status pas terug nadat play() gelukt is.
       mediaEl.addEventListener('loadedmetadata', () => {
-        mediaEl.muted = vs.muted;
+        if (mediaSeq !== vs.mediaSeq || mediaEl !== vs.currentMediaEl) return;
         el.vBtnMute.textContent = vs.muted ? '🔇' : '🔊';
       });
 
       mediaEl.addEventListener('timeupdate', () => {
-        if (!vs.seekDragging && mediaEl.duration) {
-          const pct = (mediaEl.currentTime / mediaEl.duration) * 100;
-          el.vSeek.value = String(Math.round(pct * 10));
-          if (el.vProgressFill) el.vProgressFill.style.width = pct + '%';
-          if (el.vProgressHandle) el.vProgressHandle.style.left = pct + '%';
-
-          // Loop sectie: spring terug naar begin als we voorbij het einde zijn
-          if (vs.loopStart != null && vs.loopEnd != null && mediaEl.currentTime >= vs.loopEnd) {
-            mediaEl.currentTime = vs.loopStart;
-          }
-        }
+        if (mediaSeq !== vs.mediaSeq || mediaEl !== vs.currentMediaEl) return;
+        syncVideoProgress(mediaEl);
       });
+      mediaEl.addEventListener('loadedmetadata', () => syncVideoProgress(mediaEl));
+      mediaEl.addEventListener('play', () => syncVideoProgress(mediaEl));
+      mediaEl.addEventListener('pause', () => syncVideoProgress(mediaEl));
       mediaEl.addEventListener('ended', () => {
+        if (mediaSeq !== vs.mediaSeq || mediaEl !== vs.currentMediaEl) return;
         stopReverse();
+        updatePlaybackControls(mediaEl);
         if (vs.slideshow && vs.videoWait) slideshowTick();
       });
 
       // Pas opgeslagen snelheid toe
       mediaEl.addEventListener('loadedmetadata', () => {
+        if (mediaSeq !== vs.mediaSeq || mediaEl !== vs.currentMediaEl) return;
         if (vs.playbackRate > 0) mediaEl.playbackRate = vs.playbackRate;
+      });
+      mediaEl.addEventListener('loadeddata', () => {
+        if (mediaSeq !== vs.mediaSeq || mediaEl !== vs.currentMediaEl) return;
+        const p = mediaEl.play();
+        if (p && typeof p.catch === 'function') {
+          p.then(() => {
+            if (mediaSeq !== vs.mediaSeq || mediaEl !== vs.currentMediaEl) return;
+            mediaEl.muted = vs.muted;
+            el.vBtnMute.textContent = vs.muted ? '🔇' : '🔊';
+          }).catch(() => updatePlaybackControls(mediaEl));
+        }
+      }, { once: true });
+      mediaEl.addEventListener('error', () => {
+        if (mediaSeq !== vs.mediaSeq || mediaEl !== vs.currentMediaEl) return;
+        if (!vs.forceTranscodeIds.has(String(it.id))) {
+          vs.forceTranscodeIds.add(String(it.id));
+          rebuildCurrentMedia({ reason: 'Compatibele videostream geprobeerd', quiet: true })
+            .catch((err) => log('Video-herstel fout: ' + err.message));
+          return;
+        }
+        const recoveries = Number(mediaEl.dataset.autoRecoveries || 0);
+        if (recoveries < 1) {
+          mediaEl.dataset.autoRecoveries = String(recoveries + 1);
+          rebuildCurrentMedia({ reason: 'Video-load automatisch hersteld', quiet: true })
+            .catch((err) => log('Auto-herstel fout: ' + err.message));
+          return;
+        }
+        showVideoFallback(mediaEl, it);
       });
 
       el.vVol.disabled  = false;
       el.vSeek.disabled = false;
+      if (el.vBottomControls) el.vBottomControls.classList.remove('hidden');
     } else {
       mediaEl = document.createElement('img');
-      mediaEl.src = `/media/${it.id}`;
+      mediaEl.src = mediaUrl(it);
       mediaEl.alt = it.title || '';
-      mediaEl.onerror = () => { mediaEl.src = `/thumb/${it.id}`; };
+      mediaEl.onerror = () => { mediaEl.src = thumbUrl(it, Date.now()); };
 
       el.vVol.disabled  = true;
       el.vSeek.disabled = true;
       el.vSeek.value = '0';
+      if (el.vBottomControls) el.vBottomControls.classList.add('hidden');
+      updatePlaybackControls(null);
     }
 
     mediaEl.classList.add('zoom-media');
     mediaEl.style.transition = 'transform 120ms ease-out';
     vs.currentMediaEl = mediaEl;
     el.vContent.appendChild(mediaEl);
+    if (it.type === 'video') {
+      mediaEl.src = mediaUrl(it);
+      mediaEl.load();
+    }
+    applyTransform();
     attachZoomHandlers(mediaEl);
 
-    // Align progress bar exact op onderkant van de afgespeelde pixels
-    function alignProgressBar() {
-      const media = el.vContent.querySelector('video, img');
-      if (!media || !el.vProgressBar) return;
-      
-      const isVid = media.tagName === 'VIDEO';
-      const w = isVid ? media.videoWidth : media.naturalWidth;
-      const h = isVid ? media.videoHeight : media.naturalHeight;
-      if (!w || !h) return;
-      
-      const stageRect = el.vStage.getBoundingClientRect();
-      const stageRatio = stageRect.width / stageRect.height;
-      const mediaRatio = w / h;
-      
-      let actualHeight, actualWidth;
-      if (mediaRatio > stageRatio) {
-        // Breder dan stage: letterbox boven en onder
-        actualWidth = stageRect.width;
-        actualHeight = stageRect.width / mediaRatio;
-      } else {
-        // Hoger dan stage: letterbox links en rechts (portrait)
-        actualHeight = stageRect.height;
-        actualWidth = stageRect.height * mediaRatio;
-      }
-      
-      const bottomOffset = (stageRect.height - actualHeight) / 2;
-      const sideOffset = (stageRect.width - actualWidth) / 2;
-      
-      el.vProgressBar.style.bottom = bottomOffset + 'px';
-      el.vProgressBar.style.left = sideOffset + 'px';
-      el.vProgressBar.style.right = sideOffset + 'px';
+    if (el.vProgressBar) {
+      el.vProgressBar.style.removeProperty('bottom');
+      el.vProgressBar.style.removeProperty('left');
+      el.vProgressBar.style.removeProperty('right');
+      el.vProgressBar.style.removeProperty('width');
     }
-    mediaEl.addEventListener(mediaEl.tagName === 'VIDEO' ? 'loadedmetadata' : 'load', alignProgressBar);
-    // Ook bij resize
-    if (!vs._resizeAlignBound) {
-      vs._resizeAlignBound = true;
-      window.addEventListener('resize', () => {
-        requestAnimationFrame(alignProgressBar);
-      });
-    }
-    // Na een kort moment voor layout
-    requestAnimationFrame(() => setTimeout(alignProgressBar, 50));
 
     // Mute-knop initieel syncen
     el.vBtnMute.textContent = vs.muted ? '🔇' : '🔊';
 
     // Titel — alleen titel, geen bestandsnaam
     el.vNowTitle.textContent = it.title || '(zonder titel)';
-    el.vNowSub.textContent = [
-      it.platform,
-      (it.channel && it.channel !== 'unknown') ? it.channel : '',
-    ].filter(Boolean).join(' · ');
+    el.vNowSub.textContent = sourceSummaryParts(it).join(' · ');
 
     // Rating, HUD, sidebar active
     updateRatingDisplay(it.rating);
     updateHUD(it);
     updateSidebarActive();
     scrollListToActive();
+    rememberCurrentPosition();
+    syncViewerHistoryState();
 
     // Tags prefetch
+    vs.currentItemTags = [];
+    renderFavoriteOverlay();
     loadItemTags(it.rating_id || it.id).catch(() => {});
   }
 
   function cleanupMedia() {
     stopReverse();
+    vs.mediaSeq += 1;
     vs.loopStart = null;
     vs.loopEnd = null;
+    vs.segments = [];
+    vs.autoPoints = [];
     const v = el.vContent.querySelector('video');
     if (v) { v.pause(); v.src = ''; v.load(); }
     el.vContent.innerHTML = '';
     vs.currentMediaEl = null;
     el.vSeek.value = '0';
+    updatePlaybackControls(null);
   }
 
   // ─── Navigatie ────────────────────────────────────────────────────────────
+  // 2026-05-30 (Jürgen): viewer was afhankelijk van gallery's cursor-state
+  // (vs.nextCursor uit gState bij open). Bij sort=recent kon dedup 0 fresh
+  // items opleveren → vs.done werd te vroeg true → viewer kapte af bij ~215
+  // van 5603. Fix: viewer paginate altijd via offset=vs.items.length, geen
+  // cursor. Voor pure positie-navigatie is offset stabieler dan cursor;
+  // cursor's voordeel (real-time prepend safety) is niet relevant voor viewer.
   async function loadMoreViewerItems() {
-    if (vs.loading || vs.done) return;
+    if (vs.loading || vs.done) return false;
     vs.loading = true;
     try {
-      const gFilters = gal().state.filters;
+      const sort = viewerFilters().sort || 'recent';
       const params = new URLSearchParams({
         limit: '100',
-        offset: String(vs.offset),
-        sort: gFilters.sort || 'recent',
+        sort,
       });
-      if (gFilters.platform) params.set('platform', gFilters.platform);
-      if (gFilters.channel)  params.set('channel',  gFilters.channel);
-      if (gFilters.q)        params.set('q',         gFilters.q);
-      if (gFilters.min_rating) params.set('min_rating', gFilters.min_rating);
-      if (vs.typeFilter !== 'all') params.set('media_type', vs.typeFilter);
+      // 2026-05-30 (Jürgen "oneindig doorscrollen via DB"): cursor-pagination
+      // voor sort=recent — vermijdt server-side `slice(offset, offset+limit)`
+      // bug die 0 items returnde wanneer pageRows (na filters) korter dan
+      // offset. Cursor returnt altijd tot 100 items + next_cursor; geen
+      // slice nodig. Voor andere sorts (channel/rating/random) fallback
+      // op offset.
+      if (sort === 'recent' && vs.nextCursor && vs.nextCursor.sort_ts && vs.nextCursor.source_order != null) {
+        params.set('cursor_ts', String(vs.nextCursor.sort_ts));
+        params.set('cursor_order', String(vs.nextCursor.source_order));
+      } else if (sort !== 'recent') {
+        params.set('offset', String(vs.items.length));
+      }
+      appendContextParams(params);
 
       const data = await api('/api/items?' + params.toString());
       if (data.items && data.items.length > 0) {
-        vs.items.push(...data.items);
-        vs.offset += data.items.length;
-        if (data.items.length < 100) vs.done = true;
+        const seen = new Set(vs.items.map((it) => String(it.id)));
+        const fresh = data.items.filter((it) => !seen.has(String(it.id)));
+        vs.items.push(...fresh);
+        vs.offset = vs.items.length;
+        // Bewaar nextCursor voor volgende load (sort=recent path)
+        vs.nextCursor = data.next_cursor || null;
+        // Done alleen als server klaar zegt (geen cursor meer) EN we geen
+        // fresh items kregen — dit voorkomt false-done bij filter-trim.
+        if (!vs.nextCursor && fresh.length === 0) {
+          vs.done = true;
+        }
         renderSidebarList();
+        vs.loading = false;
+        return fresh.length > 0;
       } else {
-        vs.done = true;
+        // Lege response: geen items meer, ook geen cursor → echt done
+        if (!data.next_cursor) vs.done = true;
+        else vs.nextCursor = data.next_cursor;
       }
     } catch (e) {
       log('Laden mislukt: ' + e.message);
     }
     vs.loading = false;
+    return false;
+  }
+
+  // Prefetch wanneer we binnen 30 items van het einde van vs.items zitten.
+  // Triggert async, blokkeert navigatie niet. Voorkomt hapering bij snelle
+  // ◀ ▶ door grote filters (5000+ items).
+  function maybePrefetchViewerItems() {
+    if (vs.loading || vs.done) return;
+    if (vs.idx >= vs.items.length - 30) {
+      loadMoreViewerItems().catch(() => {});
+    }
+  }
+
+  // 2026-05-30 (Jürgen): preload volgende items zodat ◀▶ snap is.
+  // Defer naar idle-tijd (na current load) + lager aantal zodat slideshow
+  // en huidige media niet uithongeren op bandbreedte. Slechts images
+  // worden preloaded; videos zou bandwidth misbruiken.
+  const _preloadCache = new Map(); // id → Image object (keep ref tegen GC)
+  let _preloadTimer = null;
+  function preloadNextMedia() {
+    if (_preloadTimer) clearTimeout(_preloadTimer);
+    // 2026-05-30 (Jürgen "slideshow werkt niet"): skip preload tijdens
+    // slideshow — anders concurreert preload met current-frame fetch.
+    if (vs.slideshow) return;
+    // 800ms delay: wacht tot huidige item zijn fetch heeft afgerond, dan pas
+    // begin preload (zodat slideshow-advance niet starveert).
+    _preloadTimer = setTimeout(() => {
+      _preloadTimer = null;
+      try {
+        const PRELOAD_AHEAD = 2; // was 3 - voorzichtiger
+        for (let offset = 1; offset <= PRELOAD_AHEAD; offset++) {
+          const idx = vs.idx + offset;
+          if (idx >= vs.items.length) break;
+          const it = vs.items[idx];
+          if (!it) continue;
+          const key = String(it.id);
+          if (_preloadCache.has(key)) continue;
+          // Alleen images preloaden — videos te groot voor zinvol effect
+          if (it.type === 'image' || it.type === 'photo') {
+            const img = new Image();
+            img.decoding = 'async';
+            try { img.fetchPriority = 'low'; } catch (_) {}
+            img.src = mediaUrl(it);
+            _preloadCache.set(key, img);
+          }
+        }
+        // Cleanup oude entries
+        if (_preloadCache.size > 20) {
+          const keys = Array.from(_preloadCache.keys()).slice(0, _preloadCache.size - 12);
+          for (const k of keys) _preloadCache.delete(k);
+        }
+      } catch (_) {}
+    }, 800);
   }
 
   async function navTo(idx) {
     if (idx < 0) {
-      if (vs.wrap) idx = vs.items.length - 1;
+      if (vs.wrap && vs.done) idx = vs.items.length - 1;
       else return;
     }
     if (idx >= vs.items.length) {
-      await loadMoreViewerItems();
+      let loaded = false;
+      for (let i = 0; idx >= vs.items.length && !vs.done && i < 10; i++) {
+        // Cursor-pagina's kunnen door live prepend/dedup een lege verse set
+        // opleveren. Blijf dan doorvragen totdat de gevraagde index bestaat.
+        loaded = await loadMoreViewerItems() || loaded;
+      }
       if (idx >= vs.items.length) {
-        if (vs.wrap) idx = 0;
+        if (loaded && idx < vs.items.length) {
+          // Nieuwe items zijn beschikbaar; ga door naar de gevraagde index.
+        } else if (vs.wrap && vs.done) idx = 0;
         else { stopSlideshow(); return; }
       }
     }
@@ -337,44 +1235,263 @@
     showCurrent();
   }
 
-  async function navNext() {
-    let next;
-    if (vs.random) {
-      next = Math.floor(Math.random() * vs.items.length);
-    } else {
-      next = vs.idx + 1;
+  function enqueueNavigation(action) {
+    navChain = navChain.catch(() => {}).then(action);
+    return navChain;
+  }
+
+  // 2026-05-25: bij random navigatie ALLE items van de current filter laden,
+  // geen cap. Bij grote filters kan dit even duren (per cycle 100 items),
+  // maar random pickt dan écht uit het volledige resultaat.
+  async function ensureAllItemsForRandom() {
+    while (!vs.done) {
+      const more = await loadMoreViewerItems();
+      if (!more) break;
     }
-    await navTo(next);
+  }
+
+  async function navNext() {
+    return enqueueNavigation(async () => {
+      let next;
+      if (vs.random) {
+        await ensureAllItemsForRandom();
+        next = Math.floor(Math.random() * vs.items.length);
+      } else {
+        next = vs.idx + 1;
+      }
+      await navTo(next);
+    });
   }
 
   async function navPrev() {
-    await navTo(vs.idx - 1);
+    return enqueueNavigation(async () => {
+      if (vs.random) {
+        await ensureAllItemsForRandom();
+        await navTo(Math.floor(Math.random() * vs.items.length));
+      } else {
+        await navTo(vs.idx - 1);
+      }
+    });
+  }
+
+  async function navPost(dir) {
+    return enqueueNavigation(async () => {
+      const currentItem = vs.items[vs.idx] || null;
+      const currentGroupKey = sourceNavigationGroupKey(currentItem);
+      if (!currentGroupKey) {
+        await navChannel(dir);
+        return;
+      }
+
+      async function findLoadedGroup(startIdx) {
+        for (let i = startIdx; i >= 0 && i < vs.items.length; i += dir) {
+          if (sourceNavigationGroupKey(vs.items[i]) !== currentGroupKey) return i;
+        }
+        return -1;
+      }
+
+      let nextIdx = await findLoadedGroup(vs.idx + dir);
+      if (nextIdx >= 0) {
+        await navTo(nextIdx);
+        return;
+      }
+
+      if (dir > 0) {
+        for (let tries = 0; tries < 10 && !vs.done; tries++) {
+          const beforeLen = vs.items.length;
+          const loaded = await loadMoreViewerItems();
+          if (!loaded && vs.items.length === beforeLen) break;
+          nextIdx = await findLoadedGroup(Math.max(beforeLen, vs.idx + 1));
+          if (nextIdx >= 0) {
+            await navTo(nextIdx);
+            return;
+          }
+        }
+      }
+
+      showHudMessage(dir > 0 ? 'Geen volgende groep/model/kanaal' : 'Geen vorige groep/model/kanaal');
+    });
   }
 
   async function navChannel(dir) {
-    if (!vs.channels.length) {
-      // Laad kanalen als nog niet aanwezig
-      try {
-        const gf = gal().state.filters;
-        const data = await api(`/api/channels${gf.platform ? '?platform=' + encodeURIComponent(gf.platform) : ''}`);
-        vs.channels = (data.channels || []).filter(c => c.channel && c.channel !== 'unknown');
-      } catch (e) { return; }
+    const currentItem = vs.items[vs.idx] || null;
+    const channelKey = (it) => [
+      String((it && it.platform) || ''),
+      String((it && it.channel) || ''),
+    ].join('\u0001');
+    const currentItemKey = channelKey(currentItem);
+    if (currentItem && currentItemKey !== '\u0001') {
+      for (let i = vs.idx + dir; i >= 0 && i < vs.items.length; i += dir) {
+        if (channelKey(vs.items[i]) !== currentItemKey) {
+          await navTo(i);
+          return;
+        }
+      }
+      if (dir > 0) {
+        for (let tries = 0; tries < 5 && !vs.done; tries++) {
+          const beforeLen = vs.items.length;
+          const loaded = await loadMoreViewerItems();
+          if (!loaded && vs.items.length === beforeLen) break;
+          for (let i = Math.max(vs.idx + 1, beforeLen); i < vs.items.length; i++) {
+            if (channelKey(vs.items[i]) !== currentItemKey) {
+              await navTo(i);
+              return;
+            }
+          }
+        }
+      }
     }
-    if (!vs.channels.length) return;
-    vs.chIdx = ((vs.chIdx + dir) + vs.channels.length) % vs.channels.length;
-    const ch = vs.channels[vs.chIdx];
-    gal().setFilter('channel', ch.channel);
+    const sameChannel = (c, channel, platform) =>
+      c && c.channel === channel && (!platform || !c.platform || c.platform === platform);
+
+    async function loadChannelList(scope) {
+      const params = scope === 'all'
+        ? new URLSearchParams()
+        : appendContextParams(new URLSearchParams(), { includeChannel: false });
+      params.set('sort', viewerFilters().sort || 'recent');
+      params.set('channel_sort', viewerFilters().channel_sort || 'count');
+      const data = await api('/api/channels' + (params.toString() ? '?' + params.toString() : ''));
+      return (data.channels || []).filter(c => c.channel && c.channel !== 'unknown');
+    }
+
+    function pickNextChannel(channels) {
+      if (!channels.length) return null;
+      const currentChannel = (currentItem && currentItem.channel) || viewerFilters().channel || '';
+      const currentPlatform = (currentItem && currentItem.platform) || viewerFilters().platform || '';
+      const currentIdx = channels.findIndex(c => sameChannel(c, currentChannel, currentPlatform));
+      const baseIdx = currentIdx >= 0 ? currentIdx : 0;
+      for (let step = 1; step <= channels.length; step++) {
+        const idx = ((baseIdx + (dir * step)) + channels.length) % channels.length;
+        const ch = channels[idx];
+        if (ch && !sameChannel(ch, currentChannel, currentPlatform)) {
+          vs.chIdx = idx;
+          return ch;
+        }
+      }
+      return null;
+    }
+
+    try {
+      if (!vs.channels.length) vs.channels = await loadChannelList(vs.channelScope);
+    } catch (e) {
+      showHudMessage('Kanalen laden mislukt');
+      log('Kanalen laden mislukt: ' + e.message);
+      return;
+    }
+
+    let ch = pickNextChannel(vs.channels);
+    if (!ch && vs.channelScope === 'query') {
+      try {
+        vs.channelScope = 'all';
+        vs.channels = await loadChannelList('all');
+        syncViewerModeControls();
+        showHudMessage('Geen volgende in query, nu alles');
+        ch = pickNextChannel(vs.channels);
+      } catch (e) {
+        showHudMessage('Kanalen laden mislukt');
+        log('Kanalen laden mislukt: ' + e.message);
+        return;
+      }
+    }
+    if (!ch) {
+      showHudMessage(dir > 0 ? 'Geen volgend kanaal/model' : 'Geen vorig kanaal/model');
+      return;
+    }
+
+    if (vs.channelScope === 'all') {
+      vs.queryFilters = {
+        platform: ch.platform || '',
+        channel: ch.channel,
+        q: '',
+        sort: viewerFilters().sort || 'recent',
+        min_rating: '',
+        media_type: vs.typeFilter && vs.typeFilter !== 'all' ? vs.typeFilter : '',
+        tag_id: '',
+      };
+    } else {
+      if (!vs.queryFilters) vs.queryFilters = snapshotGalleryFilters();
+      vs.queryFilters.channel = ch.channel;
+      if (ch.platform) vs.queryFilters.platform = ch.platform;
+    }
     await reloadViewerItems();
   }
 
-  async function reloadViewerItems() {
+  async function reloadViewerItems({ preserveSelection = false } = {}) {
+    if (!vs.queryFilters) vs.queryFilters = snapshotGalleryFilters();
+    const currentId = preserveSelection && vs.items[vs.idx] ? String(vs.items[vs.idx].id) : '';
     vs.items = [];
     vs.offset = 0;
+    vs.nextCursor = null;
     vs.done = false;
     vs.idx = 0;
     await loadMoreViewerItems();
+    if (currentId) {
+      let nextIdx = vs.items.findIndex((it) => String(it.id) === currentId);
+      for (let tries = 0; nextIdx < 0 && !vs.done && tries < 20; tries++) {
+        const beforeLen = vs.items.length;
+        await loadMoreViewerItems();
+        nextIdx = vs.items.findIndex((it) => String(it.id) === currentId);
+        if (vs.items.length === beforeLen) break;
+      }
+      if (nextIdx >= 0) {
+        vs.idx = nextIdx;
+      } else {
+        showHudMessage('Huidig item niet meer gevonden na verversen');
+      }
+    }
     if (vs.items.length > 0) showCurrent();
     renderSidebarList();
+  }
+
+  let restoreLastPositionStarted = false;
+
+  async function findGalleryIndexById(itemId, maxLoads) {
+    const gallery = gal();
+    if (!gallery || !gallery.state || !Array.isArray(gallery.state.items)) return -1;
+    let idx = gallery.state.items.findIndex((it) => String(it.id) === String(itemId));
+    for (let i = 0; idx < 0 && !gallery.state.done && i < maxLoads; i++) {
+      const beforeLen = gallery.state.items.length;
+      if (typeof gallery.loadMore !== 'function') break;
+      await gallery.loadMore();
+      idx = gallery.state.items.findIndex((it) => String(it.id) === String(itemId));
+      if (gallery.state.items.length === beforeLen) break;
+    }
+    return idx;
+  }
+
+  async function restoreLastPosition() {
+    if (restoreLastPositionStarted || vs.open) return false;
+    const saved = readRememberedPosition();
+    if (!saved) return false;
+    restoreLastPositionStarted = true;
+    return restorePosition(saved);
+  }
+
+  async function restorePosition(saved) {
+    if (vs.open || !saved || !saved.id) return false;
+    const gallery = gal();
+    if (!gallery || !gallery.state) return false;
+
+    try {
+      if (
+        saved.filters &&
+        !viewerFiltersEqual(gallery.state.filters || {}, saved.filters) &&
+        typeof gallery.applyQuery === 'function'
+      ) {
+        await gallery.applyQuery(saved.filters, { pushHistory: false });
+      }
+
+      const idx = await findGalleryIndexById(saved.id, restoreLoadPageBudget(saved));
+      if (idx < 0) {
+        sessionStorage.setItem(VIEWER_POS_KEY, JSON.stringify({ ...saved, open: false, at: Date.now() }));
+        return false;
+      }
+      open(idx, { replaceHistory: true });
+      return true;
+    } catch (e) {
+      log('Viewer herstel fout: ' + (e && e.message ? e.message : String(e)));
+      return false;
+    }
   }
 
   // ─── Rating ───────────────────────────────────────────────────────────────
@@ -433,6 +1550,251 @@
     }
   }
 
+  // ─── Video controls ───────────────────────────────────────────────────────
+  function formatTime(sec) {
+    if (!Number.isFinite(sec) || sec < 0) return '0:00';
+    const s = Math.floor(sec % 60).toString().padStart(2, '0');
+    const m = Math.floor((sec / 60) % 60);
+    const h = Math.floor(sec / 3600);
+    return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
+  }
+
+  function formatSeconds(sec) {
+    if (!Number.isFinite(sec) || sec < 0) return '--s';
+    return `${Math.round(sec)}s`;
+  }
+
+  function updatePlaybackControls(video) {
+    const v = video || el.vContent.querySelector('video');
+    if (el.vBtnPlayPause) el.vBtnPlayPause.textContent = v && !v.paused && !v.ended ? '⏸' : '▶';
+    if (el.vSpeedSelect) el.vSpeedSelect.value = String(vs.playbackRate > 0 ? vs.playbackRate : 1);
+    if (el.vBtnReverse) el.vBtnReverse.classList.toggle('active', vs.playbackRate < 0);
+    if (el.vBtnMuteBottom) el.vBtnMuteBottom.textContent = vs.muted ? '🔇' : '🔊';
+    if (el.vBottomVol && String(el.vBottomVol.value) !== String(vs.vol)) el.vBottomVol.value = String(vs.vol);
+    if (el.vTimeLabel) {
+      el.vTimeLabel.textContent = v
+        ? `${formatTime(v.currentTime)} / ${formatTime(v.duration)}`
+        : '0:00 / 0:00';
+      el.vTimeLabel.title = v
+        ? `${formatTime(v.currentTime)} (${formatSeconds(v.currentTime)}) / ${formatTime(v.duration)} (${formatSeconds(v.duration)})`
+        : '';
+    }
+  }
+
+  function syncVideoProgress(video, opts = {}) {
+    const v = video || el.vContent.querySelector('video');
+    const checkLoop = opts.checkLoop !== false;
+    if (!v) {
+      updatePlaybackControls(null);
+      return;
+    }
+    if (
+      checkLoop &&
+      vs.loopStart != null &&
+      vs.loopEnd != null &&
+      v.currentTime >= vs.loopEnd
+    ) {
+      v.currentTime = vs.loopStart;
+    }
+    // Segment skip: auto-jump past skip zones during playback
+    checkSegmentSkip(v);
+    // Speed automation: follow the automation lane curve
+    applyAutoSpeed(v);
+    if (!vs.seekDragging && Number.isFinite(v.duration) && v.duration > 0) {
+      const pct = Math.max(0, Math.min(100, (v.currentTime / v.duration) * 100));
+      el.vSeek.value = String(Math.round(pct * 10));
+      el.vSeek.style.setProperty('--vseek-progress', pct + '%');
+      if (el.vProgressFill) el.vProgressFill.style.width = pct + '%';
+      if (el.vProgressHandle) el.vProgressHandle.style.left = pct + '%';
+    }
+    updatePlaybackControls(v);
+  }
+
+  function seekVideoFromRange(rangeEl) {
+    const v = el.vContent.querySelector('video');
+    if (!v || !v.duration || !rangeEl) return;
+    v.currentTime = (parseInt(rangeEl.value, 10) / 1000) * v.duration;
+    syncVideoProgress(v);
+  }
+
+  // Cadence seek: repeated taps in the same direction produce predictable, recognizable jumps
+  // Quick taps increase level. Pausing maintains level. Longer pause = gradual decay.
+  // 1 tap = 1s, 2 taps = 3s, 3 taps = 5s, 4 taps = 10s, 5 taps = 20s, 6 taps = 45s, 7 taps = 90s
+  const seekAccel = { lastTime: 0, lastDir: 0, taps: 0 };
+  const SEEK_TAP_FAST = 500;     // ms — taps within this = increase level
+  const SEEK_TAP_HOLD = 2000;    // ms — keep current level up to this
+  const SEEK_TAP_DECAY = 1000;   // ms — after HOLD, lose 1 level per this interval
+  const SEEK_TAP_STEPS = [1, 3, 5, 10, 20, 45, 90];
+  const SEEK_TAP_DOTS = SEEK_TAP_STEPS.map((_, i, arr) =>
+    arr.map((__, j) => j <= i ? '●' : '○').join('')
+  );
+
+  function seekRelative(baseSeconds) {
+    const v = el.vContent.querySelector('video');
+    if (!v || !Number.isFinite(v.duration)) return;
+    const dir = baseSeconds > 0 ? 1 : -1;
+    const now = Date.now();
+    const elapsed = now - seekAccel.lastTime;
+
+    if (dir !== seekAccel.lastDir) {
+      // Direction change → reset
+      seekAccel.taps = 0;
+    } else if (elapsed < SEEK_TAP_FAST) {
+      // Fast tap → increase level
+      seekAccel.taps = Math.min(seekAccel.taps + 1, SEEK_TAP_STEPS.length - 1);
+    } else if (elapsed < SEEK_TAP_HOLD) {
+      // Short pause → stay at same level
+    } else {
+      // Longer pause → decay: lose 1 level per DECAY interval past HOLD
+      const decayLevels = Math.floor((elapsed - SEEK_TAP_HOLD) / SEEK_TAP_DECAY);
+      seekAccel.taps = Math.max(0, seekAccel.taps - decayLevels);
+    }
+
+    seekAccel.lastTime = now;
+    seekAccel.lastDir = dir;
+    const step = SEEK_TAP_STEPS[seekAccel.taps];
+    const delta = dir * step;
+    v.currentTime = Math.max(0, Math.min(v.duration, v.currentTime + delta));
+    syncVideoProgress(v);
+    const arrow = dir > 0 ? '▸' : '◂';
+    const dots = SEEK_TAP_DOTS[seekAccel.taps];
+    const label = step >= 60 ? `${step / 60}m` : `${step}s`;
+    showHudMessage(`${arrow} ${delta > 0 ? '+' : ''}${label}  ${dots}`, 900, { skipOverlay: true });
+  }
+
+  function toggleVideoPlayback() {
+    const v = el.vContent.querySelector('video');
+    if (!v) return;
+    if (v.paused) v.play();
+    else v.pause();
+    updatePlaybackControls(v);
+  }
+
+  function toggleFullscreen() {
+    const target = el.vStage || el.viewer || document.documentElement;
+    if (!document.fullscreenElement) {
+      const p = target.requestFullscreen && target.requestFullscreen();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    } else if (document.exitFullscreen) {
+      const p = document.exitFullscreen();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    }
+  }
+
+  function drawCurrentVideoFrame(videoEl) {
+    if (!videoEl || videoEl.tagName !== 'VIDEO') throw new Error('Geen video actief');
+    if (!videoEl.videoWidth || !videoEl.videoHeight || videoEl.readyState < 2) {
+      throw new Error('Video-frame is nog niet geladen');
+    }
+    const sourceW = videoEl.videoWidth;
+    const sourceH = videoEl.videoHeight;
+    const rotation = ((Number(vs.rotation || 0) % 360) + 360) % 360;
+    const rotated = rotation === 90 || rotation === 270;
+    const canvas = document.createElement('canvas');
+    canvas.width = rotated ? sourceH : sourceW;
+    canvas.height = rotated ? sourceW : sourceH;
+    const ctx = canvas.getContext('2d', { alpha: false });
+    if (!ctx) throw new Error('Canvas niet beschikbaar');
+    ctx.save();
+    ctx.translate(canvas.width / 2, canvas.height / 2);
+    if (rotation) ctx.rotate(rotation * Math.PI / 180);
+    ctx.drawImage(videoEl, -sourceW / 2, -sourceH / 2, sourceW, sourceH);
+    ctx.restore();
+    return canvas;
+  }
+
+  function canvasToBlob(canvas, type = 'image/jpeg', quality = 0.92) {
+    return new Promise((resolve, reject) => {
+      canvas.toBlob((blob) => {
+        if (!blob || !blob.size) reject(new Error('Screenshot is leeg'));
+        else resolve(blob);
+      }, type, quality);
+    });
+  }
+
+  async function captureCurrentVideoFrame(options = {}) {
+    const quiet = !!(options && options.quiet);
+    if (vs.screenshotRunning) {
+      if (!quiet) showHudMessage('Screenshot bezig', 1800, { skipOverlay: true });
+      return;
+    }
+    const it = vs.items[vs.idx];
+    const videoEl = vs.currentMediaEl && vs.currentMediaEl.tagName === 'VIDEO'
+      ? vs.currentMediaEl
+      : el.vContent.querySelector('video');
+    if (!it || !videoEl) {
+      if (!quiet) showHudMessage('Geen video actief', 1800, { skipOverlay: true });
+      return;
+    }
+    vs.screenshotRunning = true;
+    if (el.vBtnCaptureStage) el.vBtnCaptureStage.disabled = true;
+    try {
+      const canvas = drawCurrentVideoFrame(videoEl);
+      const blob = await canvasToBlob(canvas);
+      const params = new URLSearchParams();
+      params.set('item_id', String(it.id));
+      params.set('title', String(it.title || it.filename || 'video'));
+      if (Number.isFinite(videoEl.currentTime)) params.set('time_seconds', String(videoEl.currentTime));
+      params.set('_t', VIEWER_TAB_ID);
+      const resp = await fetch(`/api/viewer-screenshot?${params.toString()}`, {
+        method: 'POST',
+        headers: { 'Content-Type': blob.type || 'image/jpeg' },
+        body: blob,
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data.success) throw new Error(data.error || `HTTP ${resp.status}`);
+      const gallery = gal();
+      if (gallery && typeof gallery.prependItems === 'function' && data.screenshot) {
+        gallery.prependItems([data.screenshot]);
+      }
+      flashScreenshotDot(true);
+      if (!quiet) showHudMessage('Screenshot opgeslagen', 2200, { skipOverlay: true });
+      if (!quiet) log('Screenshot opgeslagen bij huidige video');
+    } catch (e) {
+      if (!quiet) showHudMessage('Screenshot fout', 1800, { skipOverlay: true });
+      if (!quiet) log('Screenshot fout: ' + (e && e.message ? e.message : String(e)));
+    } finally {
+      vs.screenshotRunning = false;
+      if (el.vBtnCaptureStage) el.vBtnCaptureStage.disabled = false;
+    }
+  }
+
+  function flashScreenshotDot(success = true) {
+    let dot = document.getElementById('vScreenshotFlashDot');
+    if (!dot) {
+      dot = document.createElement('div');
+      dot.id = 'vScreenshotFlashDot';
+      dot.setAttribute('aria-hidden', 'true');
+      Object.assign(dot.style, {
+        position: 'fixed',
+        right: '14px',
+        bottom: '14px',
+        width: '8px',
+        height: '8px',
+        borderRadius: '999px',
+        pointerEvents: 'none',
+        zIndex: '2147483647',
+        opacity: '0',
+        transform: 'scale(0.6)',
+        transition: 'opacity 90ms ease, transform 90ms ease, box-shadow 220ms ease',
+      });
+      document.body.appendChild(dot);
+    }
+    const color = success ? '#4ade80' : '#fb7185';
+    const glow = success ? 'rgba(74, 222, 128, 0.75)' : 'rgba(251, 113, 133, 0.75)';
+    dot.style.background = color;
+    dot.style.boxShadow = `0 0 0 0 ${glow}, 0 0 10px ${glow}`;
+    dot.style.opacity = '1';
+    dot.style.transform = 'scale(1)';
+    if (vs.screenshotDotTimer) clearTimeout(vs.screenshotDotTimer);
+    vs.screenshotDotTimer = setTimeout(() => {
+      dot.style.opacity = '0';
+      dot.style.transform = 'scale(0.6)';
+      dot.style.boxShadow = `0 0 0 8px rgba(0,0,0,0)`;
+      vs.screenshotDotTimer = null;
+    }, 650);
+  }
+
   // ─── HUD ──────────────────────────────────────────────────────────────────
   function updateHUD(it) {
     const total = vs.items.length;
@@ -440,32 +1802,51 @@
     el.vHudLeft.textContent =
       `${vs.idx + 1} / ${total}${plus}  ·  ${it.platform || '?'}  ·  ` +
       `${(it.channel && it.channel !== 'unknown') ? it.channel : '—'}`;
-    el.vHudRight.textContent = it.duration ? String(it.duration) : '';
+    el.vHudRight.textContent = it.type === 'video' ? '' : (it.duration ? String(it.duration) : '');
     // Reset progress bar
     if (el.vProgressFill) el.vProgressFill.style.width = '0%';
     if (el.vProgressHandle) el.vProgressHandle.style.left = '0%';
+    if (el.vSeek) el.vSeek.style.setProperty('--vseek-progress', '0%');
     // Show progress bar alleen bij video
     if (el.vProgressBar) el.vProgressBar.style.display = it.type === 'video' ? '' : 'none';
+    if (el.vBottomControls) el.vBottomControls.classList.toggle('hidden', it.type !== 'video');
+    if (el.vStage) el.vStage.classList.toggle('viewer-stage--video', it.type === 'video');
+    if (el.vBtnReloadMedia) el.vBtnReloadMedia.disabled = !it || (it.type !== 'video' && it.type !== 'image');
+    if (el.vBtnCaptureStage) el.vBtnCaptureStage.disabled = !it || it.type !== 'video';
+    updatePlaybackControls(null);
+  }
+
+  function showHudMessage(message, timeout = 1800, { skipOverlay = false } = {}) {
+    if (!message || !el.vHudRight) return;
+    el.vHudRight.textContent = message;
+    if (!skipOverlay) showHUD();
+    clearTimeout(vs.hudMessageTimer);
+    vs.hudMessageTimer = setTimeout(() => {
+      if (vs.items[vs.idx]) updateHUD(vs.items[vs.idx]);
+    }, timeout);
   }
 
   function showHUD() {
     el.vHudLeft.classList.remove('hud-hidden');
     el.vHudRight.classList.remove('hud-hidden');
     el.vStage.classList.remove('hud-hidden');
-    // Topbar mee tonen
-    const topbar = document.querySelector('.viewer-topbar');
-    if (topbar) topbar.style.opacity = '';
+    if (el.viewer) el.viewer.classList.remove('viewer--hud-hidden');
     clearTimeout(vs.hudTimer);
     vs.hudTimer = setTimeout(hideHUD, 3000);
   }
 
   function hideHUD() {
+    if (el.vTagDialog && !el.vTagDialog.classList.contains('hidden')) return;
+    const topbar = document.querySelector('.viewer-topbar');
+    if (topbar && (topbar.matches(':hover') || topbar.contains(document.activeElement))) {
+      clearTimeout(vs.hudTimer);
+      vs.hudTimer = setTimeout(hideHUD, 1200);
+      return;
+    }
     el.vHudLeft.classList.add('hud-hidden');
     el.vHudRight.classList.add('hud-hidden');
     el.vStage.classList.add('hud-hidden');
-    // Topbar mee verbergen
-    const topbar = document.querySelector('.viewer-topbar');
-    if (topbar) topbar.style.opacity = '0';
+    if (el.viewer) el.viewer.classList.add('viewer--hud-hidden');
   }
 
   // ─── Slideshow ────────────────────────────────────────────────────────────
@@ -484,8 +1865,10 @@
   function scheduleSlideshowTick() {
     if (!vs.slideshow) return;
     const v = el.vContent.querySelector('video');
-    // Als video-wait aan EN video nog bezig → wacht op 'ended' event (gebonden in showCurrent)
-    if (v && vs.videoWait && !v.ended && !v.paused) return;
+    // Als video-wait aan EN er IS een video → ALTIJD wachten op 'ended' event
+    // (gebonden in showCurrent). v.paused is true wanneer video nog niet eens
+    // gestart is — eerdere check `!v.paused` liet de timer dan tóch lopen.
+    if (v && vs.videoWait) return;
     vs.slideshowTimer = setTimeout(slideshowTick, vs.slideshowSec * 1000);
   }
 
@@ -508,9 +1891,15 @@
       const div = document.createElement('div');
       div.className = 'vsidebar-item' + (i === vs.idx ? ' active' : '');
       div.dataset.i = String(i);
-      const thumb = `/thumb/${it.id}?v=${it.is_thumb_ready ? 1 : 0}`;
       const title = (it.title || it.filename || '(untitled)').replace(/</g, '&lt;').slice(0, 64);
-      div.innerHTML = `<img class="vsidebar-thumb" src="${thumb}" loading="lazy" alt=""><span class="vsidebar-label">${title}</span>`;
+      div.innerHTML = `<img class="vsidebar-thumb" src="${thumbUrl(it)}" loading="eager" decoding="async" alt=""><span class="vsidebar-label">${title}</span>`;
+      const img = div.querySelector('img');
+      img.addEventListener('error', () => {
+        const tries = Number(img.dataset.retry || '0');
+        if (tries >= 2) return;
+        img.dataset.retry = String(tries + 1);
+        setTimeout(() => { img.src = thumbUrl(it, Date.now()); }, 700 * (tries + 1));
+      });
       div.addEventListener('click', () => navTo(i));
       frag.appendChild(div);
     }
@@ -549,85 +1938,696 @@
   }
 
   // ─── Tags ─────────────────────────────────────────────────────────────────
+  function safeText(value) {
+    return String(value || '');
+  }
+
+  function userTagUses(tag) {
+    return Number(tag && (tag.user_use_count ?? tag.applied_count ?? tag.uses) || 0);
+  }
+
+  function sortUserTags(a, b) {
+    const favDelta = Number(Boolean(b.is_favorite)) - Number(Boolean(a.is_favorite));
+    if (favDelta) return favDelta;
+    const useDelta = userTagUses(b) - userTagUses(a);
+    if (useDelta) return useDelta;
+    const bLast = Date.parse(b.last_used_at || '') || 0;
+    const aLast = Date.parse(a.last_used_at || '') || 0;
+    if (bLast !== aLast) return bLast - aLast;
+    return safeText(a.name).localeCompare(safeText(b.name));
+  }
+
+  function sortTagsByName(a, b) {
+    return safeText(a && a.name).localeCompare(safeText(b && b.name), undefined, { numeric: true, sensitivity: 'base' });
+  }
+
+  function normalizeTagList(tags) {
+    const out = [];
+    const seen = new Set();
+    for (const tag of tags || []) {
+      const id = Number(tag && tag.id);
+      if (!Number.isFinite(id) || seen.has(id)) continue;
+      seen.add(id);
+      out.push({ id, name: safeText(tag.name || `tag ${id}`) });
+    }
+    return out;
+  }
+
+  function restoreLastAppliedTags() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(LAST_APPLIED_TAGS_KEY) || '[]');
+      vs.lastAppliedTags = normalizeTagList(parsed).slice(0, 24);
+    } catch (_) {
+      vs.lastAppliedTags = [];
+    }
+  }
+
+  function rememberAppliedTags(tags, opts = {}) {
+    const normalized = normalizeTagList(tags).slice(0, 24);
+    if (!normalized.length) return;
+    if (opts.itemId != null && String(vs.lastAppliedItemId || '') === String(opts.itemId || '')) {
+      vs.lastAppliedTags = normalizeTagList([...(vs.lastAppliedTags || []), ...normalized]).slice(0, 24);
+    } else {
+      vs.lastAppliedTags = normalized;
+    }
+    vs.lastAppliedItemId = opts.itemId != null ? String(opts.itemId) : null;
+    try { localStorage.setItem(LAST_APPLIED_TAGS_KEY, JSON.stringify(vs.lastAppliedTags)); } catch (_) {}
+  }
+
+  function syncTagTargetControls() {
+    const target = vs.tagTarget === 'recipe' ? 'recipe' : 'media';
+    if (el.vTagTargetMedia) el.vTagTargetMedia.classList.toggle('active', target === 'media');
+    if (el.vTagTargetRecipe) el.vTagTargetRecipe.classList.toggle('active', target === 'recipe');
+    if (el.vBtnAddTag) {
+      el.vBtnAddTag.textContent = target === 'recipe' ? '+ Maak + naar recept' : '+ Maak + naar media';
+    }
+  }
+
+  function setTagTarget(target) {
+    vs.tagTarget = target === 'recipe' ? 'recipe' : 'media';
+    if (vs.tagTarget === 'recipe') setTagRecipesOpen(true);
+    syncTagTargetControls();
+    renderTagDialog();
+  }
+
+  async function addTagToMedia(itemId, tag, opts = {}) {
+    await api(`/api/items/${itemId}/tags`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tag_id: tag.id }),
+    });
+    if (opts.remember !== false) rememberAppliedTags([tag], { itemId });
+    await loadItemTags(itemId);
+    await loadTags();
+    renderFavoriteOverlay();
+  }
+
+  async function removeTagFromMedia(itemId, tag) {
+    await api(`/api/items/${itemId}/tags/${tag.id}`, { method: 'DELETE' });
+    vs.currentItemTags = (vs.currentItemTags || []).filter((t) => Number(t.id) !== Number(tag.id));
+    await loadItemTags(itemId);
+    await loadTags();
+    renderFavoriteOverlay();
+  }
+
+  async function applyTagsToMedia(itemId, tags, opts = {}) {
+    const normalized = normalizeTagList(tags);
+    if (!normalized.length) return 0;
+    const currentIds = new Set((vs.currentItemTags || []).map((t) => Number(t.id)));
+    const missing = normalized.filter((tag) => !currentIds.has(Number(tag.id)));
+    for (const tag of missing) {
+      await api(`/api/items/${itemId}/tags`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tag_id: tag.id }),
+      });
+    }
+    if (opts.remember !== false) rememberAppliedTags(normalized, { itemId });
+    await loadTags();
+    await loadItemTags(itemId);
+    renderFavoriteOverlay();
+    return missing.length;
+  }
+
+  async function applyPickedTag(itemId, tag) {
+    if (vs.tagTarget === 'recipe') {
+      addTagToRecipeDraft(tag);
+      return;
+    }
+    if ((vs.currentItemTags || []).some((t) => Number(t.id) === Number(tag.id))) {
+      renderTagDialog();
+      return;
+    }
+    await addTagToMedia(itemId, tag);
+    renderTagDialog();
+  }
+
+  async function toggleTagFavorite(tag) {
+    await api(`/api/tags/${tag.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ is_favorite: !tag.is_favorite }),
+    });
+  }
+
   async function loadTags() {
     try {
       const data = await api('/api/tags');
-      vs.availableTags = data.tags || [];
-      // Tag-filter select vullen
-      const sel = el.vTagFilter;
-      sel.innerHTML = '<option value="">Alle tags</option>';
-      for (const t of vs.availableTags) {
-        const o = document.createElement('option');
-        o.value = String(t.id);
-        o.textContent = t.name;
-        sel.appendChild(o);
-      }
+      vs.availableTags = (data.tags || []).sort(sortUserTags);
+      renderFavoriteOverlay();
+      renderViewerTagFilterMatrix();
     } catch (e) {
       console.warn('tags load failed', e);
     }
   }
 
+  function renderViewerTagFilterMatrix() {
+    if (!el.vTagFilterMatrix) return;
+    const selectedId = String((vs.queryFilters && vs.queryFilters.tag_id) || (el.vTagFilter && el.vTagFilter.value) || '');
+    if (el.vTagFilter) el.vTagFilter.value = selectedId;
+    el.vTagFilterMatrix.innerHTML = '';
+    const mkChip = (tag) => {
+      const tagId = tag && tag.id != null ? String(tag.id) : '';
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'tag-filter-chip' + (tagId === selectedId ? ' active' : '');
+      chip.title = tagId ? `Filter op #${safeText(tag.name)}` : 'Tagfilter wissen';
+      const count = tagId ? userTagUses(tag) : 0;
+      chip.textContent = tagId
+        ? `#${safeText(tag.name)}${count ? ` (${count})` : ''}`
+        : 'Alle tags';
+      chip.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        await applyQuickTagFilter(tagId ? tag : null);
+      });
+      return chip;
+    };
+    el.vTagFilterMatrix.appendChild(mkChip(null));
+    for (const tag of (vs.availableTags || []).slice(0, 80)) {
+      el.vTagFilterMatrix.appendChild(mkChip(tag));
+    }
+  }
+
   async function loadItemTags(itemId) {
+    const key = String(itemId || '');
+    vs.currentItemTagRequestKey = key;
     try {
       const data = await api(`/api/items/${itemId}/tags`);
-      vs.currentItemTags = data.tags || [];
+      if (vs.currentItemTagRequestKey === key) {
+        vs.currentItemTags = data.tags || [];
+        renderFavoriteOverlay();
+      }
     } catch (_) {
-      vs.currentItemTags = [];
+      if (vs.currentItemTagRequestKey === key) {
+        vs.currentItemTags = [];
+        renderFavoriteOverlay();
+      }
     }
+  }
+
+  async function loadTagRecipes() {
+    try {
+      const data = await api('/api/tag-recipes');
+      vs.tagRecipes = data.recipes || [];
+    } catch (e) {
+      vs.tagRecipes = [];
+      console.warn('tag recipes load failed', e);
+    }
+  }
+
+  function allKnownTagsById() {
+    const tags = new Map();
+    for (const t of vs.availableTags || []) tags.set(Number(t.id), t);
+    for (const t of vs.currentItemTags || []) tags.set(Number(t.id), t);
+    for (const r of vs.tagRecipes || []) {
+      for (const t of r.tags || []) tags.set(Number(t.id), t);
+    }
+    return tags;
+  }
+
+  function addTagToRecipeDraft(tag) {
+    const id = Number(tag && tag.id);
+    if (!Number.isFinite(id) || vs.recipeDraftTagIds.includes(id)) return;
+    vs.recipeDraftTagIds.push(id);
+    renderRecipeDraft();
+  }
+
+  function setRecipeDraft(tags, recipe = null) {
+    vs.recipeDraftTagIds = [];
+    for (const t of tags || []) {
+      const id = Number(t && t.id);
+      if (Number.isFinite(id) && !vs.recipeDraftTagIds.includes(id)) vs.recipeDraftTagIds.push(id);
+    }
+    vs.editingRecipeId = recipe ? Number(recipe.id) : null;
+    if (el.vRecipeName) el.vRecipeName.value = recipe ? safeText(recipe.name) : '';
+    if (el.vRecipeDescription) el.vRecipeDescription.value = recipe ? safeText(recipe.description) : '';
+    renderRecipeDraft();
+  }
+
+  function renderRecipeDraft() {
+    if (!el.vRecipeDraft) return;
+    const tags = allKnownTagsById();
+    el.vRecipeDraft.innerHTML = '';
+    if (!vs.recipeDraftTagIds.length) {
+      const empty = document.createElement('span');
+      empty.className = 'tag-empty';
+      empty.textContent = 'Nog geen tags in recept';
+      el.vRecipeDraft.appendChild(empty);
+      return;
+    }
+    for (const id of vs.recipeDraftTagIds) {
+      const tag = tags.get(Number(id));
+      if (!tag) continue;
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'tag-chip tag-chip-quick';
+      chip.title = 'Uit recept halen';
+      chip.textContent = `#${safeText(tag.name)} ×`;
+      chip.addEventListener('click', (e) => {
+        e.stopPropagation();
+        vs.recipeDraftTagIds = vs.recipeDraftTagIds.filter((tagId) => tagId !== Number(id));
+        renderRecipeDraft();
+      });
+      el.vRecipeDraft.appendChild(chip);
+    }
+  }
+
+  async function saveRecipeDraft() {
+    const name = (el.vRecipeName && el.vRecipeName.value || '').trim();
+    if (!name) {
+      log('Recept heeft een naam nodig');
+      return;
+    }
+    if (!vs.recipeDraftTagIds.length) {
+      log('Recept heeft minimaal 1 tag nodig');
+      return;
+    }
+    const body = {
+      name,
+      description: (el.vRecipeDescription && el.vRecipeDescription.value || '').trim(),
+      tag_ids: vs.recipeDraftTagIds,
+    };
+    const url = vs.editingRecipeId ? `/api/tag-recipes/${vs.editingRecipeId}` : '/api/tag-recipes';
+    const method = vs.editingRecipeId ? 'PATCH' : 'POST';
+    await api(url, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    await loadTagRecipes();
+    renderTagDialog();
+    log(`Recept opgeslagen: ${name}`);
   }
 
   async function openTagDialog() {
     const it = vs.items[vs.idx];
-    if (!it) return;
-    await loadItemTags(it.rating_id || it.id);
-    renderTagDialog();
     el.vTagDialog.classList.remove('hidden');
+    clampTagDialogPosition();
+    if (el.vTagSearch) el.vTagSearch.value = '';
+    if (el.vTagCurrent) el.vTagCurrent.textContent = 'Tags laden...';
+    if (el.vTagQuick) el.vTagQuick.textContent = '';
+    if (el.vTagList) el.vTagList.textContent = '';
+    if (!it) {
+      if (el.vTagCurrent) el.vTagCurrent.textContent = 'Geen item geselecteerd';
+      return;
+    }
+    syncTagTargetControls();
+    await Promise.all([
+      loadTags(),
+      loadItemTags(it.rating_id || it.id),
+      loadTagRecipes(),
+    ]);
+    renderTagDialog();
   }
 
-  function closeTagDialog() {
+  function openTagsFromEvent(e) {
+    if (e) {
+      try { e.preventDefault(); } catch (_) {}
+      try { e.stopPropagation(); } catch (_) {}
+      try { e.stopImmediatePropagation(); } catch (_) {}
+    }
+    const now = Date.now();
+    if (now - vs.lastTagOpenAt < 250) return false;
+    vs.lastTagOpenAt = now;
+    showHUD();
+    openTagDialog().catch((err) => log('Tags openen mislukt: ' + err.message));
+    return false;
+  }
+
+  function closeTagDialog(opts = {}) {
+    if (!opts.force && Date.now() - vs.lastTagOpenAt < 2000) return;
+    stopTagDialogDrag();
     if (el.vTagDialog) el.vTagDialog.classList.add('hidden');
+  }
+
+  function applyTagDialogPosition() {
+    if (!el.vTagDialogInner) return;
+    el.vTagDialogInner.style.setProperty('--tag-dialog-x', `${Math.round(vs.tagDialogX || 0)}px`);
+    el.vTagDialogInner.style.setProperty('--tag-dialog-y', `${Math.round(vs.tagDialogY || 0)}px`);
+  }
+
+  function clampTagDialogPosition(x = vs.tagDialogX, y = vs.tagDialogY) {
+    if (!el.vTagDialogInner) return;
+    const rect = el.vTagDialogInner.getBoundingClientRect();
+    const baseLeft = (window.innerWidth - rect.width) / 2;
+    const baseTop = (window.innerHeight - rect.height) / 2;
+    const margin = 8;
+    const minX = margin - baseLeft;
+    const maxX = window.innerWidth - margin - rect.width - baseLeft;
+    const minY = margin - baseTop;
+    const maxY = window.innerHeight - margin - rect.height - baseTop;
+    vs.tagDialogX = Math.min(Math.max(x || 0, minX), maxX);
+    vs.tagDialogY = Math.min(Math.max(y || 0, minY), maxY);
+    applyTagDialogPosition();
+  }
+
+  function stopTagDialogDrag() {
+    if (!vs.tagDialogDrag) return;
+    const drag = vs.tagDialogDrag;
+    if (drag.move) window.removeEventListener('pointermove', drag.move);
+    if (drag.up) window.removeEventListener('pointerup', drag.up);
+    vs.tagDialogDrag = null;
+    if (el.vTagDialogInner) el.vTagDialogInner.classList.remove('dragging');
+  }
+
+  function startTagDialogDrag(e) {
+    if (!el.vTagDialogInner || !el.vTagDialog || el.vTagDialog.classList.contains('hidden')) return;
+    if (e.button != null && e.button !== 0) return;
+    if (e.target && e.target.closest && e.target.closest('button')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    stopTagDialogDrag();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startOffsetX = vs.tagDialogX || 0;
+    const startOffsetY = vs.tagDialogY || 0;
+    const onMove = (moveEvent) => {
+      moveEvent.preventDefault();
+      clampTagDialogPosition(
+        startOffsetX + moveEvent.clientX - startX,
+        startOffsetY + moveEvent.clientY - startY,
+      );
+    };
+    const onUp = () => stopTagDialogDrag();
+    vs.tagDialogDrag = { move: onMove, up: onUp };
+    el.vTagDialogInner.classList.add('dragging');
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp, { once: true });
   }
 
   function renderTagDialog() {
     const it = vs.items[vs.idx];
     if (!it) return;
+    syncTagTargetControls();
+    syncTagRecipeVisibility();
     const itemId = it.rating_id || it.id;
-    const currentIds = new Set(vs.currentItemTags.map(t => t.id));
+    const currentIds = new Set(vs.currentItemTags.map(t => Number(t.id)));
+    const recipeDraftIds = new Set((vs.recipeDraftTagIds || []).map((id) => Number(id)));
+    const tagState = (tag) => {
+      const tagId = Number(tag && tag.id);
+      return {
+        tagId,
+        isOnMedia: currentIds.has(tagId),
+        isInRecipe: recipeDraftIds.has(tagId),
+      };
+    };
+    const appendStateBadges = (parent, state) => {
+      if (!state.isOnMedia && !state.isInRecipe) return;
+      const badges = document.createElement('span');
+      badges.className = 'tag-state-badges';
+      if (state.isOnMedia) {
+        const badge = document.createElement('span');
+        badge.className = 'tag-state-badge';
+        badge.textContent = 'Media';
+        badges.appendChild(badge);
+      }
+      if (state.isInRecipe) {
+        const badge = document.createElement('span');
+        badge.className = 'tag-state-badge';
+        badge.textContent = 'Recept';
+        badges.appendChild(badge);
+      }
+      parent.appendChild(badges);
+    };
+
+    if (el.vTagCurrent) {
+      el.vTagCurrent.innerHTML = '';
+      if (!vs.currentItemTags.length) {
+        const empty = document.createElement('span');
+        empty.className = 'tag-empty';
+        empty.textContent = 'Geen tags op dit item';
+        el.vTagCurrent.appendChild(empty);
+      } else {
+        for (const t of vs.currentItemTags) {
+          const chip = document.createElement('button');
+          chip.type = 'button';
+          chip.className = 'tag-chip tag-chip-current';
+
+          const name = document.createElement('span');
+          name.textContent = `#${safeText(t.name)}`;
+          const remove = document.createElement('span');
+          remove.className = 'tag-chip-remove';
+          remove.textContent = '×';
+          chip.append(name, remove);
+
+          chip.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            try {
+              await api(`/api/items/${itemId}/tags/${t.id}`, { method: 'DELETE' });
+              await loadItemTags(itemId);
+              renderTagDialog();
+            } catch (err) { log('Tag fout: ' + err.message); }
+          });
+
+          el.vTagCurrent.appendChild(chip);
+        }
+      }
+    }
+
+    if (el.vTagLast) {
+      el.vTagLast.innerHTML = '';
+      const lastTags = normalizeTagList(vs.lastAppliedTags);
+      if (!lastTags.length) {
+        const empty = document.createElement('span');
+        empty.className = 'tag-empty';
+        empty.textContent = 'Nog niets onthouden';
+        el.vTagLast.appendChild(empty);
+      } else {
+        const currentIdsForLast = new Set(vs.currentItemTags.map(t => Number(t.id)));
+        const chips = document.createElement('div');
+        chips.className = 'tag-last-chips';
+        for (const tag of lastTags.slice(0, 12)) {
+          const chip = document.createElement('span');
+          chip.className = 'tag-mini-chip' + (currentIdsForLast.has(Number(tag.id)) ? ' active' : '');
+          chip.textContent = `#${safeText(tag.name)}`;
+          chips.appendChild(chip);
+        }
+        const applyLast = document.createElement('button');
+        applyLast.type = 'button';
+        applyLast.className = 'tag-apply-last';
+        applyLast.textContent = 'Toepassen';
+        applyLast.disabled = lastTags.every((tag) => currentIdsForLast.has(Number(tag.id)));
+        applyLast.title = applyLast.disabled ? 'Alle laatst gebruikte tags staan al op dit item' : 'Laatste tag-set op dit item toepassen';
+        applyLast.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          if (applyLast.disabled) return;
+          try {
+            const added = await applyTagsToMedia(itemId, lastTags, { remember: false });
+            renderTagDialog();
+            log(added ? `Laatste tags toegepast: ${added}` : 'Laatste tags stonden al op dit item');
+          } catch (err) { log('Laatste tags fout: ' + err.message); }
+        });
+        el.vTagLast.append(chips, applyLast);
+      }
+    }
+
+    const q = (el.vTagSearch?.value || '').trim().toLowerCase();
+    const quickTags = favoriteTags();
+
+    if (el.vTagQuick) {
+      el.vTagQuick.innerHTML = '';
+      if (!quickTags.length) {
+        const empty = document.createElement('span');
+        empty.className = 'tag-empty';
+        empty.textContent = 'Nog geen favoriete tags';
+        el.vTagQuick.appendChild(empty);
+      } else {
+        for (const t of quickTags) {
+          const state = tagState(t);
+          const selectedForTarget = vs.tagTarget === 'recipe' ? state.isInRecipe : state.isOnMedia;
+          const item = document.createElement('span');
+          item.className = 'tag-quick-item';
+
+          const chip = document.createElement('button');
+          chip.type = 'button';
+          chip.className = 'tag-chip tag-chip-quick' + (selectedForTarget ? ' active' : '');
+          chip.disabled = selectedForTarget;
+          chip.title = selectedForTarget
+            ? (vs.tagTarget === 'recipe' ? 'Staat al in recept' : 'Staat al op media')
+            : (vs.tagTarget === 'recipe' ? 'Tag aan recept toevoegen' : 'Tag aan huidig item toevoegen');
+          chip.textContent = `#${safeText(t.name)}`;
+          chip.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            if (chip.disabled) return;
+            try {
+              await applyPickedTag(itemId, t);
+            } catch (err) { log('Tag fout: ' + err.message); }
+          });
+
+          const unstar = document.createElement('button');
+          unstar.type = 'button';
+          unstar.className = 'tag-quick-unstar';
+          unstar.title = 'Uit favorieten halen';
+          unstar.textContent = '★';
+          unstar.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            try {
+              await toggleTagFavorite(t);
+              await loadTags();
+              renderTagDialog();
+            } catch (err) { log('Favoriet fout: ' + err.message); }
+          });
+
+          item.append(unstar, chip);
+          el.vTagQuick.appendChild(item);
+        }
+      }
+    }
+
+    if (el.vTagRecipes) {
+      el.vTagRecipes.innerHTML = '';
+      if (!vs.tagRecipes.length) {
+        const empty = document.createElement('span');
+        empty.className = 'tag-empty';
+        empty.textContent = 'Geen opgeslagen recepten';
+        el.vTagRecipes.appendChild(empty);
+      } else {
+        for (const recipe of vs.tagRecipes.slice(0, 8)) {
+          const row = document.createElement('div');
+          row.className = 'tag-recipe';
+
+          const main = document.createElement('div');
+          main.className = 'tag-recipe-main';
+          const name = document.createElement('div');
+          name.className = 'tag-recipe-name';
+          name.textContent = safeText(recipe.name);
+          const desc = document.createElement('div');
+          desc.className = 'tag-recipe-desc';
+          desc.textContent = safeText(recipe.description) || `${(recipe.tags || []).length} tags`;
+          const tags = document.createElement('div');
+          tags.className = 'tag-recipe-tags';
+          for (const t of (recipe.tags || []).slice(0, 8)) {
+            const chip = document.createElement('span');
+            chip.className = 'tag-mini-chip';
+            chip.textContent = `#${safeText(t.name)}`;
+            tags.appendChild(chip);
+          }
+          main.append(name, desc, tags);
+
+          const apply = document.createElement('button');
+          apply.type = 'button';
+          apply.textContent = 'Media +';
+          apply.title = 'Recept op dit item toepassen';
+          apply.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            try {
+              await api(`/api/items/${itemId}/tag-recipes/${recipe.id}`, { method: 'POST' });
+              rememberAppliedTags(recipe.tags || [], { itemId });
+              await loadTags();
+              await loadItemTags(itemId);
+              await loadTagRecipes();
+              renderTagDialog();
+              log(`Recept toegepast: ${recipe.name}`);
+            } catch (err) { log('Recept fout: ' + err.message); }
+          });
+
+          const edit = document.createElement('button');
+          edit.type = 'button';
+          edit.textContent = 'Wijzig';
+          edit.title = 'Recept in editor laden';
+          edit.addEventListener('click', (e) => {
+            e.stopPropagation();
+            setRecipeDraft(recipe.tags || [], recipe);
+          });
+
+          const del = document.createElement('button');
+          del.type = 'button';
+          del.textContent = 'Wis';
+          del.title = 'Recept verwijderen';
+          del.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            if (!confirm(`Recept "${recipe.name}" verwijderen?`)) return;
+            try {
+              await api(`/api/tag-recipes/${recipe.id}`, { method: 'DELETE' });
+              if (vs.editingRecipeId === Number(recipe.id)) setRecipeDraft([]);
+              await loadTagRecipes();
+              renderTagDialog();
+            } catch (err) { log('Recept del fout: ' + err.message); }
+          });
+
+          row.append(main, apply, edit, del);
+          el.vTagRecipes.appendChild(row);
+        }
+      }
+    }
+
+    renderRecipeDraft();
+
+    const candidates = vs.availableTags
+      .filter(t => q ? safeText(t.name).toLowerCase().includes(q) : !t.is_favorite)
+      .slice(0, 120);
 
     el.vTagList.innerHTML = '';
-    for (const t of vs.availableTags) {
-      const has = currentIds.has(t.id);
+    if (!candidates.length) {
+      const empty = document.createElement('div');
+      empty.className = 'tag-empty tag-empty-row';
+      empty.textContent = q ? 'Geen bestaande tags gevonden' : 'Geen andere tags beschikbaar';
+      el.vTagList.appendChild(empty);
+      return;
+    }
+
+    for (const t of candidates) {
+      const { tagId, isOnMedia, isInRecipe } = tagState(t);
+      const addDisabled = vs.tagTarget === 'recipe' ? isInRecipe : isOnMedia;
       const row = document.createElement('div');
       row.className = 'tag-row';
-      const safeName = t.name.replace(/</g, '&lt;');
-      row.innerHTML = `
-        <span class="tag-name">${safeName}</span>
-        <button class="tag-toggle${has ? ' tag-has' : ''}" data-tagid="${t.id}" data-has="${has ? '1' : '0'}">${has ? '−' : '+'}</button>
-        <button class="tag-del" data-tagid="${t.id}" title="Verwijder globaal">🗑</button>`;
+      const name = document.createElement('span');
+      name.className = 'tag-name';
+      name.textContent = `#${safeText(t.name)}`;
+      appendStateBadges(name, { tagId, isOnMedia, isInRecipe });
 
-      row.querySelector('.tag-toggle').addEventListener('click', async (e) => {
-        const tagId = Number(e.currentTarget.dataset.tagid);
-        const isHas  = e.currentTarget.dataset.has === '1';
+      const fav = document.createElement('button');
+      fav.className = 'tag-fav' + (t.is_favorite ? ' active' : '');
+      fav.type = 'button';
+      fav.title = t.is_favorite ? 'Uit favorieten halen' : 'Als favoriete tag markeren';
+      fav.textContent = t.is_favorite ? '★' : '☆';
+
+      const uses = document.createElement('span');
+      uses.className = 'tag-uses';
+      uses.title = `${Number(t.applied_count || 0)}× toegepast`;
+      uses.textContent = userTagUses(t) ? `${userTagUses(t)}×` : '';
+
+      const add = document.createElement('button');
+      add.className = 'tag-toggle';
+      add.type = 'button';
+      add.disabled = addDisabled;
+      add.title = addDisabled
+        ? (vs.tagTarget === 'recipe' ? 'Tag staat al in dit recept' : 'Tag staat al op dit item')
+        : (vs.tagTarget === 'recipe' ? 'Tag aan recept toevoegen' : 'Tag aan huidig item toevoegen');
+      add.textContent = addDisabled
+        ? (vs.tagTarget === 'recipe' ? 'In recept' : 'Op media')
+        : (vs.tagTarget === 'recipe' ? 'Recept +' : 'Media +');
+
+      const del = document.createElement('button');
+      del.className = 'tag-del';
+      del.type = 'button';
+      del.title = 'Tag globaal verwijderen';
+      del.textContent = '🗑';
+
+      row.append(fav, name, uses, add, del);
+
+      fav.addEventListener('click', async (e) => {
+        e.stopPropagation();
         try {
-          if (isHas) {
-            await api(`/api/items/${itemId}/tags/${tagId}`, { method: 'DELETE' });
-          } else {
-            await api(`/api/items/${itemId}/tags`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ tag_id: tagId }),
-            });
-          }
-          await loadItemTags(itemId);
+          await toggleTagFavorite(t);
+          await loadTags();
           renderTagDialog();
+        } catch (err) { log('Favoriet fout: ' + err.message); }
+      });
+
+      add.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (add.disabled) return;
+        try {
+          await applyPickedTag(itemId, t);
         } catch (err) { log('Tag fout: ' + err.message); }
       });
 
-      row.querySelector('.tag-del').addEventListener('click', async (e) => {
-        const tagId = Number(e.currentTarget.dataset.tagid);
+      del.addEventListener('click', async (e) => {
+        e.stopPropagation();
         if (!confirm(`Tag "${t.name}" globaal verwijderen?`)) return;
         try {
-          await api(`/api/tags/${tagId}`, { method: 'DELETE' });
+          await api(`/api/tags/${t.id}`, { method: 'DELETE' });
           await loadTags();
           await loadItemTags(itemId);
           renderTagDialog();
@@ -645,56 +2645,171 @@
   }
 
   // ─── Afspeelsnelheid ─────────────────────────────────────────────────────
-  const SPEED_STEPS = [-2, -1, -0.5, 0.25, 0.5, 1, 1.5, 2, 3, 4];
+  const FORWARD_SPEED_STEPS = [0.1, 0.25, 0.5, 1, 1.5, 2, 3, 4];
+  const SPEED_STEPS = FORWARD_SPEED_STEPS;
 
   function changeSpeed(dir) {
     const cur = vs.playbackRate;
-    let idx = SPEED_STEPS.indexOf(cur);
-    if (idx === -1) {
-      // Zoek dichtstbijzijnde
-      idx = SPEED_STEPS.findIndex(s => s >= cur);
-      if (idx === -1) idx = SPEED_STEPS.length - 1;
+    if (cur === 0) {
+      // Paused: slower → slowest reverse, faster → slowest forward
+      if (dir < 0) { setSpeed(-FORWARD_SPEED_STEPS[0]); return; }
+      setSpeed(FORWARD_SPEED_STEPS[0]);
+      return;
     }
-    idx = Math.max(0, Math.min(SPEED_STEPS.length - 1, idx + dir));
-    setSpeed(SPEED_STEPS[idx]);
+    if (cur < 0) {
+      // Reverse: find current position in reverse steps
+      const absCur = Math.abs(cur);
+      let idx = FORWARD_SPEED_STEPS.indexOf(absCur);
+      if (idx === -1) {
+        idx = FORWARD_SPEED_STEPS.findIndex(s => s >= absCur);
+        if (idx === -1) idx = FORWARD_SPEED_STEPS.length - 1;
+      }
+      if (dir < 0) {
+        // Slower in reverse = faster reverse speed
+        idx = Math.min(FORWARD_SPEED_STEPS.length - 1, idx + 1);
+        setSpeed(-FORWARD_SPEED_STEPS[idx]);
+      } else {
+        // Faster = towards pause: decrease reverse speed
+        if (idx <= 0) { setSpeed(0); return; }
+        setSpeed(-FORWARD_SPEED_STEPS[idx - 1]);
+      }
+      return;
+    }
+    // Forward
+    let idx = FORWARD_SPEED_STEPS.indexOf(cur);
+    if (idx === -1) {
+      idx = FORWARD_SPEED_STEPS.findIndex(s => s >= cur);
+      if (idx === -1) idx = FORWARD_SPEED_STEPS.length - 1;
+    }
+    if (dir < 0 && idx <= 0) {
+      setSpeed(0); // pause before reverse
+      return;
+    }
+    if (dir > 0 && idx >= FORWARD_SPEED_STEPS.length - 1) return;
+    idx = Math.max(0, Math.min(FORWARD_SPEED_STEPS.length - 1, idx + dir));
+    setSpeed(FORWARD_SPEED_STEPS[idx]);
   }
 
   function resetSpeed() { setSpeed(1); }
 
   function setSpeed(rate) {
+    rate = Number(rate);
+    if (!Number.isFinite(rate)) rate = 1;
     vs.playbackRate = rate;
+    if (rate > 0) {
+      try { localStorage.setItem(VIEWER_SPEED_KEY, String(rate)); } catch (_) {}
+    }
     const v = el.vContent.querySelector('video');
 
-    if (rate <= 0) {
-      // Achteruit: zet video op pause, start RAF-loop
-      if (v) { v.pause(); v.playbackRate = 1; }
+    if (rate === 0) {
+      // Freeze frame: pause at current position
+      stopReverse();
+      if (v) { v.pause(); }
+    } else if (rate < 0) {
+      if (v) {
+        if (v.currentTime <= 0.15 && Number.isFinite(v.duration) && v.duration > 0) {
+          v.currentTime = Math.max(0, v.duration - 0.05);
+        }
+        v.pause();
+        v.playbackRate = 1;
+      }
       startReverse(Math.abs(rate) || 1);
     } else {
-      // Vooruit: stop eventuele reverse loop
       stopReverse();
-      if (v) { v.playbackRate = rate; if (v.paused) v.play(); }
+      if (v) {
+        v.playbackRate = rate;
+        if (v.paused) {
+          const p = v.play();
+          if (p && typeof p.catch === 'function') p.catch(() => {});
+        }
+      }
     }
     updateSpeedIndicator();
-    log(`Snelheid: ${rate > 0 ? rate + '×' : rate + '× (achteruit)'}`);
+    syncVideoProgress(v);
+    const label = rate === 0 ? 'Pauze (freeze)' : rate > 0 ? `Snelheid ${rate}x` : `Achteruit ${Math.abs(rate)}x`;
+    showHudMessage(label, 1100, { skipOverlay: true });
+    log(`Snelheid: ${rate === 0 ? 'pauze' : rate > 0 ? rate + '×' : rate + '× (achteruit)'}`);
   }
 
   function startReverse(speed) {
     stopReverse();
-    vs.reverseLastT = performance.now();
-    function tick(now) {
+    const activeVideo = el.vContent.querySelector('video');
+    if (!activeVideo) return;
+    if (activeVideo.currentTime <= 0.15 && Number.isFinite(activeVideo.duration) && activeVideo.duration > 0) {
+      activeVideo.currentTime = Math.max(0, activeVideo.duration - 0.05);
+    }
+    activeVideo.pause();
+    activeVideo.playbackRate = 1;
+    syncVideoProgress(activeVideo, { checkLoop: false });
+    vs.reverseBaseTime = activeVideo.currentTime;
+    vs.reverseBaseT = performance.now();
+    vs.reverseLastT = 0;
+
+    function seekVideo(video, time) {
+      try {
+        if (typeof video.fastSeek === 'function' && Math.abs(video.currentTime - time) > 0.45) video.fastSeek(time);
+        else video.currentTime = time;
+      } catch (_) {
+        video.currentTime = time;
+      }
+    }
+
+    function reverseBounds(video) {
+      const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : Infinity;
+      if (vs.loopStart != null && vs.loopEnd != null && Math.abs(vs.loopEnd - vs.loopStart) > 0.05) {
+        return {
+          start: Math.max(0, Math.min(vs.loopStart, vs.loopEnd)),
+          end: Math.min(duration, Math.max(vs.loopStart, vs.loopEnd)),
+          loop: true,
+        };
+      }
+      return { start: 0, end: duration, loop: false };
+    }
+
+    function resyncReverseClock(video, now) {
+      vs.reverseBaseTime = video.currentTime;
+      vs.reverseBaseT = now;
+    }
+
+    function tick() {
       const v = el.vContent.querySelector('video');
       if (!v || vs.playbackRate > 0) { stopReverse(); return; }
-      const dt = (now - vs.reverseLastT) / 1000;
+      const now = performance.now();
+      const bounds = reverseBounds(v);
+
+      if (v.seeking && now - vs.reverseLastT < 500) {
+        vs.reverseTimer = setTimeout(tick, 45);
+        return;
+      }
+
+      let target = vs.reverseBaseTime - (((now - vs.reverseBaseT) / 1000) * speed);
+      if (bounds.loop && target < bounds.start) {
+        target = bounds.end - ((bounds.start - target) % Math.max(0.05, bounds.end - bounds.start));
+        seekVideo(v, target);
+        resyncReverseClock(v, now);
+      } else if (target <= bounds.start) {
+        target = bounds.start;
+        seekVideo(v, target);
+        vs.playbackRate = 1;
+        stopReverse();
+        updateSpeedIndicator();
+        syncVideoProgress(v, { checkLoop: false });
+        showHudMessage(bounds.loop ? 'Begin loop' : 'Begin video', 900);
+        return;
+      } else if (Math.abs(v.currentTime - target) >= 0.025) {
+        seekVideo(v, target);
+      }
       vs.reverseLastT = now;
-      v.currentTime = Math.max(0, v.currentTime - dt * speed);
-      if (v.currentTime <= 0) { stopReverse(); return; }
-      vs.reverseRAF = requestAnimationFrame(tick);
+      syncVideoProgress(v, { checkLoop: false });
+      vs.reverseTimer = setTimeout(tick, 70);
     }
-    vs.reverseRAF = requestAnimationFrame(tick);
+    vs.reverseTimer = setTimeout(tick, 70);
   }
 
   function stopReverse() {
     if (vs.reverseRAF) { cancelAnimationFrame(vs.reverseRAF); vs.reverseRAF = null; }
+    if (vs.reverseTimer) { clearTimeout(vs.reverseTimer); vs.reverseTimer = null; }
+    vs.reverseLastT = 0;
   }
 
   function updateSpeedIndicator() {
@@ -719,6 +2834,10 @@
       ind.style.background = r < 0 ? 'rgba(255,80,80,.25)' : 'rgba(80,200,255,.2)';
       ind.style.color = r < 0 ? '#ff8080' : '#80d0ff';
     }
+    if (el.vSpeedSelect) el.vSpeedSelect.value = String(r > 0 ? r : 1);
+    if (el.vBtnReverse) el.vBtnReverse.classList.toggle('active', r < 0);
+    if (el.vSpeedDown) el.vSpeedDown.classList.toggle('active', r > 0 && r < 1);
+    if (el.vSpeedUp) el.vSpeedUp.classList.toggle('active', r > 1);
   }
 
   // ─── Loop sectie ─────────────────────────────────────────────────────────
@@ -777,6 +2896,475 @@
     return m + ':' + String(s).padStart(2, '0');
   }
 
+  // ─── Segment markers ────────────────────────────────────────────────────
+  // Markers come in pairs: [start1, end1, start2, end2, ...]
+  // Regions BETWEEN pairs are "keep" zones; everything else is skipped.
+  // During playback, if currentTime enters a skip zone, jump to next keep zone.
+
+  function addSegmentMarker() {
+    const v = el.vContent.querySelector('video');
+    if (!v || !Number.isFinite(v.duration)) return;
+    const t = v.currentTime;
+    vs.segments.push(t);
+    vs.segments.sort((a, b) => a - b);
+    const isPair = vs.segments.length % 2 === 0;
+    updateSegmentOverlay();
+    showHudMessage(`Marker ${isPair ? 'einde' : 'begin'}: ${fmtTime(t)}`, 1200, { skipOverlay: true });
+    log(`Segment marker ${vs.segments.length}: ${fmtTime(t)} (${isPair ? 'paar compleet' : 'wacht op einde'})`);
+  }
+
+  function isInKeepSegment(time) {
+    if (!vs.segments.length) return true;
+    for (let i = 0; i < vs.segments.length - 1; i += 2) {
+      if (time >= vs.segments[i] && time <= vs.segments[i + 1]) return true;
+    }
+    // If odd number of markers, last marker to end of video is "keep"
+    if (vs.segments.length % 2 === 1) {
+      return time >= vs.segments[vs.segments.length - 1];
+    }
+    return false;
+  }
+
+  function nextKeepSegmentStart(time) {
+    for (let i = 0; i < vs.segments.length; i += 2) {
+      if (vs.segments[i] > time) return vs.segments[i];
+    }
+    return null; // no more keep segments
+  }
+
+  function checkSegmentSkip(video) {
+    if (!vs.segmentSkipEnabled || !vs.segments.length || vs.segments.length < 2) return;
+    if (!video || !Number.isFinite(video.duration) || video.paused) return;
+    if (isInKeepSegment(video.currentTime)) return;
+    const next = nextKeepSegmentStart(video.currentTime);
+    if (next != null) {
+      video.currentTime = next;
+      showHudMessage(`Skip → ${fmtTime(next)}`, 900);
+    }
+  }
+
+  function updateSegmentOverlay() {
+    // Remove existing markers
+    const existing = document.querySelectorAll('.segment-marker, .segment-keep');
+    existing.forEach(el => el.remove());
+
+    const v = el.vContent.querySelector('video');
+    const bar = el.vProgressBar;
+    if (!v || !bar || !Number.isFinite(v.duration) || !vs.segments.length) return;
+
+    // Draw keep zones (green)
+    for (let i = 0; i < vs.segments.length - 1; i += 2) {
+      const left = (vs.segments[i] / v.duration) * 100;
+      const width = ((vs.segments[i + 1] - vs.segments[i]) / v.duration) * 100;
+      const zone = document.createElement('div');
+      zone.className = 'segment-keep';
+      zone.style.cssText = `position:absolute; bottom:0; height:100%; background:rgba(80,255,120,.2); pointer-events:none; z-index:4; border-left:2px solid rgba(80,255,120,.7); border-right:2px solid rgba(80,255,120,.7);`;
+      zone.style.left = left + '%';
+      zone.style.width = width + '%';
+      bar.appendChild(zone);
+    }
+
+    // Draw individual markers (interactive: click=delete, drag=move)
+    for (let i = 0; i < vs.segments.length; i++) {
+      const segIdx = i;
+      const pct = (vs.segments[i] / v.duration) * 100;
+      const marker = document.createElement('div');
+      marker.className = 'segment-marker';
+      const isStart = i % 2 === 0;
+      // Wide hit area (12px) centered on the 3px visible line
+      marker.style.cssText = `position:absolute; bottom:0; top:0; width:12px; margin-left:-6px; z-index:6; cursor:grab; user-select:none;`;
+      marker.style.left = pct + '%';
+      marker.title = `${isStart ? 'Begin' : 'Einde'}: ${fmtTime(vs.segments[i])} — klik=verwijder, sleep=verplaats`;
+
+      // Visible line inside the hit area
+      const line = document.createElement('div');
+      line.style.cssText = `position:absolute; left:5px; top:0; bottom:0; width:3px; border-radius:1px; background:${isStart ? '#50ff78' : '#ff6050'}; pointer-events:none;`;
+      marker.appendChild(line);
+
+      // Click = remove this marker
+      marker.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        vs.segments.splice(segIdx, 1);
+        updateSegmentOverlay();
+        showHudMessage(`Marker verwijderd (${vs.segments.length} over)`, 1000);
+        log(`Marker ${segIdx + 1} verwijderd`);
+      });
+
+      // Drag = move marker
+      marker.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        marker.style.cursor = 'grabbing';
+
+        function onMove(ev) {
+          const rect = bar.getBoundingClientRect();
+          const newPct = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
+          const newTime = newPct * v.duration;
+          vs.segments[segIdx] = newTime;
+          marker.style.left = (newPct * 100) + '%';
+          marker.title = `${isStart ? 'Begin' : 'Einde'}: ${fmtTime(newTime)}`;
+        }
+
+        function onUp() {
+          marker.style.cursor = 'grab';
+          window.removeEventListener('mousemove', onMove);
+          window.removeEventListener('mouseup', onUp);
+          // Re-sort and redraw
+          vs.segments.sort((a, b) => a - b);
+          updateSegmentOverlay();
+        }
+
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+      });
+
+      // Block context menu on markers
+      marker.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      });
+
+      bar.appendChild(marker);
+    }
+  }
+  // ─── Speed Automation Lane (Bitwig-style) ────────────────────────────────
+  const AUTO_LANE_HEIGHT = 60;
+  const AUTO_MIN_RATE = 0.1;
+  const AUTO_MAX_RATE = 4;
+
+  function ensureAutoLaneCanvas() {
+    let canvas = document.getElementById('vAutoLaneCanvas');
+    if (canvas) return canvas;
+    const stage = el.vStage;
+    if (!stage) return null;
+
+    // Container for the lane — full width, above bottom overlay
+    const container = document.createElement('div');
+    container.id = 'vAutoLaneContainer';
+    container.style.cssText = `position:absolute; left:0; right:0; bottom:120px; height:${AUTO_LANE_HEIGHT}px; background:rgba(0,0,0,.35); backdrop-filter:blur(4px); border-top:1px solid rgba(255,140,0,.4); border-bottom:1px solid rgba(255,80,200,.5); z-index:55; display:none; cursor:crosshair;`;
+
+    canvas = document.createElement('canvas');
+    canvas.id = 'vAutoLaneCanvas';
+    canvas.style.cssText = 'width:100%; height:100%; display:block;';
+    container.appendChild(canvas);
+
+    // Speed labels
+    const labelTop = document.createElement('span');
+    labelTop.style.cssText = 'position:absolute; top:1px; left:3px; font-size:9px; color:rgba(255,200,80,.6); pointer-events:none; text-shadow:0 0 4px rgba(255,140,0,.5);';
+    labelTop.textContent = `${AUTO_MAX_RATE}×`;
+    const labelBot = document.createElement('span');
+    labelBot.style.cssText = 'position:absolute; bottom:1px; left:3px; font-size:9px; color:rgba(255,200,80,.6); pointer-events:none; text-shadow:0 0 4px rgba(255,140,0,.5);';
+    labelBot.textContent = `${AUTO_MIN_RATE}×`;
+    const label1x = document.createElement('span');
+    const pct1x = 1 - ((1 - AUTO_MIN_RATE) / (AUTO_MAX_RATE - AUTO_MIN_RATE));
+    label1x.style.cssText = `position:absolute; top:${pct1x * 100}%; left:3px; font-size:9px; color:rgba(255,80,200,.7); pointer-events:none; transform:translateY(-50%); text-shadow:0 0 6px rgba(255,80,200,.4);`;
+    label1x.textContent = '1×';
+
+    // Pen mode indicator
+    const penLabel = document.createElement('span');
+    penLabel.id = 'vAutoPenLabel';
+    penLabel.style.cssText = 'position:absolute; top:2px; right:6px; font-size:10px; color:rgba(255,80,200,.8); pointer-events:none; display:none; text-shadow:0 0 6px rgba(255,80,200,.5);';
+    penLabel.textContent = '✏️ PEN';
+    container.appendChild(penLabel);
+    container.append(labelTop, labelBot, label1x);
+
+    stage.appendChild(container);
+    bindAutoLaneMouse(container, canvas);
+    return canvas;
+  }
+
+  function rateToY(rate, h) {
+    return h - ((rate - AUTO_MIN_RATE) / (AUTO_MAX_RATE - AUTO_MIN_RATE)) * h;
+  }
+  function yToRate(y, h) {
+    return AUTO_MIN_RATE + ((h - y) / h) * (AUTO_MAX_RATE - AUTO_MIN_RATE);
+  }
+
+  function lerpAutoRate(pct) {
+    const pts = vs.autoPoints;
+    if (!pts.length) return 1;
+    if (pts.length === 1) return pts[0].rate;
+    if (pct <= pts[0].pct) return pts[0].rate;
+    if (pct >= pts[pts.length - 1].pct) return pts[pts.length - 1].rate;
+
+    for (let i = 0; i < pts.length - 1; i++) {
+      if (pct >= pts[i].pct && pct <= pts[i + 1].pct) {
+        const t = (pct - pts[i].pct) / (pts[i + 1].pct - pts[i].pct);
+        const curve = pts[i].curve || 0;
+        // Apply curve: 0=linear, >0=ease-in, <0=ease-out
+        let ct;
+        if (curve === 0) ct = t;
+        else if (curve > 0) ct = Math.pow(t, 1 + curve * 2);
+        else ct = 1 - Math.pow(1 - t, 1 + Math.abs(curve) * 2);
+        return pts[i].rate + (pts[i + 1].rate - pts[i].rate) * ct;
+      }
+    }
+    return 1;
+  }
+
+  function renderAutoLane() {
+    const canvas = document.getElementById('vAutoLaneCanvas');
+    if (!canvas) return;
+    const container = canvas.parentElement;
+    if (!vs.autoLaneVisible) {
+      if (container) container.style.display = 'none';
+      return;
+    }
+    container.style.display = '';
+
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+    const w = rect.width, h = rect.height;
+
+    ctx.clearRect(0, 0, w, h);
+
+    // 1x reference line
+    const y1x = rateToY(1, h);
+    ctx.strokeStyle = 'rgba(255,80,200,.3)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(0, y1x); ctx.lineTo(w, y1x); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Pen cursor indicator
+    const penLabel = document.getElementById('vAutoPenLabel');
+    if (penLabel) penLabel.style.display = vs.autoPenActive ? '' : 'none';
+    const laneContainer = canvas.parentElement;
+    if (laneContainer) laneContainer.style.cursor = vs.autoPenActive ? 'crosshair' : 'default';
+
+    const pts = vs.autoPoints;
+    if (!pts.length) return;
+
+    // Draw curve
+    ctx.strokeStyle = 'rgba(255,140,50,.9)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+
+    // Draw segment by segment with curves
+    const firstX = pts[0].pct * w;
+    const firstY = rateToY(pts[0].rate, h);
+    // Extend to left edge
+    ctx.moveTo(0, firstY);
+    ctx.lineTo(firstX, firstY);
+
+    for (let i = 0; i < pts.length - 1; i++) {
+      const x1 = pts[i].pct * w, y1 = rateToY(pts[i].rate, h);
+      const x2 = pts[i + 1].pct * w, y2 = rateToY(pts[i + 1].rate, h);
+      const curve = pts[i].curve || 0;
+
+      if (curve === 0) {
+        ctx.lineTo(x2, y2);
+      } else {
+        // Bezier curve
+        const midX = (x1 + x2) / 2;
+        if (curve > 0) {
+          ctx.bezierCurveTo(midX, y1, x2, y1 + (y2 - y1) * (1 - curve * 0.5), x2, y2);
+        } else {
+          ctx.bezierCurveTo(x1, y1 + (y2 - y1) * (1 + curve * 0.5), midX, y2, x2, y2);
+        }
+      }
+    }
+
+    // Extend to right edge
+    const lastY = rateToY(pts[pts.length - 1].rate, h);
+    ctx.lineTo(w, lastY);
+    ctx.stroke();
+
+    // Fill under curve
+    ctx.lineTo(w, h);
+    ctx.lineTo(0, h);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(255,140,50,.12)';
+    ctx.fill();
+
+    // Draw points
+    for (let i = 0; i < pts.length; i++) {
+      const x = pts[i].pct * w, y = rateToY(pts[i].rate, h);
+      const isDragging = vs.autoDragIdx === i;
+      ctx.beginPath();
+      ctx.arc(x, y, isDragging ? 7 : 5, 0, Math.PI * 2);
+      ctx.fillStyle = isDragging ? '#fff' : 'rgba(255,80,200,.95)';
+      ctx.fill();
+      // Glow
+      ctx.shadowColor = 'rgba(255,80,200,.6)';
+      ctx.shadowBlur = isDragging ? 10 : 6;
+      ctx.strokeStyle = 'rgba(0,0,0,.5)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      // Rate label
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = 'rgba(255,220,150,.9)';
+      ctx.font = 'bold 9px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(`${pts[i].rate.toFixed(1)}×`, x, y - 9);
+    }
+  }
+
+  function bindAutoLaneMouse(container, canvas) {
+    function getPctAndRate(e) {
+      const rect = canvas.getBoundingClientRect();
+      const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      const rate = Math.max(AUTO_MIN_RATE, Math.min(AUTO_MAX_RATE, yToRate(e.clientY - rect.top, rect.height)));
+      return { pct, rate };
+    }
+
+    function findNearestPoint(e, threshold = 12) {
+      const rect = canvas.getBoundingClientRect();
+      let best = -1, bestDist = Infinity;
+      for (let i = 0; i < vs.autoPoints.length; i++) {
+        const px = vs.autoPoints[i].pct * rect.width;
+        const py = rateToY(vs.autoPoints[i].rate, rect.height);
+        const dx = (e.clientX - rect.left) - px;
+        const dy = (e.clientY - rect.top) - py;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < threshold && dist < bestDist) { best = i; bestDist = dist; }
+      }
+      return best;
+    }
+
+    // Right-click = add point
+    container.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const { pct, rate } = getPctAndRate(e);
+      vs.autoPoints.push({ pct, rate: Math.round(rate * 10) / 10, curve: 0 });
+      vs.autoPoints.sort((a, b) => a.pct - b.pct);
+      renderAutoLane();
+      showHudMessage(`Auto punt: ${(Math.round(rate * 10) / 10)}× @ ${Math.round(pct * 100)}%`, 1000);
+    });
+
+    // Click = delete point
+    container.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const idx = findNearestPoint(e);
+      if (idx >= 0) {
+        vs.autoPoints.splice(idx, 1);
+        renderAutoLane();
+        showHudMessage(`Auto punt verwijderd (${vs.autoPoints.length} over)`, 800);
+      }
+    });
+
+    // Mousedown = start drag or pen draw
+    container.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+
+      // Pen mode: draw freehand
+      if (vs.autoPenActive) {
+        e.preventDefault();
+        e.stopPropagation();
+        let lastPct = -1;
+
+        function onPenMove(ev) {
+          const { pct, rate } = getPctAndRate(ev);
+          // Only add point if moved enough (avoid duplicates)
+          if (Math.abs(pct - lastPct) < 0.005) return;
+          lastPct = pct;
+          // Remove existing points near this position
+          vs.autoPoints = vs.autoPoints.filter(p => Math.abs(p.pct - pct) > 0.008);
+          vs.autoPoints.push({ pct, rate: Math.round(rate * 10) / 10, curve: 0 });
+          vs.autoPoints.sort((a, b) => a.pct - b.pct);
+          renderAutoLane();
+        }
+
+        // Initial point
+        const { pct, rate } = getPctAndRate(e);
+        vs.autoPoints = vs.autoPoints.filter(p => Math.abs(p.pct - pct) > 0.008);
+        vs.autoPoints.push({ pct, rate: Math.round(rate * 10) / 10, curve: 0 });
+        lastPct = pct;
+        renderAutoLane();
+
+        function onPenUp() {
+          vs.autoPoints.sort((a, b) => a.pct - b.pct);
+          renderAutoLane();
+          window.removeEventListener('mousemove', onPenMove);
+          window.removeEventListener('mouseup', onPenUp);
+        }
+
+        window.addEventListener('mousemove', onPenMove);
+        window.addEventListener('mouseup', onPenUp);
+        return;
+      }
+
+      // Normal mode: drag existing point
+      const idx = findNearestPoint(e);
+      if (idx < 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      vs.autoDragIdx = idx;
+      renderAutoLane();
+
+      function onMove(ev) {
+        if (vs.autoDragIdx < 0) return;
+        const { pct, rate } = getPctAndRate(ev);
+        vs.autoPoints[vs.autoDragIdx].pct = pct;
+        vs.autoPoints[vs.autoDragIdx].rate = Math.round(rate * 10) / 10;
+        renderAutoLane();
+      }
+
+      function onUp() {
+        vs.autoDragIdx = -1;
+        vs.autoPoints.sort((a, b) => a.pct - b.pct);
+        renderAutoLane();
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+      }
+
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    });
+
+    // Scroll on point = adjust curve
+    container.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const idx = findNearestPoint(e, 20);
+      if (idx < 0) return;
+      const delta = e.deltaY > 0 ? -0.1 : 0.1;
+      vs.autoPoints[idx].curve = Math.max(-1, Math.min(1, (vs.autoPoints[idx].curve || 0) + delta));
+      renderAutoLane();
+      showHudMessage(`Curve: ${vs.autoPoints[idx].curve.toFixed(1)}`, 600);
+    }, { passive: false });
+  }
+
+  function applyAutoSpeed(video) {
+    if (!vs.autoEnabled || !vs.autoPoints.length || !video || !Number.isFinite(video.duration)) return;
+    if (video.paused) return;
+    const pct = video.currentTime / video.duration;
+    const targetRate = lerpAutoRate(pct);
+    // Only update if rate changed meaningfully (avoid constant updates)
+    const roundedRate = Math.round(targetRate * 20) / 20; // 0.05 precision
+    if (Math.abs(vs.playbackRate - roundedRate) >= 0.04) {
+      setSpeed(roundedRate);
+    }
+  }
+
+  function toggleAutoLane() {
+    vs.autoLaneVisible = !vs.autoLaneVisible;
+    if (vs.autoLaneVisible) ensureAutoLaneCanvas();
+    renderAutoLane();
+    showHudMessage(vs.autoLaneVisible ? 'Automation lane: zichtbaar' : 'Automation lane: verborgen', 1200, { skipOverlay: true });
+    log(vs.autoLaneVisible ? 'Speed automation lane geopend' : 'Speed automation lane gesloten');
+  }
+
+  function toggleAutoEnabled() {
+    vs.autoEnabled = !vs.autoEnabled;
+    showHudMessage(vs.autoEnabled ? 'Auto-snelheid: AAN' : 'Auto-snelheid: UIT', 1200, { skipOverlay: true });
+    log(vs.autoEnabled ? 'Auto-snelheid ingeschakeld' : 'Auto-snelheid uitgeschakeld');
+  }
+
+  function toggleAutoPen() {
+    vs.autoPenActive = !vs.autoPenActive;
+    renderAutoLane();
+    showHudMessage(vs.autoPenActive ? '✏️ Pen: AAN — sleep om te tekenen' : '✏️ Pen: UIT', 1200, { skipOverlay: true });
+    log(vs.autoPenActive ? 'Pen modus aan' : 'Pen modus uit');
+  }
+
   function toggleLog() {
     vs.logOpen = !vs.logOpen;
     el.vLogPanel.classList.toggle('hidden', !vs.logOpen);
@@ -784,23 +3372,116 @@
   }
 
   // ─── Keyboard ─────────────────────────────────────────────────────────────
+  function ratingFromNumberKey(e) {
+    if (!e || !/^[0-9]$/.test(String(e.key || ''))) return null;
+    return (10 - parseInt(e.key, 10)) / 2; // 0→5.0, 9→0.5
+  }
+
+  function isRightControlKey(e) {
+    return !!e
+      && e.key === 'Control'
+      && (e.code === 'ControlRight' || e.location === 2);
+  }
+
   function bindKeyboard() {
     window.addEventListener('keydown', async (e) => {
       if (!vs.open) return;
       const tag = (e.target.tagName || '').toUpperCase();
-      if (['INPUT', 'SELECT', 'TEXTAREA'].includes(tag)) return;
+      if (isRightControlKey(e)) {
+        if (!e.repeat && !['INPUT', 'TEXTAREA', 'SELECT'].includes(tag)) {
+          e.preventDefault();
+          e.stopPropagation();
+          await captureCurrentVideoFrame({ quiet: true });
+        }
+        return;
+      }
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (['INPUT', 'TEXTAREA'].includes(tag)) return;
+      const isNumpad = (e.code || '').startsWith('Numpad') && e.code !== 'Numpad0';
+      const numericRating = !isNumpad ? ratingFromNumberKey(e) : null;
+      if (numericRating != null) {
+        await setRating(numericRating);
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      if (tag === 'SELECT') return;
+
+      if (isNumpad) {
+        const v = el.vContent.querySelector('video');
+        const Q = { skipOverlay: true };
+        switch (e.code) {
+          case 'Numpad7': // volume down
+            if (v) { v.volume = Math.max(0, v.volume - 0.05); vs.vol = v.volume; showHudMessage(`Volume ${Math.round(v.volume * 100)}%`, 800, Q); }
+            e.preventDefault(); break;
+          case 'Numpad9': // volume up
+            if (v) { v.volume = Math.min(1, v.volume + 0.05); vs.vol = v.volume; showHudMessage(`Volume ${Math.round(v.volume * 100)}%`, 800, Q); }
+            e.preventDefault(); break;
+          case 'Numpad4': // seek left (accelerating)
+            seekRelative(-1);
+            e.preventDefault(); break;
+          case 'Numpad6': // seek right (accelerating)
+            seekRelative(1);
+            e.preventDefault(); break;
+          case 'Numpad5': // play/pause
+            if (v) { v.paused ? v.play() : v.pause(); }
+            e.preventDefault(); break;
+          case 'Numpad8': // seek forward fine (accelerating)
+            seekRelative(0.5);
+            e.preventDefault(); break;
+          case 'Numpad2': // screenshot (capture video frame)
+            await captureCurrentVideoFrame();
+            e.preventDefault(); break;
+          case 'Numpad1': // slower
+            changeSpeed(-1);
+            e.preventDefault(); break;
+          case 'Numpad3': // faster
+            changeSpeed(1);
+            e.preventDefault(); break;
+          case 'NumpadDecimal': // add/close segment marker
+            addSegmentMarker();
+            e.preventDefault(); break;
+          case 'NumpadEnter': // toggle auto-speed on/off
+            toggleAutoEnabled();
+            e.preventDefault(); break;
+          case 'NumpadAdd': // clear all segments
+            vs.segments = [];
+            updateSegmentOverlay();
+            showHudMessage('Segmenten gewist', 1000, Q);
+            log('Alle segmenten gewist');
+            e.preventDefault(); break;
+          case 'NumpadSubtract': // remove last marker
+            if (vs.segments.length > 0) {
+              vs.segments.pop();
+              updateSegmentOverlay();
+              showHudMessage(`Laatste marker verwijderd (${vs.segments.length} over)`, 1000, Q);
+              log(`Marker verwijderd, ${vs.segments.length} markers over`);
+            }
+            e.preventDefault(); break;
+          case 'NumpadMultiply': // toggle speed automation lane visibility
+            toggleAutoLane();
+            e.preventDefault(); break;
+          case 'NumpadDivide': // toggle pen drawing mode
+            toggleAutoPen();
+            e.preventDefault(); break;
+        }
+        // Block ALL numpad events from reaching other handlers
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
 
       switch (e.key) {
         case 'Escape':
-          if (!el.vTagDialog.classList.contains('hidden')) closeTagDialog();
+          if (!el.vTagDialog.classList.contains('hidden')) closeTagDialog({ force: true });
           else if (vs.logOpen) toggleLog();
           else close();
           e.preventDefault();
           break;
         case 'ArrowRight': await navNext(); e.preventDefault(); break;
         case 'ArrowLeft':  await navPrev(); e.preventDefault(); break;
-        case 'ArrowUp':    await navChannel(-1); e.preventDefault(); break;
-        case 'ArrowDown':  await navChannel(1);  e.preventDefault(); break;
+        case 'ArrowUp':    await navPost(-1); e.preventDefault(); break;
+        case 'ArrowDown':  await navPost(1);  e.preventDefault(); break;
         case ' ': {
           const v = el.vContent.querySelector('video');
           if (v) { v.paused ? v.play() : v.pause(); e.preventDefault(); }
@@ -811,6 +3492,7 @@
           vs.muted = !vs.muted;
           if (v) v.muted = vs.muted;
           el.vBtnMute.textContent = vs.muted ? '🔇' : '🔊';
+          if (el.vBtnMuteBottom) el.vBtnMuteBottom.textContent = vs.muted ? '🔇' : '🔊';
           e.preventDefault();
           break;
         }
@@ -822,18 +3504,25 @@
           toggleLog();
           e.preventDefault();
           break;
+        case 't': case 'T':
+          openTagsFromEvent(e);
+          break;
+        case 'g': case 'G':
+          await showCurrentGroupInGallery();
+          e.preventDefault();
+          break;
         case '[': changeSpeed(-1); e.preventDefault(); break;
         case ']': changeSpeed(1);  e.preventDefault(); break;
         case '\\': resetSpeed();   e.preventDefault(); break;
         case 'i': case 'I': setLoopPoint('start'); e.preventDefault(); break;
         case 'o': case 'O': setLoopPoint('end');   e.preventDefault(); break;
         case 'p': case 'P': clearLoop();            e.preventDefault(); break;
-        default:
-          if (/^[0-9]$/.test(e.key)) {
-            const r = (10 - parseInt(e.key, 10)) / 2; // 0→5.0, 9→0.5
-            await setRating(r);
-            e.preventDefault();
-          }
+        case 'r': case 'R':
+          vs.random = !vs.random;
+          if (el.vRandom) { el.vRandom.textContent = `🔀 Rand: ${vs.random ? 'aan' : 'uit'}`; el.vRandom.classList.toggle('active', vs.random); }
+          if (el.vRandom2) { el.vRandom2.textContent = vs.random ? '🔀 Aan' : '🔀 Rand'; el.vRandom2.classList.toggle('active', vs.random); }
+          e.preventDefault();
+          break;
       }
     }, { capture: true });
   }
@@ -843,15 +3532,19 @@
     const mediaEl = vs.currentMediaEl || el.vContent.querySelector('video, img');
     if (mediaEl) {
       const transforms = [];
+      if (vs.rotation) transforms.push('rotate(' + vs.rotation + 'deg)');
       if (vs.scale > 1) {
         transforms.push('scale(' + vs.scale + ')');
         transforms.push('translate(' + vs.panX + 'px, ' + vs.panY + 'px)');
       }
       mediaEl.style.transform = transforms.join(' ');
+      mediaEl.dataset.rotation = String(Number(vs.rotation || 0));
+      mediaEl.classList.toggle('rotated', Boolean(vs.rotation));
       mediaEl.classList.toggle('zoomed', vs.scale > 1);
       if (vs.scale <= 1) mediaEl.classList.remove('dragging');
     }
     syncZoomUi();
+    syncRotationUi();
   }
 
   function syncZoomUi() {
@@ -877,10 +3570,23 @@
     el.vStage.classList.remove('zoomed');
     const mediaEl = vs.currentMediaEl || el.vContent.querySelector('video, img');
     if (mediaEl) {
-      mediaEl.style.transform = '';
+      mediaEl.style.transform = vs.rotation ? 'rotate(' + vs.rotation + 'deg)' : '';
+      mediaEl.dataset.rotation = String(Number(vs.rotation || 0));
+      mediaEl.classList.toggle('rotated', Boolean(vs.rotation));
       mediaEl.classList.remove('zoomed', 'dragging');
     }
     syncZoomUi();
+    syncRotationUi();
+  }
+
+  function rotateCurrentMedia() {
+    const it = vs.items[vs.idx];
+    if (!it) return;
+    vs.rotation = (Number(vs.rotation || 0) + 90) % 360;
+    saveMediaRotation(it, vs.rotation);
+    applyTransform();
+    showHUD();
+    log(`Rotatie: ${vs.rotation || 0}°`);
   }
 
   // ─── Muis (exact als oude viewer: attachZoomHandlers) ──────────────────────
@@ -994,10 +3700,15 @@
       }
     });
 
-    // Browser back (popstate) → sluit viewer
+    // Browser back sluit de viewer; browser forward opent dezelfde media-entry opnieuw.
     window.addEventListener('popstate', (e) => {
       if (vs.open) {
         close(true); // skipHistory=true want we zijn al terug
+        return;
+      }
+      const pos = positionFromHistoryState(e.state);
+      if (pos) {
+        restorePosition(pos).catch((err) => log('Viewer forward-herstel fout: ' + (err && err.message ? err.message : String(err))));
       }
     });
 
@@ -1014,6 +3725,23 @@
         const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
         v.currentTime = pct * v.duration;
       });
+
+      // Rechtermuisklik op progress bar → segment marker plaatsen
+      el.vProgressBar.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const v = el.vContent.querySelector('video');
+        if (!v || !v.duration) return;
+        const rect = el.vProgressBar.getBoundingClientRect();
+        const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+        const time = pct * v.duration;
+        vs.segments.push(time);
+        vs.segments.sort((a, b) => a - b);
+        const isPair = vs.segments.length % 2 === 0;
+        updateSegmentOverlay();
+        showHudMessage(`Marker ${isPair ? 'einde' : 'begin'}: ${fmtTime(time)}`, 1200);
+        log(`Segment marker ${vs.segments.length}: ${fmtTime(time)}`);
+      });
     }
 
     // Rating rechterklik → wissen
@@ -1027,10 +3755,11 @@
 
     // Tag dialog: klik buiten → sluit
     document.addEventListener('click', (e) => {
+      const clickedTagsButton = el.vBtnTags && (e.target === el.vBtnTags || el.vBtnTags.contains(e.target));
+      if (clickedTagsButton || Date.now() - vs.lastTagOpenAt < 2000) return;
       if (
         !el.vTagDialog.classList.contains('hidden') &&
-        !el.vTagDialog.contains(e.target) &&
-        e.target !== el.vBtnTags
+        !el.vTagDialog.contains(e.target)
       ) {
         closeTagDialog();
       }
@@ -1039,10 +3768,26 @@
 
   // ─── Controls binding ─────────────────────────────────────────────────────
   function bindControls() {
+    const topbar = document.querySelector('.viewer-topbar');
+    if (topbar) {
+      for (const eventName of ['pointerdown', 'mousedown', 'mouseup', 'click', 'dblclick']) {
+        topbar.addEventListener(eventName, (e) => {
+          e.stopPropagation();
+        });
+      }
+    }
+
     el.vClose.addEventListener('click', close);
     el.vPrev.addEventListener('click', (e) => { e.stopPropagation(); navPrev(); });
     el.vNext.addEventListener('click', (e) => { e.stopPropagation(); navNext(); });
     el.vBtnSidebar.addEventListener('click', () => toggleSidebar());
+    if (el.vBtnLocateGallery) {
+      el.vBtnLocateGallery.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        close();
+      });
+    }
     el.vNowRating.addEventListener('click', (e) => {
       const btn = e.target && e.target.closest ? e.target.closest('.rating-star-btn') : null;
       if (!btn || !el.vNowRating.contains(btn)) return;
@@ -1064,8 +3809,8 @@
 
     el.vBtnOpen.addEventListener('click', () => {
       const it = vs.items[vs.idx];
-      if (it && it.source_url) window.open(it.source_url, '_blank', 'noopener');
-      else if (it && it.url)   window.open(it.url, '_blank', 'noopener');
+      const sourceUrl = sourceLinkForItem(it);
+      if (sourceUrl) window.open(sourceUrl, '_blank', 'noopener');
     });
 
     el.vBtnFinder.addEventListener('click', async () => {
@@ -1081,60 +3826,170 @@
       } catch (e) { log('Finder fout: ' + e.message); }
     });
 
-    el.vBtnMute.addEventListener('click', () => {
+    if (el.vBtnRotate) {
+      el.vBtnRotate.addEventListener('click', (e) => {
+        window.__wdRotateMedia(e);
+      });
+    }
+    if (el.vBtnRotateBottom) {
+      el.vBtnRotateBottom.addEventListener('click', (e) => {
+        window.__wdRotateMedia(e);
+      });
+    }
+    if (el.vBtnRotateStage) {
+      el.vBtnRotateStage.addEventListener('click', (e) => {
+        window.__wdRotateMedia(e);
+      });
+    }
+    if (el.vBtnCaptureStage) {
+      el.vBtnCaptureStage.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        captureCurrentVideoFrame();
+      });
+    }
+
+    function toggleMute() {
       const v = el.vContent.querySelector('video');
       vs.muted = !vs.muted;
       if (v) v.muted = vs.muted;
-      el.vBtnMute.textContent = vs.muted ? '🔇' : '🔊';
+      if (el.vBtnMute) el.vBtnMute.textContent = vs.muted ? '🔇' : '🔊';
+      if (el.vBtnMuteBottom) el.vBtnMuteBottom.textContent = vs.muted ? '🔇' : '🔊';
+    }
+
+    el.vBtnMute.addEventListener('click', toggleMute);
+    if (el.vBtnMuteBottom) el.vBtnMuteBottom.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleMute();
     });
 
-    el.vVol.addEventListener('input', () => {
-      vs.vol = parseFloat(el.vVol.value);
+    if (el.vBtnReloadMedia) {
+      el.vBtnReloadMedia.addEventListener('click', (e) => {
+        e.stopPropagation();
+        reloadCurrentMedia().catch((err) => log('Reload fout: ' + err.message));
+      });
+    }
+
+    if (el.vBtnPlayPause) {
+      el.vBtnPlayPause.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleVideoPlayback();
+      });
+    }
+
+    if (el.vBtnReverse) {
+      el.vBtnReverse.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setSpeed(vs.playbackRate < 0 ? 1 : -1);
+      });
+    }
+
+    if (el.vBtnMainProgress) {
+      el.vBtnMainProgress.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setMainProgressVisible(!vs.mainProgressVisible);
+      });
+    }
+
+    if (el.vSpeedSelect) {
+      el.vSpeedSelect.addEventListener('change', (e) => {
+        const rate = Number(e.target.value);
+        if (Number.isFinite(rate)) setSpeed(rate);
+      });
+    }
+
+    function setVolumeFrom(input) {
+      vs.vol = parseFloat(input.value);
       const v = el.vContent.querySelector('video');
       if (v) v.volume = vs.vol;
+      if (el.vVol && el.vVol !== input) el.vVol.value = String(vs.vol);
+      if (el.vBottomVol && el.vBottomVol !== input) el.vBottomVol.value = String(vs.vol);
+    }
+
+    el.vVol.addEventListener('input', () => {
+      setVolumeFrom(el.vVol);
     });
+    if (el.vBottomVol) {
+      el.vBottomVol.addEventListener('input', (e) => {
+        e.stopPropagation();
+        setVolumeFrom(el.vBottomVol);
+      });
+    }
 
     el.vSeek.addEventListener('mousedown', () => { vs.seekDragging = true; });
     el.vSeek.addEventListener('mouseup', () => {
       vs.seekDragging = false;
-      const v = el.vContent.querySelector('video');
-      if (v && v.duration) {
-        v.currentTime = (parseInt(el.vSeek.value, 10) / 1000) * v.duration;
-      }
+      seekVideoFromRange(el.vSeek);
     });
     el.vSeek.addEventListener('touchend', () => {
       vs.seekDragging = false;
+      seekVideoFromRange(el.vSeek);
+    });
+    el.vSeek.addEventListener('input', () => {
       const v = el.vContent.querySelector('video');
-      if (v && v.duration) {
-        v.currentTime = (parseInt(el.vSeek.value, 10) / 1000) * v.duration;
+      const pct = Math.max(0, Math.min(100, (parseInt(el.vSeek.value, 10) || 0) / 10));
+      el.vSeek.style.setProperty('--vseek-progress', pct + '%');
+      if (v && Number.isFinite(v.duration) && v.duration > 0 && vs.seekDragging && el.vTimeLabel) {
+        const t = (pct / 100) * v.duration;
+        el.vTimeLabel.textContent = `${formatTime(t)} / ${formatTime(v.duration)}`;
       }
     });
 
+    for (const btn of el.vBottomControls.querySelectorAll('[data-seek]')) {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        seekRelative(Number(btn.dataset.seek || 0));
+      });
+    }
+    if (el.vSpeedDown) {
+      el.vSpeedDown.addEventListener('click', (e) => {
+        e.stopPropagation();
+        changeSpeed(-1);
+      });
+    }
+    if (el.vSpeedUp) {
+      el.vSpeedUp.addEventListener('click', (e) => {
+        e.stopPropagation();
+        changeSpeed(1);
+      });
+    }
+    if (el.vBtnFullscreen) {
+      el.vBtnFullscreen.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleFullscreen();
+      });
+    }
     el.vSlideshow.addEventListener('click', () => {
       if (vs.slideshow) stopSlideshow(); else startSlideshow();
     });
 
     el.vSlideshowSec.addEventListener('change', () => {
       vs.slideshowSec = Number(el.vSlideshowSec.value);
+      if (el.vSlideshowSec2) el.vSlideshowSec2.value = el.vSlideshowSec.value;
     });
 
     el.vWrap.addEventListener('click', () => {
       vs.wrap = !vs.wrap;
-      el.vWrap.textContent = `🔁 Wrap: ${vs.wrap ? 'aan' : 'uit'}`;
-      el.vWrap.classList.toggle('active', vs.wrap);
+      syncViewerModeControls();
     });
 
     el.vRandom.addEventListener('click', () => {
       vs.random = !vs.random;
-      el.vRandom.textContent = `🔀 Rand: ${vs.random ? 'aan' : 'uit'}`;
-      el.vRandom.classList.toggle('active', vs.random);
+      syncViewerModeControls();
     });
 
     el.vVideoWait.addEventListener('click', () => {
       vs.videoWait = !vs.videoWait;
-      el.vVideoWait.textContent = `⏳ Wacht: ${vs.videoWait ? 'aan' : 'uit'}`;
-      el.vVideoWait.classList.toggle('active', vs.videoWait);
+      syncViewerModeControls();
     });
+
+    if (el.vChannelScope) {
+      el.vChannelScope.addEventListener('click', () => {
+        vs.channelScope = vs.channelScope === 'query' ? 'all' : 'query';
+        vs.channels = [];
+        syncViewerModeControls();
+      });
+    }
 
     if (el.vZoomRange) {
       el.vZoomRange.addEventListener('input', () => {
@@ -1161,32 +4016,133 @@
         syncTopbarButtons();
       });
     }
+    // 2026-05-25: topbar slideshow-interval + video-wait knoppen spiegelen sidebar
+    if (el.vSlideshowSec2) {
+      el.vSlideshowSec2.addEventListener('change', () => {
+        vs.slideshowSec = Number(el.vSlideshowSec2.value);
+        if (el.vSlideshowSec) el.vSlideshowSec.value = el.vSlideshowSec2.value;
+      });
+    }
+    if (el.vVideoWait2) {
+      el.vVideoWait2.addEventListener('click', () => {
+        vs.videoWait = !vs.videoWait;
+        syncViewerModeControls();
+      });
+    }
 
-    el.vReload.addEventListener('click', reloadViewerItems);
+    el.vReload.addEventListener('click', () => reloadViewerItems({ preserveSelection: true }));
 
     el.vMode.addEventListener('change', async () => {
       if (el.vMode.value === 'channel' && !vs.channels.length) {
         try {
-          const gf = gal().state.filters;
-          const data = await api(`/api/channels${gf.platform ? '?platform=' + encodeURIComponent(gf.platform) : ''}`);
+          if (!vs.queryFilters) vs.queryFilters = snapshotGalleryFilters();
+          const params = appendContextParams(new URLSearchParams(), { includeChannel: false });
+          params.set('sort', viewerFilters().sort || 'recent');
+          params.set('channel_sort', viewerFilters().channel_sort || 'count');
+          const data = await api('/api/channels' + (params.toString() ? '?' + params.toString() : ''));
           vs.channels = (data.channels || []).filter(c => c.channel && c.channel !== 'unknown');
-          vs.chIdx = 0;
+          const currentChannel = (vs.items[vs.idx] && vs.items[vs.idx].channel) || viewerFilters().channel || '';
+          const currentIdx = vs.channels.findIndex(c => c.channel === currentChannel);
+          vs.chIdx = currentIdx >= 0 ? currentIdx : 0;
         } catch (e) { log('Kanalen laden mislukt: ' + e.message); }
       }
     });
 
     el.vFilter.addEventListener('change', async () => {
       vs.typeFilter = el.vFilter.value;
-      await reloadViewerItems();
+      if (!vs.queryFilters) vs.queryFilters = snapshotGalleryFilters();
+      vs.queryFilters.media_type = vs.typeFilter === 'all' ? '' : vs.typeFilter;
+      vs.channels = [];
+      await reloadViewerItems({ preserveSelection: true });
     });
 
     el.vTagFilter.addEventListener('change', async () => {
-      await reloadViewerItems();
+      if (!vs.queryFilters) vs.queryFilters = snapshotGalleryFilters();
+      vs.queryFilters.tag_id = el.vTagFilter.value || '';
+      renderViewerTagFilterMatrix();
+      vs.channels = [];
+      await reloadViewerItems({ preserveSelection: true });
     });
 
     // Tags dialog
-    el.vBtnTags.addEventListener('click', (e) => { e.stopPropagation(); openTagDialog(); });
-    el.vBtnCloseTagDialog.addEventListener('click', closeTagDialog);
+    for (const eventName of ['pointerdown', 'mousedown', 'mouseup']) {
+      el.vBtnTags.addEventListener(eventName, (e) => {
+        e.stopPropagation();
+      });
+    }
+    el.vBtnTags.addEventListener('click', openTagsFromEvent);
+    el.vBtnCloseTagDialog.addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeTagDialog({ force: true });
+    });
+    if (el.vBtnToggleRecipes) {
+      el.vBtnToggleRecipes.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setTagRecipesOpen(!vs.tagRecipesOpen);
+        if (vs.tagRecipesOpen) {
+          loadTagRecipes().then(() => renderTagDialog()).catch((err) => log('Recepten laden fout: ' + err.message));
+        }
+      });
+    }
+    if (el.vTagDialogInner) {
+      const tagDialogHead = el.vTagDialogInner.querySelector('.tag-dialog-head');
+      if (tagDialogHead) tagDialogHead.addEventListener('pointerdown', startTagDialogDrag);
+    }
+    window.addEventListener('resize', () => {
+      if (el.vTagDialog && !el.vTagDialog.classList.contains('hidden')) {
+        requestAnimationFrame(() => clampTagDialogPosition());
+      }
+    });
+    el.vTagDialog.addEventListener('click', (e) => {
+      if (e.target === el.vTagDialog) closeTagDialog();
+      else e.stopPropagation();
+    });
+    for (const eventName of ['pointerdown', 'mousedown', 'mouseup', 'dblclick']) {
+      el.vTagDialog.addEventListener(eventName, (e) => {
+        if (e.target !== el.vTagDialog) e.stopPropagation();
+      });
+    }
+    if (el.vTagSearch) el.vTagSearch.addEventListener('input', renderTagDialog);
+    if (el.vTagTargetMedia) {
+      el.vTagTargetMedia.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setTagTarget('media');
+      });
+    }
+    if (el.vTagTargetRecipe) {
+      el.vTagTargetRecipe.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setTagTarget('recipe');
+      });
+    }
+
+    if (el.vBtnRecipeFromItem) {
+      el.vBtnRecipeFromItem.addEventListener('click', () => {
+        const tags = vs.currentItemTags || [];
+        if (!tags.length) {
+          log('Geen gekoppelde media-tags om een recept van te maken');
+          return;
+        }
+        setRecipeDraft(tags);
+        const it = vs.items[vs.idx] || {};
+        if (el.vRecipeName && !el.vRecipeName.value.trim()) {
+          el.vRecipeName.value = safeText(it.title || it.filename || it.channel || 'Nieuw recept').slice(0, 80);
+        }
+        setTagTarget('recipe');
+        if (el.vRecipeName) el.vRecipeName.focus();
+        log(`Recept gevuld met ${tags.length} gekoppelde tag${tags.length === 1 ? '' : 's'}`);
+      });
+    }
+    if (el.vBtnSaveRecipe) {
+      el.vBtnSaveRecipe.addEventListener('click', () => {
+        saveRecipeDraft().catch((err) => log('Recept save fout: ' + err.message));
+      });
+    }
+    if (el.vBtnClearRecipe) {
+      el.vBtnClearRecipe.addEventListener('click', () => {
+        setRecipeDraft([]);
+      });
+    }
 
     el.vBtnAddTag.addEventListener('click', async () => {
       const name = el.vNewTagInput.value.trim();
@@ -1200,16 +4156,20 @@
           body: JSON.stringify({ name }),
         });
         const itemId = it.rating_id || it.id;
-        await api(`/api/items/${itemId}/tags`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ tag_id: result.tag.id }),
-        });
+        if (vs.tagTarget === 'recipe') {
+          addTagToRecipeDraft(result.tag);
+        } else {
+          await addTagToMedia(itemId, result.tag);
+        }
         el.vNewTagInput.value = '';
         await loadTags();
+        const gallery = gal();
+        if (gallery && typeof gallery.loadTagFilterDropdown === 'function') {
+          gallery.loadTagFilterDropdown().catch(() => {});
+        }
         await loadItemTags(itemId);
         renderTagDialog();
-        log(`Tag toegevoegd: ${name}`);
+        log(vs.tagTarget === 'recipe' ? `Tag naar recept: ${name}` : `Tag toegevoegd: ${name}`);
       } catch (e) { log('Tag add fout: ' + e.message); }
     });
 
@@ -1221,7 +4181,18 @@
   }
 
   // ─── Public API ───────────────────────────────────────────────────────────
-  window.__viewer = { init, open, close };
+  window.__wdRotateMedia = (e) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    const now = Date.now();
+    if (now - vs.lastRotateAt < 250) return;
+    vs.lastRotateAt = now;
+    rotateCurrentMedia();
+  };
+  window.__wdOpenTags = openTagsFromEvent;
+  window.__viewer = { init, open, close, restoreLastPosition };
 
   // Auto-init zodra DOM klaar is (app.js laadt viewer.js na zichzelf)
   if (document.readyState === 'loading') {

@@ -1,3 +1,7 @@
+> ⚠️ **VEROUDERD per 2026-05-30** — laatst bijgewerkt 30 april. Voor actueel:
+> - [../STATUS-2026-05-24.md](../STATUS-2026-05-24.md), [../ARCHITECTURE.md](../ARCHITECTURE.md), [../DOCS-INDEX.md](../DOCS-INDEX.md)
+> - [ARCHITECTURE.md](ARCHITECTURE.md) (hub-specifiek, 24 april) — ook verouderd
+
 # WebDL-Hub roadmap - 30 april 2026
 
 Hub is niet meer in de skeleton-fase. Dit document beschrijft de huidige,

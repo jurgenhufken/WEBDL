@@ -1,6 +1,7 @@
 // src/adapters/gallerydl.js — gallery-dl adapter (imgur, twitter, pixiv, danbooru, etc.).
 'use strict';
 
+const fs = require('node:fs');
 const { defineAdapter } = require('./base');
 const { collectOutputsRecursive } = require('./_fs');
 
@@ -12,7 +13,16 @@ const HOSTS = [
   'danbooru.donmai.us', 'gelbooru.com', 'rule34.xxx', 'e621.net',
   '4chan.org', 'kemono.su', 'coomer.su', 'tumblr.com',
   'pinterest.com', 'bsky.app', 'twitter.com', 'x.com', 'mastodon.social',
+  'instagram.com', 'vipergirls.to', 'viper.to',
 ];
+
+function galleryDlCommand() {
+  const configured = String(process.env.WEBDL_GALLERYDL || '').trim();
+  if (configured) return configured;
+  const userLocal = '/Users/jurgen/.local/bin/gallery-dl';
+  if (fs.existsSync(userLocal)) return userLocal;
+  return 'gallery-dl';
+}
 
 function hostMatches(hostname) {
   const h = hostname.toLowerCase();
@@ -27,16 +37,73 @@ function matches(url) {
   } catch { return false; }
 }
 
+function isTwitterUrl(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+    return host === 'x.com' || host === 'twitter.com' || host === 'mobile.twitter.com';
+  } catch {
+    return false;
+  }
+}
+
+function normalizeGalleryDlUrl(url) {
+  try {
+    const u = new URL(String(url || ''));
+    const host = u.hostname.toLowerCase().replace(/^www\./, '');
+    if (host === 'viper.to' || host.endsWith('.viper.to')) {
+      u.hostname = 'vipergirls.to';
+    }
+    if (u.hostname.toLowerCase().replace(/^www\./, '') === 'vipergirls.to') {
+      const m = u.pathname.match(/^\/threads\/(\d+)(-[^/?#]+)?(?:\/page\d+)?\/?$/i);
+      if (m) {
+        u.pathname = `/threads/${m[1]}${m[2] || ''}`;
+        u.search = '';
+        u.hash = '';
+      }
+    }
+    const twitterHost = u.hostname.toLowerCase().replace(/^www\./, '');
+    if ((twitterHost === 'x.com' || twitterHost === 'twitter.com' || twitterHost === 'mobile.twitter.com') && /^\/hashtag\/[^/?#]+\/?$/i.test(u.pathname)) {
+      u.hostname = 'x.com';
+      u.search = '';
+      u.hash = '';
+      u.pathname = u.pathname.replace(/\/+$/, '');
+    }
+    return u.toString();
+  } catch {}
+  return url;
+}
+
 function plan(url, opts = {}) {
+  const targetUrl = normalizeGalleryDlUrl(url);
   // -D <cwd> zet álle files direct in onze jobdir (geen sub-mappen per site).
   // -q = quiet, -v geeft één regel per bestand voor progress.
   const args = [
     '--no-colors',
     '-D', opts.cwd,
+    '--cookies-from-browser', process.env.WEBDL_GALLERYDL_BROWSER_COOKIES || 'firefox',
     '-o', 'output.progress=true',
-    url,
+    '--write-metadata',
+    '--write-info-json',
   ];
-  return { cmd: 'gallery-dl', args, cwd: opts.cwd, env: {} };
+  if (isTwitterUrl(targetUrl)) {
+    args.push(
+      '-o', 'conversations=true',
+      '-o', 'replies=true',
+      '-o', 'retweets=true',
+      '-o', 'quoted=true',
+      '-o', 'pinned=true',
+      '-o', 'videos=true',
+    );
+  }
+  args.push(targetUrl);
+  return {
+    cmd: galleryDlCommand(),
+    args,
+    cwd: opts.cwd,
+    env: {},
+    timeoutMs: Number.parseInt(process.env.WEBDL_GALLERYDL_TIMEOUT_MS || String(20 * 60 * 1000), 10),
+    idleTimeoutMs: Number.parseInt(process.env.WEBDL_GALLERYDL_IDLE_TIMEOUT_MS || String(120 * 1000), 10),
+  };
 }
 
 // gallery-dl schrijft per file een regel "./pad/naar/bestand.ext" op stdout

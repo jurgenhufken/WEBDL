@@ -6,10 +6,49 @@ const test = require('node:test');
 const assert = require('node:assert');
 const { Client } = require('pg');
 const { migrate } = require('../../src/db/migrate');
-const { createRepo } = require('../../src/db/repo');
+const { createRepo, classifyLane, defaultJobPriority } = require('../../src/db/repo');
 
 const DATABASE_URL = process.env.DATABASE_URL || 'postgres://jurgen@localhost:5432/webdl';
 const TEST_SCHEMA = 'webdl_test';
+
+test('classifyLane zet losse TikTok videos in de snelle video-lane', () => {
+  assert.equal(classifyLane('https://www.tiktok.com/@user/video/1234567890123456789', 'ytdlp'), 'image');
+});
+
+test('classifyLane houdt TikTok tags en profielen in process-video', () => {
+  assert.equal(classifyLane('https://www.tiktok.com/tag/girlfoot', 'ytdlp'), 'process-video');
+  assert.equal(classifyLane('https://www.tiktok.com/@toetokqueen', 'ytdlp'), 'process-video');
+});
+
+test('classifyLane houdt YouTube altijd in heavy lane', () => {
+  assert.equal(classifyLane('https://www.youtube.com/watch?v=abc', 'ytdlp'), 'process-video');
+  assert.equal(classifyLane('https://www.youtube.com/shorts/abc', 'ytdlp'), 'process-video');
+  assert.equal(classifyLane('https://youtu.be/abc', 'ytdlp'), 'process-video');
+  assert.equal(classifyLane('https://www.youtube.com/@channel/shorts', 'ytdlp'), 'process-video');
+  assert.equal(classifyLane('https://www.youtube.com/playlist?list=PL123', 'ytdlp'), 'process-video');
+});
+
+test('classifyLane zet non-merge video zonder nabewerking in fast lane', () => {
+  assert.equal(classifyLane('https://cdn.example.com/video.mp4', 'ytdlp'), 'image');
+  assert.equal(classifyLane('https://www.xvideos.com/video.abc/title', 'ytdlp'), 'image');
+  assert.equal(classifyLane('https://k2s.cc/file/abc', 'slave-delegate'), 'image');
+  assert.equal(classifyLane('https://x.com/example', 'gallerydl'), 'image');
+  assert.equal(classifyLane('https://twitter.com/example/status/123', 'gallerydl'), 'image');
+});
+
+test('defaultJobPriority geeft snelle image/reddit jobs voorrang', () => {
+  assert.equal(defaultJobPriority('https://example.com/a.jpg', 'ytdlp'), 55);
+  assert.equal(defaultJobPriority('https://www.reddit.com/r/test/', 'reddit'), 65);
+  assert.equal(classifyLane('https://www.redgifs.com/watch/SomeClipId', 'redgifs'), 'image');
+  assert.equal(defaultJobPriority('https://www.redgifs.com/watch/SomeClipId', 'redgifs'), 25);
+  assert.equal(classifyLane('https://vipergirls.to/threads/6777850-Example', 'gallerydl'), 'gallery');
+  assert.equal(classifyLane('https://x.com/example', 'gallerydl'), 'image');
+  assert.equal(defaultJobPriority('https://imgur.com/gallery/abc', 'gallerydl'), 60);
+  assert.equal(defaultJobPriority('https://www.youtube.com/watch?v=abc', 'ytdlp'), 0);
+  assert.equal(defaultJobPriority('https://cdn.example.com/video.mp4', 'ytdlp'), 55);
+  assert.equal(defaultJobPriority('https://www.xvideos.com/video.abc/title', 'ytdlp'), 55);
+  assert.equal(defaultJobPriority('https://k2s.cc/file/abc', 'slave-delegate'), 70);
+});
 
 async function canConnect() {
   try {
@@ -46,11 +85,22 @@ test('DB-tests', { concurrency: false }, async (t) => {
     await repo.truncateAll();
     const j = await repo.createJob({ url: 'https://x/a', adapter: 'ytdlp', priority: 5 });
     assert.equal(j.status, 'queued');
+    assert.equal(j.priority, 5);
     assert.equal(j.attempts, 0);
     const again = await repo.getJob(j.id);
     assert.equal(again.url, 'https://x/a');
     const list = await repo.listJobs({ status: 'queued' });
     assert.equal(list.length, 1);
+  });
+
+  await t.test('createJob gebruikt default-priority als priority ontbreekt', async () => {
+    await repo.truncateAll();
+    const img = await repo.createJob({ url: 'https://example.com/a.jpg', adapter: 'ytdlp' });
+    const reddit = await repo.createJob({ url: 'https://www.reddit.com/r/test/', adapter: 'reddit' });
+    const explicit = await repo.createJob({ url: 'https://imgur.com/gallery/x', adapter: 'gallerydl', priority: 0 });
+    assert.equal(img.priority, 55);
+    assert.equal(reddit.priority, 65);
+    assert.equal(explicit.priority, 0);
   });
 
   await t.test('claimNextJob: priority + FIFO', async () => {
@@ -68,6 +118,41 @@ test('DB-tests', { concurrency: false }, async (t) => {
     assert.equal(first.attempts, 1);
   });
 
+  await t.test('listJobs toont werk boven recente klaar-items', async () => {
+    await repo.truncateAll();
+    const queued = await repo.createJob({ url: 'old', adapter: 'ytdlp', priority: 0 });
+    const done = await repo.createJob({ url: 'new', adapter: 'ytdlp', priority: 0 });
+    await repo.claimNextJob('w');
+    await repo.completeJob(queued.id);
+    await repo.claimNextJob('w');
+    await repo.failJob(done.id, 'retry', { retry: true });
+    const jobs = await repo.listJobs({ limit: 10 });
+    assert.equal(jobs[0].id, done.id);
+    assert.equal(jobs[0].status, 'queued');
+  });
+
+  await t.test('pauseJob haalt queued job uit claimbare lanes', async () => {
+    await repo.truncateAll();
+    const j = await repo.createJob({ url: 'u', adapter: 'ytdlp' });
+    const paused = await repo.pauseJob(j.id);
+    assert.equal(paused.lane, 'paused');
+    const claimed = await repo.claimNextJob('w');
+    assert.equal(claimed, null);
+    const resumed = await repo.resumeJob(j.id);
+    assert.notEqual(resumed.lane, 'paused');
+  });
+
+  await t.test('claimNextJob wist oude foutstatus bij retry', async () => {
+    await repo.truncateAll();
+    const j = await repo.createJob({ url: 'u1', adapter: 'ytdlp' });
+    await repo.claimNextJob('w1');
+    await repo.failJob(j.id, 'oude fout', { retry: true });
+    const claimed = await repo.claimNextJob('w2');
+    assert.equal(claimed.status, 'running');
+    assert.equal(claimed.error, null);
+    assert.equal(claimed.finished_at, null);
+  });
+
   await t.test('SKIP LOCKED: parallelle claims → 1 winnaar', async () => {
     await repo.truncateAll();
     await repo.createJob({ url: 'u1', adapter: 'ytdlp' });
@@ -76,6 +161,15 @@ test('DB-tests', { concurrency: false }, async (t) => {
     );
     const claimed = results.filter((x) => x !== null);
     assert.equal(claimed.length, 1);
+  });
+
+  await t.test('claimNextJob claimt slave-delegate fastlane jobs', async () => {
+    await repo.truncateAll();
+    await repo.createJob({ url: 'https://bunkr.cr/f/x', adapter: 'slave-delegate', lane: 'image' });
+    const claimed = await repo.claimNextJob('w', { lane: 'image' });
+    assert.equal(claimed.adapter, 'slave-delegate');
+    assert.equal(claimed.status, 'running');
+    assert.equal(claimed.lane, 'image');
   });
 
   await t.test('completeJob zet status done', async () => {
@@ -102,6 +196,20 @@ test('DB-tests', { concurrency: false }, async (t) => {
     const failed = await repo.failJob(j2.id, 'final', { retry: false });
     assert.equal(failed.status, 'failed');
     assert.ok(failed.finished_at);
+  });
+
+  await t.test('retryJob maakt uitgeputte jobs weer claimbaar', async () => {
+    await repo.truncateAll();
+    const j = await repo.createJob({ url: 'u', adapter: 'ytdlp', maxAttempts: 1 });
+    await repo.claimNextJob('w');
+    await repo.cancelJob(j.id);
+    const retried = await repo.retryJob(j.id);
+    assert.equal(retried.status, 'queued');
+    assert.equal(retried.attempts, 0);
+    assert.equal(retried.finished_at, null);
+    const claimed = await repo.claimNextJob('w2');
+    assert.equal(claimed.id, j.id);
+    assert.equal(claimed.status, 'running');
   });
 
   await t.test('cancelJob werkt alleen op queued/running', async () => {
@@ -135,5 +243,14 @@ test('DB-tests', { concurrency: false }, async (t) => {
     await repo.updateProgress(j.id, 37.5);
     const again = await repo.getJob(j.id);
     assert.equal(Math.round(again.progress_pct * 10) / 10, 37.5);
+  });
+
+  await t.test('getJobStats telt paused apart', async () => {
+    await repo.truncateAll();
+    const j = await repo.createJob({ url: 'u', adapter: 'ytdlp' });
+    await repo.pauseJob(j.id);
+    const stats = await repo.getJobStats();
+    assert.equal(stats.queued, 0);
+    assert.equal(stats.paused, 1);
   });
 });

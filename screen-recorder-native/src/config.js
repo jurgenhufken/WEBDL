@@ -1,6 +1,15 @@
-require('dotenv').config();
 const path = require('path');
 const os = require('os');
+const fs = require('fs');
+
+require('dotenv').config({ path: path.resolve(__dirname, '..', '.env') });
+
+function firstExisting(paths) {
+  for (const p of paths) {
+    if (p && fs.existsSync(p)) return p;
+  }
+  return '';
+}
 
 // ========================
 // CORE CONFIGURATIE
@@ -25,6 +34,12 @@ const OFSCRAPER_CONFIG_DIR = process.env.WEBDL_OFSCRAPER_CONFIG_DIR || path.join
 const GALLERY_DL = process.env.WEBDL_GALLERY_DL || path.join(os.homedir(), '.local', 'bin', 'gallery-dl');
 const INSTALOADER = process.env.WEBDL_INSTALOADER || path.join(os.homedir(), '.local', 'bin', 'instaloader');
 const REDDIT_DL = process.env.WEBDL_REDDIT_DL || path.join(os.homedir(), '.local', 'bin', 'reddit-dl');
+const REDDIT_BDFR = process.env.WEBDL_REDDIT_BDFR || firstExisting([
+  path.join(os.homedir(), 'Library', 'Python', `${process.version.match(/^v(\d+\.\d+)/)?.[1] || '3.9'}`, 'bin', 'bdfr'),
+  path.join(os.homedir(), 'Library', 'Python', '3.9', 'bin', 'bdfr'),
+  path.join(os.homedir(), '.local', 'bin', 'bdfr'),
+]) || 'bdfr';
+const REDDIT_BACKEND = String(process.env.WEBDL_REDDIT_BACKEND || 'auto').trim().toLowerCase();
 
 // ========================
 // TDL (Telegram Downloader) 
@@ -59,6 +74,9 @@ const RECORDING_AUDIO_CODEC = process.env.WEBDL_RECORDING_AUDIO_CODEC || 'aac_at
 const RECORDING_INPUT_PIXEL_FORMAT = String(process.env.WEBDL_RECORDING_INPUT_PIXEL_FORMAT || 'auto').trim();
 const DEFAULT_RECORDING_FPS_MODE = VIDEO_CODEC === 'h264_videotoolbox' ? 'cfr' : 'passthrough';
 const RECORDING_FPS_MODE = String(process.env.WEBDL_RECORDING_FPS_MODE || DEFAULT_RECORDING_FPS_MODE).toLowerCase();
+const RECORDING_MAX_ACTIVE = Math.max(0, parseInt(process.env.WEBDL_RECORDING_MAX_ACTIVE || '6', 10) || 0);
+const RECORDING_MAX_DURATION_MS = Math.max(0, parseInt(process.env.WEBDL_RECORDING_MAX_DURATION_MS || String(2 * 60 * 60 * 1000), 10) || 0);
+const RECORDING_MIN_FREE_BYTES = Math.max(0, parseInt(process.env.WEBDL_RECORDING_MIN_FREE_BYTES || String(50 * 1024 * 1024 * 1024), 10) || 0);
 
 // ========================
 // FFMPEG PRESTATIES
@@ -157,6 +175,8 @@ module.exports = {
   GALLERY_DL,
   INSTALOADER,
   REDDIT_DL,
+  REDDIT_BDFR,
+  REDDIT_BACKEND,
   TDL,
   TDL_NAMESPACE,
   TDL_THREADS,
@@ -178,6 +198,9 @@ module.exports = {
   RECORDING_AUDIO_CODEC,
   RECORDING_INPUT_PIXEL_FORMAT,
   RECORDING_FPS_MODE,
+  RECORDING_MAX_ACTIVE,
+  RECORDING_MAX_DURATION_MS,
+  RECORDING_MIN_FREE_BYTES,
   FFMPEG_PROBESIZE,
   FFMPEG_ANALYZEDURATION,
   FFMPEG_THREAD_QUEUE_SIZE,

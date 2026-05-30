@@ -1,4 +1,4 @@
-// Import _Keep2Share bestanden als individuele downloads-records zodat de gallery ze toont
+// Import keep2share bestanden als individuele downloads-records zodat de gallery ze toont
 const { Pool } = require('pg');
 const fs = require('fs');
 const path = require('path');
@@ -9,7 +9,6 @@ const K2S_DIR = path.join(BASE_DIR, '_Keep2Share');
 
 const MEDIA_EXTS = new Set([
   '.mp4', '.mov', '.m4v', '.webm', '.mkv', '.avi', '.wmv', '.flv', '.ts',
-  '.jpg', '.jpeg', '.png', '.gif', '.webp',
 ]);
 
 async function run() {
@@ -57,7 +56,8 @@ async function run() {
       // Maak een individueel download-record aan
       await pool.query(`
         INSERT INTO downloads (url, status, platform, channel, title, filename, filepath, filesize, format, source_url, created_at, updated_at, finished_at)
-        VALUES ($1, 'completed', '_Keep2Share', $2, $3, $4, $5, $6, $7, 'https://keep2share.cc', NOW(), NOW(), NOW())
+        VALUES ($1, 'completed', 'keep2share', $2, $3, $4, $5, $6, $7, 'https://keep2share.cc',
+                to_timestamp($8 / 1000.0), to_timestamp($8 / 1000.0), to_timestamp($8 / 1000.0))
       `, [
         `https://keep2share.cc/${channel}/${encodeURIComponent(file)}`,
         channel,
@@ -65,14 +65,15 @@ async function run() {
         file,
         absPath,
         stat.size,
-        ext
+        ext,
+        stat.mtimeMs
       ]);
       totalAdded++;
     }
   }
 
   // Ruim het oude map-record op (als dat bestaat)
-  await pool.query(`DELETE FROM downloads WHERE platform = '_Keep2Share' AND filepath LIKE '%_Keep2Share/%' AND filepath NOT LIKE '%.%'`);
+  await pool.query(`DELETE FROM downloads WHERE platform = 'keep2share' AND filepath LIKE '%_Keep2Share/%' AND filepath NOT LIKE '%.%'`);
 
   console.log(`\nKlaar! ${totalAdded} nieuwe items toegevoegd, ${totalSkipped} al aanwezig.`);
   await pool.end();

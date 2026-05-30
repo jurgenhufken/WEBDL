@@ -22,8 +22,12 @@ function createDb({ engine, sqlitePath, databaseUrl }) {
 
   if (isPostgres) {
     const connStr = String(databaseUrl || '');
-    const pool = new Pool({ connectionString: connStr, max: 20, idleTimeoutMillis: 30000 });
-    const readPool = new Pool({ connectionString: connStr, max: 5, idleTimeoutMillis: 15000 });
+    // 2026-05-30 (Jürgen perf): pool max 20→8 + read 5→3. Polling-storm in
+    // simple-server vuurt 9× dezelfde LIKE-query parallel + 3× COUNT(*)
+    // tegelijk → buffer-pool LWLock-contention. Smallere pool forceert
+    // serialisatie zonder code-rewrite. Restart vereist na deze change.
+    const pool = new Pool({ connectionString: connStr, max: 8, idleTimeoutMillis: 30000 });
+    const readPool = new Pool({ connectionString: connStr, max: 3, idleTimeoutMillis: 15000 });
     return {
       engine: 'postgres',
       isPostgres: true,
@@ -32,8 +36,19 @@ function createDb({ engine, sqlitePath, databaseUrl }) {
       readPool,
       prepare(sql) {
         const rawSql = maybeAddReturningIdForInsert(sql);
-        
+        // 2026-05-30 (Jürgen OOM-fix): backward-compat voor SQL die al $N
+        // PostgreSQL-placeholders gebruikt (oude code-paden uit voor adapter-
+        // rewrite). Detecteer eens: als SQL native $N gebruikt en geen `?`,
+        // pass args direct door zonder vertaling. Voorkomt "there is no
+        // parameter $1" errors die o.a. auto-rehydrate-loop OOM veroorzaakten.
+        const hasQuestionMark = /\?/.test(rawSql);
+        const hasDollarPlaceholder = /\$\d+/.test(rawSql);
+        const useNativePgPlaceholders = hasDollarPlaceholder && !hasQuestionMark;
+
         function buildExec(args) {
+          if (useNativePgPlaceholders) {
+            return { pgSql: rawSql, pgArgs: args.slice() };
+          }
           let pgSql = rawSql;
           const pgArgs = [];
           let counter = 1;
@@ -47,10 +62,6 @@ function createDb({ engine, sqlitePath, databaseUrl }) {
             pgArgs.push(val);
             return `$${pgArgs.length}`;
           });
-          if (pgSql.includes('UNION ALL') && pgSql.includes('LIMIT')) {
-            console.log('[DEBUG-SQL]', pgSql.substring(Math.max(0, pgSql.length - 100)).trim());
-            console.log('[DEBUG-ARGS]', pgArgs);
-          }
           return { pgSql, pgArgs };
         }
 

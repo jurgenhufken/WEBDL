@@ -8,12 +8,21 @@ const HEARTBEAT_STALE_MS = 45000;
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 const HTTP_STATUS_PROBE_INTERVAL_MS = 4000;
-const HTTP_TIMEOUT_MS = 6000;
+// 2026-05-30 A.6-fix: 6000ms was te kort voor /api/jobs hub-POST op kanalen met
+// veel videos (50+) — fetch werd geaborteerd → "Operation was aborted" in toolbar.
+// 15000ms geeft hub ruimte voor dispatch + initial DB-insert zonder fail.
+// postHubBatch (line 184) gebruikt nog Math.max(HTTP_TIMEOUT_MS, 60000) voor
+// echt grote batches.
+const HTTP_TIMEOUT_MS = 15000;
+const FFF_BACKGROUND_WATCHDOG_INTERVAL_MS = 30000;
+const FFF_BACKGROUND_STALE_MS = 180000;
+const FFF_BACKGROUND_MAX_RESTARTS = 2;
 const PROBE_FAILURES_BEFORE_DISCONNECT = 2; // Reduced so it detects faster
 const PROBE_DISCONNECT_GRACE_MS = 12000; // Drop after 12s of no heartbeat
 const SOCKET_ENABLED = false;
-const BACKGROUND_BUILD = 'simple-background-v3-hub-downloads';
+const BACKGROUND_BUILD = 'simple-background-v24-fff-watchdog-active-worker';
 const HUB_URL = 'http://localhost:35730';
+const HUB_URL_FALLBACK = 'http://127.0.0.1:35730';
 
 
 console.log(`[WEBDL] background loaded ${BACKGROUND_BUILD} socket=${SOCKET_ENABLED ? 'on' : 'off-http-only'}`);
@@ -28,6 +37,8 @@ let reconnectTimer = null;
 let reconnectAttempt = 0;
 let lastHeartbeatAt = 0;
 const activeTabs = new Set();
+const activeFffBackgroundScans = new Map();
+const activeXvideosBrowserBatches = new Map();
 let probeInFlight = null;
 let consecutiveProbeFailures = 0;
 
@@ -41,6 +52,46 @@ function getServerCandidates() {
     out.push(b.replace(/\/+$/, ''));
   }
   return out;
+}
+
+function getHubCandidates() {
+  const seen = new Set();
+  const out = [];
+  for (const base of [HUB_URL, HUB_URL_FALLBACK]) {
+    const b = String(base || '').trim();
+    if (!b || seen.has(b)) continue;
+    seen.add(b);
+    out.push(b.replace(/\/+$/, ''));
+  }
+  return out;
+}
+
+async function getHubJson(endpoint) {
+  const cleanEndpoint = String(endpoint || '').replace(/^\/+/, '');
+  let lastError = null;
+  for (const base of getHubCandidates()) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
+      const response = await fetch(`${base}/${cleanEndpoint}`, {
+        method: 'GET',
+        mode: 'cors',
+        headers: { 'Accept': 'application/json' },
+        signal: controller.signal,
+        cache: 'no-store'
+      });
+      clearTimeout(timeout);
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        lastError = data.error || `Hub fout: ${response.status}`;
+        continue;
+      }
+      return data;
+    } catch (e) {
+      lastError = e && e.message ? e.message : String(e);
+    }
+  }
+  return { success: false, error: lastError || 'Hub niet bereikbaar' };
 }
 
 async function postJson(endpoint, body) {
@@ -75,15 +126,18 @@ async function postHubJob(url, metadata = {}) {
   if (!url || typeof url !== 'string') {
     return { success: false, error: 'Geen URL om naar WebDL-Hub te sturen' };
   }
+  let lastError = null;
+  for (const base of getHubCandidates()) {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
-    const response = await fetch(`${HUB_URL}/api/jobs`, {
+    const response = await fetch(`${base}/api/jobs`, {
       method: 'POST',
       mode: 'cors',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         url,
+        ...(metadata && metadata.adapter ? { adapter: metadata.adapter } : {}),
         priority: 10,
         options: {
           ...(metadata || {}),
@@ -95,21 +149,381 @@ async function postHubJob(url, metadata = {}) {
     clearTimeout(timeout);
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      return { success: false, error: data.error || `Hub fout: HTTP ${response.status}` };
+      lastError = data.error || `Hub fout: HTTP ${response.status}`;
+      continue;
     }
     return {
       success: true,
-      downloadId: data.id || null,
+      downloadId: data.simple_server_download_id || data.id || data.groupId || null,
+      hubJobId: data.id || null,
+      simpleServerDownloadId: data.simple_server_download_id || null,
+      hub: true,
       expanded: !!data.expanded,
+      total: Number.isFinite(Number(data.total)) ? Number(data.total) : undefined,
       queued: Number.isFinite(Number(data.queued)) ? Number(data.queued) : undefined,
+      duplicates: Number.isFinite(Number(data.duplicates)) ? Number(data.duplicates) : undefined,
+      errors: Number.isFinite(Number(data.errors)) ? Number(data.errors) : undefined,
+      skipped: Number.isFinite(Number(data.skipped)) ? Number(data.skipped) : undefined,
+      paused: Number.isFinite(Number(data.paused)) ? Number(data.paused) : undefined,
       duplicate: !!data.duplicate,
       delegated: !!data.delegated,
       message: data.expanded ? 'Expanded in WebDL-Hub' : 'Added to WebDL-Hub',
       raw: data,
     };
   } catch (e) {
+    lastError = e && e.message ? e.message : String(e);
+  }
+  }
+  return { success: false, error: lastError || 'Hub niet bereikbaar' };
+}
+
+async function postHubBatch(urls, metadata = {}, force = false) {
+  const cleanUrls = Array.isArray(urls)
+    ? urls.map((url) => String(url || '').trim()).filter(Boolean)
+    : [];
+  if (!cleanUrls.length) return { success: false, error: 'Geen URLs om naar WebDL-Hub te sturen' };
+  let lastError = null;
+  for (const base of getHubCandidates()) {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), Math.max(HTTP_TIMEOUT_MS, 60000));
+    const response = await fetch(`${base}/api/jobs/batch`, {
+      method: 'POST',
+      mode: 'cors',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        urls: cleanUrls,
+        force: force === true,
+        options: {
+          ...(metadata || {}),
+          queued_from: 'firefox-extension',
+        },
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      lastError = data.error || `Hub batch fout: HTTP ${response.status}`;
+      continue;
+    }
+    return {
+      success: true,
+      total: Number(data.total) || cleanUrls.length,
+      queued: Number(data.queued) || 0,
+      duplicates: Number(data.duplicates) || 0,
+      errors: Number(data.errors) || 0,
+      jobs: Array.isArray(data.jobs) ? data.jobs : [],
+      downloads: (Array.isArray(data.jobs) ? data.jobs : []).map((job) => ({
+        downloadId: job && (job.simple_server_download_id || job.id) || null,
+        hubJobId: job && job.id || null,
+        url: job && job.url || '',
+        duplicate: !!(job && job.duplicate),
+        status: job && job.status || null,
+        title: job && job.title || job && job.video_title || '',
+      })),
+      failed: Array.isArray(data.failed) ? data.failed : [],
+      raw: data,
+    };
+  } catch (e) {
+    lastError = e && e.message ? e.message : String(e);
+  }
+  }
+  return { success: false, error: lastError || 'Hub niet bereikbaar' };
+}
+
+function waitForTabComplete(tabId, timeoutMs = 45000) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (ok) => {
+      if (done) return;
+      done = true;
+      try { clearTimeout(timer); } catch (e) {}
+      try { browser.tabs.onUpdated.removeListener(listener); } catch (e) {}
+      resolve(!!ok);
+    };
+    const listener = (updatedTabId, changeInfo) => {
+      if (updatedTabId === tabId && changeInfo && changeInfo.status === 'complete') finish(true);
+    };
+    const timer = setTimeout(() => finish(false), Math.max(3000, Number(timeoutMs) || 45000));
+    try { browser.tabs.onUpdated.addListener(listener); } catch (e) { finish(false); }
+  });
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
+function traceFffBackgroundStart(scanId, phase, data = {}) {
+  try {
+    fetch(`${SERVER_URL_FALLBACK}/debug/fff-background-scan`, {
+      method: 'POST',
+      mode: 'cors',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        scanId: scanId || '',
+        phase,
+        url: data.url || '',
+        stats: data.stats || null,
+        extra: {
+          ...(data.extra && typeof data.extra === 'object' ? data.extra : {}),
+          backgroundBuild: BACKGROUND_BUILD,
+        },
+        error: data.error || '',
+        build: BACKGROUND_BUILD,
+      }),
+    }).catch(() => {});
+  } catch (e) {}
+}
+
+async function sendTabMessageWithRetry(tabId, message, attempts = 30, delayMs = 500) {
+  let lastError = null;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const response = await browser.tabs.sendMessage(tabId, message);
+      if (response && response.success === false) {
+        throw new Error(response.error || 'Worker-tab weigerde de achtergrondscan');
+      }
+      return response || { success: true };
+    } catch (e) {
+      lastError = e;
+      await sleep(delayMs);
+    }
+  }
+  throw new Error(lastError && lastError.message ? lastError.message : 'Content-script niet bereikbaar in worker-tab');
+}
+
+async function startFffBackgroundScan(payload = {}) {
+  const url = String(payload.url || '').trim();
+  if (!url) return { success: false, error: 'Geen FootFetishForum URL voor achtergrondscan' };
+  const scanId = `fff-bg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const activeWorker = payload.activeWorker !== false;
+  const restartCount = Math.max(0, parseInt(String(payload.__restartCount || '0'), 10) || 0);
+  let tab = null;
+  try {
+    traceFffBackgroundStart(scanId, 'background-start', {
+      url,
+      extra: {
+        payloadKeys: Object.keys(payload && typeof payload === 'object' ? payload : {}),
+        initialUrls: Array.isArray(payload.initialUrls) ? payload.initialUrls.length : 0,
+        initialThreadLinks: Array.isArray(payload.initialThreadLinks) ? payload.initialThreadLinks.length : 0,
+        activeWorker,
+      },
+    });
+    tab = await browser.tabs.create({ url, active: activeWorker });
+    activeFffBackgroundScans.set(scanId, {
+      scanId,
+      tabId: tab && tab.id,
+      url,
+      payload: { ...(payload && typeof payload === 'object' ? payload : {}), url },
+      restartCount,
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+      status: 'loading',
+    });
+    traceFffBackgroundStart(scanId, 'background-tab-created', { url, extra: { tabId: tab && tab.id, activeWorker } });
+    await waitForTabComplete(tab.id, 45000);
+    activeFffBackgroundScans.set(scanId, {
+      ...(activeFffBackgroundScans.get(scanId) || { scanId, tabId: tab.id, url }),
+      status: 'dispatching',
+      updatedAt: Date.now(),
+    });
+    traceFffBackgroundStart(scanId, 'background-dispatch', { url, extra: { tabId: tab.id } });
+    const ack = await sendTabMessageWithRetry(tab.id, {
+      action: 'runFffBackgroundScan',
+      payload: {
+        ...(payload && typeof payload === 'object' ? payload : {}),
+        scanId,
+        workerTabId: tab.id,
+      }
+    }, 40, 500);
+    activeFffBackgroundScans.set(scanId, {
+      ...(activeFffBackgroundScans.get(scanId) || { scanId, tabId: tab.id, url }),
+      status: 'running',
+      acceptedAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    traceFffBackgroundStart(scanId, 'background-accepted', { url, extra: { tabId: tab.id, ack } });
+    return { success: true, accepted: true, scanId, tabId: tab.id, worker: ack };
+  } catch (e) {
+    if (tab && tab.id) {
+      try { await browser.tabs.remove(tab.id); } catch (_) {}
+    }
+    activeFffBackgroundScans.set(scanId, {
+      scanId,
+      tabId: tab && tab.id,
+      url,
+      status: 'error',
+      error: e && e.message ? e.message : String(e),
+      finishedAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    traceFffBackgroundStart(scanId, 'background-error', { url, error: e && e.message ? e.message : String(e), extra: { tabId: tab && tab.id } });
     return { success: false, error: e && e.message ? e.message : String(e) };
   }
+}
+
+function startFffBackgroundScanWatchdog() {
+  setInterval(() => {
+    const now = Date.now();
+    for (const [scanId, row] of activeFffBackgroundScans.entries()) {
+      if (!row || !['loading', 'dispatching', 'running'].includes(String(row.status || ''))) continue;
+      const lastSeen = Number(row.updatedAt || row.acceptedAt || row.startedAt || 0);
+      if (!lastSeen || (now - lastSeen) < FFF_BACKGROUND_STALE_MS) continue;
+
+      const restartCount = Math.max(0, Number(row.restartCount) || 0);
+      if (restartCount >= FFF_BACKGROUND_MAX_RESTARTS) {
+        activeFffBackgroundScans.set(scanId, {
+          ...row,
+          status: 'stale',
+          error: `Geen FFF-progress sinds ${Math.round((now - lastSeen) / 1000)}s`,
+          updatedAt: now,
+        });
+        traceFffBackgroundStart(scanId, 'watchdog-stale-final', {
+          url: row.lastUrl || row.url || '',
+          stats: row.stats || null,
+          error: `Geen progress sinds ${Math.round((now - lastSeen) / 1000)}s`,
+          extra: { restartCount },
+        });
+        continue;
+      }
+
+      const payload = row.payload && typeof row.payload === 'object' ? { ...row.payload } : {};
+      payload.url = payload.url || row.url || row.lastUrl || '';
+      payload.activeWorker = true;
+      payload.__restartCount = restartCount + 1;
+      activeFffBackgroundScans.set(scanId, {
+        ...row,
+        status: 'stale-restarting',
+        error: `Geen FFF-progress sinds ${Math.round((now - lastSeen) / 1000)}s; restart ${payload.__restartCount}/${FFF_BACKGROUND_MAX_RESTARTS}`,
+        updatedAt: now,
+      });
+      traceFffBackgroundStart(scanId, 'watchdog-restart', {
+        url: row.lastUrl || row.url || payload.url || '',
+        stats: row.stats || null,
+        extra: {
+          restartCount: payload.__restartCount,
+          oldTabId: row.tabId || null,
+          restartUrl: payload.url || '',
+        },
+      });
+      if (row.tabId) {
+        try { browser.tabs.remove(row.tabId).catch(() => {}); } catch (e) {}
+      }
+      startFffBackgroundScan(payload).catch((e) => {
+        traceFffBackgroundStart(scanId, 'watchdog-restart-error', {
+          url: payload.url || '',
+          error: e && e.message ? e.message : String(e),
+          extra: { restartCount: payload.__restartCount },
+        });
+      });
+    }
+  }, FFF_BACKGROUND_WATCHDOG_INTERVAL_MS);
+}
+
+startFffBackgroundScanWatchdog();
+
+async function runXvideosBrowserBatch(batchId, payload = {}) {
+  const urls = Array.isArray(payload.urls)
+    ? payload.urls.map((url) => String(url || '').trim()).filter(Boolean)
+    : [];
+  const metadata = payload.metadata && typeof payload.metadata === 'object' ? payload.metadata : {};
+  const stats = { total: urls.length, done: 0, imported: 0, duplicates: 0, errors: 0 };
+  activeXvideosBrowserBatches.set(batchId, {
+    batchId,
+    status: 'running',
+    startedAt: Date.now(),
+    stats,
+    currentUrl: '',
+  });
+  for (let i = 0; i < urls.length; i++) {
+    const url = urls[i];
+    let tab = null;
+    try {
+      activeXvideosBrowserBatches.set(batchId, {
+        ...(activeXvideosBrowserBatches.get(batchId) || { batchId }),
+        status: 'loading',
+        currentUrl: url,
+        index: i + 1,
+        stats,
+        updatedAt: Date.now(),
+      });
+      tab = await browser.tabs.create({ url, active: false });
+      await waitForTabComplete(tab.id, 60000);
+      activeXvideosBrowserBatches.set(batchId, {
+        ...(activeXvideosBrowserBatches.get(batchId) || { batchId }),
+        status: 'downloading',
+        tabId: tab.id,
+        currentUrl: url,
+        index: i + 1,
+        stats,
+        updatedAt: Date.now(),
+      });
+      const result = await sendTabMessageWithRetry(tab.id, {
+        action: 'runXvideosBrowserDownload',
+        payload: {
+          batchId,
+          url,
+          index: i + 1,
+          total: urls.length,
+          metadata: {
+            ...metadata,
+            webdl_batch_kind: metadata.webdl_batch_kind || 'xvideos_browser_batch',
+          },
+        },
+      }, 60, 1000);
+      stats.done++;
+      if (result && result.duplicate) stats.duplicates++;
+      else stats.imported++;
+    } catch (e) {
+      stats.done++;
+      stats.errors++;
+      activeXvideosBrowserBatches.set(batchId, {
+        ...(activeXvideosBrowserBatches.get(batchId) || { batchId }),
+        status: 'running',
+        currentUrl: url,
+        lastError: e && e.message ? e.message : String(e),
+        stats,
+        updatedAt: Date.now(),
+      });
+    } finally {
+      if (tab && tab.id) {
+        try { await browser.tabs.remove(tab.id); } catch (_) {}
+      }
+    }
+    await sleep(500);
+  }
+  activeXvideosBrowserBatches.set(batchId, {
+    ...(activeXvideosBrowserBatches.get(batchId) || { batchId }),
+    status: stats.errors ? 'done-with-errors' : 'done',
+    stats,
+    finishedAt: Date.now(),
+    updatedAt: Date.now(),
+  });
+}
+
+async function startXvideosBrowserBatch(payload = {}) {
+  const urls = Array.isArray(payload.urls)
+    ? payload.urls.map((url) => String(url || '').trim()).filter(Boolean)
+    : [];
+  if (!urls.length) return { success: false, error: 'Geen XVideos URLs voor browser-batch' };
+  const batchId = `xv-bg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  activeXvideosBrowserBatches.set(batchId, {
+    batchId,
+    status: 'queued',
+    startedAt: Date.now(),
+    stats: { total: urls.length, done: 0, imported: 0, duplicates: 0, errors: 0 },
+  });
+  runXvideosBrowserBatch(batchId, payload).catch((e) => {
+    activeXvideosBrowserBatches.set(batchId, {
+      ...(activeXvideosBrowserBatches.get(batchId) || { batchId }),
+      status: 'error',
+      error: e && e.message ? e.message : String(e),
+      finishedAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+  });
+  return { success: true, accepted: true, batchId, total: urls.length };
 }
 
 async function getJson(endpoint) {
@@ -149,10 +563,10 @@ async function probeServerStatus(source = 'probe') {
     lastHeartbeatAt = Date.now();
     const status = await getJson('status');
     if (status && status.success !== false && status.status === 'running') {
-      if (typeof status.isRecording !== 'undefined') updateRecordingState(status.isRecording, status.activeRecordingUrls);
+      if (typeof status.isRecording !== 'undefined') updateRecordingState(status.isRecording, status.activeRecordingUrls, status.activeRecordingKeys);
       if (Number.isFinite(Number(status.activeDownloads))) activeDownloads = Number(status.activeDownloads);
     }
-    return { success: true, source, isConnected: true, isRecording, activeRecordingUrls, activeDownloads };
+    return { success: true, source, isConnected: true, isRecording, activeRecordingUrls, activeRecordingKeys, activeDownloads };
   }
   consecutiveProbeFailures += 1;
   const error = health && health.error ? health.error : 'Health probe mislukt';
@@ -170,7 +584,7 @@ async function probeServerStatus(source = 'probe') {
   if (!mutedAbort && !mutedNetwork) {
     console.warn(`[WEBDL] status probe failed (${source}): ${error}`);
   }
-  return { success: false, source, isConnected: isConnected && !shouldDisconnect, isRecording, activeRecordingUrls, activeDownloads, error };
+  return { success: false, source, isConnected: isConnected && !shouldDisconnect, isRecording, activeRecordingUrls, activeRecordingKeys, activeDownloads, error };
   })();
   try {
     return await probeInFlight;
@@ -228,12 +642,14 @@ function setConnectedState(next) {
 }
 
 let activeRecordingUrls = [];
+let activeRecordingKeys = [];
 
-function updateRecordingState(next, urls) {
+function updateRecordingState(next, urls, keys) {
   const normalized = !!next;
   activeRecordingUrls = Array.isArray(urls) ? urls : [];
+  activeRecordingKeys = Array.isArray(keys) ? keys : [];
   isRecording = normalized;
-  notifyRecordingStateChange(normalized, activeRecordingUrls);
+  notifyRecordingStateChange(normalized, activeRecordingUrls, activeRecordingKeys);
 }
 
 async function notifyConnectionStateChange(state) {
@@ -253,13 +669,14 @@ async function notifyConnectionStateChange(state) {
   }
 }
 
-async function notifyRecordingStateChange(state, urls) {
+async function notifyRecordingStateChange(state, urls, keys) {
   for (const tabId of activeTabs) {
     try {
       await browser.tabs.sendMessage(tabId, {
         action: 'recordingStateChanged',
         isRecording: state,
-        activeRecordingUrls: Array.isArray(urls) ? urls : activeRecordingUrls
+        activeRecordingUrls: Array.isArray(urls) ? urls : activeRecordingUrls,
+        activeRecordingKeys: Array.isArray(keys) ? keys : activeRecordingKeys
       }).catch(() => {
         activeTabs.delete(tabId);
       });
@@ -269,20 +686,41 @@ async function notifyRecordingStateChange(state, urls) {
   }
 }
 
-function ensureContextMenu() {
+async function ensureContextMenu() {
+  const menusApi = browser.contextMenus || browser.menus;
+  if (!menusApi || !menusApi.create) {
+    console.error('context menu API ontbreekt');
+    return;
+  }
   try {
-    browser.contextMenus.removeAll();
-  } catch (e) {}
+    if (menusApi.removeAll) await menusApi.removeAll();
+  } catch (e) {
+    console.warn('context menu removeAll failed', e && e.message ? e.message : e);
+  }
+  const ctx = ['page', 'selection', 'link', 'image', 'video', 'audio'];
   try {
-    browser.contextMenus.create({
-      id: CONTEXT_MENU_ID,
-      title: 'WEBDL Download',
-      contexts: ['link', 'image', 'video', 'audio']
-    });
+    // 2026-05-30 (Jürgen): geen kwaliteit-submenu. ÉÉN klikbaar item.
+    // preferredHeight blijft 0 (= best beschikbaar) in de handler.
+    menusApi.create({ id: CONTEXT_MENU_ID, title: 'WEBDL download', contexts: ctx });
   } catch (e) {
     console.error('context menu create failed', e);
   }
 }
+
+// Maps menuItemId-suffix → metadata.preferredHeight (server gebruikt dat in
+// yt-dlp -f flag). 'best' = geen height-cap. 'audio' = audio-only mode.
+const CONTEXT_MENU_QUALITY = {
+  [CONTEXT_MENU_ID + ':best']:  { preferredHeight: 0 },
+  [CONTEXT_MENU_ID + ':1080']:  { preferredHeight: 1080 },
+  [CONTEXT_MENU_ID + ':720']:   { preferredHeight: 720 },
+  [CONTEXT_MENU_ID + ':480']:   { preferredHeight: 480 },
+  [CONTEXT_MENU_ID + ':audio']: { audioOnly: true },
+};
+
+// 2026-05-30: eerdere logica om submenu-items op CF-hosts (recu.me) te
+// verbergen weggehaald op Jürgen's verzoek. Submenu blijft altijd compleet:
+// 🎬 Full / 1080 / 720 / 480 / 🎵 audio. Op recu.me resolven alle keuzes
+// naar dezelfde snelle no-q URL via metadata.fullVideoUrl substitutie.
 
 function scheduleReconnect() {
   if (reconnectTimer) return;
@@ -303,7 +741,7 @@ function startHeartbeat() {
     const status = await sendSocketRequest('status', {}, 5000);
     if (status && status.success) {
       lastHeartbeatAt = Date.now();
-      if (typeof status.isRecording !== 'undefined') updateRecordingState(status.isRecording);
+      if (typeof status.isRecording !== 'undefined') updateRecordingState(status.isRecording, status.activeRecordingUrls, status.activeRecordingKeys);
       if (Number.isFinite(Number(status.activeDownloads))) activeDownloads = Number(status.activeDownloads);
       return;
     }
@@ -418,7 +856,7 @@ function connectPersistentSocket() {
     startHeartbeat();
     const status = await sendSocketRequest('status', {}, 4000);
     if (status && status.success) {
-      if (typeof status.isRecording !== 'undefined') updateRecordingState(status.isRecording);
+      if (typeof status.isRecording !== 'undefined') updateRecordingState(status.isRecording, status.activeRecordingUrls, status.activeRecordingKeys);
       if (Number.isFinite(Number(status.activeDownloads))) activeDownloads = Number(status.activeDownloads);
       lastHeartbeatAt = Date.now();
     }
@@ -442,7 +880,7 @@ function connectPersistentSocket() {
 
   socket.on('recording-status-changed', (data) => {
     if (data && typeof data.isRecording !== 'undefined') {
-      updateRecordingState(data.isRecording, data.activeRecordingUrls);
+      updateRecordingState(data.isRecording, data.activeRecordingUrls, data.activeRecordingKeys);
     }
   });
 
@@ -460,11 +898,28 @@ function connectPersistentSocket() {
   }
 }
 
+// 2026-05-24: Cloudflare-blocked hosts moeten via browser.downloads.download
+// omdat de server zelf 403 krijgt. Browser heeft wel een geldige CF-sessie.
+// Voor andere hosts gebruikt de context-menu de bestaande hub-flow.
+const CLOUDFLARE_BROWSER_DL_HOSTS = /(?:^|\.)(?:recu\.me|chaturbate\.com|bongacams\.com)$/i;
+
 browser.contextMenus.onClicked.addListener(async (info, tab) => {
-  if (!info || info.menuItemId !== CONTEXT_MENU_ID) return;
+  if (!info) return;
+  const mid = String(info.menuItemId || '');
+  // Accept parent (legacy: gedraagt zich als 'best') of een van de quality-subs.
+  const isParent = (mid === CONTEXT_MENU_ID);
+  const qualityInfo = CONTEXT_MENU_QUALITY[mid];
+  if (!isParent && !qualityInfo) return;
+  const quality = qualityInfo || { preferredHeight: 0 };
 
   const url = info.linkUrl || info.srcUrl || info.pageUrl;
   if (!url) return;
+
+  // Detecteer Cloudflare-hosts → browser-download pad
+  let urlHost = '';
+  try { urlHost = new URL(url).hostname.toLowerCase(); } catch (_) {}
+  const needsBrowserDl = CLOUDFLARE_BROWSER_DL_HOSTS.test(urlHost)
+    || (tab && tab.url && (() => { try { return CLOUDFLARE_BROWSER_DL_HOSTS.test(new URL(tab.url).hostname); } catch (_) { return false; } })());
 
   let metadata = null;
   try {
@@ -485,7 +940,160 @@ browser.contextMenus.onClicked.addListener(async (info, tab) => {
   }
 
   metadata.sourceUrl = url;
-  
+  // 2026-05-30: door-passen van quality-keuze uit het context-menu naar de
+  // server (yt-dlp -f flag bouwt op preferredHeight / audioOnly).
+  if (Number.isFinite(quality.preferredHeight) && quality.preferredHeight > 0) {
+    metadata.preferredHeight = quality.preferredHeight;
+  }
+  if (quality.audioOnly) {
+    metadata.audioOnly = true;
+  }
+
+  // Browser-download pad: voor recu.me en andere CF-hosts.
+  if (needsBrowserDl) {
+    // Extract channel uit page-URL als content-script 'unknown' gaf.
+    // recu.me URLs: /<username>/video/<id>/play|download → username = channel
+    try {
+      const tabUrl = (tab && tab.url) || '';
+      const m = tabUrl.match(/^https?:\/\/(?:www\.)?(recu\.me|chaturbate\.com|bongacams\.com)\/([a-z0-9_-]+)\/(?:video|vod)\//i);
+      if (m && m[2] && (!metadata.channel || metadata.channel === 'unknown')) {
+        metadata.channel = m[2];
+      }
+      // Plus platform fix
+      if (!metadata.platform || metadata.platform === 'unknown') {
+        if (m && m[1]) metadata.platform = m[1].replace(/\.[a-z]+$/, ''); // recu / chaturbate / bongacams
+      }
+    } catch (_) {}
+
+    // 2026-05-30 onderzoek: ?q=N URLs zijn door recu.me throttled (5 Mbps),
+    // /video/<id>/download zonder q= geeft volle CDN-snelheid (~75 Mbps;
+    // gemeten op belovedkhlloe 4.5GB in 8 min). scrapeMetadata in
+    // content/debug-toolbar.js construeert deze no-q URL voor recu.me hosts.
+    // Hier substitueren we de page-URL (HTML) door fullVideoUrl ongeacht
+    // welke quality-keuze in het submenu is gemaakt — alle paden gaan via
+    // dezelfde snelle CDN. Beste kwaliteit (Full video default).
+    try {
+      if (metadata && metadata.fullVideoUrl && /^https?:\/\/[^/]*recu\.me\//i.test(metadata.fullVideoUrl)) {
+        const userClickedPage = (info.linkUrl == null && info.srcUrl == null) || url === info.pageUrl;
+        if (userClickedPage) {
+          console.log(`[WEBDL] context-menu recu.me url-substitute → ${metadata.fullVideoUrl.slice(0, 80)}`);
+          url = metadata.fullVideoUrl;
+          metadata.sourceUrl = metadata.fullVideoUrl;
+          metadata.webdl_extract_mode = 'full-video-noq';
+        }
+      }
+    } catch (_) {}
+
+    try {
+      // Filename: subfolder webdl/<host>/<videoId>/ — minimal, alleen safe chars.
+      // Originele bestandsnaam wordt door Firefox uit Content-Disposition gehaald
+      // mits we GEEN file-naam-deel meegeven (alleen subfolder).
+      // Echter Firefox vereist altijd een filename. We genereren dus iets simpels.
+      let filename;
+      try {
+        const sanit = (s) => String(s || '').replace(/[^a-zA-Z0-9._-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 80);
+        const host = urlHost.replace(/^www\./, '').replace(/\.[a-z]+$/, '') || 'web';
+        const videoIdMatch = url.match(/\/(?:video|vod)\/(\d+)/);
+        const vid = videoIdMatch ? videoIdMatch[1] : Date.now().toString(36);
+        const ext = (url.match(/\.(mp4|mkv|webm|mov|avi|m4v)(?:[?#]|$)/i) || [, 'mp4'])[1].toLowerCase();
+        const ch = sanit(metadata.channel) || 'unknown';
+        filename = `webdl/${host}/${ch}/${vid}.${ext}`;
+      } catch (_) {
+        filename = `webdl/dl_${Date.now()}.mp4`;
+      }
+
+      const downloadId = await browser.downloads.download({
+        url,
+        filename,
+        conflictAction: 'uniquify',
+        saveAs: false,
+      });
+      console.log(`[WEBDL] context-menu browserDownload id=${downloadId} for ${url.slice(0, 80)} (host=${urlHost})`);
+
+      // Wacht op complete → POST naar /api/import-file
+      const onChanged = (delta) => {
+        if (delta.id !== downloadId) return;
+        if (delta.state && delta.state.current === 'complete') {
+          browser.downloads.onChanged.removeListener(onChanged);
+          browser.downloads.search({ id: downloadId }).then((items) => {
+            const item = items && items[0];
+            if (!item || !item.filename) return;
+            const importBody = {
+              filepath: item.filename,
+              sourceUrl: url,
+              platform: metadata.platform || urlHost.replace(/\.[^.]+$/, '') || 'unknown',
+              channel: metadata.channel || 'unknown',
+              title: metadata.title || '',
+              metadata: { ...metadata, webdl_browser_download_id: downloadId },
+            };
+            fetch(`${SERVER_URL}/api/import-file`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(importBody),
+            })
+              .then((r) => r.json())
+              .then((r) => {
+                console.log(`[WEBDL] context-menu import-file:`, r);
+                // 2026-05-30: meld de tab dat browser-download EN import klaar zijn
+                if (tab && tab.id != null) {
+                  const filename = (item.filename || '').split('/').pop() || '';
+                  browser.tabs.sendMessage(tab.id, {
+                    action: 'webdlBrowserDownloadComplete',
+                    success: !!(r && (r.success || r.id)),
+                    downloadId,
+                    serverDownloadId: r && r.id ? r.id : null,
+                    filepath: item.filename,
+                    filename,
+                  }).catch(() => {});
+                }
+              })
+              .catch((e) => {
+                console.warn(`[WEBDL] context-menu import-file fout:`, e);
+                if (tab && tab.id != null) {
+                  browser.tabs.sendMessage(tab.id, {
+                    action: 'webdlBrowserDownloadComplete',
+                    success: false,
+                    error: String(e && e.message || e).slice(0, 80),
+                    downloadId,
+                  }).catch(() => {});
+                }
+              });
+          });
+        } else if (delta.state && delta.state.current === 'interrupted') {
+          browser.downloads.onChanged.removeListener(onChanged);
+          console.warn(`[WEBDL] context-menu download #${downloadId} interrupted`);
+          if (tab && tab.id != null) {
+            browser.tabs.sendMessage(tab.id, {
+              action: 'webdlBrowserDownloadComplete',
+              success: false,
+              error: 'download interrupted',
+              downloadId,
+            }).catch(() => {});
+          }
+        }
+      };
+      browser.downloads.onChanged.addListener(onChanged);
+
+      try {
+        if (tab && tab.id != null) {
+          await browser.tabs.sendMessage(tab.id, {
+            action: 'webdlDownloadQueued',
+            success: true,
+            downloadId,
+            duplicate: false,
+            serverMessage: 'Browser-download gestart',
+            url,
+            browserDownload: true,
+          }).catch(() => {});
+        }
+      } catch (e) {}
+      return;
+    } catch (err) {
+      console.error(`[WEBDL] context-menu browserDownload fout:`, err);
+      // Val terug op de hub-flow
+    }
+  }
+
   const resp = await postHubJob(url, metadata);
 
   try {
@@ -518,8 +1126,46 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   const action = message && message.action ? message.action : '';
   if (action === 'contentScriptLoaded') {
-    sendResponse({ success: true, isConnected, isRecording, activeRecordingUrls, activeDownloads });
+    sendResponse({ success: true, isConnected, isRecording, activeRecordingUrls, activeRecordingKeys, activeDownloads });
     return false;
+  }
+
+  // 2026-05-30: openTab — content-scripts mogen window.open niet altijd
+  // gebruiken (CSP-blokkades op chaturbate.com etc.). Background-script staat
+  // buiten content-page-CSP en kan een nieuwe tab openen.
+  if (action === 'openTab' && message && message.url) {
+    try {
+      browser.tabs.create({ url: String(message.url), active: true })
+        .then((tab) => sendResponse({ success: true, tabId: tab && tab.id }))
+        .catch((e) => sendResponse({ success: false, error: e && e.message || String(e) }));
+    } catch (e) {
+      sendResponse({ success: false, error: e && e.message || String(e) });
+    }
+    return true;
+  }
+
+  // 2026-05-30 Spoor 3-toolbar (Jürgen): voorkom dat Firefox een tab waarop
+  // een hele-thread / alle-pages scan draait wegontlaadt door auto-tab-discard
+  // (verliest dan poll-loop + paneel-state). Tab blijft vast tot user 'm sluit.
+  if (action === 'preventAutoDiscard' && sender.tab && sender.tab.id != null) {
+    try {
+      browser.tabs.update(sender.tab.id, { autoDiscardable: false })
+        .then(() => sendResponse({ success: true }))
+        .catch((e) => sendResponse({ success: false, error: e && e.message || String(e) }));
+    } catch (e) {
+      sendResponse({ success: false, error: e && e.message || String(e) });
+    }
+    return true; // async response
+  }
+  if (action === 'allowAutoDiscard' && sender.tab && sender.tab.id != null) {
+    try {
+      browser.tabs.update(sender.tab.id, { autoDiscardable: true })
+        .then(() => sendResponse({ success: true }))
+        .catch((e) => sendResponse({ success: false, error: e && e.message || String(e) }));
+    } catch (e) {
+      sendResponse({ success: false, error: e && e.message || String(e) });
+    }
+    return true;
   }
 
   if (action === 'getStatus') {
@@ -532,19 +1178,37 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
               isConnected: !!probe.isConnected,
               isRecording: !!probe.isRecording,
               activeRecordingUrls: probe.activeRecordingUrls || activeRecordingUrls,
+              activeRecordingKeys: probe.activeRecordingKeys || activeRecordingKeys,
               activeDownloads: Number.isFinite(Number(probe.activeDownloads)) ? Number(probe.activeDownloads) : activeDownloads
             });
             return;
           }
-          sendResponse({ isConnected, isRecording, activeRecordingUrls, activeDownloads });
+          sendResponse({ isConnected, isRecording, activeRecordingUrls, activeRecordingKeys, activeDownloads });
         })
         .catch(() => {
-          sendResponse({ isConnected, isRecording, activeRecordingUrls, activeDownloads });
+          sendResponse({ isConnected, isRecording, activeRecordingUrls, activeRecordingKeys, activeDownloads });
         });
       return true;
     }
-    sendResponse({ isConnected, isRecording, activeRecordingUrls, activeDownloads });
+    sendResponse({ isConnected, isRecording, activeRecordingUrls, activeRecordingKeys, activeDownloads });
     return false;
+  }
+
+  if (action === 'getHubStatus') {
+    getHubJson('api/adapters')
+      .then((health) => {
+        if (health && Array.isArray(health.adapters)) {
+          sendResponse({ success: true, ok: true, db: null, lightweight: true });
+          return;
+        }
+        sendResponse({
+          success: false,
+          ok: false,
+          error: health && health.error ? health.error : 'Hub adapters endpoint niet bereikbaar'
+        });
+      })
+      .catch((error) => sendResponse({ success: false, ok: false, error: error && error.message ? error.message : String(error) }));
+    return true;
   }
 
   if (action === 'queueDownload') {
@@ -555,18 +1219,136 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  // 2026-05-24: browser-side download voor sites achter Cloudflare (recu.me).
+  // Server kan niet zelf bij die URL (403), maar de browser heeft een geldige
+  // CF-sessie. browser.downloads.download streamt naar disk (geen blob-memory),
+  // werkt voor files van GB-formaat. Daarna POSTen we de filepath naar
+  // /api/import-file zodat het in de gallery verschijnt.
+  if (action === 'browserDownload') {
+    const payload = (message && message.payload) || {};
+    const url = String(payload.url || '').trim();
+    const filename = String(payload.filename || '').trim() || undefined;
+    const meta = payload.metadata || {};
+    if (!url || !/^https?:/i.test(url)) {
+      sendResponse({ success: false, error: 'invalid url' });
+      return false;
+    }
+    const dlOpts = { url, conflictAction: 'uniquify', saveAs: false };
+    if (filename) dlOpts.filename = filename.replace(/[\/\\:*?"<>|]/g, '_');
+    browser.downloads.download(dlOpts).then((downloadId) => {
+      console.log(`[WEBDL] browserDownload started id=${downloadId} for ${url.slice(0, 80)}`);
+      // Listen for completion to get the on-disk path
+      const onChanged = (delta) => {
+        if (delta.id !== downloadId) return;
+        if (delta.state && delta.state.current === 'complete') {
+          browser.downloads.onChanged.removeListener(onChanged);
+          browser.downloads.search({ id: downloadId }).then((items) => {
+            const item = items && items[0];
+            if (!item || !item.filename) {
+              console.warn(`[WEBDL] browserDownload #${downloadId} compleet maar geen filename`);
+              return;
+            }
+            const importBody = {
+              filepath: item.filename,
+              sourceUrl: url,
+              platform: meta.platform || 'unknown',
+              channel: meta.channel || 'unknown',
+              title: meta.title || '',
+              metadata: meta,
+            };
+            fetch(`${SERVER_URL}/api/import-file`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(importBody),
+            })
+              .then((r) => r.json())
+              .then((r) => console.log(`[WEBDL] /api/import-file response:`, r))
+              .catch((e) => console.warn(`[WEBDL] /api/import-file fout:`, e));
+          });
+        } else if (delta.state && delta.state.current === 'interrupted') {
+          browser.downloads.onChanged.removeListener(onChanged);
+          console.warn(`[WEBDL] browserDownload #${downloadId} interrupted:`, delta);
+        }
+      };
+      browser.downloads.onChanged.addListener(onChanged);
+      sendResponse({ success: true, downloadId });
+    }).catch((err) => {
+      console.error(`[WEBDL] browserDownload fout:`, err);
+      sendResponse({ success: false, error: String(err && err.message ? err.message : err) });
+    });
+    return true;
+  }
+
   if (action === 'queueBatchDownload') {
     const payload = (message && message.payload) || {};
-    const urls = payload.urls || [];
-    const metadata = payload.metadata || {};
-    
-    Promise.all(urls.map(url => postHubJob(url, metadata))).then((results) => {
-      const queued = results.filter(r => r.success && !r.duplicate).reduce((sum, r) => sum + (Number(r.queued) || 1), 0);
-      const duplicates = results.filter(r => r.duplicate).length;
-      const errors = results.filter(r => !r.success).length;
-      sendResponse({ success: true, queued, duplicates, errors });
-    }).catch(e => sendResponse({ success: false, error: e.message }));
+    postJson('download/batch', payload)
+      .then(sendResponse)
+      .catch(e => sendResponse({ success: false, error: e.message }));
     return true;
+  }
+
+  if (action === 'startFffBackgroundScan') {
+    startFffBackgroundScan((message && message.payload) || {})
+      .then(sendResponse)
+      .catch(e => sendResponse({ success: false, error: e && e.message ? e.message : String(e) }));
+    return true;
+  }
+
+  if (action === 'startXvideosBrowserBatch') {
+    startXvideosBrowserBatch((message && message.payload) || {})
+      .then(sendResponse)
+      .catch(e => sendResponse({ success: false, error: e && e.message ? e.message : String(e) }));
+    return true;
+  }
+
+  if (action === 'xvideosBrowserBatchStatus') {
+    sendResponse({ success: true, batches: Array.from(activeXvideosBrowserBatches.values()) });
+    return false;
+  }
+
+  if (action === 'fffBackgroundScanStatus') {
+    sendResponse({ success: true, scans: Array.from(activeFffBackgroundScans.values()) });
+    return false;
+  }
+
+  if (action === 'fffBackgroundScanProgress') {
+    const payload = (message && message.payload) || {};
+    const scanId = String(payload.scanId || '').trim();
+    const tabId = sender && sender.tab && sender.tab.id ? sender.tab.id : Number(payload.tabId) || null;
+    if (scanId) {
+      activeFffBackgroundScans.set(scanId, {
+        ...(activeFffBackgroundScans.get(scanId) || { scanId, tabId }),
+        status: 'running',
+        phase: payload.phase || '',
+        stats: payload.stats || null,
+        lastUrl: payload.url || '',
+        updatedAt: Date.now(),
+      });
+    }
+    sendResponse({ success: true });
+    return false;
+  }
+
+  if (action === 'fffBackgroundScanFinished') {
+    const payload = (message && message.payload) || {};
+    const scanId = String(payload.scanId || '').trim();
+    const tabId = sender && sender.tab && sender.tab.id ? sender.tab.id : Number(payload.tabId) || null;
+    if (scanId) {
+      activeFffBackgroundScans.set(scanId, {
+        ...(activeFffBackgroundScans.get(scanId) || { scanId, tabId }),
+        status: payload.success === false ? 'error' : 'done',
+        stats: payload.stats || null,
+        error: payload.error || '',
+        finishedAt: Date.now(),
+      });
+    }
+    sendResponse({ success: true });
+    if (tabId && payload.closeTab !== false) {
+      setTimeout(() => {
+        browser.tabs.remove(tabId).catch(() => {});
+      }, 1200);
+    }
+    return false;
   }
 
   if (action === 'redditIndex') {
@@ -604,7 +1386,17 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
-ensureContextMenu();
+ensureContextMenu().catch((e) => console.error('context menu init failed', e));
+if (browser.runtime && browser.runtime.onInstalled) {
+  browser.runtime.onInstalled.addListener(() => {
+    ensureContextMenu().catch((e) => console.error('context menu install refresh failed', e));
+  });
+}
+if (browser.runtime && browser.runtime.onStartup) {
+  browser.runtime.onStartup.addListener(() => {
+    ensureContextMenu().catch((e) => console.error('context menu startup refresh failed', e));
+  });
+}
 if (SOCKET_ENABLED) {
   connectPersistentSocket();
 } else {

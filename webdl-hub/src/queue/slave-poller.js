@@ -12,7 +12,123 @@ const path = require('node:path');
 const { execFile } = require('node:child_process');
 
 const FFMPEG = process.env.WEBDL_FFMPEG || '/opt/homebrew/bin/ffmpeg';
-const VIDEO_EXTS = new Set(['.mp4', '.mkv', '.webm', '.mov', '.m4v', '.avi', '.flv', '.ts']);
+const VIDEO_EXTS = new Set(['.mp4', '.mkv', '.webm', '.mov', '.m4v', '.avi', '.wmv', '.flv', '.ts', '.m2ts', '.mpg', '.mpeg', '.ogv', '.3gp', '.3g2']);
+const ARCHIVE_EXTS = new Set(['.zip', '.rar', '.7z', '.tar', '.gz', '.tgz', '.bz2', '.xz']);
+const MEDIA_EXTS = new Set([...VIDEO_EXTS, '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.avif']);
+const DOWNLOAD_EXTS = new Set([...MEDIA_EXTS, ...ARCHIVE_EXTS]);
+const SKIP_BASENAME_RE = /(_thumb(_v\d+)?|_preview|_logo)\.(jpe?g|png|webp|gif|bmp|avif)$/i;
+const MEDIA_ROOTS = [
+  process.env.WEBDL_BASE_DIR,
+  process.env.WEBDL_MEDIA_ROOTS,
+  process.env.WEBDL_EXTRA_MEDIA_ROOTS,
+  process.env.WEBDL_ALLOWED_MEDIA_ROOTS,
+  '/Users/jurgen/Downloads/WEBDL',
+  '/Volumes/HDD - One Touch/WEBDL',
+  '/Volumes/WEBDL Extra/WEBDL',
+].filter(Boolean).flatMap((p) => String(p).split(/[;\n]/).map((v) => v.trim()).filter(Boolean));
+
+function intEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+function isMediaPath(filePath) {
+  const base = path.basename(filePath || '');
+  if (SKIP_BASENAME_RE.test(base)) return false;
+  const ext = path.extname(base).toLowerCase();
+  if (!ext && base && !base.startsWith('.')) return true;
+  return DOWNLOAD_EXTS.has(ext);
+}
+
+function relativeToMediaRoot(filePath) {
+  const abs = path.resolve(filePath);
+  for (const root of MEDIA_ROOTS) {
+    const rel = path.relative(root, abs);
+    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) return rel;
+  }
+  return abs;
+}
+
+function resolveSlaveRelPath(relPath, basePath) {
+  const raw = String(relPath || '').trim();
+  if (!raw) return '';
+  if (path.isAbsolute(raw) && fsSync.existsSync(raw)) return raw;
+  const bases = [];
+  try {
+    const st = fsSync.statSync(basePath);
+    bases.push(st.isDirectory() ? basePath : path.dirname(basePath));
+  } catch (_) {
+    if (basePath) bases.push(path.dirname(basePath));
+  }
+  bases.push(...MEDIA_ROOTS);
+  for (const base of bases) {
+    const candidate = path.resolve(base, raw);
+    if (fsSync.existsSync(candidate)) return candidate;
+  }
+  return path.resolve(MEDIA_ROOTS[0] || process.cwd(), raw);
+}
+
+function parseDuplicateActiveDownloadId(message) {
+  const match = String(message || '').match(/\bal actief als #(\d+)\b/i);
+  if (!match) return 0;
+  const id = Number.parseInt(match[1], 10);
+  return Number.isFinite(id) && id > 0 ? id : 0;
+}
+
+async function collectMediaFilesFromDir(dir, limit = 2000) {
+  const out = [];
+  const stack = [dir];
+  while (stack.length && out.length < limit) {
+    const current = stack.pop();
+    let entries;
+    try {
+      entries = await fs.readdir(current, { withFileTypes: true });
+    } catch (_) {
+      continue;
+    }
+    for (const entry of entries) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(full);
+      } else if (entry.isFile() && isMediaPath(full)) {
+        out.push(full);
+        if (out.length >= limit) break;
+      }
+    }
+  }
+  return out;
+}
+
+async function inspectSlaveFile(filePath) {
+  let st;
+  try {
+    st = await fs.stat(filePath);
+  } catch (_) {
+    return { ok: false, size: null, reason: 'slave bestand bestaat niet op disk' };
+  }
+
+  const ext = path.extname(filePath).toLowerCase();
+  if (!MEDIA_EXTS.has(ext)) return { ok: true, size: st.size, reason: '' };
+
+  let head = '';
+  try {
+    const fh = await fs.open(filePath, 'r');
+    try {
+      const buf = Buffer.alloc(Math.min(4096, Math.max(0, st.size)));
+      const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
+      head = buf.subarray(0, bytesRead).toString('utf8').toLowerCase();
+    } finally {
+      await fh.close();
+    }
+  } catch (_) {}
+
+  if (/<html\b|<!doctype html|<head\b|<body\b|login|cloudflare|keep2share|k2s\.cc/.test(head)) {
+    return { ok: false, size: st.size, reason: 'slave kreeg HTML/login-pagina terug in plaats van media' };
+  }
+  return { ok: true, size: st.size, reason: '' };
+}
 
 function generateThumbnail(videoPath) {
   return new Promise((resolve) => {
@@ -31,8 +147,62 @@ function generateThumbnail(videoPath) {
   });
 }
 
+async function collectSlaveMediaFiles(repo, row) {
+  const files = [];
+  const seen = new Set();
+  const add = (filePath) => {
+    const fp = String(filePath || '').trim();
+    if (!fp || !isMediaPath(fp) || seen.has(fp)) return;
+    seen.add(fp);
+    files.push(fp);
+  };
+
+  const indexed = await repo.pool.query(
+    `SELECT relpath FROM download_files WHERE download_id = $1 AND relpath IS NOT NULL AND relpath <> '' ORDER BY id`,
+    [row.id],
+  );
+  for (const f of indexed.rows) {
+    add(resolveSlaveRelPath(f.relpath, row.filepath));
+  }
+  if (files.length) return files;
+
+  let st;
+  try {
+    st = await fs.stat(row.filepath);
+  } catch (_) {
+    return [];
+  }
+  if (st.isDirectory()) {
+    for (const filePath of await collectMediaFilesFromDir(row.filepath)) add(filePath);
+  } else {
+    add(row.filepath);
+  }
+  return files;
+}
+
+async function indexSlaveDownloadFiles(repo, downloadId, files) {
+  if (!files.length) return 0;
+  let indexed = 0;
+  for (const filePath of files) {
+    const st = await fs.stat(filePath);
+    const relpath = relativeToMediaRoot(filePath);
+    await repo.pool.query(
+      `INSERT INTO download_files (download_id, relpath, filesize, mtime_ms, updated_at)
+       VALUES ($1, $2, $3, $4, now())
+       ON CONFLICT (download_id, relpath) DO UPDATE SET
+         filesize = EXCLUDED.filesize,
+         mtime_ms = EXCLUDED.mtime_ms,
+         updated_at = now()`,
+      [downloadId, relpath, st.size, Math.floor(st.mtimeMs)],
+    );
+    indexed++;
+  }
+  return indexed;
+}
+
 function startSlavePoller({ repo, logger, intervalMs = 5000 }) {
   let stopping = false;
+  const orphanMinutes = intEnv('WEBDL_SLAVE_ORPHAN_MINUTES', 2);
 
   async function processOne(row) {
     const hubJobId = Number(row.hub_job_id);
@@ -41,6 +211,48 @@ function startSlavePoller({ repo, logger, intervalMs = 5000 }) {
     const hubJob = await repo.getJob(hubJobId);
     if (!hubJob || hubJob.status === 'done' || hubJob.status === 'failed' || hubJob.status === 'cancelled') {
       return; // al afgehandeld of niet meer bestaand
+    }
+
+    // Slave cancelled? Sluit de hub-booking ook af. Zonder deze branch blijft
+    // dezelfde cancelled rij in elke LIMIT-batch terugkomen en blokkeert die
+    // completed slave downloads achteraan de poller.
+    if (row.slave_status === 'cancelled') {
+      const duplicateDownloadId = parseDuplicateActiveDownloadId(row.slave_error);
+      if (duplicateDownloadId && duplicateDownloadId !== Number(row.id)) {
+        const { rows } = await repo.pool.query(
+          `SELECT id, status AS slave_status, filepath, error AS slave_error
+             FROM downloads
+            WHERE id = $1
+            LIMIT 1`,
+          [duplicateDownloadId],
+        );
+        const duplicate = rows[0];
+        if (duplicate && ['completed', 'error', 'cancelled'].includes(String(duplicate.slave_status || ''))) {
+          await repo.pool.query(
+            `UPDATE ${repo.schema}.jobs
+                SET options = COALESCE(options, '{}'::jsonb) || jsonb_build_object(
+                      'simple_server_download_id', $1::text,
+                      'duplicate_resolved_from_download_id', $2::text,
+                      'duplicate_resolved_at', now()::text
+                    )
+              WHERE id = $3`,
+            [String(duplicateDownloadId), String(row.id), hubJobId],
+          );
+          await repo.appendLog(hubJobId, 'warn', `↪️  slave duplicate gevolgd: download #${row.id} -> #${duplicateDownloadId}`);
+          await processOne({
+            ...row,
+            ...duplicate,
+            id: duplicate.id,
+            download_id: duplicate.id,
+            hub_job_id: hubJobId,
+          });
+          return;
+        }
+      }
+      await repo.cancelJob(hubJobId);
+      await repo.appendLog(hubJobId, 'warn', `↯ slave cancelled: ${row.slave_error || 'cancelled'}`);
+      logger.info('slave.cancelled', { hubJob: hubJobId, downloadId: row.id });
+      return;
     }
 
     // Slave error? Markeer hub-job failed.
@@ -52,30 +264,61 @@ function startSlavePoller({ repo, logger, intervalMs = 5000 }) {
     }
 
     // Slave voltooid? Importeer file + thumb + mark done.
-    if (row.slave_status === 'completed' && row.filepath) {
+    if (row.slave_status === 'completed') {
+      if (!row.filepath) {
+        await repo.failJob(hubJobId, 'slave download completed without a file path', { retry: false });
+        await repo.appendLog(hubJobId, 'error', '❌ slave klaar gemeld, maar zonder bestandspad');
+        logger.warn('slave.completed_without_file', { hubJob: hubJobId, downloadId: row.id });
+        return;
+      }
       try {
-        // Bestands-metadata uit filesystem
-        let size = null;
-        try { const st = await fs.stat(row.filepath); size = st.size; } catch (_) {}
-
-        // File toevoegen aan webdl.files
-        await repo.addFile(hubJobId, { path: row.filepath, size, mime: null, checksum: null });
-
-        // Thumb genereren via hub pipeline (als het een video is en nog geen thumb heeft)
-        const ext = path.extname(row.filepath).toLowerCase();
-        let thumbGenerated = false;
-        if (VIDEO_EXTS.has(ext)) {
-          const thumb = await generateThumbnail(row.filepath);
-          if (thumb) thumbGenerated = true;
+        const mediaFiles = await collectSlaveMediaFiles(repo, row);
+        if (!mediaFiles.length) {
+          await repo.pool.query(
+            `UPDATE downloads
+                SET status='error',
+                    error=$2,
+                    updated_at=now()
+              WHERE id=$1`,
+            [row.id, 'slave download completed without importable media files'],
+          );
+          await repo.failJob(hubJobId, 'slave download completed without importable media files', { retry: false });
+          await repo.appendLog(hubJobId, 'error', `❌ geen importeerbare media in slave output: ${row.filepath}`);
+          logger.warn('slave.no_importable_media', { hubJob: hubJobId, downloadId: row.id, filepath: row.filepath });
+          return;
         }
 
+        const indexed = await indexSlaveDownloadFiles(repo, row.id, mediaFiles);
+        let added = 0;
+        let thumbGenerated = 0;
+
+        for (const filePath of mediaFiles) {
+          const inspected = await inspectSlaveFile(filePath);
+          if (!inspected.ok) {
+            logger.warn('slave.invalid_file_skipped', { hubJob: hubJobId, downloadId: row.id, filepath: filePath, reason: inspected.reason });
+            continue;
+          }
+          await repo.addFile(hubJobId, { path: filePath, size: inspected.size, mime: null, checksum: null });
+          added++;
+          const ext = path.extname(filePath).toLowerCase();
+          if (VIDEO_EXTS.has(ext)) {
+            const thumb = await generateThumbnail(filePath);
+            if (thumb) thumbGenerated++;
+          }
+        }
+
+        if (added === 0) {
+          await repo.failJob(hubJobId, 'slave media files were invalid', { retry: false });
+          await repo.appendLog(hubJobId, 'error', `❌ slave media ongeldig: ${row.filepath}`);
+          return;
+        }
         await repo.appendLog(
           hubJobId,
           'info',
-          `✅ slave klaar: ${path.basename(row.filepath)} (${size ? Math.round(size / 1024) + ' KB' : '?'}${thumbGenerated ? ', thumb gegenereerd' : ''})`,
+          `✅ slave klaar: ${added} bestand(en) gekoppeld, ${indexed} voor gallery geindexeerd${thumbGenerated ? `, ${thumbGenerated} thumb(s) gegenereerd` : ''}`,
         );
         await repo.completeJob(hubJobId);
-        logger.info('slave.done', { hubJob: hubJobId, downloadId: row.id, filepath: row.filepath });
+        logger.info('slave.done', { hubJob: hubJobId, downloadId: row.id, filepath: row.filepath, files: added, indexed });
       } catch (e) {
         logger.warn('slave.handoff.error', { hubJob: hubJobId, err: String(e.message || e) });
       }
@@ -84,6 +327,85 @@ function startSlavePoller({ repo, logger, intervalMs = 5000 }) {
 
   async function tick() {
     try {
+      // Herstel slave-delegate jobs die door een hub-herstart zijn blijven
+      // hangen tussen claimen en simple_server_download_id opslaan.
+      const { rows: orphanRows } = await repo.pool.query(
+        `SELECT
+           d.id AS download_id,
+           j.id AS hub_job_id,
+           d.status AS slave_status,
+           d.filepath AS filepath,
+           d.error AS slave_error,
+           d.id AS id,
+           j.url AS job_url
+         FROM ${repo.schema}.jobs j
+         LEFT JOIN LATERAL (
+           SELECT d.id, d.status, d.filepath, d.error
+             FROM downloads d
+            WHERE d.source_url = j.url
+               OR d.url = j.url
+            ORDER BY CASE d.status
+                       WHEN 'completed' THEN 0
+                       WHEN 'error' THEN 1
+                       WHEN 'cancelled' THEN 2
+                       ELSE 9
+                     END,
+                     d.updated_at DESC NULLS LAST,
+                     d.id DESC
+            LIMIT 1
+         ) d ON true
+         WHERE j.status = 'running'
+           AND j.adapter = 'slave-delegate'
+           AND NOT (j.options ? 'simple_server_download_id')
+           AND (j.locked_at IS NULL OR j.locked_at < NOW() - ($1::int * INTERVAL '1 minute'))
+         ORDER BY j.locked_at ASC NULLS FIRST, j.id ASC
+         LIMIT 200`,
+        [orphanMinutes],
+      );
+      for (const row of orphanRows) {
+        if (stopping) break;
+        if (row.download_id) {
+          await repo.pool.query(
+            `UPDATE ${repo.schema}.jobs
+                SET locked_by = 'slave-' || $1::text,
+                    locked_at = now(),
+                    options = COALESCE(options, '{}'::jsonb) || jsonb_build_object(
+                      'simple_server_download_id', $1::text,
+                      'slave_delegate_recovered_at', now()::text
+                    )
+              WHERE id = $2
+                AND status = 'running'
+                AND adapter = 'slave-delegate'`,
+            [String(row.download_id), row.hub_job_id],
+          );
+          await repo.appendLog(row.hub_job_id, 'warn', `↪️  slave-koppeling hersteld naar download #${row.download_id}`);
+          logger.info('slave.orphan.relinked', { hubJob: row.hub_job_id, downloadId: row.download_id, status: row.slave_status });
+          if (['completed', 'error', 'cancelled'].includes(String(row.slave_status || ''))) {
+            await processOne(row);
+          }
+        } else {
+          await repo.pool.query(
+            `UPDATE ${repo.schema}.jobs
+                SET status = 'queued',
+                    locked_by = NULL,
+                    locked_at = NULL,
+                    started_at = NULL,
+                    error = NULL,
+                    attempts = 0,
+                    options = COALESCE(options, '{}'::jsonb) || jsonb_build_object(
+                      'slave_delegate_requeued_at', now()::text
+                    )
+              WHERE id = $1
+                AND status = 'running'
+                AND adapter = 'slave-delegate'
+                AND NOT (options ? 'simple_server_download_id')`,
+            [row.hub_job_id],
+          );
+          await repo.appendLog(row.hub_job_id, 'warn', '↻ slave-delegate opnieuw queued: geen simple-server download-id gevonden na stale claim');
+          logger.info('slave.orphan.requeued', { hubJob: row.hub_job_id, url: row.job_url });
+        }
+      }
+
       // Vind hub-jobs in status='running' met slave-delegate adapter die een
       // simple_server_download_id hebben en waarvan de downloads rij klaar
       // of mislukt is.
@@ -101,7 +423,15 @@ function startSlavePoller({ repo, logger, intervalMs = 5000 }) {
          WHERE j.status = 'running'
            AND j.adapter = 'slave-delegate'
            AND d.status IN ('completed','error','cancelled')
-         LIMIT 50`,
+         ORDER BY CASE d.status
+                    WHEN 'completed' THEN 0
+                    WHEN 'error' THEN 1
+                    WHEN 'cancelled' THEN 2
+                    ELSE 9
+                  END,
+                  d.updated_at ASC NULLS LAST,
+                  d.id ASC
+         LIMIT 200`,
       );
       for (const row of rows) {
         if (stopping) break;
@@ -122,4 +452,4 @@ function startSlavePoller({ repo, logger, intervalMs = 5000 }) {
   return { stop: async () => { stopping = true; await loopPromise; } };
 }
 
-module.exports = { startSlavePoller };
+module.exports = { startSlavePoller, _test: { isMediaPath, parseDuplicateActiveDownloadId } };

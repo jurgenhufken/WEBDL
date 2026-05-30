@@ -28,6 +28,7 @@ function getGalleryHTML() {
     .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
     .card { border: 1px solid #1f2a52; background: #050816; border-radius: 12px; overflow: hidden; cursor: pointer; position: relative; }
     .card:hover { border-color: #00d4ff; }
+    .card.gallery-located { border-color: #00d4ff; box-shadow: 0 0 0 2px rgba(0,212,255,0.55), 0 0 24px rgba(0,212,255,0.35); }
     .thumb { width: 100%; height: 140px; background: #000; object-fit: cover; display: block; }
     .meta { padding: 8px 10px 10px; }
     .line1 { font-size: 11px; color: #9aa7d1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -88,6 +89,11 @@ function getGalleryHTML() {
     .queue-info { padding: 6px 8px; flex: 1; display: flex; flex-direction: column; justify-content: flex-start; }
     .queue-platform { font-size: 9px; font-weight: bold; color: #8892b0; margin-bottom: 3px; }
     .queue-title { font-size: 11px; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.2; font-weight: normal; text-transform: none; letter-spacing: normal; }
+    .rec-bar { display:none; padding: 10px 14px; background: #220b12; border-top: 1px solid #5b1e31; color: #ffd7df; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .rec-bar.on { display:flex; }
+    .rec-list { display:flex; gap:8px; flex-wrap:wrap; flex:1 1 auto; min-width:180px; }
+    .rec-pill { font-size:11px; border:1px solid #7f2d42; background:#12050a; border-radius:999px; padding:5px 9px; max-width:360px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .panic-btn { background:#c1121f !important; border-color:#ff5a66 !important; color:#fff !important; font-weight:700; }
   </style>
 </head>
 <body>
@@ -131,6 +137,11 @@ function getGalleryHTML() {
       <div class="queue-title">🔴 Momenteel bezig / Wachtrij</div>
       <div class="queue-grid" id="queue-grid"></div>
     </div>
+    <div id="rec-bar" class="rec-bar">
+      <strong id="rec-title">REC</strong>
+      <div id="rec-list" class="rec-list"></div>
+      <button id="btnStopAllRecs" class="btn panic-btn">Stop alle recs</button>
+    </div>
   </div>
 
   <div class="content">
@@ -142,6 +153,7 @@ function getGalleryHTML() {
     <div class="panel" id="mPanel">
       <header>
         <button id="btnClose" class="btn">✕</button>
+        <button id="btnLocateGallery" class="btn" title="Ga naar deze plek in de gallery">Gallery</button>
         <div class="h">
           <div class="t" id="mTitle">-</div>
           <div class="s" id="mSub">-</div>
@@ -229,6 +241,7 @@ function getGalleryHTML() {
     const elBtnOpen = document.getElementById('btnOpen');
     const elBtnFinder = document.getElementById('btnFinder');
     const elBtnSource = document.getElementById('btnSource');
+    const elBtnLocateGallery = document.getElementById('btnLocateGallery');
     const elBtnRotate = document.getElementById('btnRotate');
     const elZoomRange = document.getElementById('zoomRange');
     const elBtnZoomReset = document.getElementById('btnZoomReset');
@@ -298,6 +311,31 @@ function getGalleryHTML() {
         return Array.isArray(parsed) ? parsed.map(v => String(v || '').trim()).filter(Boolean) : [];
       } catch (e) {
         return null;
+      }
+    }
+
+    async function refreshRecordings() {
+      const bar = document.getElementById('rec-bar');
+      const list = document.getElementById('rec-list');
+      const title = document.getElementById('rec-title');
+      if (!bar || !list || !title) return;
+      const recs = Array.isArray(state.status && state.status.recordings) ? state.status.recordings : [];
+      if (!recs.length) {
+        bar.classList.remove('on');
+        list.innerHTML = '';
+        title.textContent = 'REC';
+        return;
+      }
+      bar.classList.add('on');
+      title.textContent = 'REC actief: ' + recs.length;
+      list.innerHTML = '';
+      for (const r of recs) {
+        const pill = document.createElement('div');
+        pill.className = 'rec-pill';
+        const label = [r.platform, r.channel, r.title].filter(Boolean).join(' / ') || r.key || 'recording';
+        const mins = Math.floor((Number(r.ageMs) || 0) / 60000);
+        pill.textContent = label + ' • ' + mins + 'm';
+        list.appendChild(pill);
       }
     }
 
@@ -982,6 +1020,32 @@ function getGalleryHTML() {
       } catch (e) {}
     }
 
+    function findGalleryCardByKey(key) {
+      if (!key) return null;
+      try {
+        return elGrid.querySelector('.card[data-key="' + CSS.escape(String(key)) + '"]');
+      } catch (e) {
+        try {
+          for (const c of Array.from(elGrid.querySelectorAll('.card'))) {
+            if (String(c.dataset && c.dataset.key || '') === String(key)) return c;
+          }
+        } catch (e2) {}
+      }
+      return null;
+    }
+
+    function flashGalleryCard(card) {
+      if (!card) return;
+      try {
+        card.classList.remove('gallery-located');
+        void card.offsetWidth;
+        card.classList.add('gallery-located');
+        setTimeout(() => {
+          try { card.classList.remove('gallery-located'); } catch (e) {}
+        }, 2800);
+      } catch (e) {}
+    }
+
     function addCards(items) {
       const frag = document.createDocumentFragment();
       for (let i = 0; i < items.length; i++) {
@@ -1340,11 +1404,12 @@ function getGalleryHTML() {
     }
 
     function closeModal(fromHistory = false) {
+      const skipHistory = fromHistory === true;
       if (fromHistory !== true && window.history.state && window.history.state.page === 'viewer') {
         window.history.back();
         return;
       }
-      try { history.replaceState({ page: 'gallery' }, '', '/gallery'); } catch(e) {}
+      try { saveStateToUrl(); } catch(e) {}
     
       stopSlideshow();
       if (state.reverseInterval) {
@@ -1375,6 +1440,51 @@ function getGalleryHTML() {
       if (!skipHistory && window.location.hash === '#viewer') {
         history.back();
       }
+    }
+
+    async function locateCurrentInGallery() {
+      const it = state.current;
+      const key = itemKey(it);
+      if (!key) return;
+
+      stopSlideshow();
+      if (state.reverseInterval) {
+        clearInterval(state.reverseInterval);
+        state.reverseInterval = null;
+      }
+      state.reversePlayback = false;
+
+      if (state.currentMediaEl) {
+        try {
+          if (state.currentMediaEl.tagName === 'VIDEO') {
+            state.currentMediaEl.pause();
+            state.currentMediaEl.src = '';
+            state.currentMediaEl.load();
+          }
+        } catch (e) {}
+      }
+
+      elModal.classList.remove('open');
+      elMBody.innerHTML = '';
+      state.current = null;
+      state.currentIndex = -1;
+      state.currentMediaEl = null;
+      resetZoom();
+      resetRotation();
+      try { saveStateToUrl(); } catch (e) {}
+
+      let card = findGalleryCardByKey(key);
+      for (let tries = 0; !card && tries < 8 && !state.done; tries++) {
+        await loadNext();
+        card = findGalleryCardByKey(key);
+      }
+      if (!card) return;
+      try {
+        card.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+      } catch (e) {
+        try { card.scrollIntoView(); } catch (e2) {}
+      }
+      flashGalleryCard(card);
     }
 
     async function openCurrent(action) {
@@ -1803,11 +1913,25 @@ function getGalleryHTML() {
           if (s && typeof s === 'object') {
             state.status = s;
             setHint();
+            refreshRecordings();
           }
         } catch (e) {}
       };
       setInterval(pollStatus, 2500);
       pollStatus();
+    } catch (e) {}
+
+    try {
+      const btnStopAllRecs = document.getElementById('btnStopAllRecs');
+      if (btnStopAllRecs) {
+        btnStopAllRecs.addEventListener('click', async () => {
+          const recs = Array.isArray(state.status && state.status.recordings) ? state.status.recordings : [];
+          if (!recs.length) return;
+          if (!confirm('Alle actieve opnames stoppen?')) return;
+          await postApi('/recordings/stop-all', { reason: 'panic_button' });
+          setTimeout(() => reloadAll().catch(() => {}), 1500);
+        });
+      }
     } catch (e) {}
 
     try {
@@ -2104,6 +2228,7 @@ function getGalleryHTML() {
     elBtnClose.addEventListener('click', closeModal);
     elModal.addEventListener('click', (e) => { if (e.target === elModal) closeModal(); });
     elModal.addEventListener('dblclick', (e) => { e.preventDefault(); e.stopPropagation(); }, { passive: false });
+    if (elBtnLocateGallery) elBtnLocateGallery.addEventListener('click', () => { locateCurrentInGallery().catch(() => {}); });
     elBtnOpen.addEventListener('click', () => openCurrent('open'));
     elBtnFinder.addEventListener('click', () => openCurrent('finder'));
 

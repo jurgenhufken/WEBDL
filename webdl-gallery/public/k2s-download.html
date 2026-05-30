@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<title>K2S Download Manager</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#0d1117; color:#c9d1d9; font-family:'Segoe UI',system-ui,sans-serif; padding:20px; }
+h1 { color:#58a6ff; margin-bottom:10px; }
+.stats { color:#8b949e; margin-bottom:20px; font-size:14px; }
+.controls { display:flex; gap:10px; margin-bottom:20px; flex-wrap:wrap; }
+button { background:#238636; color:#fff; border:none; padding:10px 20px; border-radius:6px; cursor:pointer; font-size:14px; font-weight:600; }
+button:hover { background:#2ea043; }
+button.stop { background:#da3633; }
+button.stop:hover { background:#f85149; }
+.item { display:flex; align-items:center; gap:10px; padding:8px 12px; border-radius:6px; margin-bottom:4px; font-size:13px; }
+.item:nth-child(odd) { background:#161b22; }
+.item .idx { color:#8b949e; width:30px; text-align:right; }
+.item .name { flex:1; word-break:break-all; }
+.item .status { width:100px; text-align:center; border-radius:4px; padding:2px 8px; font-size:12px; }
+.waiting { background:#1f2937; color:#8b949e; }
+.downloading { background:#0c2d6b; color:#58a6ff; }
+.done { background:#0d3117; color:#3fb950; }
+.error { background:#3d1012; color:#f85149; }
+.progress { color:#58a6ff; font-size:12px; width:60px; text-align:right; }
+#log { background:#161b22; border-radius:6px; padding:10px; margin-top:20px; font-family:monospace; font-size:12px; max-height:200px; overflow-y:auto; }
+#log div { padding:2px 0; }
+</style>
+</head>
+<body>
+<h1>⬇ K2S Download Manager</h1>
+<div class="stats">
+  <span id="statTotal">0</span> bestanden |
+  <span id="statDone" style="color:#3fb950">0 klaar</span> |
+  <span id="statActive" style="color:#58a6ff">0 bezig</span> |
+  <span id="statError" style="color:#f85149">0 errors</span> |
+  Interval: <input id="delay" type="number" value="8" min="3" max="60" style="width:50px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:2px 4px;"> sec
+</div>
+<div class="controls">
+  <button onclick="startDownloads()">▶ Start Downloads</button>
+  <button class="stop" onclick="stopDownloads()">⏹ Stop</button>
+</div>
+<div id="list"></div>
+<div id="log"><div>Wachten op start...</div></div>
+
+<script>
+let urls = [];
+let running = false;
+let currentIdx = 0;
+let stats = { done: 0, error: 0, active: 0 };
+
+async function loadUrls() {
+  try {
+    const resp = await fetch('/api/k2s-queue');
+    urls = await resp.json();
+  } catch(e) {
+    // Fallback: load from embedded data
+    urls = window.K2S_URLS || [];
+  }
+  document.getElementById('statTotal').textContent = urls.length;
+  const list = document.getElementById('list');
+  list.innerHTML = urls.map((u, i) => {
+    const name = u.split('/').pop() || u;
+    return `<div class="item" id="item-${i}">
+      <span class="idx">${i+1}</span>
+      <span class="name">${name}</span>
+      <span class="status waiting" id="status-${i}">wacht</span>
+    </div>`;
+  }).join('');
+}
+
+function log(msg) {
+  const el = document.getElementById('log');
+  const d = document.createElement('div');
+  d.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  el.appendChild(d);
+  el.scrollTop = el.scrollHeight;
+}
+
+function setStatus(i, cls, text) {
+  const el = document.getElementById(`status-${i}`);
+  if (el) { el.className = `status ${cls}`; el.textContent = text; }
+}
+
+function updateStats() {
+  document.getElementById('statDone').textContent = stats.done + ' klaar';
+  document.getElementById('statActive').textContent = stats.active + ' bezig';
+  document.getElementById('statError').textContent = stats.error + ' errors';
+}
+
+async function downloadOne(idx) {
+  const url = urls[idx];
+  const name = url.split('/').pop() || url;
+  setStatus(idx, 'downloading', '⬇ bezig');
+  stats.active++;
+  updateStats();
+  log(`Start: ${name}`);
+  
+  // Open in hidden iframe to trigger K2S premium download
+  const iframe = document.createElement('iframe');
+  iframe.style.display = 'none';
+  iframe.src = url;
+  document.body.appendChild(iframe);
+  
+  // Wait for delay then mark done
+  const delay = parseInt(document.getElementById('delay').value) || 8;
+  await new Promise(r => setTimeout(r, delay * 1000));
+  
+  stats.active--;
+  stats.done++;
+  setStatus(idx, 'done', '✅ klaar');
+  updateStats();
+  log(`Verzonden: ${name}`);
+  
+  // Cleanup iframe after a while
+  setTimeout(() => iframe.remove(), 30000);
+}
+
+async function startDownloads() {
+  if (running) return;
+  running = true;
+  log('Downloads gestart!');
+  
+  for (let i = currentIdx; i < urls.length && running; i++) {
+    currentIdx = i;
+    await downloadOne(i);
+    if (!running) break;
+  }
+  
+  running = false;
+  log(running ? 'Gestopt.' : 'Alle downloads verzonden!');
+}
+
+function stopDownloads() {
+  running = false;
+  stats.active = 0;
+  updateStats();
+  log('Gestopt door gebruiker.');
+}
+
+loadUrls();
+</script>
+</body>
+</html>

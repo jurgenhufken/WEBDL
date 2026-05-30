@@ -7,16 +7,73 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { execFile } = require('node:child_process');
 const { runProcess } = require('../util/process-runner');
+const { isSlaveUrl, delegateToSlave } = require('./slave-router');
 
 const FFMPEG = process.env.WEBDL_FFMPEG || '/opt/homebrew/bin/ffmpeg';
 const DATABASE_URL = process.env.DATABASE_URL || 'postgres://jurgen@localhost:5432/webdl';
 
 // Video extensions die een thumbnail mogen krijgen
-const VIDEO_EXTS = new Set(['.mp4', '.mkv', '.webm', '.mov', '.m4v', '.avi', '.flv', '.ts']);
+const VIDEO_EXTS = new Set(['.mp4', '.mkv', '.webm', '.mov', '.m4v', '.avi', '.wmv', '.flv', '.ts', '.m2ts', '.mpg', '.mpeg', '.ogv', '.3gp', '.3g2']);
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.avif']);
 const SKIP_EXTS = new Set(['.part', '.ytdl', '.tmp']);
+const PARTIAL_MEDIA_BASENAME_RE = /(?:^|[._-])(?:temp|partial|part|download)(?:[._-]|$)/i;
+const YTDLP_FORMAT_FRAGMENT_RE = /\.(?:f\d+|fhls-\d+|ffallback)\.(?:mp4|webm|m4a|mkv|mov|m4v|avi|wmv|flv|ts|m2ts|mpg|mpeg|ogv|3gp|3g2)$/i;
+const AUX_IMAGE_BASENAME_RE = /(^\d{1,3}[-_. ]?thumbnail|(?:^|[-_. ])thumbnail|_thumb(_v\d+)?|_preview|_logo)\.(jpe?g|png|webp|gif|bmp|avif)$/i;
+const SITE_SHELL_IMAGE_BASENAME_RE = /^(?:vipergirls|viper)[-_.]\d+\.(jpe?g|png|webp|gif|bmp|avif)$/i;
+const FORUM_CHROME_IMAGE_BASENAME_RE = /(?:^|[-_. ])(?:statusicon|reputation|avatar|button|spacer|blank)(?:[-_. ]|$)/i;
+
+function isAuxiliaryImageBasename(name) {
+  return AUX_IMAGE_BASENAME_RE.test(name)
+    || SITE_SHELL_IMAGE_BASENAME_RE.test(name)
+    || FORUM_CHROME_IMAGE_BASENAME_RE.test(name);
+}
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+function isRefreshableCollectionUrl(url, adapterName = '') {
+  try {
+    const u = new URL(String(url || '').trim());
+    const host = u.hostname.replace(/^www\./i, '').toLowerCase();
+    const pathname = u.pathname.replace(/\/+$/, '') || '/';
+    if (adapterName === 'reddit' || host === 'reddit.com' || host.endsWith('.reddit.com')) {
+      return /^\/(?:r|user)\/[^/]+$/i.test(pathname);
+    }
+    if (host === 'x.com' || host.endsWith('.x.com') || host === 'twitter.com' || host.endsWith('.twitter.com')) {
+      return /^\/(?!i\/|home$|explore$|search$|settings$|messages$|notifications$)[A-Za-z0-9_]{1,20}$/i.test(pathname);
+    }
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
+
+function redditFallbackCommentsUrl(sourceUrl, submissionId) {
+  const id = String(submissionId || '').trim();
+  if (!id) return '';
+  try {
+    const u = new URL(String(sourceUrl || ''));
+    const pathname = String(u.pathname || '');
+    const sub = pathname.match(/^\/r\/([^/?#]+)/i);
+    if (sub && sub[1]) {
+      return `https://www.reddit.com/r/${encodeURIComponent(decodeURIComponent(sub[1]))}/comments/${id}/`;
+    }
+  } catch (_) {}
+  return `https://www.reddit.com/comments/${id}/`;
+}
+
+function intEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function nonNegativeIntEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
 
 // ─── Thumbnail generatie ──────────────────────────────────────────────────────
 function generateThumbnail(videoPath) {
@@ -57,16 +114,79 @@ function generateThumbnail(videoPath) {
 function detectPlatform(url) {
   try {
     const h = new URL(url).hostname.toLowerCase();
+    const p = new URL(url).pathname.toLowerCase();
+    if (h === 'translated.turbopages.org' || h.endsWith('.translated.turbopages.org')) return 'turbopages';
+    if (h.includes('vipergirls.to') || h.includes('viper.to')) return 'vipergirls';
     if (h.includes('youtube') || h.includes('youtu.be')) return 'youtube';
+    if (h === 'flc.nyc3.digitaloceanspaces.com' && /\/data\/(?:attachments|video)\//i.test(p)) return 'footfetishforum';
+    if (h.includes('footfetishforum.com')) return 'footfetishforum';
     if (h.includes('vimeo')) return 'vimeo';
     if (h.includes('tiktok')) return 'tiktok';
     if (h.includes('reddit')) return 'reddit';
+    if (h.includes('redgifs') || h.includes('gifdeliverynetwork') || h.includes('gfycat')) return 'redgifs';
     if (h.includes('instagram')) return 'instagram';
+    if (h === 't.me' || h.endsWith('.t.me') || h === 'telegram.me' || h.endsWith('.telegram.me')) return 'telegram';
     if (h.includes('twitter') || h.includes('x.com')) return 'twitter';
     if (h.includes('twitch')) return 'twitch';
     if (h.includes('danbooru')) return 'danbooru';
     return h.replace(/^www\./, '').split('.')[0];
   } catch { return 'unknown'; }
+}
+
+function platformOverrideFromJob(job) {
+  const optionPlatform = String(job?.options?.platform || '').trim().toLowerCase();
+  if (optionPlatform === 'turbopages') return 'turbopages';
+  try {
+    const contextUrl = String(job?.options?.contextUrl || job?.options?.pageUrl || '').trim();
+    if (contextUrl && detectPlatform(contextUrl) === 'turbopages') return 'turbopages';
+  } catch {}
+  return '';
+}
+
+function normalizeChaturbateTarget(parts = {}) {
+  const haystack = [
+    parts.platform,
+    parts.channel,
+    parts.title,
+    parts.filename,
+    parts.filepath,
+    parts.sourceUrl,
+    parts.contextUrl,
+  ].filter(Boolean).join(' ').toLowerCase().replace(/[_-]+/g, ' ');
+  const isCamSource = /\b(chaturbate|cloudbate|archivebate|xhomealone)\b/.test(haystack);
+  if (!isCamSource) return null;
+  if (/\bjuliana\s+gonebad\b/.test(haystack)) return { platform: 'chaturbate', channel: 'juliana_gonebad' };
+  if (/\bbreeding\s+material\b/.test(haystack)) return { platform: 'chaturbate', channel: 'breeding_material' };
+  return null;
+}
+
+function titleFromThreadUrl(rawUrl) {
+  try {
+    const last = String(new URL(String(rawUrl || '')).pathname || '').split('/').filter(Boolean).pop() || '';
+    return decodeURIComponent(last.replace(/^\d+-/, '').replace(/[-_]+/g, ' ')).trim();
+  } catch {
+    const m = String(rawUrl || '').match(/\/threads\/\d+-([^/?#]+)/i);
+    return m ? m[1].replace(/[-_]+/g, ' ').trim() : '';
+  }
+}
+
+function comparableTitle(input) {
+  return String(input || '')
+    .toLowerCase()
+    .replace(/\.(?:com|net|org)\b/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function isThreadShellImage(filePath, job, sourceUrl, fileInfo) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (!IMAGE_EXTS.has(ext)) return false;
+  const stem = path.basename(filePath, ext);
+  if (!new RegExp(`(?:^|[-_. ])${String(job?.id || '')}$`).test(stem)) return false;
+  if (sourceUrl && isImageUrlLike(sourceUrl)) return false;
+  const threadTitle = comparableTitle(job?.options?.title || job?.options?.channel || titleFromThreadUrl(job?.options?.contextUrl || job?.url));
+  const fileTitle = comparableTitle(fileInfo?.title || stem);
+  return Boolean(threadTitle && fileTitle && (fileTitle === threadTitle || fileTitle.startsWith(threadTitle)));
 }
 
 // ─── Kanaal/uploader uit yt-dlp info.json ─────────────────────────────────────
@@ -77,16 +197,361 @@ async function readInfoJson(workdir) {
       if (e.endsWith('.info.json')) {
         const raw = await fs.readFile(path.join(workdir, e), 'utf8');
         const data = JSON.parse(raw);
+        data.__webdl_raw_tweet_id = rawJsonScalar(raw, 'tweet_id');
+        data.__webdl_raw_conversation_id = rawJsonScalar(raw, 'conversation_id');
+        const sourceInfo = galleryDlSourceInfo(data);
         return {
-          channel: data.channel || data.uploader || data.uploader_id || data.playlist_title || '',
-          title: data.fulltitle || data.title || '',
-          sourceUrl: data.webpage_url || data.original_url || data.url || '',
-          platform: data.extractor_key ? data.extractor_key.toLowerCase() : '',
+          channel: sourceInfo.channel || data.channel || data.uploader || data.uploader_id || data.playlist_title || '',
+          channelId: data.channel_id || data.uploader_id || '',
+          channelUrl: data.channel_url || data.uploader_url || '',
+          title: sourceInfo.title || data.fulltitle || data.title || '',
+          sourceUrl: sourceInfo.sourcePostUrl || data.webpage_url || data.original_url || data.url || '',
+          platform: sourceInfo.sourceSite || (data.extractor_key ? data.extractor_key.toLowerCase() : ''),
+          duration: data.duration_string || (Number.isFinite(Number(data.duration)) ? String(Math.round(Number(data.duration))) : null),
+          sourcePublishedAt: sourceInfo.sourcePublishedAt || getYtdlpSourceTimestamp(data),
+          ...sourceInfo,
+          ...galleryDlForumInfo(data),
         };
       }
     }
   } catch {}
   return null;
+}
+
+async function readInfoJsonForMedia(mediaPath, fallbackInfo = null) {
+  try {
+    const dir = path.dirname(mediaPath);
+    const ext = path.extname(mediaPath);
+    const base = path.basename(mediaPath, ext);
+    const candidates = [
+      path.join(dir, `${base}.info.json`),
+      `${mediaPath}.json`,
+      path.join(dir, `${base}.json`),
+    ];
+    for (const exact of candidates) {
+      if (!fsSync.existsSync(exact)) continue;
+      const raw = await fs.readFile(exact, 'utf8');
+      const data = JSON.parse(raw);
+      data.__webdl_filename_tweet_id = twitterIdFromMediaFilename(mediaPath);
+      data.__webdl_raw_tweet_id = rawJsonScalar(raw, 'tweet_id');
+      data.__webdl_raw_conversation_id = rawJsonScalar(raw, 'conversation_id');
+      const sourceInfo = galleryDlSourceInfo(data);
+      return {
+        channel: sourceInfo.channel || data.channel || data.uploader || data.uploader_id || data.playlist_title || '',
+        channelId: data.channel_id || data.uploader_id || '',
+        channelUrl: data.channel_url || data.uploader_url || '',
+        title: sourceInfo.title || data.fulltitle || data.title || data.filename || '',
+        sourceUrl: sourceInfo.sourcePostUrl || data.webpage_url || data.original_url || data.url || '',
+        platform: sourceInfo.sourceSite || (data.extractor_key ? data.extractor_key.toLowerCase() : ''),
+        telegramMessageId: data.telegram_message_id || null,
+        telegramChatTitle: data.telegram_chat_title || null,
+        telegramTopicTitle: data.telegram_topic_title || null,
+        telegramTopicId: data.telegram_topic_id || null,
+        sourcePostTitle: sourceInfo.sourcePostTitle || data.source_post_title || null,
+        sourcePostId: sourceInfo.sourcePostId || data.source_post_id || null,
+        sourcePostUrl: sourceInfo.sourcePostUrl || data.source_post_url || null,
+        sourceThreadTitle: sourceInfo.sourceThreadTitle || data.source_thread_title || null,
+        duration: data.duration_string || (Number.isFinite(Number(data.duration)) ? String(Math.round(Number(data.duration))) : null),
+        sourcePublishedAt: sourceInfo.sourcePublishedAt || getYtdlpSourceTimestamp(data),
+        ...sourceInfo,
+        ...galleryDlForumInfo(data),
+      };
+    }
+  } catch {}
+  return fallbackInfo;
+}
+
+function getYtdlpSourceTimestamp(info) {
+  try {
+    if (!info || typeof info !== 'object') return null;
+    const rawTimestamp = Number(info.release_timestamp || info.timestamp || info.modified_timestamp || 0);
+    if (Number.isFinite(rawTimestamp) && rawTimestamp > 0) {
+      const dt = new Date(rawTimestamp * 1000);
+      if (Number.isFinite(dt.getTime())) return dt.toISOString();
+    }
+    const rawDate = String(info.upload_date || info.release_date || info.date || '').trim();
+    const m = rawDate.match(/^(\d{4})(\d{2})(\d{2})$/);
+    if (m) {
+      const dt = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0));
+      if (Number.isFinite(dt.getTime())) return dt.toISOString();
+    }
+  } catch {}
+  return null;
+}
+
+function parseGalleryDlDate(value) {
+  try {
+    const raw = String(value || '').trim();
+    if (!raw) return null;
+    const normalized = raw.includes('T') ? raw : raw.replace(' ', 'T') + 'Z';
+    const dt = new Date(normalized);
+    return Number.isFinite(dt.getTime()) ? dt.toISOString() : null;
+  } catch {}
+  return null;
+}
+
+function rawJsonScalar(raw, key) {
+  try {
+    const re = new RegExp(`\"${String(key).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\"\\\\s*:\\\\s*(?:\"([^\"]+)\"|(\\d+))`);
+    const m = re.exec(String(raw || ''));
+    return m ? String(m[1] || m[2] || '') : '';
+  } catch {}
+  return '';
+}
+
+function twitterIdFromMediaFilename(filePath) {
+  try {
+    const stem = path.basename(String(filePath || ''), path.extname(String(filePath || '')));
+    const m = stem.match(/^(\d{15,25})(?:[_-]\d+)?(?:[_-].*)?$/);
+    return m && m[1] ? String(m[1]) : '';
+  } catch {}
+  return '';
+}
+
+function galleryDlAuthor(data) {
+  const author = data && typeof data.author === 'object' ? data.author : null;
+  const user = data && typeof data.user === 'object' ? data.user : null;
+  return author || user || null;
+}
+
+function galleryDlSourceInfo(data) {
+  if (!data || typeof data !== 'object') return {};
+  const category = String(data.category || data.source_site || '').trim().toLowerCase();
+  const subcategory = String(data.subcategory || '').trim().toLowerCase();
+  const author = galleryDlAuthor(data);
+  if (category !== 'twitter' && subcategory !== 'twitter' && !data.tweet_id) return {};
+
+  const handle = String(data.username || author?.name || '').trim().replace(/^@+/, '');
+  const display = String(data.fullname || author?.nick || author?.name || handle || '').trim();
+  const tweetId = data.__webdl_filename_tweet_id || data.__webdl_raw_tweet_id || data.__webdl_raw_conversation_id || data.source_post_id || data.tweet_id || data.conversation_id || '';
+  const postTitle = String(data.content || data.text || data.description || data.source_post_title || '').replace(/\s+/g, ' ').trim();
+  const profileUrl = handle ? `https://x.com/${encodeURIComponent(handle)}` : '';
+  const postUrl = handle && tweetId ? `https://x.com/${encodeURIComponent(handle)}/status/${encodeURIComponent(String(tweetId))}` : '';
+  const threadTitle = handle
+    ? `${display || handle} (@${handle})`
+    : (display || 'Twitter/X');
+  return {
+    channel: handle ? `@${handle}` : display,
+    title: postTitle,
+    sourceSite: 'twitter',
+    sourceThreadTitle: threadTitle,
+    sourceThreadId: author?.id ? String(author.id) : '',
+    sourceThreadUrl: profileUrl,
+    sourcePostTitle: postTitle,
+    sourcePostId: tweetId ? String(tweetId) : '',
+    sourcePostUrl: postUrl || profileUrl,
+    sourcePublishedAt: parseGalleryDlDate(data.date),
+  };
+}
+
+function sanitizeFilePart(value, fallback = 'download') {
+  const cleaned = String(value || '')
+    .replace(/^Thread:\s*/i, '')
+    .normalize('NFKD')
+    .replace(/[^\w .()[\]-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120);
+  return cleaned || fallback;
+}
+
+function idFromMediaUrl(rawUrl) {
+  try {
+    const u = new URL(String(rawUrl || ''));
+    const parts = String(u.pathname || '').split('/').filter(Boolean);
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const part = parts[i].replace(/\.(jpe?g|png|gif|webp|mp4|webm|m4v|mov)$/i, '');
+      if (/^[a-z0-9]{8,}$/i.test(part)) return part;
+    }
+  } catch {}
+  return '';
+}
+
+function galleryDlForumInfo(data) {
+  if (!data || typeof data !== 'object') return {};
+  const threadTitle = data.thread_title || data.source_thread_title || '';
+  const threadId = data.thread_id || data.source_thread_id || '';
+  const postTitle = data.post_title || data.source_post_title || '';
+  const postNum = data.post_num || data.source_post_num || '';
+  const postId = data.post_id || data.source_post_id || '';
+  const postUrl = data.post_url || data.source_post_url || '';
+  const threadUrl = data.thread_url || data.source_thread_url || '';
+  const forumTitle = data.forum_title || data.source_forum_title || '';
+  const category = data.category || data.source_site || '';
+  if (!threadTitle && !threadId && !postTitle && !postNum && !postId && !postUrl && !threadUrl && !forumTitle) return {};
+  return {
+    sourceThreadTitle: threadTitle ? String(threadTitle) : '',
+    sourceThreadId: threadId ? String(threadId) : '',
+    sourceThreadUrl: threadUrl ? String(threadUrl) : '',
+    sourcePostTitle: postTitle ? String(postTitle) : '',
+    sourcePostNum: postNum ? String(postNum) : '',
+    sourcePostId: postId ? String(postId) : '',
+    sourcePostUrl: postUrl ? String(postUrl) : '',
+    sourceForumTitle: forumTitle ? String(forumTitle) : '',
+    sourceSite: category ? String(category).toLowerCase() : '',
+  };
+}
+
+function forumThreadIdFromUrl(rawUrl) {
+  try {
+    const m = String(new URL(String(rawUrl || '')).pathname || '').match(/\/threads\/(\d+)/i);
+    return m ? m[1] : '';
+  } catch {
+    const m = String(rawUrl || '').match(/\/threads\/(\d+)/i);
+    return m ? m[1] : '';
+  }
+}
+
+function forumInfoFromJob(job) {
+  const options = job?.options || {};
+  const sourceUrl = options.contextUrl || options.url || job?.url || '';
+  const pinnedVipergirls = isPinnedVipergirlsJob(job);
+  const sourceContext = options.sourceContext && typeof options.sourceContext === 'object' ? options.sourceContext : null;
+  const contextPlatform = String(sourceContext?.platform || options.platform || '').toLowerCase();
+  if (contextPlatform === 'xvideos') {
+    return {
+      sourceThreadTitle: String(sourceContext?.listingTitle || options.playlistTitle || titleFromThreadUrl(sourceUrl) || 'xvideos listing').trim(),
+      sourceThreadId: '',
+      sourceThreadUrl: sourceUrl || '',
+      sourcePostTitle: String(sourceContext?.title || options.videoTitle || options.title || '').trim(),
+      sourcePostNum: '',
+      sourcePostId: '',
+      sourcePostUrl: job?.url || '',
+      sourceForumTitle: '',
+      sourceSite: 'xvideos',
+    };
+  }
+  const sourceThreadTitle = String(options.title || options.channel || titleFromThreadUrl(sourceUrl)).replace(/^thread_\d+$/i, '').trim();
+  const sourceThreadId = forumThreadIdFromUrl(sourceUrl);
+  if (!pinnedVipergirls && !sourceThreadTitle && !sourceThreadId) return null;
+  const platformOverride = platformOverrideFromJob(job);
+  return {
+    sourceThreadTitle,
+    sourceThreadId,
+    sourcePostTitle: '',
+    sourcePostNum: '',
+    sourcePostId: '',
+    sourceForumTitle: '',
+    sourceSite: pinnedVipergirls ? 'vipergirls' : (platformOverride || detectPlatform(sourceUrl || job?.url)),
+  };
+}
+
+function mergeForumInfo(primary, fallback) {
+  if (!primary && !fallback) return null;
+  const out = {};
+  for (const key of [
+    'sourceThreadTitle',
+    'sourceThreadId',
+    'sourcePostTitle',
+    'sourcePostNum',
+    'sourcePostId',
+    'sourcePostUrl',
+    'sourceThreadUrl',
+    'sourceForumTitle',
+    'sourceSite',
+  ]) {
+    out[key] = (primary && primary[key]) || (fallback && fallback[key]) || '';
+  }
+  return Object.values(out).some(Boolean) ? out : null;
+}
+
+function sourceGraphFromForumInfo(info, sourceUrl, platform) {
+  if (!info || (!info.sourceThreadTitle && !info.sourceThreadId && !info.sourcePostId && !info.sourcePostNum)) return null;
+  const nodes = [];
+  if (info.sourceSite || platform) nodes.push({ type: 'host', platform: info.sourceSite || platform });
+  if (info.sourceForumTitle) nodes.push({ type: 'forum', title: info.sourceForumTitle });
+  nodes.push({
+    type: 'thread',
+    id: info.sourceThreadId || null,
+    title: info.sourceThreadTitle || '',
+    url: info.sourceThreadUrl || sourceUrl || null,
+  });
+  nodes.push({
+    type: 'post',
+    id: info.sourcePostId || null,
+    num: info.sourcePostNum || null,
+    title: info.sourcePostTitle || '',
+    url: info.sourcePostUrl || sourceUrl || null,
+  });
+  return { nodes };
+}
+
+function isImageUrlLike(input) {
+  try {
+    const u = new URL(String(input || ''));
+    return IMAGE_EXTS.has(path.extname(String(u.pathname || '')).toLowerCase());
+  } catch {
+    return IMAGE_EXTS.has(path.extname(String(input || '').split(/[?#]/)[0]).toLowerCase());
+  }
+}
+
+function isLikelyThumbnailImageUrl(rawUrl) {
+  try {
+    const input = String(rawUrl || '').trim();
+    if (!input || !isImageUrlLike(input)) return false;
+    const u = new URL(input);
+    const host = String(u.hostname || '').toLowerCase();
+    const p = String(u.pathname || '').toLowerCase();
+    if (/^(?:thumbs?|thumbnails?)\d*\./i.test(host)) return true;
+    if ((host === 'vipr.im' || host.endsWith('.vipr.im')) && /^\/th\//i.test(p)) return true;
+    if ((host === 'pixhost.to' || host.endsWith('.pixhost.to')) && /\/thumbs\//i.test(p)) return true;
+    if (/\/(?:thumb|thumbs|thumbnail|thumbnails|preview|previews|small|mini|square)\//i.test(p)) return true;
+    if (/\.(?:th|thumb|thumbnail|preview|small|md)\.(?:jpe?g|png|gif|webp|bmp|avif)(?:$|[?#])/i.test(input)) return true;
+    if (/(?:^|[-_.\/])(?:thumb|thumbnail|preview|small|mini)(?:[-_.\/]|$)/i.test(p)) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function isPinnedVipergirlsJob(job) {
+  return String(job?.options?.platform || '').toLowerCase() === 'vipergirls'
+    || /vipergirls\.to/i.test(String(job?.options?.contextUrl || job?.options?.url || ''));
+}
+
+function pinnedVipergirlsTarget(job) {
+  const options = job?.options || {};
+  const haystack = [
+    job?.url,
+    options.url,
+    options.contextUrl,
+    options.pageUrl,
+    options.title,
+    options.channel,
+    options.expandGroup,
+  ].map((v) => String(v || '')).join(' ');
+
+  if (/thread_?6777850|threads\/6777850|czechcasting/i.test(haystack)) {
+    return {
+      platform: 'czechcasting',
+      channel: 'MyFav Czechcasting Model Collection Sets',
+      sourcePlatform: 'vipergirls',
+      sourceChannel: options.channel || 'thread_6777850',
+    };
+  }
+
+  return {
+    platform: 'vipergirls',
+    channel: options.channel || 'vipergirls',
+    sourcePlatform: 'vipergirls',
+    sourceChannel: options.channel || 'vipergirls',
+  };
+}
+
+function renameOutputForPinnedSource(filePath, job, sourceUrl, ext) {
+  if (!isPinnedVipergirlsJob(job)) return filePath;
+  const dir = path.dirname(filePath);
+  const sourceId = idFromMediaUrl(sourceUrl || job.url) || String(job.id || 'item');
+  const baseTitle = sanitizeFilePart(job?.options?.title || job?.options?.channel || 'vipergirls', 'vipergirls');
+  const target = path.join(dir, `${baseTitle}_${sourceId}${ext}`);
+  if (target === filePath) return filePath;
+  try {
+    if (fsSync.existsSync(target)) return target;
+    fsSync.renameSync(filePath, target);
+    return target;
+  } catch {
+    return filePath;
+  }
 }
 
 // ─── Pre-download dedup: check of URL al in simple-server gallery staat ─────
@@ -114,7 +579,7 @@ async function checkGalleryDuplicate(url) {
 }
 
 // ─── Gallery sync: insert voltooide download in public.downloads ──────────────
-async function syncToGallery(job, outputFiles, logger) {
+async function syncToGallery(job, outputFiles, logger, repo) {
   const { Pool } = require('pg');
   const galleryPool = new Pool({ connectionString: DATABASE_URL, max: 2 });
 
@@ -124,67 +589,248 @@ async function syncToGallery(job, outputFiles, logger) {
   const workdir = path.dirname(outputFiles[0]?.path || '');
   const info = await readInfoJson(workdir);
 
-  const channel = info?.channel || (job.options?.playlistTitle) || '';
-  const realPlatform = info?.platform || platform;
-
   try {
+    let inserted = 0;
+    const seenOutputPaths = new Set();
     for (const f of outputFiles) {
       const ext = path.extname(f.path).toLowerCase();
       const isVideo = VIDEO_EXTS.has(ext);
       const isImage = IMAGE_EXTS.has(ext);
       if (!isVideo && !isImage) continue;
       // Skip thumbnails en temp files
-      if (/_thumb(_v\d+)?\.(jpe?g|png|webp)$/i.test(path.basename(f.path))) continue;
+      if (isAuxiliaryImageBasename(path.basename(f.path))) continue;
+      if (YTDLP_FORMAT_FRAGMENT_RE.test(path.basename(f.path))) continue;
+      if (PARTIAL_MEDIA_BASENAME_RE.test(path.basename(f.path))) continue;
       if (SKIP_EXTS.has(ext)) continue;
+      if (seenOutputPaths.has(f.path)) continue;
+      seenOutputPaths.add(f.path);
 
-      const title = path.basename(f.path, ext).replace(/_/g, ' ').trim();
-      const sourceUrl = info?.sourceUrl || job.url;
-
-      // Check for duplicate by filepath
-      const existing = await galleryPool.query(
-        'SELECT id FROM downloads WHERE filepath = $1 LIMIT 1',
-        [f.path],
-      );
-      if (existing.rows.length > 0) continue;
-
-      // Check for duplicate by source URL
-      if (sourceUrl) {
-        const byUrl = await galleryPool.query(
-          'SELECT id FROM downloads WHERE source_url = $1 LIMIT 1',
-          [sourceUrl],
-        );
-        if (byUrl.rows.length > 0) continue;
+      const fileInfo = await readInfoJsonForMedia(f.path, info);
+      const pinnedVipergirls = isPinnedVipergirlsJob(job);
+      const pinnedTarget = pinnedVipergirls ? pinnedVipergirlsTarget(job) : null;
+      const rawSourceUrl = fileInfo?.sourceUrl || job.url;
+      if (isThreadShellImage(f.path, job, rawSourceUrl, fileInfo)) continue;
+      const imageQuality = isImage && isImageUrlLike(rawSourceUrl)
+        ? (isLikelyThumbnailImageUrl(rawSourceUrl)
+          ? { quality: 'thumbnail_rejected', wasThumbnail: true, rejected: true }
+          : { quality: 'direct_image', wasThumbnail: false, rejected: false })
+        : { quality: isImage ? 'unknown_source' : 'not_image', wasThumbnail: false, rejected: false };
+      if (imageQuality.rejected) {
+        if (repo && repo.appendLog) {
+          await repo.appendLog(job.id, 'warn', `thumbnail overgeslagen, geen fullscale bron bevestigd: ${rawSourceUrl}`);
+        }
+        logger.warn('gallery.sync.thumbnail_skipped', { job: job.id, sourceUrl: rawSourceUrl, file: path.basename(f.path) });
+        continue;
       }
+      const finalPath = renameOutputForPinnedSource(f.path, job, rawSourceUrl, ext);
+      if (finalPath !== f.path) {
+        try {
+          await galleryPool.query(`UPDATE webdl.files SET path = $1 WHERE job_id = $2 AND path = $3`, [finalPath, job.id, f.path]);
+        } catch (_) {}
+        f.path = finalPath;
+      }
+      const infoPlatform = String(fileInfo?.platform || '').toLowerCase();
+      const isTelegram = job.adapter === 'tdl' || platform === 'telegram' || infoPlatform === 'telegram';
+      const fileForumInfo = fileInfo && (fileInfo.sourceThreadTitle || fileInfo.sourceThreadId || fileInfo.sourcePostId || fileInfo.sourcePostNum)
+        ? fileInfo
+        : null;
+      const forumInfo = isTelegram ? null : mergeForumInfo(fileForumInfo, forumInfoFromJob(job));
+      const forumThreadChannel = forumInfo?.sourceThreadTitle
+        ? String(forumInfo.sourceThreadTitle).trim().toLowerCase()
+        : '';
+      // 2026-05-30 A.7-fix: voor YouTube wint fileInfo.channel altijd over
+      // forumThreadChannel/batch-titel. Was: forumThreadChannel (lowercase
+      // "a stunning boat trip - aegean sea coasts") overschreed fileInfo.channel
+      // ("KingGreatWhiteShark" uit info.json data.channel). Resultaat: alle
+      // YT-batch items uit één kanaal kregen de playlist-titel als channel.
+      const fileInfoIsYouTube = String(fileInfo?.platform || '').toLowerCase().startsWith('youtube');
+      let channel = isTelegram
+        ? (fileInfo?.channel || job.options?.channel || 'telegram')
+        : (fileInfoIsYouTube && fileInfo?.channel
+          ? fileInfo.channel
+          : (forumThreadChannel || (pinnedVipergirls
+            ? pinnedTarget.channel
+            : (fileInfo?.channel || job.options?.channel || job.options?.playlistTitle || ''))));
+      let realPlatform = isTelegram
+        ? 'telegram'
+        : (pinnedVipergirls
+          ? pinnedTarget.platform
+          : (platformOverrideFromJob(job) || (infoPlatform && infoPlatform !== 'generic' ? infoPlatform : platform)));
+      const sourceId = idFromMediaUrl(rawSourceUrl || job.url);
+      const title = pinnedVipergirls
+        ? `${sanitizeFilePart(job.options?.title || 'Vipergirls', 'Vipergirls')}${sourceId ? ` ${sourceId}` : ''}`
+        : (fileInfo?.title || path.basename(f.path, ext).replace(/_/g, ' ').trim());
+      const chaturbateTarget = normalizeChaturbateTarget({
+        platform: realPlatform,
+        channel,
+        title,
+        filename: path.basename(f.path),
+        filepath: f.path,
+        sourceUrl: rawSourceUrl,
+        contextUrl: job.options?.contextUrl || job.url,
+      });
+      if (!isTelegram && chaturbateTarget) {
+        realPlatform = chaturbateTarget.platform;
+        channel = chaturbateTarget.channel;
+      }
+      const sourceUrl = rawSourceUrl;
+      const sourceUrlIsJobUrl = sourceUrl && String(sourceUrl) === String(job.url || '');
+      const shouldDedupeBySourceUrl = Boolean(sourceUrl) && !(sourceUrlIsJobUrl && outputFiles.length > 1);
+      const twitterMediaId = realPlatform === 'twitter' ? twitterIdFromMediaFilename(f.path) : '';
+      const telegramSourceGraph = isTelegram ? {
+        nodes: [
+          { type: 'host', platform: 'telegram' },
+          {
+            type: 'thread',
+            id: fileInfo?.channelId || null,
+            title: fileInfo?.telegramChatTitle || channel || '',
+            url: fileInfo?.channelUrl || null,
+          },
+          {
+            type: 'post',
+            id: fileInfo?.telegramMessageId ? String(fileInfo.telegramMessageId) : (fileInfo?.sourcePostId || null),
+            title: fileInfo?.sourcePostTitle || title || '',
+            url: sourceUrl || null,
+          },
+        ],
+      } : null;
 
       const stat = fsSync.statSync(f.path);
-      await galleryPool.query(
-        `INSERT INTO downloads
-          (url, platform, channel, title, filename, filepath, filesize, format,
-           status, progress, metadata, source_url, created_at, updated_at, finished_at, is_thumb_ready)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-                 'completed', 100, $9::jsonb, $10, now(), now(), now(), $11)
-         ON CONFLICT DO NOTHING`,
-        [
-          sourceUrl,
-          realPlatform,
-          channel,
-          title,
-          path.basename(f.path),
-          f.path,
-          stat.size,
-          ext.replace('.', ''),
-          JSON.stringify({ hub_job_id: job.id, adapter: job.adapter }),
-          sourceUrl,
-          f._thumbPath ? true : false,
-        ],
-      );
-      logger.info('gallery.synced', { job: job.id, file: path.basename(f.path), platform: realPlatform, channel });
+      // Gallery "recent" means imported/downloaded recently, not the original
+      // publish date of a TikTok/YouTube post. Keep the source date only as
+      // metadata so newly completed downloads actually surface at the top.
+      const importedAt = new Date().toISOString();
+      let result = { rowCount: 0 };
+      const client = await galleryPool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [f.path]);
+
+        let duplicate = false;
+        const existing = await client.query('SELECT id FROM downloads WHERE filepath = $1 LIMIT 1', [f.path]);
+        duplicate = existing.rows.length > 0;
+
+        if (!duplicate && shouldDedupeBySourceUrl) {
+          const byUrl = await client.query('SELECT id FROM downloads WHERE source_url = $1 LIMIT 1', [sourceUrl]);
+          duplicate = byUrl.rows.length > 0;
+        }
+
+        if (!duplicate && twitterMediaId) {
+          const byTwitterMedia = await client.query(
+            `SELECT id
+               FROM downloads
+              WHERE platform = 'twitter'
+                AND (
+                  filename = $1
+                  OR source_url = $2
+                  OR COALESCE(metadata::text, '') LIKE $3
+                )
+              LIMIT 1`,
+            [
+              path.basename(f.path),
+              fileInfo?.sourcePostUrl || `https://x.com/status/${twitterMediaId}`,
+              `%${twitterMediaId}%`,
+            ],
+          );
+          duplicate = byTwitterMedia.rows.length > 0;
+        }
+
+        if (!duplicate) {
+          result = await client.query(
+            `INSERT INTO downloads
+              (url, platform, channel, title, filename, filepath, filesize, format,
+               status, progress, metadata, source_url, duration, created_at, updated_at, finished_at, is_thumb_ready)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+                     'completed', 100, $9::jsonb, $10, $11, $12::timestamptz, $12::timestamptz, $12::timestamptz, $13)`,
+            [
+              sourceUrl,
+              realPlatform,
+              channel,
+              title,
+              path.basename(f.path),
+              f.path,
+              stat.size,
+              ext.replace('.', ''),
+              JSON.stringify({
+                hub_job_id: job.id,
+                adapter: job.adapter,
+                source_published_at: fileInfo?.sourcePublishedAt || null,
+                source_site: forumInfo?.sourceSite || null,
+                source_thread_title: forumInfo?.sourceThreadTitle || null,
+                source_thread_id: forumInfo?.sourceThreadId || null,
+                source_thread_url: forumInfo?.sourceThreadUrl || null,
+                source_forum_title: forumInfo?.sourceForumTitle || null,
+                source_post_title: forumInfo?.sourcePostTitle || null,
+                source_post_num: forumInfo?.sourcePostNum || null,
+                source_post_id: forumInfo?.sourcePostId || null,
+                source_post_url: forumInfo?.sourcePostUrl || null,
+                source_graph: telegramSourceGraph || sourceGraphFromForumInfo(forumInfo, job.options?.contextUrl || job.url, realPlatform),
+                telegram_message_id: fileInfo?.telegramMessageId || null,
+                telegram_chat_title: fileInfo?.telegramChatTitle || null,
+                telegram_topic_title: fileInfo?.telegramTopicTitle || null,
+                telegram_topic_id: fileInfo?.telegramTopicId || null,
+                youtube_channel_id: fileInfo?.channelId || job.options?.youtubeChannelId || null,
+                youtube_channel_url: fileInfo?.channelUrl || job.options?.youtubeChannelUrl || null,
+                indexed_channel: channel || null,
+                webdl_image_quality: imageQuality.quality,
+                webdl_was_thumbnail_url: imageQuality.wasThumbnail === true,
+                source_context: pinnedVipergirls ? {
+                  platform: pinnedTarget.sourcePlatform,
+                  channel: pinnedTarget.sourceChannel,
+                  target_platform: pinnedTarget.platform,
+                  target_channel: pinnedTarget.channel,
+                  title: job.options?.title || null,
+                  url: job.options?.contextUrl || null,
+                } : null,
+              }),
+              sourceUrl,
+              fileInfo?.duration || null,
+              importedAt,
+              f._thumbPath ? true : false,
+            ],
+          );
+        }
+
+        await client.query('COMMIT');
+      } catch (e) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw e;
+      } finally {
+        client.release();
+      }
+      inserted += result.rowCount || 0;
+      if (result.rowCount) logger.info('gallery.synced', { job: job.id, file: path.basename(f.path), platform: realPlatform, channel });
     }
+    return inserted;
   } catch (e) {
     logger.warn('gallery.sync.error', { job: job.id, err: e.message });
+    return 0;
   } finally {
     await galleryPool.end();
   }
+}
+
+function isImportableMedia(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (!VIDEO_EXTS.has(ext) && !IMAGE_EXTS.has(ext)) return false;
+  if (isAuxiliaryImageBasename(path.basename(filePath))) return false;
+  if (YTDLP_FORMAT_FRAGMENT_RE.test(path.basename(filePath))) return false;
+  if (PARTIAL_MEDIA_BASENAME_RE.test(path.basename(filePath))) return false;
+  if (SKIP_EXTS.has(ext)) return false;
+  return true;
+}
+
+async function filterSettledMediaOutputs(outputs, minAgeMs = 2500) {
+  const now = Date.now();
+  const out = [];
+  for (const f of outputs) {
+    if (!isImportableMedia(f.path)) continue;
+    try {
+      const st = await fs.stat(f.path);
+      if (st.size > 0 && now - st.mtimeMs >= minAgeMs) out.push(f);
+    } catch {}
+  }
+  return out;
 }
 
 function startWorkerPool({
@@ -200,55 +846,81 @@ function startWorkerPool({
   const workerId = `w-${crypto.randomBytes(3).toString('hex')}`;
   let stopping = false;
   const active = new Set();
+  const activeProcesses = new Set();
+  const heartbeatMs = intEnv('WEBDL_WORKER_HEARTBEAT_MS', 30_000);
+  const staleRunningMinutes = intEnv('WEBDL_STALE_RUNNING_MINUTES', 15);
 
-  // Reclaim stale jobs at startup: jobs marked 'running' from previous worker
-  // processes that died without cleanup. 100%-jobs → done, rest → requeued.
-  (async () => {
+  async function reclaimStaleJobs() {
     try {
-      const { rows: doneRows } = await repo.pool.query(
-        `UPDATE ${repo.schema}.jobs
-            SET status='done', finished_at=now(),
-                locked_by=NULL, locked_at=NULL
-          WHERE status='running' AND progress_pct >= 100
-        RETURNING id`,
-      );
-      const { rows: failedRows } = await repo.pool.query(
-        `UPDATE ${repo.schema}.jobs
-            SET status='failed',
-                error=COALESCE(error, 'stale running job exceeded max attempts'),
-                finished_at=now(),
-                locked_by=NULL, locked_at=NULL
-          WHERE status='running'
-            AND adapter <> 'slave-delegate'
-            AND attempts >= max_attempts
-            AND (locked_at IS NULL OR locked_at < NOW() - INTERVAL '10 minutes')
-        RETURNING id`,
-      );
-      const { rows: requeuedRows } = await repo.pool.query(
-        `UPDATE ${repo.schema}.jobs
-            SET status='queued',
-                locked_by=NULL, locked_at=NULL, started_at=NULL
-          WHERE status='running'
-            AND adapter <> 'slave-delegate'
-            AND attempts < max_attempts
-            AND (locked_at IS NULL OR locked_at < NOW() - INTERVAL '10 minutes')
-        RETURNING id`,
-      );
-      if (doneRows.length || failedRows.length || requeuedRows.length) {
-        logger.info('worker.startup.reclaim', {
-          markedDone: doneRows.map((r) => r.id),
-          markedFailed: failedRows.map((r) => r.id),
-          requeued: requeuedRows.map((r) => r.id),
-        });
+      const reclaimed = await repo.reclaimStaleRunning({ olderThanMinutes: staleRunningMinutes });
+      if (reclaimed.markedFailed.length || reclaimed.requeued.length) {
+        logger.info('worker.stale.reclaim', reclaimed);
       }
     } catch (e) {
-      logger.warn('worker.startup.reclaim.error', { err: String(e.message || e) });
+      logger.warn('worker.stale.reclaim.error', { err: String(e.message || e) });
     }
-  })();
+  }
+
+  // Reclaim stale jobs at startup and periodically. Active jobs refresh
+  // locked_at through the heartbeat below, so stale means "worker died/stuck".
+  reclaimStaleJobs();
+  const staleTimer = setInterval(reclaimStaleJobs, Math.max(60_000, heartbeatMs * 2));
+  if (typeof staleTimer.unref === 'function') staleTimer.unref();
 
   async function runOne(job) {
     const workdir = path.join(downloadRoot, String(job.id));
     await fs.mkdir(workdir, { recursive: true });
+
+    if (job.adapter === 'slave-delegate') {
+      const slave = isSlaveUrl(job.url) || { platform: job?.options?.slave_platform || 'unknown' };
+      try {
+        const result = await delegateToSlave(repo.pool, {
+          url: job.url,
+          platform: slave.platform || job?.options?.slave_platform || 'unknown',
+          metadata: {
+            ...(job.options || {}),
+            delegated_from_hub: true,
+            hub_job_id: job.id,
+            source_context: job?.options?.source_context || job?.options?.origin_thread || (
+              job?.options?.contextUrl
+                ? {
+                    url: job.options.contextUrl,
+                    platform: job.options.platform || job.options.source_site || null,
+                    channel: job.options.channel || null,
+                    title: job.options.title || null,
+                  }
+                : null
+            ),
+            source_site: job?.options?.source_site || job?.options?.platform || null,
+            original_site: job?.options?.source_site || job?.options?.platform || null,
+            original_platform: job?.options?.platform || job?.options?.source_site || null,
+            original_channel: job?.options?.channel || null,
+            original_title: job?.options?.title || null,
+            original_url: job?.options?.contextUrl || job?.options?.pageUrl || null,
+          },
+          priority: job.priority || 70,
+        });
+        await repo.pool.query(
+          `UPDATE ${repo.schema}.jobs
+              SET status = 'running',
+                  started_at = COALESCE(started_at, now()),
+                  locked_by = 'slave-' || $1::text,
+                  locked_at = now(),
+                  options = COALESCE(options, '{}'::jsonb) || jsonb_build_object(
+                    'simple_server_download_id', $1::text,
+                    'was_duplicate', $2::boolean
+                  )
+            WHERE id = $3`,
+          [String(result.downloadId), !!result.duplicate, job.id],
+        );
+        await repo.appendLog(job.id, 'info', `↪️  fastlane gedelegeerd naar simple-server (${slave.platform}, download #${result.downloadId}${result.duplicate ? `, dupe status=${result.existingStatus}` : ''})`);
+        logger.info('slave.delegated.by_worker', { job: job.id, downloadId: result.downloadId, platform: slave.platform, duplicate: !!result.duplicate });
+      } catch (e) {
+        await repo.appendLog(job.id, 'error', `slave delegate fout: ${e.message}`);
+        await queue.fail(job.id, e.message, { retry: true });
+      }
+      return;
+    }
 
     const adapter = byName.get(job.adapter);
     if (!adapter) {
@@ -266,7 +938,13 @@ function startWorkerPool({
       /\/@[^/]+\/?(shorts|videos|streams)?\/?$/.test(urlLower) ||
       /\/channel\//.test(urlLower) ||
       /\/c\//.test(urlLower);
-    if (!isExpandable) {
+    const isViperThread = /https?:\/\/(?:www\.)?(?:vipergirls\.to|viper\.to)\/threads\/\d+/i.test(String(job.url || ''));
+    const isRefreshableCollection = isRefreshableCollectionUrl(job.url, job.adapter);
+    const skipPreDownloadDedup = String(job?.options?.source_quality || '') === 'vipr_full_image'
+      || Boolean(job?.options?.vipergirlsWholeThread)
+      || isViperThread
+      || isRefreshableCollection;
+    if (!isExpandable && !skipPreDownloadDedup) {
       try {
         const dupe = await checkGalleryDuplicate(job.url);
         if (dupe) {
@@ -285,16 +963,101 @@ function startWorkerPool({
       }
     }
 
-    const planned = adapter.plan(job.url, { ...job.options, cwd: workdir });
+    const planned = adapter.plan(job.url, { ...job.options, cwd: workdir, lane: job.lane });
     const startedAtMs = Date.now();
     await repo.appendLog(job.id, 'info', `start ${adapter.name}: ${planned.cmd} ${planned.args.join(' ')}`);
     logger.info('job.start', { job: job.id, adapter: adapter.name });
 
     let lastReported = -1;
     let lastLoggedTitle = '';
+    let rateLimited = false;
+    let rateLimitMessage = '';
+    const redditFallbackLimit = intEnv('WEBDL_REDDIT_VREDDIT_FALLBACK_LIMIT', 80);
+    const redditFallbackQueued = new Set();
     const proc = runProcess(planned);
+    activeProcesses.add(proc);
+    const heartbeatTimer = setInterval(() => {
+      repo.heartbeatJob(job.id, workerId).catch((e) => {
+        logger.warn('job.heartbeat.error', { job: job.id, err: String(e.message || e) });
+      });
+    }, heartbeatMs);
+    if (typeof heartbeatTimer.unref === 'function') heartbeatTimer.unref();
+
+    const liveGallerySyncMs = intEnv('WEBDL_LIVE_GALLERY_SYNC_MS', 3_000);
+    const enableLiveGallerySync = liveGallerySyncMs > 0 && typeof adapter.collectOutputs === 'function';
+    let liveGallerySyncRunning = false;
+    let lastLiveGallerySynced = 0;
+    async function runLiveGallerySync() {
+      if (liveGallerySyncRunning) return;
+      liveGallerySyncRunning = true;
+      try {
+        const outs = await adapter.collectOutputs(workdir, { job, startedAtMs });
+        const mediaOuts = await filterSettledMediaOutputs(outs, intEnv('WEBDL_LIVE_GALLERY_MIN_AGE_MS', 1_500));
+        if (mediaOuts.length > lastLiveGallerySynced) {
+          const freshJob = await repo.getJob(job.id).catch(() => null);
+          const inserted = await syncToGallery(freshJob || job, mediaOuts, logger, repo);
+          lastLiveGallerySynced = Math.max(lastLiveGallerySynced, mediaOuts.length);
+          if (inserted > 0) {
+            await repo.appendLog(job.id, 'info', `📺 live gallery sync: ${inserted} nieuw`);
+          }
+        }
+      } catch (e) {
+        logger.warn('gallery.live_sync.error', { job: job.id, err: String(e.message || e) });
+      } finally {
+        liveGallerySyncRunning = false;
+      }
+    }
+    const liveGalleryTimer = enableLiveGallerySync ? setInterval(runLiveGallerySync, liveGallerySyncMs) : null;
+    if (liveGalleryTimer && typeof liveGalleryTimer.unref === 'function') liveGalleryTimer.unref();
+    if (enableLiveGallerySync) setTimeout(runLiveGallerySync, Math.min(1000, liveGallerySyncMs)).unref?.();
 
     proc.on('line', async ({ stream, line }) => {
+      if (isYoutubeRateLimitMessage(line)) {
+        rateLimited = true;
+        rateLimitMessage = String(line || '').trim();
+        job._rateLimited = true;
+      }
+      if (job.adapter === 'reddit' && redditFallbackQueued.size < redditFallbackLimit) {
+        const fallbackMatch = String(line || '').match(/Site\s+VReddit\s+failed\s+to\s+download\s+submission\s+([a-z0-9]+):.*https?:\/\/v\.redd\.it\/([a-z0-9]+)/i);
+        if (fallbackMatch) {
+          const submissionId = fallbackMatch[1];
+          const mediaId = fallbackMatch[2];
+          const fallbackUrl = redditFallbackCommentsUrl(job.url, submissionId);
+          if (fallbackUrl && !redditFallbackQueued.has(fallbackUrl)) {
+            redditFallbackQueued.add(fallbackUrl);
+            try {
+              const existing = await repo.findRecentJobByUrl(fallbackUrl);
+              if (!existing) {
+                const child = await queue.enqueue({
+                  url: fallbackUrl,
+                  adapter: 'ytdlp',
+                  priority: Math.max(Number(job.priority || 0), 10),
+                  options: {
+                    ...(job.options || {}),
+                    platform: 'reddit',
+                    channel: job?.options?.channel || '',
+                    title: job?.options?.title || '',
+                    reddit_vreddit_fallback: true,
+                    reddit_parent_job_id: job.id,
+                    reddit_submission_id: submissionId,
+                    reddit_media_id: mediaId,
+                    sourceContext: {
+                      url: job.url,
+                      platform: 'reddit',
+                      channel: job?.options?.channel || '',
+                      title: job?.options?.title || '',
+                    },
+                  },
+                  maxAttempts: 2,
+                });
+                await repo.appendLog(job.id, 'info', `↪️  v.redd.it fallback gequeued als ytdlp job #${child.id}: ${fallbackUrl}`);
+              }
+            } catch (e) {
+              logger.warn('reddit.vreddit_fallback.error', { job: job.id, url: fallbackUrl, err: String(e.message || e) });
+            }
+          }
+        }
+      }
       const prog = adapter.parseProgress(line);
       if (prog && typeof prog.pct === 'number') {
         const pct = Math.max(0, Math.min(100, prog.pct));
@@ -327,50 +1090,94 @@ function startWorkerPool({
       }
     });
 
+    async function importOutputs({ partialReason = '' } = {}) {
+      const outs = await adapter.collectOutputs(workdir, { job, startedAtMs });
+      const mediaOuts = outs.filter((f) => isImportableMedia(f.path));
+      if (partialReason && mediaOuts.length === 0) return 0;
+
+      // Thumbnails genereren
+      for (const f of outs) {
+        try {
+          const thumbPath = await generateThumbnail(f.path);
+          if (thumbPath) {
+            f._thumbPath = thumbPath;
+            await repo.appendLog(job.id, 'info', `🖼️ thumbnail: ${path.basename(thumbPath)}`);
+          }
+        } catch (_) {}
+      }
+
+      for (const f of outs) await repo.addFile(job.id, f);
+      if (partialReason) {
+        await repo.pool.query(
+          `UPDATE ${repo.schema}.jobs
+              SET options = COALESCE(options, '{}'::jsonb) || jsonb_build_object('partial_success', true, 'partial_reason', $2::text)
+            WHERE id = $1 AND status = 'running'`,
+          [job.id, partialReason],
+        );
+      }
+      const completedJob = await queue.complete(job.id);
+      if (!completedJob) {
+        logger.info('job.complete.skipped', { job: job.id, reason: 'job no longer running' });
+        return mediaOuts.length;
+      }
+      await repo.appendLog(
+        job.id,
+        partialReason ? 'warn' : 'info',
+        partialReason
+          ? `⚠️ gedeeltelijk klaar, ${mediaOuts.length} media-bestand(en) geïmporteerd; oorzaak: ${partialReason}`
+          : `✅ klaar, ${outs.length} bestand(en)`,
+      );
+      logger.info(partialReason ? 'job.partial.done' : 'job.done', {
+        job: job.id,
+        files: outs.length,
+        mediaFiles: mediaOuts.length,
+        partialReason,
+      });
+
+      // Gallery sync — alleen voltooide of gedeeltelijk bruikbare downloads
+      try {
+        const freshJob = await repo.getJob(job.id);
+        await syncToGallery(freshJob || job, outs, logger, repo);
+        await repo.markGallerySynced(job.id);
+        await repo.appendLog(job.id, 'info', '📺 gallery sync voltooid');
+      } catch (e) {
+        await repo.appendLog(job.id, 'warn', `gallery sync mislukt: ${e.message}`);
+      }
+      return mediaOuts.length;
+    }
+
     try {
       const { code, signal, timedOut, idleTimedOut } = await proc.done;
+      activeProcesses.delete(proc);
+      clearInterval(heartbeatTimer);
+      if (liveGalleryTimer) clearInterval(liveGalleryTimer);
       if (code === 0) {
-        const outs = await adapter.collectOutputs(workdir, { job, startedAtMs });
-
-        // Thumbnails genereren
-        for (const f of outs) {
-          try {
-            const thumbPath = await generateThumbnail(f.path);
-            if (thumbPath) {
-              f._thumbPath = thumbPath;
-              await repo.appendLog(job.id, 'info', `🖼️ thumbnail: ${path.basename(thumbPath)}`);
-            }
-          } catch (_) {}
-        }
-
-        for (const f of outs) await repo.addFile(job.id, f);
-        await queue.complete(job.id);
-        await repo.appendLog(job.id, 'info', `✅ klaar, ${outs.length} bestand(en)`);
-        logger.info('job.done', { job: job.id, files: outs.length });
-
-        // Gallery sync — alleen voltooide downloads
-        try {
-          const freshJob = await repo.getJob(job.id);
-          await syncToGallery(freshJob || job, outs, logger);
-          await repo.markGallerySynced(job.id);
-          await repo.appendLog(job.id, 'info', '📺 gallery sync voltooid');
-        } catch (e) {
-          await repo.appendLog(job.id, 'warn', `gallery sync mislukt: ${e.message}`);
-        }
+        await importOutputs();
         return true; // success
       } else {
-        const retry = job.attempts < job.max_attempts;
-        const reason = idleTimedOut
-          ? `idle timeout (${Math.round((planned.idleTimeoutMs || 0) / 1000)}s zonder output)`
-          : timedOut
-            ? `timeout (${Math.round((planned.timeoutMs || 0) / 1000)}s)`
-            : `exit ${code}${signal ? ` (${signal})` : ''}`;
+        const reason = rateLimited
+          ? `youtube rate limit: ${rateLimitMessage || 'Video unavailable; account tijdelijk rate-limited'}`
+          : idleTimedOut
+            ? `idle timeout (${Math.round((planned.idleTimeoutMs || 0) / 1000)}s zonder output)`
+            : timedOut
+              ? `timeout (${Math.round((planned.timeoutMs || 0) / 1000)}s)`
+              : `exit ${code}${signal ? ` (${signal})` : ''}`;
+        try {
+          const imported = await importOutputs({ partialReason: reason });
+          if (imported > 0) return true;
+        } catch (e) {
+          logger.warn('job.partial.import.error', { job: job.id, err: String(e.message || e) });
+        }
+        const retry = rateLimited ? true : job.attempts < job.max_attempts;
         await queue.fail(job.id, reason, { retry });
         await repo.appendLog(job.id, retry ? 'warn' : 'error', `${reason}${retry ? ' (retry)' : ''}`);
         logger.warn('job.failed', { job: job.id, code, signal, retry, timedOut, idleTimedOut });
         return false; // failure
       }
     } catch (err) {
+      activeProcesses.delete(proc);
+      clearInterval(heartbeatTimer);
+      if (liveGalleryTimer) clearInterval(liveGalleryTimer);
       const retry = job.attempts < job.max_attempts;
       await queue.fail(job.id, String(err.message || err), { retry });
       logger.error('job.error', { job: job.id, err: String(err.message || err) });
@@ -382,7 +1189,11 @@ function startWorkerPool({
   // Houdt per domein bij wanneer de laatste download startte en hoeveel
   // opeenvolgende failures er waren. Bij failures groeit de wachttijd
   // exponentieel (backoff). Bij successen reset de backoff.
-  const domainState = new Map(); // domain → { lastStartMs, consecutiveFails }
+  const domainState = new Map(); // domain → { lastStartMs, consecutiveFails, pauseUntilMs }
+  const youtubeRateLimitBackoffMs = Math.max(
+    5 * 60 * 1000,
+    Number.parseInt(process.env.WEBDL_YOUTUBE_RATE_LIMIT_BACKOFF_MS || String(65 * 60 * 1000), 10) || 65 * 60 * 1000,
+  );
 
   // Configuratie per domein-patroon (defaults voor onbekende domeinen)
   const DOMAIN_THROTTLE = {
@@ -390,6 +1201,7 @@ function startWorkerPool({
     'tiktok':    { baseSpacingMs: 3000,  maxBackoffMs: 30000, jitterMs: 1500 },
     'instagram': { baseSpacingMs: 4000,  maxBackoffMs: 45000, jitterMs: 2000 },
     'reddit':    { baseSpacingMs: 2000,  maxBackoffMs: 20000, jitterMs: 1000 },
+    'redgifs':   { baseSpacingMs: 2500,  maxBackoffMs: 30000, jitterMs: 1500 },
     '_default':  { baseSpacingMs: 500,   maxBackoffMs: 10000, jitterMs: 500  },
   };
 
@@ -400,6 +1212,7 @@ function startWorkerPool({
       if (h.includes('tiktok')) return 'tiktok';
       if (h.includes('instagram')) return 'instagram';
       if (h.includes('reddit')) return 'reddit';
+      if (h.includes('redgifs') || h.includes('gifdeliverynetwork') || h.includes('gfycat')) return 'redgifs';
       return h;
     } catch { return 'unknown'; }
   }
@@ -410,15 +1223,25 @@ function startWorkerPool({
 
   function getDomainState(domain) {
     if (!domainState.has(domain)) {
-      domainState.set(domain, { lastStartMs: 0, consecutiveFails: 0 });
+      domainState.set(domain, { lastStartMs: 0, consecutiveFails: 0, pauseUntilMs: 0 });
     }
     return domainState.get(domain);
+  }
+
+  function isYoutubeRateLimitMessage(text) {
+    return /rate-limited by youtube|content isn't available,\s*try again later|try again later.*rate-limit/i.test(String(text || ''));
+  }
+
+  function getDomainPauseWaitMs(domain) {
+    const ds = getDomainState(domain);
+    return Math.max(0, Number(ds.pauseUntilMs || 0) - Date.now());
   }
 
   function computeWaitMs(domain) {
     const conf = getThrottleConfig(domain);
     const ds = getDomainState(domain);
     const elapsed = Date.now() - ds.lastStartMs;
+    const pauseWait = getDomainPauseWaitMs(domain);
 
     // Backoff: spacing verdubbelt per opeenvolgende failure, met plafond
     const backoffMultiplier = Math.min(Math.pow(2, ds.consecutiveFails), 32);
@@ -426,7 +1249,7 @@ function startWorkerPool({
     const jitter = Math.floor(Math.random() * conf.jitterMs);
     const needed = spacing + jitter;
 
-    return Math.max(0, needed - elapsed);
+    return Math.max(pauseWait, needed - elapsed);
   }
 
   function markDomainStarted(domain) {
@@ -438,11 +1261,21 @@ function startWorkerPool({
     ds.consecutiveFails = 0;
   }
 
-  function markDomainFailed(domain) {
+  function markDomainFailed(domain, { rateLimited = false } = {}) {
     const ds = getDomainState(domain);
     ds.consecutiveFails++;
     const conf = getThrottleConfig(domain);
     const backoff = Math.min(conf.baseSpacingMs * Math.pow(2, ds.consecutiveFails), conf.maxBackoffMs);
+    if (domain === 'youtube' && rateLimited) {
+      ds.pauseUntilMs = Math.max(Number(ds.pauseUntilMs || 0), Date.now() + youtubeRateLimitBackoffMs);
+      logger.warn('throttle.youtube.rate_limit_pause', {
+        domain,
+        fails: ds.consecutiveFails,
+        pauseMs: youtubeRateLimitBackoffMs,
+        resumeAt: new Date(ds.pauseUntilMs).toISOString(),
+      });
+      return;
+    }
     logger.info('throttle.backoff', { domain, fails: ds.consecutiveFails, nextDelayMs: backoff });
   }
 
@@ -452,7 +1285,7 @@ function startWorkerPool({
     markDomainStarted(domain);
     const ok = await runOne(job);
     if (ok === false) {
-      markDomainFailed(domain);
+      markDomainFailed(domain, { rateLimited: job._rateLimited === true });
     } else {
       markDomainSuccess(domain);
     }
@@ -460,13 +1293,15 @@ function startWorkerPool({
 
   // ─── Lane-based loops ──────────────────────────────────────────────────────
   // Elke lane heeft eigen concurrency-limiet en eigen worker-loop.
-  //   process-video: 1 (ffmpeg merge CPU-zwaar)
-  //   video:         2 (directe video, geen merge)
-  //   image:         6 (snel, netwerk-bound)
+  //   process-video: ffmpeg/merge-zware jobs
+  //   video:         directe video, geen merge; netwerk-bound
+  //   gallery:       gallery-dl batches; limiet via env omdat sites rate-limiten
+  //   image:         snelle imagehost/directe image jobs
   const LANES = [
-    { name: 'process-video', concurrency: 1 },
-    { name: 'video',         concurrency: 2 },
-    { name: 'image',         concurrency: 6 },
+    { name: 'process-video', concurrency: nonNegativeIntEnv('WEBDL_PROCESS_VIDEO_CONCURRENCY', 1) },
+    { name: 'video',         concurrency: nonNegativeIntEnv('WEBDL_DIRECT_VIDEO_CONCURRENCY', 2) },
+    { name: 'gallery',       concurrency: nonNegativeIntEnv('WEBDL_GALLERY_CONCURRENCY', 1) },
+    { name: 'image',         concurrency: nonNegativeIntEnv('WEBDL_IMAGE_CONCURRENCY', 8) },
   ];
   const laneActive = new Map(LANES.map((l) => [l.name, new Set()]));
 
@@ -474,6 +1309,14 @@ function startWorkerPool({
     const laneSet = laneActive.get(lane);
     while (!stopping) {
       if (laneSet.size >= maxConcurrency) { await sleep(pollMs); continue; }
+      if (lane === 'process-video') {
+        const youtubePauseWaitMs = getDomainPauseWaitMs('youtube');
+        if (youtubePauseWaitMs > 0) {
+          logger.info('throttle.youtube.paused', { waitMs: youtubePauseWaitMs, lane });
+          await sleep(Math.min(youtubePauseWaitMs, 30_000));
+          continue;
+        }
+      }
 
       const job = await queue.claimNext(workerId, { lane }).catch((e) => {
         logger.error('queue.claim.error', { lane, err: String(e.message || e) });
@@ -487,6 +1330,16 @@ function startWorkerPool({
       if (waitMs > 0) {
         logger.info('throttle.wait', { job: job.id, domain, waitMs, lane });
         await sleep(waitMs);
+        const freshJob = await repo.getJob(job.id).catch(() => null);
+        if (!freshJob || freshJob.status !== 'running' || freshJob.locked_by !== workerId) {
+          logger.info('job.skipped.after_throttle', {
+            job: job.id,
+            lane,
+            status: freshJob ? freshJob.status : 'missing',
+            lockedBy: freshJob ? freshJob.locked_by : null,
+          });
+          continue;
+        }
       }
 
       const p = runOneThrottled(job)
@@ -501,6 +1354,10 @@ function startWorkerPool({
 
   async function stop() {
     stopping = true;
+    clearInterval(staleTimer);
+    for (const proc of activeProcesses) {
+      try { proc.kill('SIGTERM'); } catch (_) {}
+    }
     await Promise.all(loopPromises);
   }
 
@@ -522,4 +1379,10 @@ function startWorkerPool({
   return { stop, workerId, stats };
 }
 
-module.exports = { startWorkerPool };
+module.exports = {
+  startWorkerPool,
+  syncToGallery,
+  filterSettledMediaOutputs,
+  isImportableMedia,
+  _test: { galleryDlSourceInfo, twitterIdFromMediaFilename },
+};
