@@ -44,23 +44,11 @@ const CHATURBATE_CONFIG = {
 
   extraButtons: [
     {
-      // Directe model-page op recu.me. Werkt als model daar geïndexeerd is.
-      label: '🎬 recu.me model',
+      // 2026-05-30 v2: search is PRIMAIR want directe model-URL geeft op recu.me
+      // vaak "add_download_btn_failure" popup (model niet geïndexeerd onder die
+      // exact naam). Search werkt altijd: matching results worden getoond.
+      label: '🔍 Zoek op recu.me',
       color: '#ec4899',
-      match(_pageType, url) { return Boolean(chaturbateModelFromUrl(url)); },
-      onClick(ctx) {
-        const model = chaturbateModelFromUrl(ctx.url);
-        if (!model) return { text: '✗ Geen model in URL' };
-        window.open(`https://recu.me/${encodeURIComponent(model)}/`, '_blank');
-        return { text: '✓ Tab geopend' };
-      },
-    },
-    {
-      // 2026-05-30: search-fallback wanneer directe model-page geen resultaat
-      // geeft (model bestaat niet op recu.me of andere naam-variant). Search
-      // werkt altijd, toont matching results.
-      label: '🔍 recu.me zoek',
-      color: '#f472b6',
       match(_pageType, url) { return Boolean(chaturbateModelFromUrl(url)); },
       onClick(ctx) {
         const model = chaturbateModelFromUrl(ctx.url);
@@ -70,7 +58,21 @@ const CHATURBATE_CONFIG = {
       },
     },
     {
-      label: '📸 Open in stripchat',
+      // Directe model-URL als secundaire optie. Werkt soms (jong model met
+      // exact naam-match). Faalt op "add_download_btn_failure" als model niet
+      // geïndexeerd → klik dan op de zoek-knop hierboven.
+      label: '🎬 Direct (kan 404)',
+      color: '#f472b6',
+      match(_pageType, url) { return Boolean(chaturbateModelFromUrl(url)); },
+      onClick(ctx) {
+        const model = chaturbateModelFromUrl(ctx.url);
+        if (!model) return { text: '✗ Geen model in URL' };
+        window.open(`https://recu.me/${encodeURIComponent(model)}/`, '_blank');
+        return { text: '✓ Tab geopend' };
+      },
+    },
+    {
+      label: '📸 Stripchat',
       color: '#a855f7',
       match(_pageType, url) { return Boolean(chaturbateModelFromUrl(url)); },
       onClick(ctx) {

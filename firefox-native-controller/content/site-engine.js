@@ -794,13 +794,17 @@
     });
     wrap.appendChild(header);
 
-    if (type === 'single') {
+    // 2026-05-30: sites met itemTypes:[] (chaturbate, sexygirlspics-quarantaine)
+    // tonen GEEN download-/scan-knoppen — die zijn verwarrend en doen niets.
+    // extraButtons (recu.me/stripchat etc.) komen later toch wel.
+    const hasItemTypes = Array.isArray(cfg.itemTypes) && cfg.itemTypes.length > 0;
+    if (type === 'single' && hasItemTypes) {
       const url = window.location.href.split('#')[0];
       const t = itemTypeForUrl(url);
       const label = t ? (t.singleLabel || '⬇ Download') : '✗ Onbekend item-type';
       const color = t && t.color || '#2196F3';
       wrap.appendChild(makeButton(label, color, handleSingle));
-    } else {
+    } else if (hasItemTypes) {
       const items = collectItemsFromDoc(document);
       const byType = {};
       for (const it of items) {
@@ -813,6 +817,9 @@
       const maxLabel = Number.isFinite(maxP) && maxP > 1 ? ` (${maxP} totaal)` : '';
       wrap.appendChild(makeButton(`📄 Deze pagina (${onPageLabel})`, '#1565C0', handleThisPage));
       wrap.appendChild(makeButton(`🧵 Alle pages${maxLabel}`, '#0ea5e9', handleAllPages));
+    }
+    // Channel-hint altijd tonen (ook voor sites met alleen extraButtons)
+    if (hasItemTypes || (Array.isArray(cfg.extraButtons) && cfg.extraButtons.length > 0)) {
       const hint = document.createElement('div');
       hint.textContent = `→ channel: ${cfg.deriveChannel(window.location.href)}`;
       Object.assign(hint.style, { fontSize: '10px', opacity: '0.6', padding: '2px 4px' });
