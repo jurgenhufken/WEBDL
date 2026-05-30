@@ -57,7 +57,7 @@ async function extractImageUrls(page) {
     // - twemoji / 1fXXXX.png : Unicode emoji codepoints
     // - /smilies/ /avatars/ /styles/ /images/icons : forum chrome
     // - blank.gif, spacer : transparent placeholders
-    const JUNK_RE = /\/(?:twemoji|smilies|emoticons|avatars?|styles\/[^/]+\/(?:xenforo|core)\/|images\/(?:icons|buttons|misc)|blank\.gif|spacer\.)/i;
+    const JUNK_RE = /\/(?:twemoji|smilies|emoticons|avatars?|styles\/[^/]+\/(?:xenforo|core)\/|images\/(?:icons|buttons|misc)|blank\.gif|spacer\.|attachments\/upload)/i;
     const EMOJI_CODEPOINT_RE = /\/(?:1f[0-9a-f]{3,4}|26[0-9a-f]{2}|27[0-9a-f]{2})\.(?:png|svg|webp)$/i;
     function isJunk(u) {
       if (!u) return true;
