@@ -761,13 +761,46 @@
       savePanelState({ collapsed: true });
     }
 
-    if (state.collapsed) {
-      // Wacht 1 tick zodat panel in DOM zit
+    // 2026-05-30 (Jürgen "minder prominent"): default = collapsed-badge.
+    // Alleen volledige paneel tonen als user expliciet heeft uitgeklapt
+    // (state.collapsed === false na klik op badge).
+    if (state.collapsed !== false) {
       setTimeout(collapse, 0);
     }
   }
 
+  // 2026-05-30: auto-fade naar lage opacity na 3s zonder muis-interactie.
+  // Hover/klik = volle opacity terug. Maakt paneel minder opvallend
+  // wanneer user iets anders aan het lezen/kijken is.
+  function wrapAutoFade(panel) {
+    let fadeTimer = null;
+    function startFade() {
+      clearTimeout(fadeTimer);
+      fadeTimer = setTimeout(() => {
+        try { panel.style.opacity = '0.25'; panel.style.transition = 'opacity .3s ease'; } catch (_) {}
+      }, 3000);
+    }
+    function showFull() {
+      try { panel.style.opacity = '1'; } catch (_) {}
+      startFade();
+    }
+    panel.addEventListener('mouseenter', () => { clearTimeout(fadeTimer); panel.style.opacity = '1'; });
+    panel.addEventListener('mouseleave', startFade);
+    panel.addEventListener('mousedown', showFull);
+    startFade();
+  }
+
+  // 2026-05-30: render-delay zodat addon niet over site-content valt tijdens initial load
+  let _renderTimer = null;
   function renderPanel() {
+    if (_renderTimer) clearTimeout(_renderTimer);
+    _renderTimer = setTimeout(() => {
+      _renderTimer = null;
+      renderPanelImmediate();
+    }, 2000);
+  }
+
+  function renderPanelImmediate() {
     const existing = document.getElementById('webdl-site-panel');
     if (existing) existing.remove();
     const existingBadge = document.getElementById('webdl-site-badge');
@@ -779,20 +812,23 @@
     if (cfg.useJobsApi) {
       renderJobsPanel(type);
       const p = document.getElementById('webdl-site-panel');
-      if (p) wrapPanelControls(p, `${cfg.label} · jobs`);
+      if (p) { wrapPanelControls(p, `${cfg.label} · jobs`); wrapAutoFade(p); }
       return;
     }
 
     const wrap = document.createElement('div');
     wrap.id = 'webdl-site-panel';
+    // 2026-05-30: minder prominent — kleiner, in corner, semi-transparent.
+    // Position rechts-onder ipv -boven; verkleind van 280px naar 220px;
+    // background-opacity verlaagd; auto-fade via wrapAutoFade.
     Object.assign(wrap.style, {
-      position: 'fixed', top: '12px', right: '12px',
+      position: 'fixed', bottom: '12px', right: '12px',
       zIndex: '2147483646',
-      background: 'rgba(20,20,30,0.94)', color: '#fff',
-      padding: '8px', borderRadius: '8px',
+      background: 'rgba(20,20,30,0.85)', color: '#fff',
+      padding: '6px', borderRadius: '8px',
       fontFamily: 'system-ui, -apple-system, sans-serif',
-      fontSize: '13px', boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
-      minWidth: '280px',
+      fontSize: '12px', boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
+      minWidth: '220px',
       display: 'flex', flexDirection: 'column', gap: '4px',
     });
 
@@ -918,6 +954,9 @@
     // enige zichtbare UI — debug-toolbar staat op display:none. Wrap rendert
     // dus drijvend op document.body zoals voorheen.
     document.body.appendChild(wrap);
+    // 2026-05-30 (Jürgen "minder prominent"): collapse-badge + auto-fade
+    wrapPanelControls(wrap, cfg.label);
+    wrapAutoFade(wrap);
   }
 
   function init() {
