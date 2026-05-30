@@ -22,8 +22,12 @@ function createDb({ engine, sqlitePath, databaseUrl }) {
 
   if (isPostgres) {
     const connStr = String(databaseUrl || '');
-    const pool = new Pool({ connectionString: connStr, max: 20, idleTimeoutMillis: 30000 });
-    const readPool = new Pool({ connectionString: connStr, max: 5, idleTimeoutMillis: 15000 });
+    // 2026-05-30 (Jürgen perf): pool max 20→8 + read 5→3. Polling-storm in
+    // simple-server vuurt 9× dezelfde LIKE-query parallel + 3× COUNT(*)
+    // tegelijk → buffer-pool LWLock-contention. Smallere pool forceert
+    // serialisatie zonder code-rewrite. Restart vereist na deze change.
+    const pool = new Pool({ connectionString: connStr, max: 8, idleTimeoutMillis: 30000 });
+    const readPool = new Pool({ connectionString: connStr, max: 3, idleTimeoutMillis: 15000 });
     return {
       engine: 'postgres',
       isPostgres: true,

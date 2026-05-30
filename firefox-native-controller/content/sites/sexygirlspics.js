@@ -13,6 +13,59 @@ window.WEBDL_SITES['sexygirlspics.com'] = {
     return 'listing';
   },
 
+  // Pagination-detector voor listing-pages (/tag/<term>/, /<category>/, /search/...).
+  // Pakt zowel WordPress-stijl `/page/N/` URLs, "page-numbers" anchors, "Last"-links,
+  // als "Page X of Y" tekst. Returns het hoogst gevonden page-nummer (>=1).
+  detectMaxPage(doc) {
+    const root = doc || document;
+    let max = 1;
+    // Variant 1: <a href=".../page/N/"> — WordPress default
+    for (const a of root.querySelectorAll('a[href*="/page/"]')) {
+      const href = a.getAttribute('href') || '';
+      const m = href.match(/\/page\/(\d+)\/?(?:[?#]|$)/);
+      if (m) { const n = parseInt(m[1], 10); if (n > max && n < 100000) max = n; }
+    }
+    // Variant 2: pagination-container met genummerde anchor-text
+    const containers = root.querySelectorAll(
+      '.pagination, .pages, .pagi, .page-numbers, nav.pagination, ul.pagination, div[class*="pagi"], div[class*="page-nav"]'
+    );
+    const seedRoots = containers.length ? containers : [root];
+    for (const cont of seedRoots) {
+      for (const a of cont.querySelectorAll('a, span')) {
+        const txt = (a.textContent || '').trim();
+        const m = txt.match(/^(\d{1,5})$/);
+        if (m) { const n = parseInt(m[1], 10); if (n > max && n < 100000) max = n; }
+      }
+    }
+    // Variant 3: "Last" / "»" link met /page/N/
+    for (const a of root.querySelectorAll('a')) {
+      const txt = (a.textContent || '').trim().toLowerCase();
+      if (txt !== 'last' && txt !== '»' && txt !== '>>' && !a.classList.contains('last')) continue;
+      const href = a.getAttribute('href') || '';
+      const m = href.match(/\/page\/(\d+)\/?(?:[?#]|$)/);
+      if (m) { const n = parseInt(m[1], 10); if (n > max) max = n; }
+    }
+    // Variant 4: "Page X of Y" tekst-mining (fallback voor non-standard themes)
+    const bodyText = (root.body?.textContent || root.textContent || '');
+    const pageOfRe = /Page\s+\d+\s+of\s+(\d+)/i;
+    const m4 = bodyText.match(pageOfRe);
+    if (m4) { const n = parseInt(m4[1], 10); if (n > max && n < 100000) max = n; }
+    return max;
+  },
+
+  // Bouw URL voor pagina N. WordPress-stijl: .../page/N/
+  // Behoudt query-string en hash.
+  pageUrl(page, baseHref) {
+    try {
+      const u = new URL(baseHref || window.location.href);
+      // Strip bestaande /page/N/ uit pathname
+      u.pathname = u.pathname.replace(/\/page\/\d+\/?$/i, '/');
+      if (!u.pathname.endsWith('/')) u.pathname += '/';
+      if (page > 1) u.pathname += `page/${page}/`;
+      return u.toString();
+    } catch (_) { return baseHref; }
+  },
+
   // 2026-05-30: tijdelijk lege itemTypes — sexygirlspics albums (/pics/<slug>/)
   // zijn aggregator-pages die via yt-dlp 'Unsupported URL' geven. Wacht op
   // dedicated album-resolver (scripts/sexygirlspics_album_dl.py + /api/sexygirlspics/album
