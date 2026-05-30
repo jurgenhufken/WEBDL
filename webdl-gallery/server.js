@@ -1867,6 +1867,11 @@ function buildScreenshotFilters({ req, params, includeChannel = true }) {
   const qPlatformAlias = !platformValues.length && q ? platformSearchAlias(q) : '';
 
   const where = [`s.filepath IS NOT NULL`, `s.filepath <> ''`];
+  // 2026-05-30 (Jürgen): auto-generated frame-thumbnails uitsluiten —
+  // pattern `screenshot_<title>_t<seconds>_<iso-timestamp>.jpg` markeert
+  // server-side bulk-extracted frames (tot 25 per video). User wil alleen
+  // handmatige screenshots (uit viewer 's-key). Filter via filename-pattern.
+  where.push(`s.filepath !~ '_t[0-9]+_20[0-9]{2}-'`);
   if (hasSourceScope) where.push('false');
   if (platformValues.length) {
     params.push(platformValues);

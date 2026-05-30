@@ -15347,7 +15347,10 @@ async function startTdlDownload(downloadId, url, platform, channel, title, metad
       return;
     }
 
-    const args = [scriptPath, chatId, dir];
+    // 2026-05-30 (Jürgen "telegram langzaam"): --parallel 12 ipv default 5
+    // voor 2-3× snellere whole-channel downloads. Telegram rate-limit zit
+    // rond ~20 concurrent requests, dus 12 is veilig.
+    const args = [scriptPath, chatId, dir, '--parallel', '12'];
     const proc = spawn('python3', args, { env: { ...process.env, TELEGRAM_PHONE: process.env.TELEGRAM_PHONE || '' } });
     activeProcesses.set(downloadId, proc);
     try { startingJobs.delete(downloadId); } catch (e) { }
@@ -20352,6 +20355,14 @@ async function startServer() {
 
     setTimeout(() => {
       try {
+        // 2026-05-30 (Jürgen): zombie 'queued' rows uit vorige sessie terug
+        // naar 'pending' zodat rehydrate ze meeneemt. Anders blijven ze hangen
+        // (auto-rehydrate filtert alleen status='pending'). Klassieke
+        // lost-on-restart bug.
+        db.prepare("UPDATE downloads SET status='pending', updated_at=NOW() WHERE status='queued'")
+          .run()
+          .then((r) => { if (r && r.changes > 0) console.log(`🔄 Startup: ${r.changes} zombie 'queued' rows teruggezet naar 'pending'.`); })
+          .catch(() => {});
         rehydrateDownloadQueue();
         runDownloadSchedulerSoon();
         syncRuntimeActiveState().catch(() => { });

@@ -20352,6 +20352,14 @@ async function startServer() {
 
     setTimeout(() => {
       try {
+        // 2026-05-30 (Jürgen): zombie 'queued' rows uit vorige sessie terug
+        // naar 'pending' zodat rehydrate ze meeneemt. Anders blijven ze hangen
+        // (auto-rehydrate filtert alleen status='pending'). Klassieke
+        // lost-on-restart bug.
+        db.prepare("UPDATE downloads SET status='pending', updated_at=NOW() WHERE status='queued'")
+          .run()
+          .then((r) => { if (r && r.changes > 0) console.log(`🔄 Startup: ${r.changes} zombie 'queued' rows teruggezet naar 'pending'.`); })
+          .catch(() => {});
         rehydrateDownloadQueue();
         runDownloadSchedulerSoon();
         syncRuntimeActiveState().catch(() => { });

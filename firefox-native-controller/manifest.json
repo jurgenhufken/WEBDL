@@ -65,7 +65,12 @@
     "*://*.recu.me/*",
     "*://recu.me/*",
     "*://*.chaturbate.com/*",
-    "*://chaturbate.com/*"
+    "*://chaturbate.com/*",
+    "*://t.me/*",
+    "*://*.t.me/*",
+    "*://telegram.me/*",
+    "*://*.telegram.me/*",
+    "*://web.telegram.org/*"
   ],
   "content_scripts": [
     {
@@ -113,9 +118,15 @@
         "*://*.recu.me/*",
         "*://recu.me/*",
         "*://*.chaturbate.com/*",
-        "*://chaturbate.com/*"
+        "*://chaturbate.com/*",
+        "*://t.me/*",
+        "*://*.t.me/*",
+        "*://telegram.me/*",
+        "*://*.telegram.me/*",
+        "*://web.telegram.org/*"
       ],
       "js": [
+        "content/sites/telegram.js",
         "content/sites/chaturbate.js",
         "content/sites/footstockings.js",
         "content/sites/vipergirls.js",

@@ -208,14 +208,21 @@ async function runWholeThread(job, source, downloadEndpoint) {
   job.itemsTotal += first.items.length;
   await dispatchItemsParallel(first.items, job.channel, source.id, job.sourceUrl, downloadEndpoint, job);
 
-  // Walk pages 2..N
-  for (let i = 1; i < allPages.length; i++) {
+  // 2026-05-30 (Jürgen): walk pages in REVERSE order (laatste page eerst).
+  // Oudere threads hebben pages 1..N waarvan pages 1..oldMax al gescand zijn
+  // bij vorige runs. Nieuwe content komt op de LAATSTE pages binnen. Door
+  // reverse te walken vinden we nieuwe K2S URLs ASAP; oude duplicates komen
+  // pas op het einde en worden door dedup-check geskipt.
+  // Early-stop heuristic: als 3 opeenvolgende pages 100% duplicates leveren,
+  // stop want we zijn in al-gescande oude pages beland.
+  let consecutiveAllDup = 0;
+  for (let i = allPages.length - 1; i >= 1; i--) {
     if (job.cancelled) {
       job.status = 'cancelled';
       jobLog(job, `cancelled at page ${i + 1}/${allPages.length}`);
       return;
     }
-    job.pagesScanned = i + 1; // update VOOR scan zodat UI ziet welke page bezig is
+    job.pagesScanned = allPages.length - i + 1; // UI: hoeveel pages al gescand
     job.updatedAt = new Date().toISOString();
     const pageUrl = allPages[i];
     let pageResult;
@@ -226,10 +233,18 @@ async function runWholeThread(job, source, downloadEndpoint) {
       continue;
     }
     job.itemsTotal += pageResult.items.length;
+    const before = job.itemsDispatched;
     // sourceUrl = job.sourceUrl (root thread, niet pageUrl) zodat alle items
     // van deze whole-thread scan in hetzelfde channel komen.
     await dispatchItemsParallel(pageResult.items, job.channel, source.id, job.sourceUrl, downloadEndpoint, job);
-    jobLog(job, `page ${i + 1}/${allPages.length}: +${pageResult.items.length} items`);
+    const newlyDispatched = job.itemsDispatched - before;
+    const allDup = pageResult.items.length > 0 && newlyDispatched === 0;
+    consecutiveAllDup = allDup ? consecutiveAllDup + 1 : 0;
+    jobLog(job, `page ${i + 1}/${allPages.length}: ${pageResult.items.length} items, ${newlyDispatched} new${allDup ? ' (all dup)' : ''}`);
+    if (consecutiveAllDup >= 3) {
+      jobLog(job, `early-stop: 3 opeenvolgende pages 100% duplicate (we zijn in oude gescande zone)`);
+      break;
+    }
     // Rate-limit: niet hammeren
     if (source.features.rateLimitPerMin && source.features.rateLimitPerMin > 0) {
       const sleepMs = Math.ceil(60000 / source.features.rateLimitPerMin);

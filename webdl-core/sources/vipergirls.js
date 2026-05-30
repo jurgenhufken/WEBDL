@@ -56,9 +56,42 @@ const VIDEO_PREVIEW_THUMB_RE = /\/?(?:th_)?[0-9a-f]{6,}_[^/]+\.(?:wmv|avi|mp4|mk
 // deze img.php-pages niet resolven → 75% van vipergirls posts queued met
 // errors. Apart pattern omdat het in query zit, niet in path.
 const IMAGEVENUE_PREVIEW_QUERY_RE = /[?&]image=[^&]*\.(?:wmv|avi|mp4|mkv|mov|webm|flv|m4v)\.v\d+_/i;
+// 2026-05-30 (Jürgen scrape-batch): elke img.php?image= URL (ook zonder
+// video-ext) faalt met yt-dlp "Unsupported URL". Strenger pakken: alle
+// imagevenue img.php URLs skippen, alleen direct image-URLs accepteren.
+const IMAGEVENUE_IMG_PHP_RE = /\bimagevenue\.com\/img\.php\b/i;
+// 2026-05-30 (Jürgen "rare video previews"): URLs zoals
+// ist5-2.filesor.com/.../Nud1sm003.avi.jpg = video-thumbnails met
+// filename `<videoName>.<videoExt>.<imgExt>`. Filesor/pimpandhost levert
+// deze als image-host maar het is altijd een poster van een video.
+const VIDEO_POSTER_FILENAME_RE = /\.(wmv|avi|mp4|mov|mkv|webm|flv|m4v)\.(jpe?g|png|gif|webp|bmp)(?:[?#]|$)/i;
+// 2026-05-30 (Jürgen "rare collages"): URLs zoals
+// /nudistsonbeach_022_video__image_1_.jpg = collage-thumbnails met
+// patroon `<videoName>_video__image_<N>_.<imgExt>`. picstate.com levert
+// deze als preview-images van videos.
+const VIDEO_COLLAGE_FILENAME_RE = /_video__image_[0-9]+_\.(jpe?g|png|gif|webp|bmp)(?:[?#]|$)/i;
+// `cover.jpg` filenames in 4KDownloader/_4KDownloader/hub structures
+const VIDEO_COVER_FILENAME_RE = /_cover\.(jpe?g|png|gif|webp|bmp)(?:[?#]|$)/i;
 // `cdn-thumbs.imagevenue.com` host serveert pure thumbnails (15-50KB, suffix
 // `_t.jpg`). Zijn klein, geen upgrade-pad → user wil ze niet.
 const IMAGEVENUE_THUMB_HOST_RE = /(?:^|\.)cdn-thumbs\.imagevenue\.com$/i;
+// Forum-zelf-paden: vipergirls.to/threads/images/icons/*.png zijn forum-iconen
+// (smilies, ratings). JUNK_PATH_RE matcht /icon (singular) maar regex zou
+// het al moeten pakken. Dit is een extra safety net.
+const FORUM_ICON_RE = /\/(?:images\/icons|attachments\/icons|smilies)\//i;
+// 2026-05-30 (Jürgen "video threads = alleen videos"): voor threads die
+// duidelijk video-content zijn (titel/url bevat voyeur/nudist/beach/spying/
+// candid/hidden/cam/video) → SKIP image-host URLs, behoud alleen file-hosts
+// (K2S/rapidgator/etc) + direct video-files (.mp4 etc).
+const VIDEO_THREAD_URL_RE = /\b(voyeur|nudist|beach|spying|candid|hidden[-_]?cam|hidden_camera|video|webcam|cams|caught)\b/i;
+const IMAGE_HOST_PATTERNS = [
+  /imagebam\.com/i, /imagetwist\.com/i, /imgbox\.com/i, /pixhost\.(?:to|cc)/i,
+  /postimg\.(?:cc|org)/i, /imagevenue\.com/i, /turboimagehost\.com/i, /turboimg\.net/i,
+  /imx\.(?:to|cc)/i, /imgkiwi\.(?:com|net)/i, /imgchest\.com/i,
+  /vipr\.(?:im|net)/i, /imagebams\.com/i, /imgbb\.com/i, /pimpandhost\.com/i,
+  /picstate\.com/i, /filesor\.com/i,
+];
+const VIDEO_FILE_EXT_RE = /\.(mp4|mov|m4v|mkv|webm|avi|wmv|flv|rar|zip|7z)(?:[?#]|$)/i;
 // vipr.im thumbnails: hostname i*.vipr.im, path /th/<id>/<hex>.jpg.
 // Resolver kan deze niet upgraden naar fullscale → blijft retry-loop. Filter ze
 // hier voordat ze de queue raken. JUNK_PATH_RE matcht `/thumb` maar niet `/th/`.
@@ -132,9 +165,11 @@ function paginate(baseUrl, page) {
 /**
  * Filter: is dit een echte media-URL die we willen downloaden?
  * @param {string} url
+ * @param {string} [baseUrl] - de thread/page URL waar deze item vandaan komt
+ *                              (gebruikt voor channel-aware filtering)
  * @returns {boolean}
  */
-function isMediaCandidate(url) {
+function isMediaCandidate(url, baseUrl) {
   if (!url) return false;
   try {
     const u = new URL(url);
@@ -146,8 +181,20 @@ function isMediaCandidate(url) {
     if (VIDEO_PREVIEW_THUMB_RE.test(path) || VIDEO_PREVIEW_THUMB_RE.test(u.pathname)) return false;
     // Skip imagevenue img.php?image=*.<videoExt>.v*_*lo previews (75% van vipergirls posts).
     if (IMAGEVENUE_PREVIEW_QUERY_RE.test(u.search || '')) return false;
+    // Skip ALLE imagevenue img.php URLs — yt-dlp kan ze niet handlen, queue
+    // vol met "Unsupported URL" errors.
+    if (IMAGEVENUE_IMG_PHP_RE.test(u.hostname + u.pathname)) return false;
+    // Skip video-poster filenames: <name>.<videoExt>.<imgExt> patroon
+    // (filesor.com, pimpandhost, etc. leveren deze als rare thumbs).
+    if (VIDEO_POSTER_FILENAME_RE.test(u.pathname)) return false;
+    // Skip video-collage thumbnails: <name>_video__image_N_.<imgExt> (picstate).
+    if (VIDEO_COLLAGE_FILENAME_RE.test(u.pathname)) return false;
+    // Skip video-cover JPGs (4KDownloader, etc).
+    if (VIDEO_COVER_FILENAME_RE.test(u.pathname)) return false;
     // Skip cdn-thumbs.imagevenue.com — pure thumbnails (15-50KB, geen upgrade-pad).
     if (IMAGEVENUE_THUMB_HOST_RE.test(u.hostname)) return false;
+    // Skip forum-iconen (smilies, ratings) op vipergirls.to zelf.
+    if (FORUM_ICON_RE.test(u.pathname)) return false;
     // Skip vipr.im thumbnails (/th/<id>/<hex>.jpg) — resolver kan ze niet upgraden.
     if (VIPR_THUMB_HOST_RE.test(u.hostname) && VIPR_THUMB_PATH_RE.test(u.pathname)) return false;
     // Skip K2S/Keep2Share als gebruiker geen premium heeft (default aan).
@@ -155,6 +202,17 @@ function isMediaCandidate(url) {
       for (const p of K2S_HOST_PATTERNS) {
         if (p.test(u.hostname)) return false;
       }
+    }
+    // 2026-05-30 (Jürgen): voor VIDEO-threads (voyeur/nudist/beach/spying/
+    // candid/hidden-cam/video) → skip image-host URLs volledig. Alleen
+    // file-hosts (K2S/rapidgator) en directe video-files blijven.
+    const isVideoThread = baseUrl && VIDEO_THREAD_URL_RE.test(String(baseUrl));
+    if (isVideoThread) {
+      for (const p of IMAGE_HOST_PATTERNS) {
+        if (p.test(u.hostname)) return false;
+      }
+      // Direct image files (.jpg etc) ook skippen in video-threads.
+      if (/\.(jpe?g|png|gif|webp|bmp|avif|svg)(?:[?#]|$)/i.test(path)) return false;
     }
     // Direct file extension
     if (DIRECT_FILE_RE.test(path)) return true;
@@ -197,7 +255,7 @@ function extractItemsFromHtml(html, baseUrl) {
     let abs;
     try { abs = new URL(m[1], baseUrl).toString(); } catch (e) { continue; }
     if (seen.has(abs)) continue;
-    if (!isMediaCandidate(abs)) continue;
+    if (!isMediaCandidate(abs, baseUrl)) continue;
     seen.add(abs);
     /** @type {Item['type']} */
     let type = 'unknown';
