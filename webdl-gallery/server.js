@@ -374,8 +374,14 @@ function platformGroupSql(alias = 'd') {
 
 function channelGroupSql(alias = 'd') {
   const sourceSite = sourceSiteSql(alias);
+  // 2026-05-30 (Spoor 5.9): voorheen werden ALLE K2S/sabnzbd items overridden naar
+  // 'site:' + source_site, ook als channel al een thread_<id>_<slug> bevatte.
+  // Resultaat: source-tree toonde "via vipergirls (N) · via keep2share (N)" ipv
+  // thread-titels. Nu alleen fallback bij ontbrekend/unknown channel.
   return `CASE
-    WHEN LOWER(COALESCE(${alias}.platform, '')) IN ('sabnzbd', 'keep2share', 'k2s', 'k2scc', 'k2s.cc', 'k2s.io', 'keep2share.cc') AND ${sourceSite} IS NOT NULL
+    WHEN LOWER(COALESCE(${alias}.platform, '')) IN ('sabnzbd', 'keep2share', 'k2s', 'k2scc', 'k2s.cc', 'k2s.io', 'keep2share.cc')
+      AND (${alias}.channel IS NULL OR ${alias}.channel = '' OR LOWER(${alias}.channel) = 'unknown')
+      AND ${sourceSite} IS NOT NULL
       THEN 'site:' || ${sourceSite}
     ELSE ${alias}.channel
   END`;
