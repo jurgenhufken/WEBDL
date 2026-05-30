@@ -8,7 +8,12 @@ const HEARTBEAT_STALE_MS = 45000;
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 const HTTP_STATUS_PROBE_INTERVAL_MS = 4000;
-const HTTP_TIMEOUT_MS = 6000;
+// 2026-05-30 A.6-fix: 6000ms was te kort voor /api/jobs hub-POST op kanalen met
+// veel videos (50+) — fetch werd geaborteerd → "Operation was aborted" in toolbar.
+// 15000ms geeft hub ruimte voor dispatch + initial DB-insert zonder fail.
+// postHubBatch (line 184) gebruikt nog Math.max(HTTP_TIMEOUT_MS, 60000) voor
+// echt grote batches.
+const HTTP_TIMEOUT_MS = 15000;
 const FFF_BACKGROUND_WATCHDOG_INTERVAL_MS = 30000;
 const FFF_BACKGROUND_STALE_MS = 180000;
 const FFF_BACKGROUND_MAX_RESTARTS = 2;
