@@ -22,6 +22,7 @@
     "tabs",
     "contextMenus",
     "storage",
+    "downloads",
     "http://localhost/*",
     "http://127.0.0.1/*",
     "*://foot-fetish.club/*",
@@ -62,7 +63,9 @@
     "*://*.viper.to/*",
     "*://viper.to/*",
     "*://*.recu.me/*",
-    "*://recu.me/*"
+    "*://recu.me/*",
+    "*://*.chaturbate.com/*",
+    "*://chaturbate.com/*"
   ],
   "content_scripts": [
     {
