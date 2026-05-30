@@ -144,11 +144,17 @@ async function crawlThread(page, threadUrl, meta) {
   console.log(`📍 Forum: ${FORUM_URL}`);
   console.log(`📡 Server: ${SERVER}\n`);
 
-  const browser = await firefox.launch({ headless: false });
-  const context = await browser.newContext({
+  // 2026-05-30 (Jürgen): gebruik persistent profile met FFF-login-cookies.
+  // Profile gemaakt door /tmp/fff_login.js. CF + login cookies blijven bewaard.
+  const PROFILE = process.env.WEBDL_FFF_PROFILE || '/tmp/pw-fff-profile';
+  console.log(`📁 Persistent profile: ${PROFILE}`);
+  const context = await firefox.launchPersistentContext(PROFILE, {
+    headless: false,
+    timeout: 60000,
     userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:128.0) Gecko/20100101 Firefox/128.0',
   });
-  const page = await context.newPage();
+  const browser = context.browser();
+  const page = context.pages()[0] || await context.newPage();
 
   // 2026-05-30: parse start-page uit FORUM_URL (bv. /page-3) zodat we daar
   // BEGINNEN ipv proberen /page-3/page-2 te bouwen (vorige bug → 404).
@@ -215,7 +221,7 @@ async function crawlThread(page, threadUrl, meta) {
     }
   }
 
-  await browser.close();
+  await context.close();
 
   console.log(`\n\n✅ Klaar!`);
   console.log(`📊 Forum: ${stats.forumPages}p | Threads: ${stats.threads} | Pages: ${stats.threadPages}`);

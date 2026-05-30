@@ -958,6 +958,7 @@
     // 2026-05-30 (Jürgen): proactief volgende batch laden zodra we de rand
     // naderen, zodat ▶ blijft werken in filters met duizenden items.
     maybePrefetchViewerItems();
+    preloadNextMedia();
 
     cleanupMedia();
     const mediaSeq = ++vs.mediaSeq;
@@ -1151,6 +1152,44 @@
     if (vs.idx >= vs.items.length - 30) {
       loadMoreViewerItems().catch(() => {});
     }
+  }
+
+  // 2026-05-30 (Jürgen): preload next N media + thumbs zodat ◀▶ snap is.
+  // Images: new Image().src = fileUrl → browser cache pre-warmed.
+  // Videos: skip (te grote bandbreedte voor zinvol preload), wel poster.
+  const _preloadCache = new Map(); // id → Image object (keep ref tegen GC)
+  function preloadNextMedia() {
+    try {
+      const PRELOAD_AHEAD = 3;
+      for (let offset = 1; offset <= PRELOAD_AHEAD; offset++) {
+        const idx = vs.idx + offset;
+        if (idx >= vs.items.length) break;
+        const it = vs.items[idx];
+        if (!it) continue;
+        const key = String(it.id);
+        if (_preloadCache.has(key)) continue; // al gepre-load
+        // Image: full file preload
+        if (it.type === 'image' || it.type === 'photo') {
+          const img = new Image();
+          img.decoding = 'async';
+          img.fetchPriority = 'low';
+          img.src = mediaUrl(it);
+          _preloadCache.set(key, img);
+        } else if (it.type === 'video') {
+          // Video: alleen thumbnail (poster) preload; volledige video te zwaar
+          const img = new Image();
+          img.decoding = 'async';
+          img.fetchPriority = 'low';
+          img.src = thumbUrl(it);
+          _preloadCache.set(key, img);
+        }
+      }
+      // Cleanup oude entries (memory management)
+      if (_preloadCache.size > 30) {
+        const keys = Array.from(_preloadCache.keys()).slice(0, _preloadCache.size - 20);
+        for (const k of keys) _preloadCache.delete(k);
+      }
+    } catch (_) {}
   }
 
   async function navTo(idx) {
