@@ -228,13 +228,22 @@ def write_sidecar(file_path, entity, message, chat_title, topic_titles=None, cha
         print(f"⚠️  Could not write metadata for message {message.id}: {e}")
 
 async def download_message(client, message, output_dir, semaphore, stats, entity=None, topic_titles=None):
-    """Download a single message's media with concurrency control"""
+    """Download a single message's media with concurrency control.
+    2026-05-30 (Jürgen "direct in gallery"): direct na succesvolle download
+    een DB-row inserten zodat het item binnen seconden in de gallery verschijnt
+    (i.p.v. te wachten op tg_auto_import.sh cycle van 3 min).
+    """
     async with semaphore:
         try:
             path = await message.download_media(file=output_dir)
             if path:
                 if entity is not None:
                     write_sidecar(path, entity, message, stats.get('chat_title') or '', topic_titles=topic_titles, channel_info=stats.get('channel_info'))
+                    # Direct DB-insert zodat gallery dit item direct toont
+                    try:
+                        _insert_to_db_immediate(path, entity, message, stats)
+                    except Exception as _e:
+                        print(f"⚠️  DB-insert faalde voor {message.id}: {_e}")
                 stats['count'] += 1
                 total = stats.get('total') or 0
                 if total:
@@ -245,6 +254,68 @@ async def download_message(client, message, output_dir, semaphore, stats, entity
         except Exception as e:
             print(f"⚠️  Error downloading message {message.id}: {e}")
             return False
+
+
+# === DB-insert direct na download (Jürgen 2026-05-30) ===
+_DB_CONN = None
+def _get_db():
+    global _DB_CONN
+    if _DB_CONN is None or _DB_CONN.closed:
+        try:
+            import psycopg2
+            _DB_CONN = psycopg2.connect("dbname=webdl user=jurgen host=localhost")
+            _DB_CONN.autocommit = True
+        except Exception as e:
+            print(f"⚠️  Geen DB-conn: {e}")
+            return None
+    return _DB_CONN
+
+
+def _insert_to_db_immediate(filepath, entity, message, stats):
+    """Insert row in public.downloads als completed. Dedup via filepath uniek.
+    Veilig om herhaaldelijk te roepen (ON CONFLICT DO NOTHING)."""
+    conn = _get_db()
+    if conn is None:
+        return
+    import os as _os
+    channel_username = getattr(entity, 'username', None)
+    channel_id = str(getattr(entity, 'id', '') or '')
+    channel_name = channel_username or channel_id or 'telegram'
+    chat_title = stats.get('chat_title') or channel_name
+    # title uit message
+    media_type = type(message.media).__name__ if message.media else 'unknown'
+    title = (str(getattr(message, 'message', '') or '').strip()[:120] or _os.path.basename(filepath))[:200]
+    duration_sec = 0
+    try:
+        from telethon.tl.types import DocumentAttributeVideo, DocumentAttributeAudio
+        if hasattr(message.media, 'document') and message.media.document is not None:
+            for attr in message.media.document.attributes or []:
+                if isinstance(attr, (DocumentAttributeVideo, DocumentAttributeAudio)):
+                    duration_sec = int(getattr(attr, 'duration', 0) or 0)
+                    break
+    except Exception:
+        pass
+    h, rem = divmod(duration_sec, 3600)
+    m, s = divmod(rem, 60)
+    duration_str = f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}" if duration_sec else ''
+    file_size = _os.path.getsize(filepath) if _os.path.exists(filepath) else 0
+    source_url = f"https://t.me/{channel_username}/{message.id}" if channel_username else f"https://t.me/c/{channel_id}/{message.id}"
+    import json as _json
+    metadata = _json.dumps({
+        'platform': 'telegram',
+        'channel': channel_name,
+        'channel_title': chat_title,
+        'channel_id': channel_id,
+        'telegram_message_id': message.id,
+        'media_type': media_type,
+        'duration_sec': duration_sec,
+    })
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO downloads (url, platform, channel, title, status, metadata, source_url, filepath, filesize, duration, created_at, updated_at, finished_at)
+            VALUES (%s, 'telegram', %s, %s, 'completed', %s::jsonb, %s, %s, %s, %s, NOW(), NOW(), NOW())
+            ON CONFLICT DO NOTHING
+        """, (source_url, channel_name, title, metadata, source_url, filepath, file_size, duration_str))
 
 async def download_entity(client, chat_id, output_dir, message_limit=None, parallel=5, with_linked=False, seen=None, media_limit=None):
     """Download media from a Telegram channel/chat using an already connected client."""
