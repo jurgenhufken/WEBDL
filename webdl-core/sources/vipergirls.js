@@ -38,9 +38,10 @@ const MEDIA_HOST_PATTERNS = [
 
 // 2026-05-25: K2S/Keep2Share premium accounts vereisen geldige auth. Zonder
 // premium krijgt elke download "Download is not available" → wachtrij vol
-// errors + captcha-flags. Skip K2S-links default. Zet WEBDL_VIPERGIRLS_SKIP_K2S=0
-// om dit uit te zetten (alleen zinvol als je weer premium hebt).
-const SKIP_K2S_LINKS = String(process.env.WEBDL_VIPERGIRLS_SKIP_K2S || '1').trim() !== '0';
+// errors + captcha-flags. 2026-05-30: K2S werkt nu (web-cookie auth + monitor
+// health.ok=true) — default DRAAIEN we K2S-links wel mee. Opt-out via
+// WEBDL_VIPERGIRLS_SKIP_K2S=1 als premium weer expired raakt.
+const SKIP_K2S_LINKS = String(process.env.WEBDL_VIPERGIRLS_SKIP_K2S || '0').trim() === '1';
 const K2S_HOST_PATTERNS = [/\bk2s\.cc\b/i, /\bkeep2share\.cc\b/i, /\bk2s\.io\b/i];
 const DIRECT_FILE_RE = /\.(jpe?g|png|gif|webp|bmp|avif|mp4|mov|m4v|webm|mkv|zip|rar|7z)(?:[?#]|$)/i;
 const JUNK_PATH_RE = /\/(?:thumb|thumbs|thumbnail|icon|sprite|avatar|emoji|smilie|smiley)\b/i;
