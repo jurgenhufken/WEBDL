@@ -52,11 +52,48 @@ window.WEBDL_SITES['sexygirlspics.com'] = {
       },
     },
     {
-      label: '🚧 Download album',
-      color: '#666',
-      match() { return /\/(pic|pics|gallery|galleries|albums?)\//i.test(window.location.pathname); },
+      label: '📥 Download dit album',
+      color: '#d9272e',
+      match() { return /\/pics\/[a-z0-9-]+-\d+\/?$/i.test(window.location.pathname); },
       async onClick() {
-        return { text: 'Album-resolver wordt gebouwd — wacht eventjes' };
+        try {
+          const r = await fetch('http://localhost:35729/api/sexygirlspics/album', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: window.location.href.split('#')[0].split('?')[0] }),
+          });
+          const body = await r.json().catch(() => ({}));
+          if (r.ok && body.success !== false) {
+            return { text: `✓ album gequeued (pid ${body.pid || '?'})` };
+          }
+          return { text: `✗ ${body.error || ('HTTP ' + r.status)}` };
+        } catch (e) {
+          return { text: `✗ ${String(e.message || e).slice(0, 60)}` };
+        }
+      },
+    },
+    {
+      label: '🧵 Walk hele search/category (alle albums)',
+      color: '#0ea5e9',
+      match() {
+        // Listing-types: /search/<term>/, /category/<cat>/, /tag/<tag>/, /pornstars/<name>/
+        return /^\/(search|category|categories|tag|tags|pornstars)\/[a-z0-9-]+/i.test(window.location.pathname);
+      },
+      async onClick() {
+        try {
+          const r = await fetch('http://localhost:35729/api/sexygirlspics/album', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: window.location.href.split('#')[0] }),
+          });
+          const body = await r.json().catch(() => ({}));
+          if (r.ok && body.success !== false) {
+            return { text: `✓ listing walk gestart (pid ${body.pid || '?'})` };
+          }
+          return { text: `✗ ${body.error || ('HTTP ' + r.status)}` };
+        } catch (e) {
+          return { text: `✗ ${String(e.message || e).slice(0, 60)}` };
+        }
       },
     },
   ],

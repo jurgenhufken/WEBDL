@@ -7382,6 +7382,51 @@ expressApp.post('/api/erome/album', (req, res) => {
   }
 });
 
+// sexygirlspics.com album OR search/category listing → spawn scripts/sgp_dl.py.
+// Werkt voor zowel /pics/<slug>-<id>/ (single album) als /search/<term>/ /
+// /category/<cat>/ / /pornstars/<name>/ (listing-walk + per-album download).
+expressApp.post('/api/sexygirlspics/album', (req, res) => {
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const url = String(body.url || '').trim();
+    const channel = String(body.channel || '').trim();
+    const maxAlbums = Number(body.max) > 0 ? Math.floor(Number(body.max)) : 0;
+    if (!url || !/^https?:\/\/(?:www\.)?sexygirlspics\.com\//i.test(url)) {
+      return res.status(400).json({ success: false, error: 'url moet sexygirlspics.com URL zijn' });
+    }
+    const script = path.join(__dirname, '..', '..', 'scripts', 'sgp_dl.py');
+    if (!fs.existsSync(script)) {
+      return res.status(500).json({ success: false, error: `script ontbreekt: ${script}` });
+    }
+    const args = [script, url];
+    if (channel) args.push('--channel-override', channel);
+    if (maxAlbums) args.push('--max', String(maxAlbums));
+    const child = spawn('/usr/bin/python3', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: false,
+      env: { ...process.env },
+    });
+    const pid = child.pid;
+    let stderr = '';
+    child.stderr.on('data', (d) => { stderr += d.toString().slice(0, 4096); });
+    child.on('close', (code) => {
+      console.log(`[sgp_dl pid=${pid}] exit ${code}`);
+      if (code !== 0) console.warn(`[sgp_dl pid=${pid}] stderr: ${stderr.slice(0, 500)}`);
+    });
+    child.unref();
+    return res.json({
+      success: true,
+      url,
+      channel: channel || '(auto)',
+      maxAlbums,
+      pid,
+      message: 'sgp_dl.py gestart — album of listing-walk loopt op achtergrond',
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: String(e && e.message ? e.message : e) });
+  }
+});
+
 // mega.nz file/folder share-link → spawn scripts/mega_dl.py async.
 // URL moet `#KEY` fragment bevatten (encryption-key) — anders kan megatools
 // niet decrypten. We INSERTen direct een pending DB-row als source-of-truth

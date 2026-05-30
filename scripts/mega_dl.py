@@ -105,17 +105,19 @@ def download_one(url, base_dir, row_id=None):
         if row_id: update_db_error(row_id, msg)
         return False
 
-    # Update parent row + insert child-files
+    # Update parent row + insert ALL files (zodat gallery alles toont).
+    # insert_child dedupt op filepath dus dubbel-aanroep is veilig.
     largest = max(files, key=os.path.getsize)
     largest_size = os.path.getsize(largest)
+    channel = f"mega_{info['id']}"
     if row_id:
         update_db_completed(row_id, largest, largest_size)
-    # Insert child files (if folder met meerdere)
-    if len(files) > 1:
-        channel = f"mega_{info['id']}"
-        for fp in files:
-            if fp == largest: continue
-            insert_child(url, fp, os.path.getsize(fp), channel)
+    # 2026-05-30: ALTIJD alle files inserteren (was alleen non-largest, dat
+    # liet button-triggered downloads zonder DB-rij voor de hoofdfile achter).
+    for fp in files:
+        if row_id and fp == largest:
+            continue  # parent row al ge-updatet
+        insert_child(url, fp, os.path.getsize(fp), channel)
     return True
 
 
@@ -135,10 +137,14 @@ def insert_child(parent_url, filepath, filesize, channel):
     safe_url = parent_url.replace("'", "''")
     safe_fp = filepath.replace("'", "''")
     safe_ch = channel.replace("'", "''")
-    title = os.path.basename(filepath).replace("'", "''")[:200]
+    fname = os.path.basename(filepath)
+    title = os.path.splitext(fname)[0][:200].replace("'", "''")
+    safe_fname = fname.replace("'", "''")
+    fmt = os.path.splitext(fname)[1].lstrip('.').lower() or 'bin'
+    meta = f'{{"platform":"mega","channel":"{safe_ch}","title":"{title}","url":"{safe_url}","adapter":"mega_dl","source_url":"{safe_url}","indexed_channel":"{safe_ch}"}}'
     sql = f"""
-INSERT INTO downloads (url, platform, channel, title, status, metadata, source_url, filepath, filesize, created_at, updated_at, finished_at)
-SELECT '{safe_url}', 'mega', '{safe_ch}', '{title}', 'completed', '{{"platform":"mega"}}'::jsonb, '{safe_url}', '{safe_fp}', {filesize}, NOW(), NOW(), NOW()
+INSERT INTO downloads (url, platform, channel, title, status, metadata, source_url, filepath, filename, filesize, format, progress, created_at, updated_at, finished_at)
+SELECT '{safe_url}', 'mega', '{safe_ch}', '{title}', 'completed', '{meta}'::jsonb, '{safe_url}', '{safe_fp}', '{safe_fname}', {filesize}, '{fmt}', 100, NOW(), NOW(), NOW()
 WHERE NOT EXISTS (SELECT 1 FROM downloads WHERE filepath = '{safe_fp}');
 """
     subprocess.run(["psql", "-U", "jurgen", "-d", "webdl", "-tAc", sql], capture_output=True, timeout=10)

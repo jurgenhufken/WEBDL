@@ -34,6 +34,17 @@ const megaConfig = {
     return 'single';
   },
 
+  // Default deriveChannel — engine roept dit altijd op voor channel-hint;
+  // zonder def throwt het en worden extraButtons niet gerendeerd.
+  deriveChannel(url) {
+    try {
+      const u = new URL(url, window.location.href);
+      const m = String(u.pathname || '').match(/\/(file|folder)\/([A-Za-z0-9_-]+)/);
+      if (m) return `${m[1]}_${m[2].slice(0, 12)}`;
+    } catch (_) {}
+    return 'mega';
+  },
+
   itemTypes: [],
 
   extraButtons: [
