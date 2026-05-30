@@ -13,18 +13,12 @@ window.WEBDL_SITES['sexygirlspics.com'] = {
     return 'listing';
   },
 
-  itemTypes: [
-    {
-      name: 'album',
-      match: (p) => /^\/(albums?|pics?|gallery|galleries)\//i.test(p) || /^\/\d+\/[a-z0-9-]+\/?$/i.test(p),
-      selector: 'a[href*="/album"], a[href*="/pics/"], a[href*="/gallery"]',
-      endpoint: '/download',
-      buildBody: (url, channel) => ({ url, platform: 'sexygirlspics', channel, title: '' }),
-      singleLabel: '⬇ Download dit album',
-      listingNoun: 'albums',
-      color: '#7c3aed',
-    },
-  ],
+  // 2026-05-30: tijdelijk lege itemTypes — sexygirlspics albums (/pics/<slug>/)
+  // zijn aggregator-pages die via yt-dlp 'Unsupported URL' geven. Wacht op
+  // dedicated album-resolver (scripts/sexygirlspics_album_dl.py + /api/sexygirlspics/album
+  // endpoint). Tot dan: geen queue om error-stream te voorkomen.
+  // Site-engine zal "Deze pagina (leeg)" / "Alle pages" tonen zonder items.
+  itemTypes: [],
 
   paginationUrl(baseHref, page) {
     if (page <= 1) return baseHref;
