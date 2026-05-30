@@ -71,18 +71,21 @@ def download_one(url, base_dir, row_id=None):
     os.makedirs(out_dir, exist_ok=True)
 
     print(f"[mega] {info['kind']}/{info['id']} → {out_dir}")
+    # Geen subprocess timeout — grote folders (10+ GB) hebben uren nodig en megatools
+    # is resume-safe (skipt complete files, hervat .megatmp.* bij re-run). Als hangen
+    # echt voorkomt, beter detecteren via disk-progress check elders.
     try:
         result = subprocess.run(
             [MEGATOOLS, "dl", "--no-progress", "--path", out_dir, url],
-            capture_output=True, text=True, timeout=1800  # 30 min per link
+            capture_output=True, text=True
         )
         if result.returncode != 0:
             msg = f"megatools exit {result.returncode}: {result.stderr[:200] or result.stdout[:200]}"
             print(f"  ERROR: {msg}")
             if row_id: update_db_error(row_id, msg)
             return False
-    except subprocess.TimeoutExpired:
-        msg = "megatools timeout (>30 min)"
+    except Exception as e:
+        msg = f"megatools exception: {e}"
         print(f"  ERROR: {msg}")
         if row_id: update_db_error(row_id, msg)
         return False
