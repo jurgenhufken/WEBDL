@@ -1596,11 +1596,14 @@ async function resolveKeep2ShareDirectUrl(input, metadata = null) {
       : accessTokenSource === 'metadata-cookie'
         ? 'K2S accessToken uit meegegeven cookie'
         : 'K2S accessToken';
+    // 2026-05-30: trigger on-demand health-refresh (throttled 1×/min)
+    try { if (typeof noteKeep2ShareError === 'function') noteKeep2ShareError('accessToken-rejected'); } catch (_) {}
     return {
       url: '',
       error: `${sourceLabel} werd niet geaccepteerd voor getUrl: ${keep2ShareApiErrorMessage(json)}. Web-cookie fallback: ${webResolved.error || 'geen downloadlink'}`
     };
   }
+  try { if (typeof noteKeep2ShareError === 'function') noteKeep2ShareError('getUrl-failed'); } catch (_) {}
   return { url: '', error: `Keep2Share getUrl faalde: ${keep2ShareApiErrorMessage(json)}. Web-cookie fallback: ${webResolved.error || 'geen downloadlink'}` };
 }
 
