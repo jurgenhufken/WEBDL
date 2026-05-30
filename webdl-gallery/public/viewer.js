@@ -1154,42 +1154,43 @@
     }
   }
 
-  // 2026-05-30 (Jürgen): preload next N media + thumbs zodat ◀▶ snap is.
-  // Images: new Image().src = fileUrl → browser cache pre-warmed.
-  // Videos: skip (te grote bandbreedte voor zinvol preload), wel poster.
+  // 2026-05-30 (Jürgen): preload volgende items zodat ◀▶ snap is.
+  // Defer naar idle-tijd (na current load) + lager aantal zodat slideshow
+  // en huidige media niet uithongeren op bandbreedte. Slechts images
+  // worden preloaded; videos zou bandwidth misbruiken.
   const _preloadCache = new Map(); // id → Image object (keep ref tegen GC)
+  let _preloadTimer = null;
   function preloadNextMedia() {
-    try {
-      const PRELOAD_AHEAD = 3;
-      for (let offset = 1; offset <= PRELOAD_AHEAD; offset++) {
-        const idx = vs.idx + offset;
-        if (idx >= vs.items.length) break;
-        const it = vs.items[idx];
-        if (!it) continue;
-        const key = String(it.id);
-        if (_preloadCache.has(key)) continue; // al gepre-load
-        // Image: full file preload
-        if (it.type === 'image' || it.type === 'photo') {
-          const img = new Image();
-          img.decoding = 'async';
-          img.fetchPriority = 'low';
-          img.src = mediaUrl(it);
-          _preloadCache.set(key, img);
-        } else if (it.type === 'video') {
-          // Video: alleen thumbnail (poster) preload; volledige video te zwaar
-          const img = new Image();
-          img.decoding = 'async';
-          img.fetchPriority = 'low';
-          img.src = thumbUrl(it);
-          _preloadCache.set(key, img);
+    if (_preloadTimer) clearTimeout(_preloadTimer);
+    // 800ms delay: wacht tot huidige item zijn fetch heeft afgerond, dan pas
+    // begin preload (zodat slideshow-advance niet starveert).
+    _preloadTimer = setTimeout(() => {
+      _preloadTimer = null;
+      try {
+        const PRELOAD_AHEAD = 2; // was 3 - voorzichtiger
+        for (let offset = 1; offset <= PRELOAD_AHEAD; offset++) {
+          const idx = vs.idx + offset;
+          if (idx >= vs.items.length) break;
+          const it = vs.items[idx];
+          if (!it) continue;
+          const key = String(it.id);
+          if (_preloadCache.has(key)) continue;
+          // Alleen images preloaden — videos te groot voor zinvol effect
+          if (it.type === 'image' || it.type === 'photo') {
+            const img = new Image();
+            img.decoding = 'async';
+            try { img.fetchPriority = 'low'; } catch (_) {}
+            img.src = mediaUrl(it);
+            _preloadCache.set(key, img);
+          }
         }
-      }
-      // Cleanup oude entries (memory management)
-      if (_preloadCache.size > 30) {
-        const keys = Array.from(_preloadCache.keys()).slice(0, _preloadCache.size - 20);
-        for (const k of keys) _preloadCache.delete(k);
-      }
-    } catch (_) {}
+        // Cleanup oude entries
+        if (_preloadCache.size > 20) {
+          const keys = Array.from(_preloadCache.keys()).slice(0, _preloadCache.size - 12);
+          for (const k of keys) _preloadCache.delete(k);
+        }
+      } catch (_) {}
+    }, 800);
   }
 
   async function navTo(idx) {

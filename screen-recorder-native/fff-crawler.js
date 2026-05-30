@@ -51,29 +51,58 @@ async function queueBatch(urls, meta) {
 async function extractImageUrls(page) {
   return page.evaluate(() => {
     const urls = new Set();
+
+    // 2026-05-30 (Jürgen "moet weg"): filter junk URLs voordat we toevoegen.
+    // - proxy.php?image= : forum wrapper — unwrap naar de echte URL (param)
+    // - twemoji / 1fXXXX.png : Unicode emoji codepoints
+    // - /smilies/ /avatars/ /styles/ /images/icons : forum chrome
+    // - blank.gif, spacer : transparent placeholders
+    const JUNK_RE = /\/(?:twemoji|smilies|emoticons|avatars?|styles\/[^/]+\/(?:xenforo|core)\/|images\/(?:icons|buttons|misc)|blank\.gif|spacer\.)/i;
+    const EMOJI_CODEPOINT_RE = /\/(?:1f[0-9a-f]{3,4}|26[0-9a-f]{2}|27[0-9a-f]{2})\.(?:png|svg|webp)$/i;
+    function isJunk(u) {
+      if (!u) return true;
+      if (JUNK_RE.test(u)) return true;
+      if (EMOJI_CODEPOINT_RE.test(u)) return true;
+      return false;
+    }
+    function unwrapProxy(u) {
+      // FFF proxy.php?image=<encoded-url>  →  echte URL
+      const m = (u || '').match(/[?&]image=([^&#]+)/i);
+      if (!m) return u;
+      try { return decodeURIComponent(m[1]); } catch (_) { return u; }
+    }
+    function addUrl(u) {
+      if (!u) return;
+      // Eerst unwrap proxy.php wrappers
+      if (/\/proxy\.php\?/i.test(u)) u = unwrapProxy(u);
+      if (isJunk(u)) return;
+      urls.add(u);
+    }
+
     document.querySelectorAll('a[href]').forEach(a => {
       const h = a.href || '';
-      if (/upload\.footfetishforum\.com\/image\//i.test(h)) urls.add(h);
-      if (/imagebam\.com/i.test(h)) urls.add(h);
-      if (/pixhost\.to/i.test(h)) urls.add(h);
-      if (/vipr\.im/i.test(h)) urls.add(h);
-      if (/imx\.to/i.test(h)) urls.add(h);
-      if (/imgbox\.com/i.test(h)) urls.add(h);
-      if (/imagetwist\.com/i.test(h)) urls.add(h);
-      if (/imagevenue\.com/i.test(h)) urls.add(h);
-      if (/turboimagehost\.com/i.test(h)) urls.add(h);
-      if (/postimg/i.test(h)) urls.add(h);
-      // 2026-05-30: extra hosts gezien in DB voor FFF
-      if (/flc\.nyc3\.digitaloceanspaces\.com/i.test(h)) urls.add(h);
-      if (/cdni\.pornpics\.com/i.test(h)) urls.add(h);
+      if (/upload\.footfetishforum\.com\/image\//i.test(h)) addUrl(h);
+      if (/imagebam\.com/i.test(h)) addUrl(h);
+      if (/pixhost\.to/i.test(h)) addUrl(h);
+      if (/vipr\.im/i.test(h)) addUrl(h);
+      if (/imx\.to/i.test(h)) addUrl(h);
+      if (/imgbox\.com/i.test(h)) addUrl(h);
+      if (/imagetwist\.com/i.test(h)) addUrl(h);
+      if (/imagevenue\.com/i.test(h)) addUrl(h);
+      if (/turboimagehost\.com/i.test(h)) addUrl(h);
+      if (/postimg/i.test(h)) addUrl(h);
+      if (/flc\.nyc3\.digitaloceanspaces\.com/i.test(h)) addUrl(h);
+      if (/cdni\.pornpics\.com/i.test(h)) addUrl(h);
+      // proxy.php links die direct in een <a> staan
+      if (/\/proxy\.php\?image=/i.test(h)) addUrl(h);
     });
     document.querySelectorAll('.message-body img[src], .bbWrapper img[src]').forEach(img => {
       const s = img.src || '';
-      if (/\.(jpg|jpeg|png|gif|webp)/i.test(s) && !/avatar|smil|emoji|icon/i.test(s)) urls.add(s);
+      if (/\.(jpg|jpeg|png|gif|webp)/i.test(s)) addUrl(s);
     });
     document.querySelectorAll('a[href*="/attachments/"]').forEach(a => {
       const h = a.href || '';
-      if (/footfetishforum\.com\/attachments\//i.test(h)) urls.add(h);
+      if (/footfetishforum\.com\/attachments\//i.test(h)) addUrl(h);
     });
     return [...urls];
   });
