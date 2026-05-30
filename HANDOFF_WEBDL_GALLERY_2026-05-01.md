@@ -1,3 +1,7 @@
+> ⚠️ **VEROUDERD per 2026-05-30** — handoff van 1 mei. Voor actueel:
+> - [STATUS-2026-05-24.md](STATUS-2026-05-24.md), [ARCHITECTURE.md](ARCHITECTURE.md), [DOCS-INDEX.md](DOCS-INDEX.md)
+> - Recente handoff: [HANDOFF-COWORK-TO-VSCODE-2026-05-24.md](HANDOFF-COWORK-TO-VSCODE-2026-05-24.md)
+
 # WEBDL Gallery Handoff - 2026-05-01
 
 Dit document is bedoeld om in een nieuwe chat snel verder te kunnen zonder de hele thread opnieuw te lezen.

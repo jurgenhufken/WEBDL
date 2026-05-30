@@ -1,3 +1,9 @@
+> ⚠️ **VEROUDERD per 2026-05-30** — laatst bijgewerkt 12 april. Voor actuele simple-server status:
+> - [../STATUS-2026-05-24.md](../STATUS-2026-05-24.md) (sectie "Simple-server")
+> - [../ARCHITECTURE.md](../ARCHITECTURE.md)
+> - [../DOCS-INDEX.md](../DOCS-INDEX.md)
+> - Recente refactor zit in commit-history, niet in dit document.
+
 # Refactor Plan: simple-server.js → Modulaire Architectuur
 
 ## Waarom "extract & move" niet werkt

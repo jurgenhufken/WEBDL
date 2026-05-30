@@ -1,3 +1,8 @@
+> ⚠️ **VEROUDERD per 2026-05-30** — laatst bijgewerkt 24 april. Voor actuele architectuur:
+> - [../ARCHITECTURE.md](../ARCHITECTURE.md) — WEBDL-brede target architectuur (24-mei)
+> - [../STATUS-2026-05-24.md](../STATUS-2026-05-24.md) — live status
+> - [../DOCS-INDEX.md](../DOCS-INDEX.md) — overzicht alle docs
+
 # WebDL-Hub — Architectuur
 
 Centrale orchestrator voor alle download-tools binnen het WEBDL-ecosysteem.

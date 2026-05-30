@@ -1,3 +1,8 @@
+> ⚠️ **VEROUDERD per 2026-05-30** — naam zegt "Current" maar is van 1 mei. Voor actueel:
+> - [STATUS-2026-05-24.md](STATUS-2026-05-24.md) — live document
+> - [ARCHITECTURE.md](ARCHITECTURE.md) — target architectuur (24-mei)
+> - [DOCS-INDEX.md](DOCS-INDEX.md) — overzicht alle docs
+
 # WEBDL Current Plan - 2026-05-01
 
 This is the current working note after reconstructing the previous Codex session.

@@ -1,3 +1,6 @@
+> ⚠️ **VEROUDERD per 2026-05-30** — uit 2 mei. Voor actueel:
+> - [STATUS-2026-05-24.md](STATUS-2026-05-24.md), [ARCHITECTURE.md](ARCHITECTURE.md), [DOCS-INDEX.md](DOCS-INDEX.md)
+
 # WEBDL vervolgplan voor nieuwe chat
 
 ## Huidige status
