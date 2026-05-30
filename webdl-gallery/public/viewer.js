@@ -1128,7 +1128,11 @@
         vs.items.push(...fresh);
         vs.offset = vs.items.length;
         vs.nextCursor = null;
-        if (data.items.length < 100) {
+        // 2026-05-30 (Jürgen "oneindig doorscrollen"): NIET vs.done op
+        // 'items.length < 100' want server kan minder leveren door dedup of
+        // filters terwijl er nog wel meer is. Alleen op léeg → done. En
+        // alleen op 0 fresh (alle dupes) → done om infinite-loop te vermijden.
+        if (fresh.length === 0) {
           vs.done = true;
         }
         renderSidebarList();
