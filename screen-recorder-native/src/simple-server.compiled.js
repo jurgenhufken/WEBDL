@@ -6233,9 +6233,14 @@ function shouldAutoRehydrate() {
   const heavyLimit = Math.max(0, HEAVY_DOWNLOAD_CONCURRENCY);
   const lightLimit = Math.max(0, LIGHT_DOWNLOAD_CONCURRENCY);
   const batchLimit = Math.max(0, BATCH_DOWNLOAD_CONCURRENCY);
-  const needHeavy = heavyLimit > 0 && queuedHeavy.length === 0 && activeLaneCount('heavy') < heavyLimit;
-  const needLight = lightLimit > 0 && queuedLight.length === 0 && activeLaneCount('light') < lightLimit;
-  const needBatch = batchLimit > 0 && queuedBatch.length === 0 && activeLaneCount('batch') < batchLimit;
+  // 2026-05-30 (Jürgen footstockings-bug): pre-fill queue zelfs als slots
+  // vol zijn. Voorheen wachtte rehydrate tot zowel queue=0 ALS slot vrij —
+  // dat creëerde een gap: queue raakt leeg, slot komt vrij, rehydrate
+  // moet eerst back-off (30-300s) overleven voordat nieuwe items binnenkomen.
+  // Nu: keep queue topped up tot >= lightLimit, ongeacht active.
+  const needHeavy = heavyLimit > 0 && queuedHeavy.length < heavyLimit;
+  const needLight = lightLimit > 0 && queuedLight.length < lightLimit;
+  const needBatch = batchLimit > 0 && queuedBatch.length < batchLimit;
   return needHeavy || needLight || needBatch;
 }
 
@@ -6283,9 +6288,10 @@ function scheduleAutoRehydrate() {
       const heavyLimit = Math.max(0, HEAVY_DOWNLOAD_CONCURRENCY);
       const lightLimit = Math.max(0, LIGHT_DOWNLOAD_CONCURRENCY);
       const batchLimit = Math.max(0, BATCH_DOWNLOAD_CONCURRENCY);
-      const needHeavy = heavyLimit > 0 && queuedHeavy.length === 0 && activeLaneCount('heavy') < heavyLimit;
-      const needLight = lightLimit > 0 && queuedLight.length === 0 && activeLaneCount('light') < lightLimit;
-      const needBatch = batchLimit > 0 && queuedBatch.length === 0 && activeLaneCount('batch') < batchLimit;
+      // 2026-05-30 (Jürgen footstockings-bug): zie shouldAutoRehydrate.
+      const needHeavy = heavyLimit > 0 && queuedHeavy.length < heavyLimit;
+      const needLight = lightLimit > 0 && queuedLight.length < lightLimit;
+      const needBatch = batchLimit > 0 && queuedBatch.length < batchLimit;
       if (!needHeavy && !needLight && !needBatch) return;
 
       // 2026-05-30 Spoor 1.2 v3: starvation-fix via inline-literal IN-clause.
@@ -6293,11 +6299,20 @@ function scheduleAutoRehydrate() {
       // hier accepteert geen parameter-binding voor IN-lijst. Nu: hardcoded inline
       // SQL-string van quoted-literals. Garandeert lane-balance: 125 light-platforms
       // + 125 heavy-platforms parallel opgehaald, geen wederzijdse starvation.
+      // 2026-05-30: sync met lightPlatforms in detectLane (regel 5911).
+      // Tube-sites toegevoegd zodat rehydrate ze met de juiste prio binnenhaalt.
       const LIGHT_PLATFORM_HINTS = [
         'footfetishforum','forum-area','imagetwist','imagebam','imgbox','imagevenue','imgchest','imgvb',
         'imx','vipr','turboimagehost','imgkiwi','pixhost','postimg','bunkr','jpg','aznudefeet','pornpics',
         'kinky','wikifeet','wikifeetx','elitebabes','erome','keep2share','twitter',
         'vipergirls','phun','amateurvoyeurforum','pictoa','imagefap',
+        'footstockings','spankbang','heavyfetish','darknessporn','darknetvideos',
+        'redtube','xnxx','tnaflix','xvideos','recu','omegleporn',
+        'sexygirlspics','hoestube','porncoven','pornkai','porndr',
+        'pornzog','tubesafari','alohatube','usersporn','xfree','zzztube',
+        'spycamhub','favoyeurtube','nakedneighbour','chaturbate','bongacams',
+        'eporner','xhamster','xh','bravoteens','drtvid','xozilla',
+        'videotubepornclassic','bigtitslust','vid-ip','videohdzog','yourlust',
       ];
       const lightLiteral = LIGHT_PLATFORM_HINTS.map(p => `'${p}'`).join(',');
       const baseFilter = `status = 'pending'
@@ -6326,15 +6341,20 @@ function scheduleAutoRehydrate() {
       if (!rows || rows.length === 0) return;
       console.log(`🔁 Auto-rehydrate: loading ${rows.length} pending items into queue...`);
       let loaded = 0;
+      // 2026-05-30 DIAGNOSTIC: tel skip-reden per categorie
+      let skipActive = 0, skipStarting = 0, skipQueued = 0, skipUrl = 0, skipRec = 0, skipLaneHeavy = 0, skipLaneLight = 0, skipLaneBatch = 0;
+      const skipSampleIds = { activeP: [], startingJ: [], queuedJ: [] };
       for (const row of rows) {
         const id = Number(row.id);
         if (!Number.isFinite(id)) continue;
-        if (activeProcesses.has(id) || startingJobs.has(id) || queuedJobs.has(id)) continue;
+        if (activeProcesses.has(id)) { skipActive++; if (skipSampleIds.activeP.length < 3) skipSampleIds.activeP.push(id); continue; }
+        if (startingJobs.has(id)) { skipStarting++; if (skipSampleIds.startingJ.length < 3) skipSampleIds.startingJ.push(id); continue; }
+        if (queuedJobs.has(id)) { skipQueued++; if (skipSampleIds.queuedJ.length < 3) skipSampleIds.queuedJ.push(id); continue; }
         let url = String(row.url || '').trim();
-        if (!url || url.startsWith('recording:')) continue;
+        if (!url || url.startsWith('recording:')) { skipUrl++; continue; }
         let parsedMeta = null;
         try { if (row.metadata) parsedMeta = JSON.parse(row.metadata); } catch (e) {}
-        if (parsedMeta && parsedMeta.webdl_kind === 'recording') continue;
+        if (parsedMeta && parsedMeta.webdl_kind === 'recording') { skipRec++; continue; }
         // 2026-05-30 (Jürgen): K2S-resolver overschrijft `downloads.url` met
         // resolved temp-URL (str-XX.filestore.app/...?temp_url_sig=...). Die
         // signatures verlopen na ~1u → re-queue krijgt 404. Restore vanuit
@@ -6353,9 +6373,9 @@ function scheduleAutoRehydrate() {
         const title = ctx.title;
         const metadata = ctx.metadata;
         const lane = detectLane(platform, url, metadata);
-        if (lane === 'heavy' && !needHeavy) continue;
-        if (lane === 'light' && !needLight) continue;
-        if (lane === 'batch' && !needBatch) continue;
+        if (lane === 'heavy' && !needHeavy) { skipLaneHeavy++; continue; }
+        if (lane === 'light' && !needLight) { skipLaneLight++; continue; }
+        if (lane === 'batch' && !needBatch) { skipLaneBatch++; continue; }
         queuedJobs.set(id, { downloadId: id, url, platform, channel, title, metadata, progress: 0 });
         jobLane.set(id, lane);
         jobPlatform.set(id, platform);
@@ -6387,6 +6407,10 @@ function scheduleAutoRehydrate() {
         nextRehydrateAllowedAt = Date.now() + backoffMs;
         if (consecutiveZeroLoads <= 3) {
           console.log(`🔁 Auto-rehydrate: 0 nieuwe items in ${rows.length} pending (alle al in queue/active). Back-off ${Math.round(backoffMs/1000)}s.`);
+          // 2026-05-30 DIAGNOSTIC
+          console.log(`   🔍 skip breakdown: active=${skipActive} starting=${skipStarting} queued=${skipQueued} url=${skipUrl} rec=${skipRec} laneHeavy=${skipLaneHeavy} laneLight=${skipLaneLight} laneBatch=${skipLaneBatch}`);
+          console.log(`   🔍 sample skip-IDs: activeProcesses=${JSON.stringify(skipSampleIds.activeP)} startingJobs=${JSON.stringify(skipSampleIds.startingJ)} queuedJobs=${JSON.stringify(skipSampleIds.queuedJ)}`);
+          console.log(`   🔍 needLight=${needLight} needHeavy=${needHeavy} needBatch=${needBatch} | activeLight=${activeLaneCount('light')} activeHeavy=${activeLaneCount('heavy')}`);
         }
       }
     } catch (e) {
@@ -6812,7 +6836,7 @@ async function rehydrateDownloadQueue() {
           "('postprocessing')" :
           "('downloading', 'postprocessing')";
     const rows = await db.prepare(
-      `SELECT id, url, source_url, platform, channel, title, metadata, status
+      `SELECT id, url, source_url, platform, channel, title, metadata, status, priority
        FROM downloads
        WHERE status IN ${statusList}
        ORDER BY
@@ -6823,6 +6847,7 @@ async function rehydrateDownloadQueue() {
            WHEN 'pending' THEN 3
            ELSE 9
          END,
+         COALESCE(priority, 0) DESC,
          created_at DESC,
          id DESC
        LIMIT ?`
