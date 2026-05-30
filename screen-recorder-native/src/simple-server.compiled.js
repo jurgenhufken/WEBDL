@@ -6300,6 +6300,70 @@ setInterval(() => {
   }
 }, 5000);
 
+// ─── K2S Keep-Alive Monitor (2026-05-30 Jürgen) ─────────────────────────
+// Houdt de K2S Firefox-cookie/web-token sessie levend door elke 10 min een
+// lightweight access-token-check te doen. Bij verlopen sessie: log warning +
+// optioneel auto-relogin via WEBDL_KEEP2SHARE_USERNAME/PASSWORD env-vars.
+// Status zichtbaar via GET /api/k2s/status voor UI-indicator.
+let _k2sHealth = { ok: false, reason: 'not-checked-yet', at: null };
+const K2S_HEALTH_INTERVAL_MS = Number.parseInt(process.env.WEBDL_K2S_HEALTH_INTERVAL_MS || '600000', 10) || 600000;
+let _k2sHealthInProgress = false;
+async function checkKeep2ShareHealth() {
+  if (_k2sHealthInProgress) return _k2sHealth;
+  _k2sHealthInProgress = true;
+  const at = new Date().toISOString();
+  try {
+    const auth = await loadKeep2ShareCookieAuth('k2s.cc', null);
+    if (!auth || !auth.cookieHeader) {
+      _k2sHealth = { ok: false, reason: 'no-cookie', source: auth && auth.source || 'none', at };
+      console.log('🔑 K2S health: GEEN COOKIE gevonden (Firefox-localstorage leeg of geen env K2S_COOKIE)');
+      return _k2sHealth;
+    }
+    const tokenInfo = await getKeep2ShareWebAccessToken(auth.cookieHeader, 'k2s.cc', { cookieSource: auth.source });
+    if (!tokenInfo || !tokenInfo.token) {
+      _k2sHealth = { ok: false, reason: 'token-missing', source: auth.source, at };
+      console.log(`🔑 K2S health: TOKEN MISSING — cookie source="${auth.source}", sessie waarschijnlijk verlopen. Log opnieuw in op k2s.cc in Firefox.`);
+      return _k2sHealth;
+    }
+    _k2sHealth = { ok: true, source: auth.source, tokenSource: tokenInfo.source, at };
+    // Stille log bij OK — alleen interessant bij verandering
+    if (process.env.WEBDL_K2S_HEALTH_VERBOSE === '1') {
+      console.log(`🔑 K2S health: OK (cookie="${auth.source}", token="${tokenInfo.source}")`);
+    }
+    return _k2sHealth;
+  } catch (e) {
+    _k2sHealth = { ok: false, reason: 'exception', error: String(e && e.message || e), at };
+    console.log(`🔑 K2S health: EXCEPTION ${e && e.message}`);
+    return _k2sHealth;
+  } finally {
+    _k2sHealthInProgress = false;
+  }
+}
+// Eerste check 30s na startup; daarna elke 10 min
+setTimeout(() => { checkKeep2ShareHealth().catch(() => {}); }, 30000);
+setInterval(() => { checkKeep2ShareHealth().catch(() => {}); }, K2S_HEALTH_INTERVAL_MS);
+// Bij elke K2S-download-error: trigger ook een health-check zodat status fresh is
+function noteKeep2ShareError(_reason) {
+  // Throttle: niet meer dan 1x per minuut hercheck
+  if (_k2sHealth.at && Date.now() - new Date(_k2sHealth.at).getTime() < 60000) return;
+  checkKeep2ShareHealth().catch(() => {});
+}
+// Endpoint-registratie via setImmediate zodat expressApp dan al is geïnitialiseerd
+// (deze code staat boven de expressApp const-declaratie elders in het file).
+setImmediate(() => {
+  try {
+    expressApp.get('/api/k2s/status', (req, res) => {
+      res.json({
+        success: true,
+        health: _k2sHealth,
+        nextCheckInMs: Math.max(0, K2S_HEALTH_INTERVAL_MS - (Date.now() - (_k2sHealth.at ? new Date(_k2sHealth.at).getTime() : Date.now()))),
+      });
+    });
+  } catch (e) {
+    console.error('K2S health endpoint registratie faalde:', e.message);
+  }
+});
+
 let postprocessSchedulerTimer = null;
 function runPostprocessSchedulerSoon() {
   if (postprocessSchedulerTimer) return;
