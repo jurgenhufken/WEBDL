@@ -57,13 +57,17 @@
     // Auto-refresh
     autoRefresh: true,
     liveAllMedia: true,
-    autoRefreshMs: 5000,
+    // 2026-05-30 (Jürgen "refreshrate omhoog"): 5s → 2s zodat nieuwe items
+    // sneller zichtbaar zijn tijdens bulk-scraping. /api/items is via
+    // df.platform index nu sub-1s, dus 2s polling is OK qua load.
+    autoRefreshMs: 2000,
     autoInjectMax: 100,
     autoInjectPumpMs: 50,
     autoRefreshTimer: null,
     autoInjectTimer: null,
     autoRefreshInFlight: false,
-    activeRefreshMs: 30000,
+    // Active downloads (actief-paneel) — 10s ipv 30s, snel feedback
+    activeRefreshMs: 10000,
     activeRefreshTimer: null,
     activeRefreshInFlight: false,
     tagFilterOptions: [],
