@@ -30,11 +30,10 @@ window.WEBDL_SITES['sexygirlspics.com'] = {
     if (page <= 1) return baseHref;
     try {
       const u = new URL(baseHref, window.location.href);
-      // 2026-05-30: sexygirlspics gebruikt /page/N/ path-based pagination
-      // op search/category-pagina's. Strip eventuele bestaande /page/X/ en
-      // append /page/N/ aan pathname. Query (search-term) blijft staan.
-      const cleanPath = u.pathname.replace(/\/page\/\d+\/?$/, '').replace(/\/+$/, '');
-      u.pathname = `${cleanPath}/page/${page}/`;
+      // 2026-05-30 v2: revert naar ?page=N. Eerdere /page/N/ pad-based wijziging
+      // werkte niet zoals verwacht (sexygirlspics serveert mogelijk via een
+      // andere route op pad-based). Querystring is robuust gebleken.
+      u.searchParams.set('page', String(page));
       return u.toString();
     } catch (_) { return baseHref; }
   },

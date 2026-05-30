@@ -27,11 +27,11 @@ const CHATURBATE_CONFIG = {
   label: 'chaturbate',
   platform: 'chaturbate',
 
-  // Niet een download-target — we hebben hier alleen extra-buttons. pageType
-  // 'single' zodat de panel-render het juiste tak pakt; de item-types laten we
-  // leeg dus geen download-knoppen verschijnen.
+  // 2026-05-30: was 'single' maar zonder matching itemType toonde paneel
+  // "✗ Onbekend item-type". Return 'listing' (= toont "Deze pagina" tak die
+  // bij lege itemTypes 0 items toont) en laat extraButtons het werk doen.
   pageType(_path) {
-    return chaturbateModelFromUrl(window.location.href) ? 'single' : null;
+    return chaturbateModelFromUrl(window.location.href) ? 'listing' : null;
   },
 
   deriveChannel() {
@@ -44,14 +44,29 @@ const CHATURBATE_CONFIG = {
 
   extraButtons: [
     {
-      label: '🎬 Open in recu.me',
+      // Directe model-page op recu.me. Werkt als model daar geïndexeerd is.
+      label: '🎬 recu.me model',
       color: '#ec4899',
       match(_pageType, url) { return Boolean(chaturbateModelFromUrl(url)); },
       onClick(ctx) {
         const model = chaturbateModelFromUrl(ctx.url);
         if (!model) return { text: '✗ Geen model in URL' };
-        window.open(`https://recu.me/${encodeURIComponent(model)}`, '_blank', 'noopener');
+        window.open(`https://recu.me/${encodeURIComponent(model)}/`, '_blank');
         return { text: '✓ Tab geopend' };
+      },
+    },
+    {
+      // 2026-05-30: search-fallback wanneer directe model-page geen resultaat
+      // geeft (model bestaat niet op recu.me of andere naam-variant). Search
+      // werkt altijd, toont matching results.
+      label: '🔍 recu.me zoek',
+      color: '#f472b6',
+      match(_pageType, url) { return Boolean(chaturbateModelFromUrl(url)); },
+      onClick(ctx) {
+        const model = chaturbateModelFromUrl(ctx.url);
+        if (!model) return { text: '✗ Geen model' };
+        window.open(`https://recu.me/search/?searchquery=${encodeURIComponent(model)}`, '_blank');
+        return { text: '✓ Zoek geopend' };
       },
     },
     {
@@ -61,7 +76,7 @@ const CHATURBATE_CONFIG = {
       onClick(ctx) {
         const model = chaturbateModelFromUrl(ctx.url);
         if (!model) return { text: '✗ Geen model' };
-        window.open(`https://stripchat.com/${encodeURIComponent(model)}`, '_blank', 'noopener');
+        window.open(`https://stripchat.com/${encodeURIComponent(model)}`, '_blank');
         return { text: '✓ Tab geopend' };
       },
     },
