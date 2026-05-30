@@ -44,42 +44,58 @@ const CHATURBATE_CONFIG = {
 
   extraButtons: [
     {
-      // 2026-05-30 v2: search is PRIMAIR want directe model-URL geeft op recu.me
-      // vaak "add_download_btn_failure" popup (model niet geïndexeerd onder die
-      // exact naam). Search werkt altijd: matching results worden getoond.
+      // 2026-05-30 v3: chaturbate.com's CSP blokkeert window.open vanuit
+      // content-script. Workaround: stuur message naar background script die
+      // browser.tabs.create() doet — background script valt buiten chaturbate's
+      // CSP. Plus location.href fallback als sendMessage faalt.
       label: '🔍 Zoek op recu.me',
       color: '#ec4899',
       match(_pageType, url) { return Boolean(chaturbateModelFromUrl(url)); },
-      onClick(ctx) {
+      async onClick(ctx) {
         const model = chaturbateModelFromUrl(ctx.url);
         if (!model) return { text: '✗ Geen model' };
-        window.open(`https://recu.me/search/?searchquery=${encodeURIComponent(model)}`, '_blank');
-        return { text: '✓ Zoek geopend' };
+        const target = `https://recu.me/search/?searchquery=${encodeURIComponent(model)}`;
+        try {
+          await browser.runtime.sendMessage({ action: 'openTab', url: target });
+          return { text: '✓ Zoek geopend' };
+        } catch (e) {
+          try { window.open(target, '_blank'); return { text: '✓ Tab geopend' }; }
+          catch (_) { location.href = target; return { text: '✓ Navigeer naar zoek' }; }
+        }
       },
     },
     {
-      // Directe model-URL als secundaire optie. Werkt soms (jong model met
-      // exact naam-match). Faalt op "add_download_btn_failure" als model niet
-      // geïndexeerd → klik dan op de zoek-knop hierboven.
       label: '🎬 Direct (kan 404)',
       color: '#f472b6',
       match(_pageType, url) { return Boolean(chaturbateModelFromUrl(url)); },
-      onClick(ctx) {
+      async onClick(ctx) {
         const model = chaturbateModelFromUrl(ctx.url);
         if (!model) return { text: '✗ Geen model in URL' };
-        window.open(`https://recu.me/${encodeURIComponent(model)}/`, '_blank');
-        return { text: '✓ Tab geopend' };
+        const target = `https://recu.me/${encodeURIComponent(model)}/`;
+        try {
+          await browser.runtime.sendMessage({ action: 'openTab', url: target });
+          return { text: '✓ Tab geopend' };
+        } catch (e) {
+          try { window.open(target, '_blank'); return { text: '✓ Tab geopend' }; }
+          catch (_) { location.href = target; return { text: '✓ Navigeer' }; }
+        }
       },
     },
     {
       label: '📸 Stripchat',
       color: '#a855f7',
       match(_pageType, url) { return Boolean(chaturbateModelFromUrl(url)); },
-      onClick(ctx) {
+      async onClick(ctx) {
         const model = chaturbateModelFromUrl(ctx.url);
         if (!model) return { text: '✗ Geen model' };
-        window.open(`https://stripchat.com/${encodeURIComponent(model)}`, '_blank');
-        return { text: '✓ Tab geopend' };
+        const target = `https://stripchat.com/${encodeURIComponent(model)}`;
+        try {
+          await browser.runtime.sendMessage({ action: 'openTab', url: target });
+          return { text: '✓ Tab geopend' };
+        } catch (e) {
+          try { window.open(target, '_blank'); return { text: '✓ Tab geopend' }; }
+          catch (_) { location.href = target; return { text: '✓ Navigeer' }; }
+        }
       },
     },
   ],

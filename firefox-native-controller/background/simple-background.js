@@ -1046,6 +1046,20 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
+  // 2026-05-30: openTab — content-scripts mogen window.open niet altijd
+  // gebruiken (CSP-blokkades op chaturbate.com etc.). Background-script staat
+  // buiten content-page-CSP en kan een nieuwe tab openen.
+  if (action === 'openTab' && message && message.url) {
+    try {
+      browser.tabs.create({ url: String(message.url), active: true })
+        .then((tab) => sendResponse({ success: true, tabId: tab && tab.id }))
+        .catch((e) => sendResponse({ success: false, error: e && e.message || String(e) }));
+    } catch (e) {
+      sendResponse({ success: false, error: e && e.message || String(e) });
+    }
+    return true;
+  }
+
   // 2026-05-30 Spoor 3-toolbar (Jürgen): voorkom dat Firefox een tab waarop
   // een hele-thread / alle-pages scan draait wegontlaadt door auto-tab-discard
   // (verliest dan poll-loop + paneel-state). Tab blijft vast tot user 'm sluit.
