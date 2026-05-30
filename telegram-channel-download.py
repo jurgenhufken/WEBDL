@@ -280,8 +280,11 @@ def _insert_to_db_immediate(filepath, entity, message, stats):
     import os as _os
     channel_username = getattr(entity, 'username', None)
     channel_id = str(getattr(entity, 'id', '') or '')
-    channel_name = channel_username or channel_id or 'telegram'
-    chat_title = stats.get('chat_title') or channel_name
+    chat_title = stats.get('chat_title') or ''
+    # 2026-05-30: voor private channels (geen username) val terug op de display
+    # title (bv. "FeetLive ~private"), niet op de raw chat-id. Anders verschijnt
+    # het in de gallery-filter als "1615583309" i.p.v. de leesbare naam.
+    channel_name = channel_username or chat_title or channel_id or 'telegram'
     # title uit message
     media_type = type(message.media).__name__ if message.media else 'unknown'
     title = (str(getattr(message, 'message', '') or '').strip()[:120] or _os.path.basename(filepath))[:200]
