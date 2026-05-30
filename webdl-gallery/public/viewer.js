@@ -1117,8 +1117,19 @@
       const params = new URLSearchParams({
         limit: '100',
         sort,
-        offset: String(vs.items.length),
       });
+      // 2026-05-30 (Jürgen "oneindig doorscrollen via DB"): cursor-pagination
+      // voor sort=recent — vermijdt server-side `slice(offset, offset+limit)`
+      // bug die 0 items returnde wanneer pageRows (na filters) korter dan
+      // offset. Cursor returnt altijd tot 100 items + next_cursor; geen
+      // slice nodig. Voor andere sorts (channel/rating/random) fallback
+      // op offset.
+      if (sort === 'recent' && vs.nextCursor && vs.nextCursor.sort_ts && vs.nextCursor.source_order != null) {
+        params.set('cursor_ts', String(vs.nextCursor.sort_ts));
+        params.set('cursor_order', String(vs.nextCursor.source_order));
+      } else if (sort !== 'recent') {
+        params.set('offset', String(vs.items.length));
+      }
       appendContextParams(params);
 
       const data = await api('/api/items?' + params.toString());
@@ -1127,19 +1138,20 @@
         const fresh = data.items.filter((it) => !seen.has(String(it.id)));
         vs.items.push(...fresh);
         vs.offset = vs.items.length;
-        vs.nextCursor = null;
-        // 2026-05-30 (Jürgen "oneindig doorscrollen"): NIET vs.done op
-        // 'items.length < 100' want server kan minder leveren door dedup of
-        // filters terwijl er nog wel meer is. Alleen op léeg → done. En
-        // alleen op 0 fresh (alle dupes) → done om infinite-loop te vermijden.
-        if (fresh.length === 0) {
+        // Bewaar nextCursor voor volgende load (sort=recent path)
+        vs.nextCursor = data.next_cursor || null;
+        // Done alleen als server klaar zegt (geen cursor meer) EN we geen
+        // fresh items kregen — dit voorkomt false-done bij filter-trim.
+        if (!vs.nextCursor && fresh.length === 0) {
           vs.done = true;
         }
         renderSidebarList();
         vs.loading = false;
         return fresh.length > 0;
       } else {
-        vs.done = true;
+        // Lege response: geen items meer, ook geen cursor → echt done
+        if (!data.next_cursor) vs.done = true;
+        else vs.nextCursor = data.next_cursor;
       }
     } catch (e) {
       log('Laden mislukt: ' + e.message);
@@ -1166,6 +1178,9 @@
   let _preloadTimer = null;
   function preloadNextMedia() {
     if (_preloadTimer) clearTimeout(_preloadTimer);
+    // 2026-05-30 (Jürgen "slideshow werkt niet"): skip preload tijdens
+    // slideshow — anders concurreert preload met current-frame fetch.
+    if (vs.slideshow) return;
     // 800ms delay: wacht tot huidige item zijn fetch heeft afgerond, dan pas
     // begin preload (zodat slideshow-advance niet starveert).
     _preloadTimer = setTimeout(() => {
