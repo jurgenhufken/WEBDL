@@ -73,6 +73,34 @@ app.use(express.static(path.join(__dirname, 'public'), {
 
 const BASE_DIR = process.env.WEBDL_BASE_DIR || '/Users/jurgen/Downloads/WEBDL';
 
+// 2026-05-30 (Jürgen thumb-fix): proxy /download/* naar simple-server (35729).
+// downloads-tabel slaat thumbnail op als relative URL '/download/<id>/thumb'.
+// Browser interpreteert die same-origin = gallery, die de route niet heeft → 404.
+// Daarom server-side proxy zodat <img src="/download/.../thumb"> via gallery werkt.
+const SIMPLE_SERVER_URL = process.env.WEBDL_SIMPLE_SERVER_URL || 'http://localhost:35729';
+const { Readable } = require('node:stream');
+app.use('/download', async (req, res) => {
+  try {
+    const upstream = `${SIMPLE_SERVER_URL}/download${req.url}`;
+    const r = await fetch(upstream);
+    if (!r.ok) { res.status(r.status).end(); return; }
+    // Doorzetten van content-type/length + browser-cache zodat thumbs niet
+    // elke scroll opnieuw worden gehaald.
+    const ct = r.headers.get('content-type'); if (ct) res.setHeader('Content-Type', ct);
+    const cl = r.headers.get('content-length'); if (cl) res.setHeader('Content-Length', cl);
+    const etag = r.headers.get('etag'); if (etag) res.setHeader('ETag', etag);
+    res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
+    // Streaming i.p.v. buffer: start direct met sturen, geen full-load wachten.
+    if (r.body) {
+      Readable.fromWeb(r.body).pipe(res);
+    } else {
+      res.end();
+    }
+  } catch (e) {
+    res.status(502).end();
+  }
+});
+
 function uniqueExistingDirs(paths) {
   const out = [];
   const seen = new Set();

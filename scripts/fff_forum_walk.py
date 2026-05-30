@@ -53,6 +53,21 @@ FORUM_TITLE_RE = re.compile(r'<h1[^>]*class="[^"]*p-title-value[^"]*"[^>]*>([^<]
 # collectFootFetishForumMediaFromHtml + isFootFetishForumMediaCandidateUrl
 MEDIA_ATTR_RE = re.compile(r'\b(?:href|src|data-src|data-lazy-src|data-url|data-href)=["\']([^"\']+)["\']', re.IGNORECASE)
 MEDIA_RAW_RE = re.compile(r'(https?://[^\s"\'<>)]+)')
+
+# v2.2: anchor-wrapped image pattern. XenForo wraps elke attachment-thumb in
+# <a href="/attachments/<filename>.<id>/"> dat naar de FULL versie wijst.
+# We pakken de anchor href en negeren de img src (= thumb).
+ANCHOR_IMG_RE = re.compile(
+    r'<a\b[^>]*href=["\']([^"\']*/attachments/[^"\']+?\.(\d+)/?)["\'][^>]*>'
+    r'(?:[^<]|<(?!/a>))*?'
+    r'<img\b[^>]*src=["\']([^"\']+)["\']',
+    re.IGNORECASE | re.DOTALL,
+)
+# flc.nyc3 inline-thumb pattern — gebruikt voor reject + voor lookup naar full-anchor
+FLC_THUMB_RE = re.compile(
+    r'^https?://flc\.nyc3\.digitaloceanspaces\.com/data/attachments/\d+/(\d+)-[a-f0-9]+\.(?:jpe?g|png|gif|webp|bmp|mp4|mov|m4v|webm|mkv)(?:\?|$)',
+    re.IGNORECASE,
+)
 NEXT_PAGE_PATTERNS = [
     re.compile(r'<link\b[^>]*rel=["\']next["\'][^>]*href=["\']([^"\']+)["\']', re.IGNORECASE),
     re.compile(r'<a\b[^>]*rel=["\']next["\'][^>]*href=["\']([^"\']+)["\']', re.IGNORECASE),
@@ -192,12 +207,31 @@ def is_media_candidate(url):
 
 
 def extract_thread_media(html, base_url):
-    """Mirror van collectFootFetishForumMediaFromHtml."""
+    """v2.2: pak FFF /attachments/<name>.<id>/ uit anchor-wrappers (= full versie),
+    en mark de inline flc.nyc3 thumb-URLs als 'overruled by full' (skip).
+    Voor upload.fff/pixhost/etc.: gewone attr+raw scan."""
     out = []
     seen = set()
+    overruled = set()  # flc.nyc3 thumb URLs die al een full-anchor hebben
+
+    # Stap 1: anchor-img pairs — pak href (= full), markeer img src (= thumb) als overruled
+    for m in ANCHOR_IMG_RE.finditer(html):
+        anchor_href = m.group(1)
+        img_src = absolute_url(m.group(3), base_url)
+        if img_src and FLC_THUMB_RE.match(img_src):
+            overruled.add(img_src)
+        final = absolute_url(anchor_href, base_url)
+        if final and final not in seen and is_media_candidate(final):
+            seen.add(final)
+            out.append(final)
+
     def push(raw):
         final = absolute_url(raw, base_url)
         if not final or final in seen:
+            return
+        # v2.2: skip flc.nyc3 inline thumbs zonder anchor-wrap. Die zijn nooit full;
+        # we hebben de anchor-wrappers al via stap 1 hierboven gepakt.
+        if FLC_THUMB_RE.match(final):
             return
         if not is_media_candidate(final):
             return

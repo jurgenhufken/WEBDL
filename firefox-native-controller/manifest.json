@@ -37,6 +37,7 @@
     "*://*.amateurvoyeurforum.com/*",
     "*://*.elitebabes.com/*",
     "*://*.footstockings.com/*",
+    "*://*.omegleporn.to/*",
     "*://*.heavyfetish.com/*",
     "*://*.darknetvideos.com/*",
     "*://*.darknessporn.com/*",
@@ -92,6 +93,7 @@
     {
       "matches": [
         "*://*.footstockings.com/*",
+        "*://*.omegleporn.to/*",
         "*://*.heavyfetish.com/*",
         "*://*.darknetvideos.com/*",
         "*://*.darknessporn.com/*",
@@ -136,6 +138,7 @@
         "content/sites/telegram.js",
         "content/sites/chaturbate.js",
         "content/sites/footstockings.js",
+        "content/sites/omegleporn.js",
         "content/sites/vipergirls.js",
         "content/sites/heavyfetish.js",
         "content/sites/darknetvideos.js",
