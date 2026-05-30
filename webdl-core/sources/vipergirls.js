@@ -51,6 +51,14 @@ const JUNK_TEXT_RE = /\b(?:avatar|emoji|emote|smilie|smiley|reaction|logo|icon|b
 // User wil ze niet in de gallery. Filter ze hier zodat ze niet eens
 // gedispatcht worden naar /download.
 const VIDEO_PREVIEW_THUMB_RE = /\/?(?:th_)?[0-9a-f]{6,}_[^/]+\.(?:wmv|avi|mp4|mkv|mov|webm|flv|m4v)\.v\d+_/i;
+// 2026-05-30 (Jürgen "rare thumbs eraf"): imagevenue gebruikt zelfde pattern
+// maar verstopt het in de `?image=` query param i.p.v. het path. yt-dlp kan
+// deze img.php-pages niet resolven → 75% van vipergirls posts queued met
+// errors. Apart pattern omdat het in query zit, niet in path.
+const IMAGEVENUE_PREVIEW_QUERY_RE = /[?&]image=[^&]*\.(?:wmv|avi|mp4|mkv|mov|webm|flv|m4v)\.v\d+_/i;
+// `cdn-thumbs.imagevenue.com` host serveert pure thumbnails (15-50KB, suffix
+// `_t.jpg`). Zijn klein, geen upgrade-pad → user wil ze niet.
+const IMAGEVENUE_THUMB_HOST_RE = /(?:^|\.)cdn-thumbs\.imagevenue\.com$/i;
 // vipr.im thumbnails: hostname i*.vipr.im, path /th/<id>/<hex>.jpg.
 // Resolver kan deze niet upgraden naar fullscale → blijft retry-loop. Filter ze
 // hier voordat ze de queue raken. JUNK_PATH_RE matcht `/thumb` maar niet `/th/`.
@@ -136,6 +144,10 @@ function isMediaCandidate(url) {
     // Skip imagebam-style video-preview thumbnails (`th_<hex>_name.wmv.v2_*.jpg`).
     // User klacht: 75% van forum-scans waren deze 1-10KB previews, niet de echte videos.
     if (VIDEO_PREVIEW_THUMB_RE.test(path) || VIDEO_PREVIEW_THUMB_RE.test(u.pathname)) return false;
+    // Skip imagevenue img.php?image=*.<videoExt>.v*_*lo previews (75% van vipergirls posts).
+    if (IMAGEVENUE_PREVIEW_QUERY_RE.test(u.search || '')) return false;
+    // Skip cdn-thumbs.imagevenue.com — pure thumbnails (15-50KB, geen upgrade-pad).
+    if (IMAGEVENUE_THUMB_HOST_RE.test(u.hostname)) return false;
     // Skip vipr.im thumbnails (/th/<id>/<hex>.jpg) — resolver kan ze niet upgraden.
     if (VIPR_THUMB_HOST_RE.test(u.hostname) && VIPR_THUMB_PATH_RE.test(u.pathname)) return false;
     // Skip K2S/Keep2Share als gebruiker geen premium heeft (default aan).

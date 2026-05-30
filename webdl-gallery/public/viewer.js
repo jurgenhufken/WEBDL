@@ -801,9 +801,14 @@
     vs.channels = [];
     vs.chIdx = 0;
     vs.items  = [...gState.items];
-    vs.offset = gState.offset;
-    vs.nextCursor = gState.nextCursor || null;
-    vs.done   = Boolean(gState.done && !vs.nextCursor);
+    // 2026-05-30 (Jürgen): viewer paginate altijd via offset=vs.items.length,
+    // niet via cursor. Daarom vs.nextCursor altijd null en vs.offset gelijk
+    // aan vs.items.length. vs.done blijft alleen true als gallery zelf
+    // bewees klaar te zijn — maar wordt door eerste loadMoreViewerItems
+    // bevestigd (data.items.length < 100).
+    vs.offset = vs.items.length;
+    vs.nextCursor = null;
+    vs.done   = Boolean(gState.done);
     vs.idx    = Math.max(0, Math.min(idx, vs.items.length - 1));
     vs.open   = true;
 
@@ -950,6 +955,10 @@
     const it = vs.items[vs.idx];
     if (!it) { close(); return; }
 
+    // 2026-05-30 (Jürgen): proactief volgende batch laden zodra we de rand
+    // naderen, zodat ▶ blijft werken in filters met duizenden items.
+    maybePrefetchViewerItems();
+
     cleanupMedia();
     const mediaSeq = ++vs.mediaSeq;
     resetZoom(); // Reset zoom bij elk nieuw item (exact als oude viewer)
@@ -1093,6 +1102,12 @@
   }
 
   // ─── Navigatie ────────────────────────────────────────────────────────────
+  // 2026-05-30 (Jürgen): viewer was afhankelijk van gallery's cursor-state
+  // (vs.nextCursor uit gState bij open). Bij sort=recent kon dedup 0 fresh
+  // items opleveren → vs.done werd te vroeg true → viewer kapte af bij ~215
+  // van 5603. Fix: viewer paginate altijd via offset=vs.items.length, geen
+  // cursor. Voor pure positie-navigatie is offset stabieler dan cursor;
+  // cursor's voordeel (real-time prepend safety) is niet relevant voor viewer.
   async function loadMoreViewerItems() {
     if (vs.loading || vs.done) return false;
     vs.loading = true;
@@ -1101,13 +1116,8 @@
       const params = new URLSearchParams({
         limit: '100',
         sort,
+        offset: String(vs.items.length),
       });
-      if (sort === 'recent' && vs.nextCursor) {
-        params.set('cursor_ts', vs.nextCursor.sort_ts);
-        params.set('cursor_order', vs.nextCursor.source_order);
-      } else {
-        params.set('offset', String(vs.offset));
-      }
       appendContextParams(params);
 
       const data = await api('/api/items?' + params.toString());
@@ -1115,16 +1125,14 @@
         const seen = new Set(vs.items.map((it) => String(it.id)));
         const fresh = data.items.filter((it) => !seen.has(String(it.id)));
         vs.items.push(...fresh);
-        vs.offset += data.items.length;
-        vs.nextCursor = data.next_cursor || null;
-        if (sort === 'recent') {
-          vs.done = !vs.nextCursor;
-        } else if (data.items.length < 100) {
+        vs.offset = vs.items.length;
+        vs.nextCursor = null;
+        if (data.items.length < 100) {
           vs.done = true;
         }
         renderSidebarList();
         vs.loading = false;
-        return fresh.length > 0 || (!vs.done && Boolean(vs.nextCursor));
+        return fresh.length > 0;
       } else {
         vs.done = true;
       }
@@ -1133,6 +1141,16 @@
     }
     vs.loading = false;
     return false;
+  }
+
+  // Prefetch wanneer we binnen 30 items van het einde van vs.items zitten.
+  // Triggert async, blokkeert navigatie niet. Voorkomt hapering bij snelle
+  // ◀ ▶ door grote filters (5000+ items).
+  function maybePrefetchViewerItems() {
+    if (vs.loading || vs.done) return;
+    if (vs.idx >= vs.items.length - 30) {
+      loadMoreViewerItems().catch(() => {});
+    }
   }
 
   async function navTo(idx) {

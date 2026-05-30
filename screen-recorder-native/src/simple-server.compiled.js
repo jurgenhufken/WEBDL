@@ -1165,6 +1165,9 @@ function keep2ShareFileIdFromUrl(input) {
 let keep2ShareAuthTokenCache = { token: '', expiresAt: 0 };
 let keep2ShareWebAccessTokenCache = { token: '', expiresAt: 0, source: '' };
 
+// 2026-05-30 Spoor K2S auto-refresh: laatste flush-event voor /api/k2s/status
+let _k2sLastRefresh = { at: null, reason: '', source: '' };
+
 function decodeJwtPayload(token) {
   try {
     const parts = String(token || '').split('.');
@@ -1173,6 +1176,27 @@ function decodeJwtPayload(token) {
   } catch (e) {
     return null;
   }
+}
+
+// JWT geldigheid checken — true als token nog >= minRemainingMs geldig is.
+function isJwtTokenStillValid(token, minRemainingMs = 60000) {
+  const payload = decodeJwtPayload(token);
+  if (!payload || typeof payload.exp !== 'number') return false;
+  return payload.exp * 1000 > Date.now() + minRemainingMs;
+}
+
+// Flush K2S auth-caches zodat de volgende call een verse Firefox-cookie ophaalt
+// en een nieuw web-access-token aanvraagt bij api.k2s.cc. Reason wordt gelogd +
+// in /api/k2s/status getoond zodat we live zien wanneer/waarom een refresh triggerde.
+function flushKeep2ShareAuthCaches(reason = 'manual') {
+  const prevSource = keep2ShareFirefoxWebAuthCache && keep2ShareFirefoxWebAuthCache.source || keep2ShareWebAccessTokenCache.source || '';
+  keep2ShareWebAccessTokenCache = { token: '', expiresAt: 0, source: '' };
+  keep2ShareFirefoxWebAuthCache = { at: 0, token: '', cookieHeader: '', source: '' };
+  if (typeof browserCookieCache !== 'undefined' && browserCookieCache && typeof browserCookieCache.clear === 'function') {
+    try { browserCookieCache.clear(); } catch (_) {}
+  }
+  _k2sLastRefresh = { at: new Date().toISOString(), reason: String(reason || 'manual'), source: prevSource };
+  console.log(`🔑 K2S cache-flush reason="${reason}" prev-source="${prevSource}"`);
 }
 
 async function postKeep2ShareApi(pathname, body) {
@@ -1405,8 +1429,14 @@ async function getKeep2ShareWebAccessToken(cookieHeader = '', preferredHost = ''
   ).trim();
   if (direct) return { token: direct, source: 'env' };
   const cookieSource = String(options.cookieSource || '').trim();
+  // Cache-hit alleen geldig als JWT zelf nog >60s geldig is — anders is de TTL
+  // van onze cache misleidend (server geeft 30 min TTL maar de JWT zelf is al
+  // verlopen → next download faalt onverwacht). Reset bij stale exp.
   if (!cookieHeader && keep2ShareWebAccessTokenCache.token && keep2ShareWebAccessTokenCache.expiresAt > Date.now() + 60000) {
-    return { token: keep2ShareWebAccessTokenCache.token, source: keep2ShareWebAccessTokenCache.source };
+    if (isJwtTokenStillValid(keep2ShareWebAccessTokenCache.token, 60000)) {
+      return { token: keep2ShareWebAccessTokenCache.token, source: keep2ShareWebAccessTokenCache.source };
+    }
+    flushKeep2ShareAuthCaches('stale-exp-cached-token');
   }
 
   const baseHeaders = {
@@ -1429,11 +1459,22 @@ async function getKeep2ShareWebAccessToken(cookieHeader = '', preferredHost = ''
         keep2ShareWebAccessTokenCache = { token: String(json.access_token), expiresAt: Date.now() + 30 * 60 * 1000, source: cookieSource || 'cookie' };
         return { token: keep2ShareWebAccessTokenCache.token, source: keep2ShareWebAccessTokenCache.source };
       }
+      // 401/403 op auth/token → cookie is dood. Flush Firefox-cache zodat de
+      // volgende loadKeep2ShareFirefoxWebAuth() opnieuw uit SQLite leest i.p.v.
+      // de 60s-cache uit te zitten (memo K2S keep-alive monitor).
+      if (res.status === 401 || res.status === 403) {
+        flushKeep2ShareAuthCaches(`auth-token-http-${res.status}`);
+      }
     } catch (e) { }
   }
 
   const firefoxAuth = await loadKeep2ShareFirefoxWebAuth(preferredHost);
-  if (firefoxAuth.token) return { token: firefoxAuth.token, source: firefoxAuth.source, cookieHeader: firefoxAuth.cookieHeader };
+  if (firefoxAuth.token && isJwtTokenStillValid(firefoxAuth.token, 60000)) {
+    return { token: firefoxAuth.token, source: firefoxAuth.source, cookieHeader: firefoxAuth.cookieHeader };
+  }
+  if (firefoxAuth.token && !isJwtTokenStillValid(firefoxAuth.token, 60000)) {
+    flushKeep2ShareAuthCaches('firefox-token-exp-stale');
+  }
 
   // 2026-05-25: guest-mode client_credentials fallback UITGEZET. Die geeft
   // K2S een 'anonieme' token waarmee elke download een captcha-challenge
@@ -1466,7 +1507,7 @@ async function getKeep2ShareWebAccessToken(cookieHeader = '', preferredHost = ''
   return { token: '', source: '' };
 }
 
-async function fetchKeep2ShareWebApiJson(pathname, { filePageUrl = '', cookieHeader = '', cookieSource = '', metadata = null } = {}) {
+async function fetchKeep2ShareWebApiJson(pathname, { filePageUrl = '', cookieHeader = '', cookieSource = '', metadata = null, _retry = false } = {}) {
   let cookieAuth = cookieHeader
     ? { cookieHeader, source: cookieSource || 'provided-cookie' }
     : await loadKeep2ShareCookieAuth('k2s.cc', metadata);
@@ -1494,6 +1535,14 @@ async function fetchKeep2ShareWebApiJson(pathname, { filePageUrl = '', cookieHea
   const text = await res.text();
   let json = null;
   try { json = JSON.parse(text); } catch (e) { }
+  // 401/403 op web-API met onze cached token → token wordt door K2S geweigerd,
+  // ondanks dat de JWT-exp nog ok lijkt. Flush + retry 1× met verse cookie.
+  // Beperkt tot één retry zodat we niet in een loop draaien als de Firefox-
+  // sessie écht dood is.
+  if (!_retry && !cookieHeader && (res.status === 401 || res.status === 403)) {
+    flushKeep2ShareAuthCaches(`web-api-http-${res.status}`);
+    return fetchKeep2ShareWebApiJson(pathname, { filePageUrl, cookieHeader: '', cookieSource: '', metadata, _retry: true });
+  }
   return { json, status: res.status, tokenSource: tokenInfo.source, error: json ? '' : `K2S web-API gaf geen JSON terug (${res.status}, auth=${tokenInfo.source || 'geen'})` };
 }
 
@@ -1541,6 +1590,28 @@ async function resolveKeep2ShareWebDirectUrl(input, metadata = null) {
 async function resolveKeep2ShareDirectUrl(input, metadata = null) {
   const fileId = keep2ShareFileIdFromUrl(input);
   if (!fileId) return { url: '', error: 'Keep2Share file-id ontbreekt in URL' };
+
+  // 2026-05-30 (Jürgen): K2S DMCA-takedown is normaal voor adult content.
+  // Vroege pre-check via lichtgewicht /v1/files/{id} (geen auth nodig) zodat
+  // we bij isDeleted/hasAbuse direct duidelijk falen zonder de zware
+  // getUrl + web-cookie flow te draaien. Voorkomt ook misleidende
+  // "accessToken werd niet geaccepteerd" foutmeldingen waar de echte oorzaak
+  // gewoon "K2S verwijderde dit bestand" is. Pre-check faalt stil (network
+  // hiccup) → val terug op normale flow.
+  try {
+    const infoRes = await fetch(`https://api.k2s.cc/v1/files/${encodeURIComponent(fileId)}`, {
+      headers: { 'Accept': 'application/json', 'Origin': 'https://k2s.cc', 'Referer': String(input || 'https://k2s.cc/') }
+    });
+    if (infoRes.ok) {
+      const info = await infoRes.json().catch(() => null);
+      if (info && info.isDeleted === true) {
+        return { url: '', error: `K2S file ${fileId} is verwijderd (DMCA/takedown of door eigenaar)`, deleted: true };
+      }
+      if (info && info.hasAbuse === true) {
+        return { url: '', error: `K2S file ${fileId} is geflagd voor abuse en kan niet worden gedownload`, abuse: true };
+      }
+    }
+  } catch (_) { /* network hiccup → ga door met normale flow */ }
 
   // 2026-05-30 Spoor 1.5: web-cookie flow EERST proberen (bewezen werkend voorheen
   // per vorige sessie). JWT-token-flow valt vaak met "File not found" terug op
@@ -6240,11 +6311,23 @@ function scheduleAutoRehydrate() {
         const id = Number(row.id);
         if (!Number.isFinite(id)) continue;
         if (activeProcesses.has(id) || startingJobs.has(id) || queuedJobs.has(id)) continue;
-        const url = String(row.url || '').trim();
+        let url = String(row.url || '').trim();
         if (!url || url.startsWith('recording:')) continue;
         let parsedMeta = null;
         try { if (row.metadata) parsedMeta = JSON.parse(row.metadata); } catch (e) {}
         if (parsedMeta && parsedMeta.webdl_kind === 'recording') continue;
+        // 2026-05-30 (Jürgen): K2S-resolver overschrijft `downloads.url` met
+        // resolved temp-URL (str-XX.filestore.app/...?temp_url_sig=...). Die
+        // signatures verlopen na ~1u → re-queue krijgt 404. Restore vanuit
+        // metadata.webdl_input_url zodat resolver opnieuw kan draaien met
+        // verse premium-cookie. Update DB ook zodat queue weer in zicht is.
+        if (/^https?:\/\/(?:str|cmb)-[\w.-]+\.filestore\.app\//i.test(url) && parsedMeta && parsedMeta.webdl_input_url) {
+          const restored = String(parsedMeta.webdl_input_url).trim();
+          if (restored && restored !== url) {
+            try { await updateDownloadUrl.run(restored, id); } catch (_) {}
+            url = restored;
+          }
+        }
         const ctx = queueContextFromDownloadRow(row, parsedMeta);
         const platform = ctx.platform;
         const channel = ctx.channel;
@@ -6288,7 +6371,18 @@ function scheduleAutoRehydrate() {
         }
       }
     } catch (e) {
-      console.error('Auto-rehydrate error:', e.message);
+      // 2026-05-30 (Jürgen OOM-fix): bij ÉLKE error → exponentiële back-off,
+      // anders triggert setInterval (5s) een retry-loop die per iteratie 250
+      // rows uit DB in memory laadt → heap-leak → OOM crash binnen 15min.
+      // Eerdere logs tonen "🔁 Auto-rehydrate: loading 250 pending items"
+      // tientallen keren in een rij vlak voor crash.
+      consecutiveZeroLoads += 1;
+      const errBackoffMs = consecutiveZeroLoads === 1 ? 30 * 1000
+                         : consecutiveZeroLoads === 2 ? 2 * 60 * 1000
+                         : consecutiveZeroLoads <= 5 ? 5 * 60 * 1000
+                         : 30 * 60 * 1000;
+      nextRehydrateAllowedAt = Date.now() + errBackoffMs;
+      console.error(`Auto-rehydrate error (attempt ${consecutiveZeroLoads}, back-off ${Math.round(errBackoffMs/1000)}s):`, e.message);
     }
   }, 2000);
 }
@@ -6310,6 +6404,9 @@ setInterval(() => {
 // Status zichtbaar via GET /api/k2s/status voor UI-indicator.
 let _k2sHealth = { ok: false, reason: 'not-checked-yet', at: null };
 const K2S_HEALTH_INTERVAL_MS = Number.parseInt(process.env.WEBDL_K2S_HEALTH_INTERVAL_MS || '600000', 10) || 600000;
+// Marge waaronder een token "stale" heet — als JWT exp - now < deze waarde,
+// flush cache zodat volgende download verse cookie+token ophaalt.
+const K2S_TOKEN_STALE_MARGIN_MS = Number.parseInt(process.env.WEBDL_K2S_TOKEN_STALE_MARGIN_MS || '300000', 10) || 300000;
 let _k2sHealthInProgress = false;
 async function checkKeep2ShareHealth() {
   if (_k2sHealthInProgress) return _k2sHealth;
@@ -6328,10 +6425,20 @@ async function checkKeep2ShareHealth() {
       console.log(`🔑 K2S health: TOKEN MISSING — cookie source="${auth.source}", sessie waarschijnlijk verlopen. Log opnieuw in op k2s.cc in Firefox.`);
       return _k2sHealth;
     }
-    _k2sHealth = { ok: true, source: auth.source, tokenSource: tokenInfo.source, at };
+    // JWT-exp inspecteren — als het token bijna verloopt, proactief flushen.
+    const payload = decodeJwtPayload(tokenInfo.token) || {};
+    const expMs = typeof payload.exp === 'number' ? payload.exp * 1000 : 0;
+    const tokenExpiresAt = expMs ? new Date(expMs).toISOString() : null;
+    if (expMs && expMs - Date.now() < K2S_TOKEN_STALE_MARGIN_MS) {
+      flushKeep2ShareAuthCaches('health-token-near-exp');
+      _k2sHealth = { ok: false, reason: 'token-near-exp', source: auth.source, tokenSource: tokenInfo.source, tokenExpiresAt, at };
+      console.log(`🔑 K2S health: token verloopt binnen ${Math.round((expMs - Date.now()) / 1000)}s — cache geflusht, log opnieuw in op k2s.cc als dit blijft.`);
+      return _k2sHealth;
+    }
+    _k2sHealth = { ok: true, source: auth.source, tokenSource: tokenInfo.source, tokenExpiresAt, at };
     // Stille log bij OK — alleen interessant bij verandering
     if (process.env.WEBDL_K2S_HEALTH_VERBOSE === '1') {
-      console.log(`🔑 K2S health: OK (cookie="${auth.source}", token="${tokenInfo.source}")`);
+      console.log(`🔑 K2S health: OK (cookie="${auth.source}", token="${tokenInfo.source}", exp=${tokenExpiresAt || 'n/a'})`);
     }
     return _k2sHealth;
   } catch (e) {
@@ -6345,27 +6452,78 @@ async function checkKeep2ShareHealth() {
 // Eerste check 30s na startup; daarna elke 10 min
 setTimeout(() => { checkKeep2ShareHealth().catch(() => {}); }, 30000);
 setInterval(() => { checkKeep2ShareHealth().catch(() => {}); }, K2S_HEALTH_INTERVAL_MS);
-// Bij elke K2S-download-error: trigger ook een health-check zodat status fresh is
-function noteKeep2ShareError(_reason) {
-  // Throttle: niet meer dan 1x per minuut hercheck
-  if (_k2sHealth.at && Date.now() - new Date(_k2sHealth.at).getTime() < 60000) return;
+// Bij elke K2S-download-error: flush auth-caches + trigger health-check zodat
+// volgende download verse cookie ophaalt. Throttle 1×/min zodat we api.k2s.cc
+// niet bombarderen bij een burst aan failures.
+let _k2sLastErrorFlushAt = 0;
+function noteKeep2ShareError(reason) {
+  if (Date.now() - _k2sLastErrorFlushAt < 60000) return;
+  _k2sLastErrorFlushAt = Date.now();
+  flushKeep2ShareAuthCaches(`download-error:${reason || 'unknown'}`);
   checkKeep2ShareHealth().catch(() => {});
 }
-// Endpoint-registratie via setImmediate zodat expressApp dan al is geïnitialiseerd
-// (deze code staat boven de expressApp const-declaratie elders in het file).
-setImmediate(() => {
+// 2026-05-30 (Jürgen restart-race fix): functie hier definiëren, aanroepen
+// gebeurt expliciet vanaf NÁ `const expressApp = express()` (zie regel ~6909
+// + de bijbehorende `registerK2sStatusEndpoints()` call). Vervangt de oude
+// setImmediate-wrap die kwetsbaar was voor cp/mv-race in StartServer.command
+// — bij gedeeltelijke file-load belandde `expressApp.get(...)` op top-level
+// en gaf TDZ-fout "Cannot access 'expressApp' before initialization".
+function registerK2sStatusEndpoints() {
   try {
     expressApp.get('/api/k2s/status', (req, res) => {
+      const firefoxAge = keep2ShareFirefoxWebAuthCache && keep2ShareFirefoxWebAuthCache.at
+        ? Math.round((Date.now() - keep2ShareFirefoxWebAuthCache.at) / 1000)
+        : null;
+      const cachedToken = keep2ShareWebAccessTokenCache && keep2ShareWebAccessTokenCache.token;
+      const tokenPayload = cachedToken ? decodeJwtPayload(cachedToken) : null;
       res.json({
         success: true,
         health: _k2sHealth,
         nextCheckInMs: Math.max(0, K2S_HEALTH_INTERVAL_MS - (Date.now() - (_k2sHealth.at ? new Date(_k2sHealth.at).getTime() : Date.now()))),
+        lastRefresh: _k2sLastRefresh,
+        cachedTokenExpiresAt: tokenPayload && tokenPayload.exp ? new Date(tokenPayload.exp * 1000).toISOString() : null,
+        cachedTokenSource: keep2ShareWebAccessTokenCache && keep2ShareWebAccessTokenCache.source || null,
+        firefoxCookieAgeSec: firefoxAge,
+        firefoxCookieSource: keep2ShareFirefoxWebAuthCache && keep2ShareFirefoxWebAuthCache.source || null,
       });
+    });
+    expressApp.post('/api/k2s/flush-cache', (req, res) => {
+      const reason = String((req.body && req.body.reason) || req.query.reason || 'manual-api').slice(0, 64);
+      flushKeep2ShareAuthCaches(reason);
+      checkKeep2ShareHealth().catch(() => {});
+      res.json({ success: true, flushedAt: _k2sLastRefresh.at, reason });
+    });
+    // Diagnostic: test-resolve een K2S URL via onze volledige flow zodat we
+    // live kunnen onderscheiden tussen auth-probleem en deleted-file.
+    // Roept ook K2S file-info aan om te zien of het bestand bestaat.
+    expressApp.post('/api/k2s/test-resolve', async (req, res) => {
+      const url = String((req.body && req.body.url) || req.query.url || '').trim();
+      if (!isKeep2ShareUrl(url)) {
+        return res.status(400).json({ success: false, error: 'url must be a k2s.cc/keep2share.cc link' });
+      }
+      const fileId = keep2ShareFileIdFromUrl(url);
+      const out = { success: true, url, fileId };
+      try {
+        const infoRes = await fetch(`https://api.k2s.cc/v1/files/${encodeURIComponent(fileId)}`, {
+          headers: { Accept: 'application/json', Origin: 'https://k2s.cc', Referer: url }
+        });
+        out.fileInfo = await infoRes.json().catch(() => null);
+        out.fileInfoStatus = infoRes.status;
+      } catch (e) {
+        out.fileInfoError = String(e && e.message || e);
+      }
+      try {
+        const resolved = await resolveKeep2ShareDirectUrl(url, null);
+        out.resolved = resolved;
+      } catch (e) {
+        out.resolveError = String(e && e.message || e);
+      }
+      res.json(out);
     });
   } catch (e) {
     console.error('K2S health endpoint registratie faalde:', e.message);
   }
-});
+}
 
 let postprocessSchedulerTimer = null;
 function runPostprocessSchedulerSoon() {
@@ -6922,6 +7080,12 @@ const io = socketIO(server, {
 expressApp.use(express.json({ limit: '50mb' }));
 // Serve downloaded files directly as static assets (fast thumbnails, no DB lookup)
 expressApp.use('/webdl-static', express.static(BASE_DIR, { maxAge: '1h', immutable: true }));
+
+// 2026-05-30 (Jürgen restart-race fix): K2S status/flush/test-resolve endpoints
+// registreren NÁ expressApp init. Vroeger via setImmediate-wrap eerder in file
+// — kwetsbaar voor cp/mv race in StartServer.command waardoor server bleef
+// crashen op TDZ "Cannot access 'expressApp' before initialization".
+try { registerK2sStatusEndpoints(); } catch (e) { console.error('K2S endpoint init faalde:', e.message); }
 
 expressApp.get('/favicon.ico', (req, res) => {
   res.setHeader('Cache-Control', 'public, max-age=604800');

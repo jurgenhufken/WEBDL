@@ -167,7 +167,10 @@ const KEEP2SHARE_SYNC_MAX_ADDS = process.env.KEEP2SHARE_SYNC_MAX_ADDS
   ? Number(process.env.KEEP2SHARE_SYNC_MAX_ADDS)
   : Number.POSITIVE_INFINITY;
 const DEBUG_GALLERY_QUERY = /^(1|true|yes|on)$/i.test(process.env.DEBUG_GALLERY_QUERY || '');
-const SHOW_SCREENSHOTS_IN_GALLERY = /^(1|true|yes|on)$/i.test(process.env.WEBDL_GALLERY_SHOW_SCREENSHOTS || '');
+// 2026-05-30 (Jürgen): default AAN — screenshots werden niet meer getoond
+// omdat env-var niet in StartServer.command stond. Opt-out via
+// WEBDL_GALLERY_SHOW_SCREENSHOTS=0.
+const SHOW_SCREENSHOTS_IN_GALLERY = !/^(0|false|no|off)$/i.test(process.env.WEBDL_GALLERY_SHOW_SCREENSHOTS || '');
 let keep2shareSyncRunning = false;
 const thumbInflight = new Map();
 const activeThumbPaths = new Map();
