@@ -6,6 +6,20 @@
 
 set -u
 
+# PID-lock: voorkomt dat parallelle starts stapelen. Reden: simple-server
+# doet setInterval(spawn, 3min) zonder check of vorige run nog draait. Als
+# één cyclus >3 min duurt → pile-up van honderden procs + postgres-storm.
+# macOS heeft geen flock; daarom DIY met kill -0 op PID-file.
+LOCK="/tmp/tg_auto_import.pid"
+if [ -f "$LOCK" ]; then
+  old_pid=$(cat "$LOCK" 2>/dev/null)
+  if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+    exit 0  # vorige run draait nog; stilletjes weggaan
+  fi
+fi
+echo $$ > "$LOCK"
+trap 'rm -f "$LOCK"' EXIT
+
 HUB_DIR="/Volumes/WEBDL Extra/WEBDL/_4KDownloader/hub"
 PY="/usr/bin/python3"
 SCRIPT="/Users/jurgen/WEBDL/scripts/tg_import_folder.py"

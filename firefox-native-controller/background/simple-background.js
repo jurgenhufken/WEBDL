@@ -699,13 +699,9 @@ async function ensureContextMenu() {
   }
   const ctx = ['page', 'selection', 'link', 'image', 'video', 'audio'];
   try {
-    // Parent: opens kwaliteit-submenu via rechtsmuisknop
+    // 2026-05-30 (Jürgen): geen kwaliteit-submenu. ÉÉN klikbaar item.
+    // preferredHeight blijft 0 (= best beschikbaar) in de handler.
     menusApi.create({ id: CONTEXT_MENU_ID, title: 'WEBDL download', contexts: ctx });
-    menusApi.create({ id: CONTEXT_MENU_ID + ':best',  parentId: CONTEXT_MENU_ID, title: '🎬 Full video (best beschikbaar)', contexts: ctx });
-    menusApi.create({ id: CONTEXT_MENU_ID + ':1080',  parentId: CONTEXT_MENU_ID, title: '1080p',                              contexts: ctx });
-    menusApi.create({ id: CONTEXT_MENU_ID + ':720',   parentId: CONTEXT_MENU_ID, title: '720p',                               contexts: ctx });
-    menusApi.create({ id: CONTEXT_MENU_ID + ':480',   parentId: CONTEXT_MENU_ID, title: '480p',                               contexts: ctx });
-    menusApi.create({ id: CONTEXT_MENU_ID + ':audio', parentId: CONTEXT_MENU_ID, title: '🎵 Alleen audio (mp3)',              contexts: ctx });
   } catch (e) {
     console.error('context menu create failed', e);
   }
@@ -720,6 +716,11 @@ const CONTEXT_MENU_QUALITY = {
   [CONTEXT_MENU_ID + ':480']:   { preferredHeight: 480 },
   [CONTEXT_MENU_ID + ':audio']: { audioOnly: true },
 };
+
+// 2026-05-30: eerdere logica om submenu-items op CF-hosts (recu.me) te
+// verbergen weggehaald op Jürgen's verzoek. Submenu blijft altijd compleet:
+// 🎬 Full / 1080 / 720 / 480 / 🎵 audio. Op recu.me resolven alle keuzes
+// naar dezelfde snelle no-q URL via metadata.fullVideoUrl substitutie.
 
 function scheduleReconnect() {
   if (reconnectTimer) return;
@@ -964,6 +965,25 @@ browser.contextMenus.onClicked.addListener(async (info, tab) => {
       }
     } catch (_) {}
 
+    // 2026-05-30 onderzoek: ?q=N URLs zijn door recu.me throttled (5 Mbps),
+    // /video/<id>/download zonder q= geeft volle CDN-snelheid (~75 Mbps;
+    // gemeten op belovedkhlloe 4.5GB in 8 min). scrapeMetadata in
+    // content/debug-toolbar.js construeert deze no-q URL voor recu.me hosts.
+    // Hier substitueren we de page-URL (HTML) door fullVideoUrl ongeacht
+    // welke quality-keuze in het submenu is gemaakt — alle paden gaan via
+    // dezelfde snelle CDN. Beste kwaliteit (Full video default).
+    try {
+      if (metadata && metadata.fullVideoUrl && /^https?:\/\/[^/]*recu\.me\//i.test(metadata.fullVideoUrl)) {
+        const userClickedPage = (info.linkUrl == null && info.srcUrl == null) || url === info.pageUrl;
+        if (userClickedPage) {
+          console.log(`[WEBDL] context-menu recu.me url-substitute → ${metadata.fullVideoUrl.slice(0, 80)}`);
+          url = metadata.fullVideoUrl;
+          metadata.sourceUrl = metadata.fullVideoUrl;
+          metadata.webdl_extract_mode = 'full-video-noq';
+        }
+      }
+    } catch (_) {}
+
     try {
       // Filename: subfolder webdl/<host>/<videoId>/ — minimal, alleen safe chars.
       // Originele bestandsnaam wordt door Firefox uit Content-Disposition gehaald
@@ -1012,12 +1032,44 @@ browser.contextMenus.onClicked.addListener(async (info, tab) => {
               body: JSON.stringify(importBody),
             })
               .then((r) => r.json())
-              .then((r) => console.log(`[WEBDL] context-menu import-file:`, r))
-              .catch((e) => console.warn(`[WEBDL] context-menu import-file fout:`, e));
+              .then((r) => {
+                console.log(`[WEBDL] context-menu import-file:`, r);
+                // 2026-05-30: meld de tab dat browser-download EN import klaar zijn
+                if (tab && tab.id != null) {
+                  const filename = (item.filename || '').split('/').pop() || '';
+                  browser.tabs.sendMessage(tab.id, {
+                    action: 'webdlBrowserDownloadComplete',
+                    success: !!(r && (r.success || r.id)),
+                    downloadId,
+                    serverDownloadId: r && r.id ? r.id : null,
+                    filepath: item.filename,
+                    filename,
+                  }).catch(() => {});
+                }
+              })
+              .catch((e) => {
+                console.warn(`[WEBDL] context-menu import-file fout:`, e);
+                if (tab && tab.id != null) {
+                  browser.tabs.sendMessage(tab.id, {
+                    action: 'webdlBrowserDownloadComplete',
+                    success: false,
+                    error: String(e && e.message || e).slice(0, 80),
+                    downloadId,
+                  }).catch(() => {});
+                }
+              });
           });
         } else if (delta.state && delta.state.current === 'interrupted') {
           browser.downloads.onChanged.removeListener(onChanged);
           console.warn(`[WEBDL] context-menu download #${downloadId} interrupted`);
+          if (tab && tab.id != null) {
+            browser.tabs.sendMessage(tab.id, {
+              action: 'webdlBrowserDownloadComplete',
+              success: false,
+              error: 'download interrupted',
+              downloadId,
+            }).catch(() => {});
+          }
         }
       };
       browser.downloads.onChanged.addListener(onChanged);

@@ -12,14 +12,15 @@
     'erome.com', 'xnxx.com', 'tnaflix.com', 'spankbang.com', 'redtube.com',
     'pictoa.com', 'tubesafari.com', 'pornzog.com', 'alohatube.com', 'usersporn.com',
     'nakedneighbour.com', 'pornkai.com', 'xfree.com', 'zzztube.com',
-    'favoyeurtube.net', 'spycamhub.net', 'sexygirlspics.com', 'porncoven.com',
+    'favoyeurtube.net', 'spycamhub.net', 'porncoven.com',
+    // 2026-05-30: sexygirlspics.com UIT skip-set — user wil debug-toolbar daar
+    // ook (REC/Screenshot). Site-engine paneel wordt op sexygirlspics geskipt
+    // via SITE_ENGINE_SKIP_HOSTS in content/site-engine.js. Walk-functie wordt
+    // toegevoegd aan debug-toolbar als extra-button voor sexygirlspics.
     // 2026-05-24 — recu.me NIET in skip-set: user wil de debug-toolbar (REC,
-    // Screenshot, K2S-knoppen) ook hier. Het site-engine paneel rechtsboven
-    // komt NAAST de debug-toolbar. Zelfde patroon als vipergirls.
+    // Screenshot, K2S-knoppen) ook hier.
     // 2026-05-24 — vipergirls NIET in skip-set: debug-toolbar heeft nog
     // veel andere knoppen (K2S-batch, single video, screenshot, recording).
-    // De NIEUWE jobs-mode panel rechtsboven komt NAAST de debug-toolbar.
-    // Pas slopen als alle debug-toolbar features ook in site-engine zitten.
   ]);
   try {
     const host = String((window && window.location && window.location.hostname) || '').toLowerCase();
@@ -1861,6 +1862,38 @@
       const parts = xTwitterPartsFromUrl(url);
       if (parts.user) meta.channel = `@${parts.user}`;
       else if (parts.hashtag) meta.channel = `#${parts.hashtag}`;
+    }
+
+    // recu.me — alleen channel/title afleiden + NO-Q "Full video" URL.
+    // Reden: ?q=N URLs zijn server-side throttled (5 Mbps), de plain
+    // /video/<id>/download URL geeft volle CDN-snelheid (~75 Mbps zoals
+    // belovedkhlloe 4.5GB in 8 min).
+    else if (/recu\.me/i.test(url)) {
+      meta.platform = 'recu';
+      const pathM = String(window.location.pathname || '').match(/^\/([a-z0-9_-]+)\/video\/\d+/i);
+      if (pathM && pathM[1] && pathM[1].toLowerCase() !== 'video') {
+        meta.channel = pathM[1].replace(/^_+|_+$/g, '');
+      }
+      const h1 = document.querySelector('h1, .video-title');
+      if (h1) {
+        const t = (h1.textContent || '').trim();
+        if (t) meta.title = t;
+      }
+      // Strategie 1: video-id uit URL → bouw zelf de no-q URL
+      const idM = String(window.location.pathname || '').match(/\/video\/(\d+)/);
+      if (idM && idM[1]) {
+        meta.fullVideoUrl = `https://recu.me/video/${idM[1]}/download`;
+      }
+      // Strategie 2 (fallback): zoek anchor naar /video/<id>/download (geen q=)
+      if (!meta.fullVideoUrl) {
+        for (const a of document.querySelectorAll('a[href*="/download"]')) {
+          const href = a.href || '';
+          if (/^https?:\/\/[^/]*recu\.me\/video\/\d+\/download(?:$|[?#])/i.test(href) && !/[?&]q=/i.test(href)) {
+            meta.fullVideoUrl = href;
+            break;
+          }
+        }
+      }
     }
 
     else if (/reddit\.com|redd\.it/i.test(url)) {
@@ -5359,13 +5392,11 @@
     applySmartButtonMode();
   });
 
-  // 2026-05-30 (Jürgen "geen debug toolbar"): de uitgebreide debug-toolbar
-  // wordt niet meer zichtbaar getoond — de gebruiker wil het schone site-engine
-  // paneel als UI. We APPENDEN hem wel (interne logica zoals heartbeat,
-  // recording-state, hooks etc. blijven nodig) maar laten hem visueel
-  // verborgen. Site-engine paneel laat zelf de standaardknoppen
-  // (Screenshot, REC, etc.) zien zodat user niets mist.
-  toolbar.style.display = 'none';
+  // 2026-05-30: oude display:none teruggedraaid. De early-return bovenaan
+  // dit script returnt al wanneer SITE_ENGINE_HOSTS of WEBDL_SITES van
+  // toepassing is — d.w.z. we komen ALLEEN hier wanneer er GEEN site-engine
+  // paneel bestaat voor deze host (YouTube, Twitter, generic web). Daar moet
+  // de debug-toolbar juist wél zichtbaar zijn anders ziet de user niets.
   document.body.appendChild(toolbar);
 
   const captureFrame = document.createElement('div');
@@ -9463,6 +9494,13 @@
       if (message.success && message.duplicate) {
         showNotification(`Bestaat al in WebDL${message.downloadId ? ` (#${message.downloadId})` : ''}`);
         try { addLog(`Rechtsklik download overgeslagen, bestaat al: ${message.url}`); } catch (e) {}
+      } else if (message.success && message.browserDownload) {
+        // 2026-05-30: browser-download (CF-hosts zoals recu.me) — downloadId is
+        // browser.downloads.download() ID, niet server-side. Niet pollDownload
+        // aanroepen (zou willekeurig server-record retreiven). Wachten op
+        // expliciete 'webdlBrowserDownloadComplete' melding wanneer Firefox klaar is.
+        showNotification(`Browser-download gestart (recu.me/CF)`);
+        try { addLog(`Rechtsklik browser-download gestart (browserId #${message.downloadId})`); } catch (e) {}
       } else if (message.success && message.downloadId) {
         showNotification(`Download #${message.downloadId} in wachtrij`);
         try { addLog(`Rechtsklik download gestart #${message.downloadId}`); } catch (e) {}
@@ -9470,6 +9508,19 @@
       } else {
         showNotification(`Download fout: ${message.error || 'onbekend'}`, true);
         try { addLog(`Rechtsklik download fout: ${message.error || 'onbekend'}`, 'error'); } catch (e) {}
+      }
+      return true;
+    }
+
+    // 2026-05-30: browser-download (recu.me/CF) afgerond — background heeft
+    // /api/import-file gepost. Toon echte completion + filepath in log.
+    if (message && message.action === 'webdlBrowserDownloadComplete') {
+      if (message.success) {
+        showNotification(`✓ Browser-download klaar: ${message.filename || ''}`.slice(0, 80));
+        try { addLog(`Browser-download voltooid: ${message.filename || message.filepath || ''}`); } catch (e) {}
+      } else {
+        showNotification(`✗ Browser-download fout: ${message.error || 'onbekend'}`, true);
+        try { addLog(`Browser-download fout: ${message.error || 'onbekend'}`, 'error'); } catch (e) {}
       }
       return true;
     }

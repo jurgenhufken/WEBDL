@@ -2162,6 +2162,12 @@ app.get('/api/items', async (req, res) => {
         channelExpr: fileChannelSql('d', 'df'),
       });
       fastFileWhere.push(`d.status <> ALL(ARRAY[${HIDDEN_FILE_PARENT_STATUSES.map(s => `'${s}'`).join(',')}])`);
+      // 2026-05-30: redundante df.platform-filter voor planner-hint (zie longpath uitleg)
+      const _fastPlatformValues = splitMultiFilter(req.query.platform);
+      if (_fastPlatformValues.length) {
+        fastParams.push(_fastPlatformValues);
+        fastFileWhere.push(`df.platform = ANY($${fastParams.length}::text[])`);
+      }
       fastFileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
       fastFileWhere.push(`(df.filesize IS NULL OR df.filesize > 0)`);
       fastFileWhere.push(`lower(regexp_replace(df.relpath, '^.*\\\\.', '')) IN (${MEDIA_EXT_SQL})`);
@@ -2263,6 +2269,14 @@ app.get('/api/items', async (req, res) => {
       channelExpr: fileChannelExpr,
     });
     if (!directOnlyPlatform) {
+      // 2026-05-30: redundante df.platform-filter zodat planner idx_download_files_platform_mtime
+      // gebruikt ipv Parallel Seq Scan. buildItemFilters checkt al d.platform (met OR-metadata),
+      // maar dat vereist JOIN-roundtrip — deze pre-filter selecteert direct via index.
+      const _platformValuesForFileFilter = splitMultiFilter(req.query.platform);
+      if (_platformValuesForFileFilter.length) {
+        params.push(_platformValuesForFileFilter);
+        fileWhere.push(`df.platform = ANY($${params.length}::text[])`);
+      }
       fileWhere.push(`df.relpath !~* '${AUX_RELPATH_RE}'`);
       fileWhere.push(`df.relpath !~* '${TEMP_RELPATH_RE}'`);
       fileWhere.push(`d.filepath !~* '${TEMP_RELPATH_RE}'`);

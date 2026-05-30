@@ -130,7 +130,16 @@ window.WEBDL_SITES['sexygirlspics.com'] = {
       color: '#0ea5e9',
       match() {
         // Listing-types: /search/<term>/, /category/<cat>/, /tag/<tag>/, /pornstars/<name>/
-        return /^\/(search|category|categories|tag|tags|pornstars)\/[a-z0-9-]+/i.test(window.location.pathname);
+        // 2026-05-30 (Jürgen): match ELKE listing-page, niet alleen /search/
+        // /category/ etc. Pad bv. /beautiful/ is ook een listing (top-niveau
+        // category) en moet de walk-knop tonen. Single album-pages (/pics/<slug>/
+        // of /<id>/<slug>/) worden via pageType=='single' uitgesloten.
+        const path = window.location.pathname;
+        // Sluit single-album pages expliciet uit
+        if (/^\/(albums?|pics?|gallery|galleries)\//i.test(path)) return false;
+        if (/^\/\d+\/[a-z0-9-]+\/?$/i.test(path)) return false;
+        // Toon op alles wat op een listing lijkt (>= 1 path-segment)
+        return /^\/[a-z0-9-]+(?:\/|$)/i.test(path);
       },
       async onClick() {
         try {

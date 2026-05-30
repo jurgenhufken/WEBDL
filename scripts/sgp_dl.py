@@ -46,6 +46,15 @@ ALBUM_TITLE_RE = re.compile(r"<a[^>]*href='https://sexygirlspics\.com/pics/[A-Za
 PIC_URL_RE = re.compile(r"^https?://(?:www\.)?sexygirlspics\.com/pics/([A-Za-z0-9-]+)-(\d+)/?$", re.IGNORECASE)
 SEARCH_URL_RE = re.compile(r"^https?://(?:www\.)?sexygirlspics\.com/search/([A-Za-z0-9-]+)/?(?:(\d+)/?)?$", re.IGNORECASE)
 SEARCH_NAV_RE_TMPL = r"/search/{term}/(\d+)/"
+# 2026-05-30: generieke listing-categorie (bv. /beautiful/, /asian/, /feet/).
+# Sluit interne paden uit (/pics/, /search/, /albums/, /tag/, /category/,
+# /pornstars/) zodat we niet dubbel matchen.
+LISTING_URL_RE = re.compile(
+    r"^https?://(?:www\.)?sexygirlspics\.com/"
+    r"(?!pics/|search/|albums?/|gallery/|galleries/|tag/|tags/|category/|categories/|pornstars/)"
+    r"([a-z0-9-]+)/?(?:\?page=(\d+))?/?$",
+    re.IGNORECASE,
+)
 IMAGE_1280_RE = re.compile(r"https://cdni\.sexygirlspics\.com/1280/\d+/\d+/(\d+)/(\1_\d+_[a-z0-9]+\.(?:jpg|jpeg|png|webp))", re.IGNORECASE)
 
 
@@ -107,6 +116,23 @@ def parse_search_url(url):
     if not m:
         return None
     return m.group(1), int(m.group(2) or '1')
+
+
+def parse_listing_url(url):
+    """Return (category, start_page) voor /<category>/?page=N URL, else None.
+
+    Bv. https://sexygirlspics.com/beautiful/ → ('beautiful', 1).
+    Sluit interne paden uit (pics/search/albums/tag/category/pornstars).
+    """
+    # Strip trailing slash voor regex match, ?page=N voor query
+    base = url.split('#')[0]
+    page_match = re.search(r'[?&]page=(\d+)', base)
+    page = int(page_match.group(1)) if page_match else 1
+    base_no_query = base.split('?')[0].rstrip('/')
+    m = LISTING_URL_RE.match(base_no_query + '/')
+    if not m:
+        return None
+    return m.group(1), page
 
 
 def collect_pic_urls(html):
@@ -281,6 +307,60 @@ def register_in_db(cur, source_url, channel, filepath, size, title, pid, slug, c
             print(f"  DB error: {e2}")
 
 
+def walk_listing(o, category, channel, out_root, cur, throttle_ms, max_albums, max_pages, source_url, start_page=1):
+    """Walk een generieke listing-categorie (bv. /beautiful/?page=N).
+
+    Pagination: /<category>/ → /<category>/?page=2 → /<category>/?page=3.
+    Detecteert nieuwe pages via ?page=N anchors in HTML.
+    """
+    print(f"== Walk listing: {category} (channel={channel})")
+    page_nav_re = re.compile(rf"/{re.escape(category)}/\?page=(\d+)", re.IGNORECASE)
+    page = start_page
+    all_urls = []
+    seen = set()
+    while page <= max_pages:
+        purl = BASE + f"/{category}/" if page == 1 else BASE + f"/{category}/?page={page}"
+        try:
+            html = fetch_text(o, purl, ref=BASE + '/')
+        except Exception as e:
+            print(f"  page {page} fetch FAIL: {e}")
+            break
+        items = collect_pic_urls(html)
+        new = [it for it in items if it[2] not in seen]
+        for it in new:
+            seen.add(it[2])
+        print(f"  page {page}: {len(items)} albums ({len(new)} nieuw)")
+        if not items or not new:
+            break
+        all_urls.extend(new)
+        next_pages = [int(n) for n in page_nav_re.findall(html) if int(n) > page]
+        if not next_pages:
+            break
+        page = min(next_pages)
+        if max_albums and len(all_urls) >= max_albums:
+            break
+        time.sleep(throttle_ms / 1000)
+    if max_albums:
+        all_urls = all_urls[:max_albums]
+
+    print(f"== Totaal: {len(all_urls)} albums")
+    tot = {'ok': 0, 'fail': 0, 'i_new': 0, 'i_skip': 0, 'i_fail': 0}
+    for i, (aurl, title, pid, slug) in enumerate(all_urls, 1):
+        print(f"[{i}/{len(all_urls)}] {aurl}")
+        s = download_album(o, aurl, channel, out_root, cur=cur,
+                           sleep_ms=throttle_ms, source_url=source_url)
+        if s.get('ok'):
+            tot['ok'] += 1
+            tot['i_new'] += s['images_new']
+            tot['i_skip'] += s['images_skip']
+            tot['i_fail'] += s['images_fail']
+            print(f"  OK  imgs:+{s['images_new']}/skip{s['images_skip']}/fail{s['images_fail']} ({s['images_total']} totaal)")
+        else:
+            tot['fail'] += 1
+            print(f"  FAIL: {s.get('reason')}")
+    return tot
+
+
 def walk_search(o, term, channel, out_root, cur, throttle_ms, max_albums, max_pages, source_url):
     print(f"== Walk search: {term} (channel={channel})")
     nav_re = re.compile(SEARCH_NAV_RE_TMPL.format(term=re.escape(term)))
@@ -344,11 +424,12 @@ def main():
 
     o = make_opener()
 
-    # Detect URL type
+    # Detect URL type (volgorde: meest specifiek eerst)
     pic = parse_pic_url(args.url)
     search = parse_search_url(args.url)
+    listing = None if (pic or search) else parse_listing_url(args.url)
 
-    if not pic and not search:
+    if not pic and not search and not listing:
         print(f"Onbekend URL-formaat: {args.url}", file=sys.stderr)
         sys.exit(1)
 
@@ -378,7 +459,7 @@ def main():
         else:
             print(f"FAIL: {s.get('reason')}")
             sys.exit(1)
-    else:
+    elif search:
         term, _ = search
         channel = args.channel_override or f"search_{term}"
         out_root = os.path.join(DEFAULT_BASE_DIR, 'sexygirlspics', channel)
@@ -390,6 +471,23 @@ def main():
         tot = walk_search(o, term, channel, out_root, cur,
                           args.throttle_ms, args.max, args.max_pages,
                           source_url=args.url)
+        print()
+        print(f"DONE. albums ok:{tot['ok']} fail:{tot['fail']}")
+        print(f"      images nieuw:{tot['i_new']} skip:{tot['i_skip']} fail:{tot['i_fail']}")
+        print(f"Gallery filter: platform=sexygirlspics channel={channel}")
+    else:
+        # generieke listing-categorie (bv. /beautiful/)
+        category, start_page = listing
+        channel = args.channel_override or f"category_{category}"
+        out_root = os.path.join(DEFAULT_BASE_DIR, 'sexygirlspics', channel)
+        os.makedirs(out_root, exist_ok=True)
+        print(f"Listing  : {category} (start page {start_page})")
+        print(f"Channel  : {channel}")
+        print(f"Output   : {out_root}")
+        print()
+        tot = walk_listing(o, category, channel, out_root, cur,
+                           args.throttle_ms, args.max, args.max_pages,
+                           source_url=args.url, start_page=start_page)
         print()
         print(f"DONE. albums ok:{tot['ok']} fail:{tot['fail']}")
         print(f"      images nieuw:{tot['i_new']} skip:{tot['i_skip']} fail:{tot['i_fail']}")

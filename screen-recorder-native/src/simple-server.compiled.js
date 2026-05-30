@@ -5927,20 +5927,39 @@ function detectLane(platform, url = '', metadata = null) {
   }
 
   // Media that downloads without ffmpeg merge/transcode gets the fast lane.
-  // Forums + image-galleries hier — video-tubes (heavyfetish, darknessporn,
-  // redtube, xnxx, spankbang, tnaflix, xvideos) blijven heavy.
+  // 2026-05-30 (Jürgen): video-tubes toegevoegd. yt-dlp pakt op deze sites
+  // een al-gemergede mp4 (single-file best), geen ffmpeg-merge nodig. Heavy
+  // is alleen voor merge-zware bronnen (YT/Vimeo/Twitch/Reddit/OF/TikTok
+  // playlists). Eerder hadden 9034 footstockings + spankbang playlist + 12
+  // heavyfetish in heavy gewacht achter 1 concurrent slot.
   const lightPlatforms = [
     'footfetishforum', 'forum-area', 'imagetwist', 'imagebam', 'imgbox', 'imagevenue', 'imgchest', 'imgvb',
     'imx', 'vipr', 'turboimagehost', 'imgkiwi', 'pixhost', 'postimg', 'bunkr', 'jpg', 'aznudefeet', 'pornpics',
     'kinky', 'wikifeet', 'wikifeetx', 'elitebabes', 'erome', 'keep2share', 'twitter',
-    // 2026-05-24 toegevoegd — forums + image-galleries die nu nog heavy waren:
     'vipergirls', 'phun', 'amateurvoyeurforum', 'pictoa', 'imagefap',
+    // 2026-05-30: single-mp4 video-tubes (geen merge) — naar light
+    'footstockings', 'spankbang', 'heavyfetish', 'darknessporn', 'darknetvideos',
+    'redtube', 'xnxx', 'tnaflix', 'xvideos', 'recu', 'omegleporn',
+    'sexygirlspics', 'hoestube', 'porncoven', 'pornkai', 'porndr',
+    'pornzog', 'tubesafari', 'alohatube', 'usersporn', 'xfree', 'zzztube',
+    'spycamhub', 'favoyeurtube', 'nakedneighbour', 'chaturbate', 'bongacams',
+    // 2026-05-30 nog meer: alles wat in heavy-queue zat te wachten
+    'eporner', 'xhamster', 'xh', 'bravoteens', 'drtvid', 'xozilla',
+    'videotubepornclassic', 'bigtitslust', 'vid-ip', 'videohdzog', 'yourlust',
   ];
 
   if (lightPlatforms.includes(p)) return 'light';
 
-  // Everything else (youtube, onlyfans, tiktok videos, instagram zips, reddit videos) is heavy
-  return 'heavy';
+  // 2026-05-30 (Jürgen): default = light. Heavy alleen voor expliciet
+  // merge-zware platforms (YT DASH-merge, Vimeo, Twitch VOD, Reddit video,
+  // OnlyFans/instagram bulk). Obscure tube-sites zonder merge-noodzaak
+  // moeten niet in heavy zitten — they zaten daar eerder per ongeluk.
+  const heavyPlatforms = [
+    'youtube', 'youtube-shorts', 'vimeo', 'twitch', 'reddit', 'onlyfans',
+    'instagram', 'tiktok-playlist',
+  ];
+  if (heavyPlatforms.includes(p)) return 'heavy';
+  return 'light';
 }
 
 function deriveEarlyThumbnail(url, platform) {

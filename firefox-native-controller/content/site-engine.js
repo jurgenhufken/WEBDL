@@ -35,6 +35,17 @@
   'use strict';
 
   const host = String(window?.location?.hostname || '').toLowerCase().replace(/^www\./, '');
+
+  // 2026-05-30: hosts waar site-engine GEEN paneel mag renderen omdat user
+  // alleen debug-toolbar + rechtsklik wil gebruiken. Recu.me: rechtsklik
+  // WEBDL download trekt no-q "Full video" URL (75 Mbps); een tweede paneel
+  // ernaast zou alleen dubbele UI zijn.
+  const SITE_ENGINE_SKIP_HOSTS = new Set([
+    'recu.me',
+    'sexygirlspics.com',
+  ]);
+  if (SITE_ENGINE_SKIP_HOSTS.has(host)) return;
+
   const SITES = window.WEBDL_SITES || {};
   let cfg = SITES[host];
 

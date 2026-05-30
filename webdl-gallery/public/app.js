@@ -57,7 +57,7 @@
     // Auto-refresh
     autoRefresh: true,
     liveAllMedia: true,
-    autoRefreshMs: 1000,
+    autoRefreshMs: 5000,
     autoInjectMax: 100,
     autoInjectPumpMs: 50,
     autoRefreshTimer: null,
