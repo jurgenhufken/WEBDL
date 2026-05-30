@@ -1596,11 +1596,14 @@ async function resolveKeep2ShareDirectUrl(input, metadata = null) {
       : accessTokenSource === 'metadata-cookie'
         ? 'K2S accessToken uit meegegeven cookie'
         : 'K2S accessToken';
+    // 2026-05-30: trigger on-demand health-refresh (throttled 1×/min)
+    try { if (typeof noteKeep2ShareError === 'function') noteKeep2ShareError('accessToken-rejected'); } catch (_) {}
     return {
       url: '',
       error: `${sourceLabel} werd niet geaccepteerd voor getUrl: ${keep2ShareApiErrorMessage(json)}. Web-cookie fallback: ${webResolved.error || 'geen downloadlink'}`
     };
   }
+  try { if (typeof noteKeep2ShareError === 'function') noteKeep2ShareError('getUrl-failed'); } catch (_) {}
   return { url: '', error: `Keep2Share getUrl faalde: ${keep2ShareApiErrorMessage(json)}. Web-cookie fallback: ${webResolved.error || 'geen downloadlink'}` };
 }
 
@@ -8372,6 +8375,49 @@ function probeVideoDurationSeconds(filePath) {
   });
 }
 
+// 2026-05-30 (Spoor 1.4): post-download integriteits-check voor video-bestanden.
+// Voorkomt B.10 (0:00 mp4 zonder audio sluipt door als 'completed'). Retourneert
+// lege string als OK, of een human-readable error-string die naar status='error'
+// gaat. Faalt safe: bij ffprobe-infra-issues niet rejecten (return '').
+async function verifyVideoIntegrity(filePath) {
+  try {
+    if (!filePath) return '';
+    const stat = fs.statSync(filePath);
+    if (stat.size < 10240) return ''; // < 10KB: andere checks (hotlink-fingerprint) zijn beter
+    const args = ['-v', 'error', '-show_entries', 'stream=codec_type:format=duration', '-of', 'json', filePath];
+    const result = await new Promise((resolve) => {
+      const proc = spawn(FFPROBE, args);
+      let out = '';
+      let err = '';
+      const timer = setTimeout(() => {
+        try { proc.kill('SIGKILL'); } catch (_) {}
+        resolve({ out, err: err || 'ffprobe timeout', code: -1 });
+      }, 8000);
+      proc.stdout.on('data', (d) => { out += d.toString(); });
+      proc.stderr.on('data', (d) => { err += d.toString(); });
+      proc.on('close', (code) => { clearTimeout(timer); resolve({ out, err, code }); });
+      proc.on('error', (e) => { clearTimeout(timer); resolve({ out, err: String(e && e.message || e), code: -1 }); });
+    });
+    if (result.code !== 0) return ''; // infra-fail = onbekend, niet rejecten
+    let data;
+    try { data = JSON.parse(result.out); } catch (_) { return ''; }
+    const duration = parseFloat(data?.format?.duration || 0);
+    const streams = Array.isArray(data?.streams) ? data.streams : [];
+    const hasVideo = streams.some((s) => s && s.codec_type === 'video');
+    const hasAudio = streams.some((s) => s && s.codec_type === 'audio');
+    if (!hasVideo) return ''; // niet-video container (mp4 met alleen audio etc); andere check vangt af
+    if (!Number.isFinite(duration) || duration < 0.5) {
+      return `Video heeft geen leesbare duratie (duration=${duration}s, size=${stat.size}b) — vermoedelijk truncated/broken container`;
+    }
+    if (!hasAudio) {
+      return `Video heeft geen audio-stream (duration=${duration.toFixed(2)}s) — vermoedelijk format-string fout, herproberen met bv*+ba/b`;
+    }
+    return '';
+  } catch (e) {
+    return ''; // veilig: nooit rejecten op infra-fail
+  }
+}
+
 function moveFileSync(srcPath, destPath) {
   try {
     fs.renameSync(srcPath, destPath);
@@ -14580,6 +14626,31 @@ function directDownloadLooksLikeHtml(filepath, rawHeaders) {
   }
 }
 
+// 2026-05-30 (Spoor 1.3): host-registry voor hotlink-protected image-hosts.
+// Per host: rejectExactSizes (bekende placeholder-fingerprints), minValidSize
+// (alles eronder = placeholder/error-pagina). Nieuwe host = 1 regel toevoegen.
+// Referer-injectie zit al in download-flow ~14910 — registry hier is voor
+// post-download fingerprint-detect.
+const HOTLINK_HOST_REGISTRY = {
+  'vipr.im':        { rejectExactSizes: [8346], minValidSize: 1024 },
+  'imagetwist.com': { rejectExactSizes: [8346], minValidSize: 1024 },
+  'imagebam.com':   { minValidSize: 2048 },
+  'imx.to':         { minValidSize: 1024 },
+  'pixhost.to':     { minValidSize: 1024 },
+  'pixhost.cc':     { minValidSize: 1024 },
+  'imgbox.com':     { minValidSize: 1024 },
+  'imagevenue.com': { minValidSize: 2048 },
+  'imgchest.com':   { minValidSize: 1024 },
+};
+
+function lookupHotlinkConfig(host) {
+  const h = String(host || '').toLowerCase();
+  for (const key of Object.keys(HOTLINK_HOST_REGISTRY)) {
+    if (h === key || h.endsWith('.' + key)) return HOTLINK_HOST_REGISTRY[key];
+  }
+  return null;
+}
+
 function rejectInvalidDirectDownload(url, filepath, filename, rawHeaders) {
   const ext = String(path.extname(filename || filepath || '') || '').toLowerCase();
   const isExpectedMedia = IMPORTABLE_VIDEO_EXTS.has(ext) || isImagePath(filename || filepath || '');
@@ -14589,18 +14660,19 @@ function rejectInvalidDirectDownload(url, filepath, filename, rawHeaders) {
       ? 'Keep2Share gaf een HTML/login-pagina terug in plaats van het videobestand; premium-cookie ontbreekt of is niet geldig'
       : 'Directe download gaf HTML terug in plaats van media';
   }
-  // 2026-05-25: hotlink-error placeholder detection. Bepaalde image-hosts
-  // (vipr.im / imagetwist) geven bij ontbrekende Referer of rate-limit een
-  // ~8KB JPG met "Imagetwist.com Error: Hotlinking is disabled" tekst.
-  // Fingerprint = exact 8346 bytes voor vipr.im. Wijs af zodat 'ie als error
-  // gemarkeerd wordt en niet als legitieme image in DB belandt.
+  // 2026-05-30 (Spoor 1.3): registry-based fingerprint-detect (vervangt
+  // hardcoded vipr.im/imagetwist 8346b check; uitbreidbaar per host).
   try {
     let host = '';
     try { host = new URL(String(url || '')).hostname.toLowerCase(); } catch (_) {}
-    if (/(?:^|\.)(?:vipr\.im|imagetwist\.com)$/i.test(host)) {
+    const cfg = lookupHotlinkConfig(host);
+    if (cfg) {
       const stat = fs.statSync(filepath);
-      if (stat.size === 8346) {
-        return 'Hotlink-error placeholder ontvangen i.p.v. echte image (vipr.im/imagetwist 8346b fingerprint)';
+      if (Array.isArray(cfg.rejectExactSizes) && cfg.rejectExactSizes.includes(stat.size)) {
+        return `Hotlink-error placeholder (${host}, fingerprint ${stat.size}b)`;
+      }
+      if (typeof cfg.minValidSize === 'number' && stat.size < cfg.minValidSize && isExpectedMedia) {
+        return `Hotlink-error placeholder (${host}, bestand ${stat.size}b < min ${cfg.minValidSize}b — vermoedelijk error-pagina)`;
       }
     }
   } catch (e) { /* niet-fataal */ }
@@ -14969,6 +15041,16 @@ async function startDirectFileDownload(downloadId, url, platform, channel, title
             try { fs.rmSync(tmpFilepath, { force: true }); } catch (e) { }
             await updateDownloadStatus.run('error', 0, invalidReason, downloadId);
             return;
+          }
+          // 2026-05-30 (Spoor 1.4): ffprobe-verify voor video-extensions.
+          // Voorkomt B.10 (0:00 mp4 zonder audio sluipt door als 'completed').
+          if (IMPORTABLE_VIDEO_EXTS.has('.' + ext)) {
+            const videoIssue = await verifyVideoIntegrity(tmpFilepath);
+            if (videoIssue) {
+              try { fs.rmSync(tmpFilepath, { force: true }); } catch (e) { }
+              await updateDownloadStatus.run('error', 0, videoIssue, downloadId);
+              return;
+            }
           }
           const filepath = uniqueFilePath(path.join(dir, filename), downloadId);
           try {
