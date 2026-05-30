@@ -20,6 +20,47 @@ window.WEBDL_SITES['sexygirlspics.com'] = {
   // Site-engine zal "Deze pagina (leeg)" / "Alle pages" tonen zonder items.
   itemTypes: [],
 
+  // 2026-05-30: extraButtons als tussenoplossing zodat panel niet leeg is.
+  // Quarantaine blijft (itemTypes:[]) maar gebruiker krijgt scannen + inzicht.
+  extraButtons: [
+    {
+      label: '🔍 Toon items op pagina',
+      color: '#1565C0',
+      match() { return true; },
+      async onClick(ctx) {
+        try {
+          const links = Array.from(document.querySelectorAll('a[href*="/pics/"], a[href*="/pic/"], a[href*="/galleries/"], a[href*="/gallery/"]'))
+            .map(a => a.href).filter(Boolean);
+          const unique = Array.from(new Set(links)).filter(u => /sexygirlspics\.com/i.test(u));
+          console.log(`[WEBDL sexygirlspics] ${unique.length} album-links op pagina:`, unique.slice(0, 10));
+          if (unique.length === 0) return { text: '0 albums gevonden' };
+          return { text: `${unique.length} albums (console)` };
+        } catch (e) { return { text: '✗ Scan-fout' }; }
+      },
+    },
+    {
+      label: '🧵 Alle pages tellen',
+      color: '#0ea5e9',
+      match() { return true; },
+      async onClick(ctx) {
+        try {
+          const cfg = window.WEBDL_SITES['sexygirlspics.com'];
+          const maxP = cfg && cfg.detectMaxPage ? cfg.detectMaxPage(document) : 1;
+          if (!maxP || maxP <= 1) return { text: 'Geen pagination gevonden' };
+          return { text: `Site heeft ${maxP} pages` };
+        } catch (e) { return { text: '✗ Pages-detect fout' }; }
+      },
+    },
+    {
+      label: '🚧 Download album',
+      color: '#666',
+      match() { return /\/(pic|pics|gallery|galleries|albums?)\//i.test(window.location.pathname); },
+      async onClick() {
+        return { text: 'Album-resolver wordt gebouwd — wacht eventjes' };
+      },
+    },
+  ],
+
   paginationUrl(baseHref, page) {
     if (page <= 1) return baseHref;
     try {
