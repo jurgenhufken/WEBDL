@@ -134,13 +134,39 @@ async function crawlThread(page, threadUrl, meta) {
   let url = threadUrl;
   const allUrls = [];
 
+  // 2026-05-30 (Jürgen "posts bij elkaar"): leid thread-slug af uit URL voor
+  // per-thread channel naam zodat gallery items van zelfde thread groepeert.
+  // URL pattern: /threads/<slug>.<id>/
+  const slugM = String(threadUrl).match(/\/threads\/([a-z0-9-]+)\.(\d+)/i);
+  const slugRaw = slugM ? slugM[1] : '';
+  const slugPretty = slugRaw
+    .replace(/-/g, ' ')
+    .split(' ')
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ')
+    .slice(0, 60);
+  const threadId = slugM ? slugM[2] : '';
+  const baseChannel = meta.channel || 'Initiation Archive';
+  const threadChannel = slugPretty ? `${baseChannel} / ${slugPretty}` : baseChannel;
+  // Strip /latest, /unread fragmenten zodat source_url stabiel is voor alle pages
+  const threadSourceUrl = String(threadUrl).replace(/\/(latest|unread)\/?$/i, '/').replace(/\/page-\d+\/?$/i, '/');
+  const enrichedMeta = {
+    ...meta,
+    channel: threadChannel,
+    source_url: threadSourceUrl,
+    source_thread_url: threadSourceUrl,
+    source_thread_title: slugPretty,
+    source_thread_id: threadId,
+    webdl_pin_context: true,
+  };
+
   while (url) {
     try {
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await page.waitForTimeout(600);
       stats.threadPages++;
 
-      const title = await page.title().catch(() => '');
+      const title = await page.title().catch(() => slugPretty);
       const imageUrls = await extractImageUrls(page);
       allUrls.push(...imageUrls);
       stats.urls += imageUrls.length;
@@ -148,7 +174,7 @@ async function crawlThread(page, threadUrl, meta) {
       // Queue immediately in batches
       while (allUrls.length >= BATCH_SIZE) {
         const batch = allUrls.splice(0, BATCH_SIZE);
-        await queueBatch(batch, { ...meta, title });
+        await queueBatch(batch, { ...enrichedMeta, title });
         printStatus();
       }
 
@@ -162,8 +188,8 @@ async function crawlThread(page, threadUrl, meta) {
 
   // Queue remaining
   if (allUrls.length) {
-    const title = await page.title().catch(() => '');
-    await queueBatch(allUrls, { ...meta, title });
+    const title = await page.title().catch(() => slugPretty);
+    await queueBatch(allUrls, { ...enrichedMeta, title });
     printStatus();
   }
 }
