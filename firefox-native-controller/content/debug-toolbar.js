@@ -5359,6 +5359,13 @@
     applySmartButtonMode();
   });
 
+  // 2026-05-30 (Jürgen "geen debug toolbar"): de uitgebreide debug-toolbar
+  // wordt niet meer zichtbaar getoond — de gebruiker wil het schone site-engine
+  // paneel als UI. We APPENDEN hem wel (interne logica zoals heartbeat,
+  // recording-state, hooks etc. blijven nodig) maar laten hem visueel
+  // verborgen. Site-engine paneel laat zelf de standaardknoppen
+  // (Screenshot, REC, etc.) zien zodat user niets mist.
+  toolbar.style.display = 'none';
   document.body.appendChild(toolbar);
 
   const captureFrame = document.createElement('div');

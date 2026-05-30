@@ -826,6 +826,46 @@
       wrap.appendChild(hint);
     }
 
+    // 2026-05-30 (Jürgen "geen debug toolbar"): vaste globale knoppen onderaan
+    // — overal hetzelfde, vervangt Screenshot/REC die voorheen alleen in de
+    // (nu verborgen) debug-toolbar zaten.
+    function callBg(action, payload = {}) {
+      return new Promise((resolve) => {
+        try {
+          const send = (typeof browser !== 'undefined' && browser.runtime && browser.runtime.sendMessage)
+            ? browser.runtime.sendMessage.bind(browser.runtime)
+            : (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage
+              ? chrome.runtime.sendMessage.bind(chrome.runtime) : null);
+          if (!send) return resolve({ success: false, error: 'no-runtime' });
+          const cb = (resp) => resolve(resp || { success: true });
+          const ret = send({ action, payload });
+          if (ret && typeof ret.then === 'function') ret.then(cb, (e) => resolve({ success: false, error: String(e) }));
+        } catch (e) { resolve({ success: false, error: String(e.message || e) }); }
+      });
+    }
+    const sigil = document.createElement('div');
+    Object.assign(sigil.style, { display: 'flex', gap: '4px', flexWrap: 'wrap', padding: '6px 0 2px', borderTop: '1px solid rgba(255,255,255,0.08)', marginTop: '4px' });
+    const mkGlobal = (label, color, action, payload) => {
+      const b = makeButton(label, color, async (btn) => {
+        if (STATE.busy) return;
+        STATE.busy = true; btn.disabled = true;
+        const orig = btn.textContent;
+        try {
+          const r = await callBg(action, payload || {});
+          btn.textContent = (r && r.success !== false) ? '✓' : ('✗ ' + (r && r.error || 'fout'));
+        } finally {
+          setTimeout(() => { btn.disabled = false; btn.textContent = orig; STATE.busy = false; }, 2000);
+        }
+      });
+      Object.assign(b.style, { flex: '1 1 auto', minWidth: '90px', fontSize: '12px' });
+      sigil.appendChild(b);
+    };
+    mkGlobal('📸 Screenshot', '#4CAF50', 'takeScreenshot', { videoOnly: false });
+    mkGlobal('🔴 REC start', '#dc2626', 'startRecording', { url: window.location.href });
+    mkGlobal('■ REC stop', '#475569', 'stopRecording', {});
+    wrap.appendChild(sigil);
+
+
     // 2026-05-30: extraButtons support — site-config kan custom action-knoppen
     // declareren die geen download zijn (bv. "open elders", "open dashboard").
     // Pattern: cfg.extraButtons = [{ label, color, onClick(ctx) }]
@@ -858,6 +898,14 @@
       }
     }
 
+    // 2026-05-30 (Jürgen "1 addon"-merge): site-specifieke knoppen-blok IN
+    // de bestaande debug-toolbar plaatsen, niet een tweede paneel. Wacht
+    // tot debug-toolbar bestaat (kort polling), dan injecteren als child
+    // van #webdl-toolbar. Fallback naar document.body (geen debug-toolbar
+    // bv. wegens iframe of error).
+    // 2026-05-30 (Jürgen "geen debug toolbar"): site-engine paneel is nu de
+    // enige zichtbare UI — debug-toolbar staat op display:none. Wrap rendert
+    // dus drijvend op document.body zoals voorheen.
     document.body.appendChild(wrap);
   }
 

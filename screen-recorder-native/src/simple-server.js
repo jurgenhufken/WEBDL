@@ -16442,12 +16442,29 @@ async function startYtDlpDownload(downloadId, url, platform, channel, title, met
 
     const forceOverwrite = !!(metadata && typeof metadata === 'object' && !Array.isArray(metadata) && metadata.webdl_force === true);
     const outputTemplate = path.join(dir, '%(title).120B [%(id)s].%(ext)s');
+    // 2026-05-30 (Jürgen context-menu kwaliteit): per-request format-keuze.
+    // metadata.preferredHeight (1080/720/480) → height-cap. metadata.audioOnly
+    // → bestaudio + mp3. Geen veld = default best-mp4 zoals voorheen.
+    let _formatSpec = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best';
+    let _mergeFormat = 'mp4';
+    try {
+      if (metadata && typeof metadata === 'object' && !Array.isArray(metadata)) {
+        const h = Number(metadata.preferredHeight);
+        if (Number.isFinite(h) && h > 0) {
+          _formatSpec = `bv*[height<=${h}][ext=mp4]+ba[ext=m4a]/bv*[height<=${h}]+ba/b[height<=${h}]/b`;
+        }
+        if (metadata.audioOnly === true) {
+          _formatSpec = 'bestaudio[ext=m4a]/bestaudio/best';
+          _mergeFormat = 'mp3';
+        }
+      }
+    } catch (_) {}
     const baseArgs = [
       '--concurrent-fragments', YTDLP_CONCURRENT_FRAGMENTS,
       '--socket-timeout', '30',
       '--ffmpeg-location', path.dirname(FFMPEG),
-      '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-      '--merge-output-format', 'mp4',
+      '-f', _formatSpec,
+      '--merge-output-format', _mergeFormat,
       '--write-thumbnail',
       '--write-info-json'];
 

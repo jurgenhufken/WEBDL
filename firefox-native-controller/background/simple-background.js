@@ -697,16 +697,29 @@ async function ensureContextMenu() {
   } catch (e) {
     console.warn('context menu removeAll failed', e && e.message ? e.message : e);
   }
+  const ctx = ['page', 'selection', 'link', 'image', 'video', 'audio'];
   try {
-    menusApi.create({
-      id: CONTEXT_MENU_ID,
-      title: 'Download with WEBDL',
-      contexts: ['page', 'selection', 'link', 'image', 'video', 'audio']
-    });
+    // Parent: opens kwaliteit-submenu via rechtsmuisknop
+    menusApi.create({ id: CONTEXT_MENU_ID, title: 'WEBDL download', contexts: ctx });
+    menusApi.create({ id: CONTEXT_MENU_ID + ':best',  parentId: CONTEXT_MENU_ID, title: '🎬 Full video (best beschikbaar)', contexts: ctx });
+    menusApi.create({ id: CONTEXT_MENU_ID + ':1080',  parentId: CONTEXT_MENU_ID, title: '1080p',                              contexts: ctx });
+    menusApi.create({ id: CONTEXT_MENU_ID + ':720',   parentId: CONTEXT_MENU_ID, title: '720p',                               contexts: ctx });
+    menusApi.create({ id: CONTEXT_MENU_ID + ':480',   parentId: CONTEXT_MENU_ID, title: '480p',                               contexts: ctx });
+    menusApi.create({ id: CONTEXT_MENU_ID + ':audio', parentId: CONTEXT_MENU_ID, title: '🎵 Alleen audio (mp3)',              contexts: ctx });
   } catch (e) {
     console.error('context menu create failed', e);
   }
 }
+
+// Maps menuItemId-suffix → metadata.preferredHeight (server gebruikt dat in
+// yt-dlp -f flag). 'best' = geen height-cap. 'audio' = audio-only mode.
+const CONTEXT_MENU_QUALITY = {
+  [CONTEXT_MENU_ID + ':best']:  { preferredHeight: 0 },
+  [CONTEXT_MENU_ID + ':1080']:  { preferredHeight: 1080 },
+  [CONTEXT_MENU_ID + ':720']:   { preferredHeight: 720 },
+  [CONTEXT_MENU_ID + ':480']:   { preferredHeight: 480 },
+  [CONTEXT_MENU_ID + ':audio']: { audioOnly: true },
+};
 
 function scheduleReconnect() {
   if (reconnectTimer) return;
@@ -890,7 +903,13 @@ function connectPersistentSocket() {
 const CLOUDFLARE_BROWSER_DL_HOSTS = /(?:^|\.)(?:recu\.me|chaturbate\.com|bongacams\.com)$/i;
 
 browser.contextMenus.onClicked.addListener(async (info, tab) => {
-  if (!info || info.menuItemId !== CONTEXT_MENU_ID) return;
+  if (!info) return;
+  const mid = String(info.menuItemId || '');
+  // Accept parent (legacy: gedraagt zich als 'best') of een van de quality-subs.
+  const isParent = (mid === CONTEXT_MENU_ID);
+  const qualityInfo = CONTEXT_MENU_QUALITY[mid];
+  if (!isParent && !qualityInfo) return;
+  const quality = qualityInfo || { preferredHeight: 0 };
 
   const url = info.linkUrl || info.srcUrl || info.pageUrl;
   if (!url) return;
@@ -920,6 +939,14 @@ browser.contextMenus.onClicked.addListener(async (info, tab) => {
   }
 
   metadata.sourceUrl = url;
+  // 2026-05-30: door-passen van quality-keuze uit het context-menu naar de
+  // server (yt-dlp -f flag bouwt op preferredHeight / audioOnly).
+  if (Number.isFinite(quality.preferredHeight) && quality.preferredHeight > 0) {
+    metadata.preferredHeight = quality.preferredHeight;
+  }
+  if (quality.audioOnly) {
+    metadata.audioOnly = true;
+  }
 
   // Browser-download pad: voor recu.me en andere CF-hosts.
   if (needsBrowserDl) {

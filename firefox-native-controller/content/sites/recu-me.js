@@ -19,6 +19,9 @@ const RECU_CONFIG = {
     if (/^(?:\/[a-z0-9_-]+)?\/video\/\d+(?:\/play)?\/?$/i.test(path)) return 'single';
     return null;
   },
+  // 2026-05-30 (Jürgen): GEEN download-knop op recu.me — user gebruikt alleen
+  // de rechtermuisknop ("WEBDL download" → kwaliteit-submenu). itemTypes leeg
+  // → site-engine toont alleen header + channel-hint + globale Screenshot/REC.
 
   // Channel = model-naam uit URL of titel. recu.me URLs zijn:
   //   /video/<id>/play          (anonymous flow)
@@ -44,115 +47,27 @@ const RECU_CONFIG = {
     return 'recu';
   },
 
-  itemTypes: [
-    {
-      name: 'video',
-      match: (p) => /^(?:\/[a-z0-9_-]+)?\/video\/\d+(?:\/play)?\/?$/i.test(p),
-      selector: '',
-      endpoint: '/download',
-      // 2026-05-24: recu.me staat achter Cloudflare → server-side fetch geeft
-      // 403. Browser heeft wel geldige CF-sessie, dus we laten de extensie
-      // zelf de file via browser.downloads.download() binnenhalen. Daarna
-      // POSTt background een filepath naar /api/import-file zodat de file
-      // in de gallery verschijnt. Zie firefox-native-controller/background/
-      // simple-background.js → action 'browserDownload'.
-      useBrowserDownload: true,
-      buildBody: (_url, channel) => {
-        // Bij voorkeur de echte file-URL uit de "Full video" optie in de
-        // Download dropdown op recu.me. Niet de HLS-stream — die vereist
-        // HLS-mux + is geen origineel bestand. "Full video" is de standaard
-        // download zonder kwaliteits-keuze.
-        function findDownloadUrl() {
-          // 1) Tekstuele "Full video" / "Download" knoppen (recu.me-specifiek)
-          //    Dropdown-items: <a>Full video</a> / <a>Cut fragment</a>
-          const textCandidates = [...document.querySelectorAll('a, button')]
-            .map((el) => ({ el, txt: (el.textContent || '').trim() }))
-            .filter(({ txt }) => /\b(full\s*video|download)\b/i.test(txt) && !/\bcut\s*fragment\b/i.test(txt));
-          // Sort: "full video" links eerst (primary), "download" labels daarna
-          textCandidates.sort((a, b) => {
-            const ar = /\bfull\s*video\b/i.test(a.txt) ? 0 : 1;
-            const br = /\bfull\s*video\b/i.test(b.txt) ? 0 : 1;
-            return ar - br;
-          });
-          for (const { el } of textCandidates) {
-            const u = el.href || el.dataset.downloadUrl || el.dataset.url || el.getAttribute('data-href') || '';
-            if (u && /^https?:/i.test(u)) return u;
-          }
-          // 2) Generieke selectors als fallback
-          const selectors = [
-            'a[href*=".mp4"]',
-            'a[href*="/download"]',
-            'a[download]',
-            'a.btn-download',
-            'a.download-btn',
-            'a.video-download',
-            'button[data-download-url]',
-            'button[data-url*=".mp4"]',
-            '[data-download-url]',
-            '[data-url*=".mp4"]',
-          ];
-          for (const sel of selectors) {
-            const el = document.querySelector(sel);
-            if (!el) continue;
-            const u = el.href || el.dataset.downloadUrl || el.dataset.url || el.getAttribute('data-href') || '';
-            if (u && /^https?:/i.test(u) && /\.mp4(?:[?#]|$)/i.test(u)) return u;
-            if (u && /^https?:/i.test(u) && /\/download/i.test(u)) return u;
-          }
-          return '';
-        }
+  itemTypes: [],
 
+  // 2026-05-30 (Jürgen "Hele thread weer terug"): klikt programmatisch de
+  // verborgen debug-toolbar "Hele thread" knop aan. Logica blijft daar, we
+  // tonen alleen een duidelijke entry-button in het site-engine paneel.
+  extraButtons: [
+    {
+      label: '🧵 Hele thread (alle videos van model)',
+      color: '#0ea5e9',
+      match: () => /^\/[a-z0-9_-]+\/?$/i.test(window.location.pathname),
+      async onClick() {
         try {
-          let downloadUrl = findDownloadUrl();
-          let usedFallback = '';
-          if (!downloadUrl) {
-            // Laatste redmiddel: m3u8 stream (yt-dlp handelt HLS native af).
-            const source = document.querySelector('video source[src*=".m3u8"], video source[type*="mpegurl"], video source');
-            const streamUrl = source && source.src ? source.src.trim() : '';
-            if (streamUrl && !/^blob:/i.test(streamUrl)) {
-              downloadUrl = streamUrl;
-              usedFallback = 'hls-stream';
-            }
-          }
-          if (!downloadUrl) {
-            return { __webdlError: 'recu-me: geen Download-URL gevonden in DOM (probeer eerst de video af te spelen en kijk of de Download-knop verschenen is).' };
-          }
-          const h1 = document.querySelector('h1, .video-title');
-          const title = (h1 && h1.textContent || document.title || '').trim() || `recu_${window.location.pathname.split('/').filter(Boolean).join('_')}`;
-          const pageUrl = window.location.href.split('#')[0];
-          // Filename voor browser.downloads.download — channel/title als folder/naam.
-          // Sanitize: geen path-separators of speciale tekens.
-          const safeChan = (channel || 'recu').replace(/[\/\\:*?"<>|]/g, '_').slice(0, 60);
-          const safeTitle = String(title).replace(/[\/\\:*?"<>|]/g, '_').slice(0, 80) || 'video';
-          const videoId = (window.location.pathname.match(/\/video\/(\d+)/) || [])[1] || '';
-          const filename = `webdl/recu/${safeChan}/${safeTitle}${videoId ? '_' + videoId : ''}.mp4`;
-          return {
-            url: downloadUrl,
-            filename,
-            metadata: {
-              platform: 'recu',
-              channel: channel || 'recu',
-              title,
-              url: pageUrl,
-              webdl_pin_context: true,
-              original_platform: 'recu',
-              original_channel: channel || 'recu',
-              original_title: title,
-              recu_extract_mode: usedFallback || 'download-button',
-              source_context: {
-                url: pageUrl,
-                platform: 'recu',
-                channel: channel || 'recu',
-                title,
-              },
-            },
-          };
-        } catch (e) {
-          return { __webdlError: `recu-me buildBody error: ${e && e.message ? e.message : e}` };
-        }
+          const tb = document.getElementById('webdl-toolbar');
+          if (!tb) return { text: '✗ toolbar niet geladen' };
+          const btn = Array.from(tb.querySelectorAll('button'))
+            .find((b) => /hele\s+thread/i.test((b.textContent || '').trim()));
+          if (!btn) return { text: '✗ Hele thread-knop niet gevonden' };
+          btn.click();
+          return { text: '✓ thread-walk gestart' };
+        } catch (e) { return { text: '✗ ' + String(e.message || e).slice(0, 60) }; }
       },
-      singleLabel: '⬇ Download stream',
-      listingNoun: 'video',
-      color: '#ec4899',
     },
   ],
 
